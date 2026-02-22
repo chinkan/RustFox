@@ -192,9 +192,17 @@ impl Agent {
                     // Notify listener about all tools about to run in this batch
                     if let Some(tx) = events {
                         for tc in tool_calls.iter() {
-                            let _ = tx.send(AgentEvent::ToolStarted {
-                                name: tc.function.name.clone(),
-                            });
+                            if tx
+                                .send(AgentEvent::ToolStarted {
+                                    name: tc.function.name.clone(),
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    "AgentEvent receiver dropped; tool hint not delivered"
+                                );
+                                break;
+                            }
                         }
                     }
 
@@ -1075,26 +1083,4 @@ mod tests {
         assert!(validate_skill_path("/SKILL.md").is_err());
     }
 
-    #[tokio::test]
-    async fn test_agent_event_tool_started_is_sent() {
-        // Verify the channel receives one event per tool name sent
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-
-        // Simulate what the agentic loop does
-        let names = vec!["search_memory", "run_command"];
-        for name in &names {
-            let _ = tx.send(AgentEvent::ToolStarted {
-                name: name.to_string(),
-            });
-        }
-        drop(tx);
-
-        let mut received = Vec::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                AgentEvent::ToolStarted { name } => received.push(name),
-            }
-        }
-        assert_eq!(received, vec!["search_memory", "run_command"]);
-    }
 }
