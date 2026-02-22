@@ -179,7 +179,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent
-    let result = agent.process_message(&incoming).await;
+    let result = agent.process_message(&incoming, None).await;
     typing_handle.abort(); // Stop the typing refresh task
     match result {
         Ok(response) => {

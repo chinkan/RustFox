@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
             if !req.is_recurring {
                 let _ = req.task_store.set_status(&req.task_id, "completed").await;
             }
-            let response = match agent.process_message(&req.incoming).await {
+            let response = match agent.process_message(&req.incoming, None).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
