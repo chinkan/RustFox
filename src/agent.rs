@@ -1078,5 +1078,4 @@ mod tests {
         assert!(validate_skill_path("/etc/passwd").is_err());
         assert!(validate_skill_path("/SKILL.md").is_err());
     }
-
 }

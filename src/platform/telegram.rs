@@ -186,8 +186,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                         match status_msg_id {
                             None => {
                                 // First tool — send new status message
-                                if let Ok(m) =
-                                    status_bot.send_message(status_chat_id, &text).await
+                                if let Ok(m) = status_bot.send_message(status_chat_id, &text).await
                                 {
                                     status_msg_id = Some(m.id);
                                 }
