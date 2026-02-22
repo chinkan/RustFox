@@ -15,11 +15,14 @@ use crate::skills::SkillRegistry;
 use crate::tools;
 
 /// Events emitted by the agent loop so callers can show live progress.
+// Consumed in Task 2 (process_message signature) — allow until then.
+#[allow(dead_code)]
 pub enum AgentEvent {
     ToolStarted { name: String },
 }
 
 /// Convenience alias — the sending half of an agent event channel.
+#[allow(dead_code)]
 pub type EventSender = tokio::sync::mpsc::UnboundedSender<AgentEvent>;
 
 /// A request dispatched from a fire closure to the background job runner.
