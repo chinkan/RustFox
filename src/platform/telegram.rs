@@ -169,6 +169,42 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         }
     });
 
+    // Channel for real-time tool activity hints
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentEvent>();
+
+    // Spawn status task: receives ToolStarted events, manages one Telegram message
+    let status_bot = bot.clone();
+    let status_chat_id = msg.chat.id;
+    let status_handle: tokio::task::JoinHandle<Option<teloxide::types::MessageId>> =
+        tokio::spawn(async move {
+            let mut status_msg_id: Option<teloxide::types::MessageId> = None;
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    crate::agent::AgentEvent::ToolStarted { name } => {
+                        let text = format!("⚙️ Calling: {}", name);
+                        match status_msg_id {
+                            None => {
+                                // First tool — send new status message
+                                if let Ok(m) =
+                                    status_bot.send_message(status_chat_id, &text).await
+                                {
+                                    status_msg_id = Some(m.id);
+                                }
+                            }
+                            Some(id) => {
+                                // Subsequent tools — edit in place
+                                let _ = status_bot
+                                    .edit_message_text(status_chat_id, id, &text)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            status_msg_id
+        });
+
     // Build platform-agnostic message
     let incoming = IncomingMessage {
         platform: "telegram".to_string(),
@@ -178,9 +214,18 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         text,
     };
 
-    // Process through agent
-    let result = agent.process_message(&incoming, None).await;
-    typing_handle.abort(); // Stop the typing refresh task
+    // Process through agent — passes the event sender for live tool hints
+    let result = agent.process_message(&incoming, Some(&event_tx)).await;
+
+    // Close the event channel so the status task exits its recv loop
+    drop(event_tx);
+    typing_handle.abort();
+
+    // Wait for the status task to finish, then delete its message if one was sent
+    if let Ok(Some(status_msg_id)) = status_handle.await {
+        let _ = bot.delete_message(msg.chat.id, status_msg_id).await;
+    }
+
     match result {
         Ok(response) => {
             for chunk in split_message(&response, 4000) {

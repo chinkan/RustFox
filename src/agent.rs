@@ -16,11 +16,7 @@ use crate::tools;
 
 /// Events emitted by the agent loop so callers can show live progress.
 pub enum AgentEvent {
-    ToolStarted {
-        // Read by the channel receiver on the caller side; allow until a consumer exists.
-        #[allow(dead_code)]
-        name: String,
-    },
+    ToolStarted { name: String },
 }
 
 /// Convenience alias — the sending half of an agent event channel.
