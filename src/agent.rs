@@ -14,6 +14,14 @@ use crate::scheduler::Scheduler;
 use crate::skills::SkillRegistry;
 use crate::tools;
 
+/// Events emitted by the agent loop so callers can show live progress.
+pub enum AgentEvent {
+    ToolStarted { name: String },
+}
+
+/// Convenience alias — the sending half of an agent event channel.
+pub type EventSender = tokio::sync::mpsc::UnboundedSender<AgentEvent>;
+
 /// A request dispatched from a fire closure to the background job runner.
 pub struct ScheduledJobRequest {
     pub incoming: IncomingMessage,
