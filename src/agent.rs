@@ -15,9 +15,12 @@ use crate::skills::SkillRegistry;
 use crate::tools;
 
 /// Events emitted by the agent loop so callers can show live progress.
-#[allow(dead_code)]
 pub enum AgentEvent {
-    ToolStarted { name: String },
+    ToolStarted {
+        // Read by the channel receiver on the caller side; allow until a consumer exists.
+        #[allow(dead_code)]
+        name: String,
+    },
 }
 
 /// Convenience alias — the sending half of an agent event channel.
@@ -106,7 +109,7 @@ impl Agent {
     pub async fn process_message(
         &self,
         incoming: &IncomingMessage,
-        _events: Option<&EventSender>,
+        events: Option<&EventSender>,
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
@@ -185,6 +188,15 @@ impl Agent {
                         .save_message(&conversation_id, &response)
                         .await?;
                     messages.push(response.clone());
+
+                    // Notify listener about all tools about to run in this batch
+                    if let Some(tx) = events {
+                        for tc in tool_calls.iter() {
+                            let _ = tx.send(AgentEvent::ToolStarted {
+                                name: tc.function.name.clone(),
+                            });
+                        }
+                    }
 
                     // Execute tool calls in parallel — each tool is independent
                     let tool_futures = tool_calls.iter().map(|tc| {
@@ -1061,5 +1073,28 @@ mod tests {
     fn test_validate_skill_path_absolute() {
         assert!(validate_skill_path("/etc/passwd").is_err());
         assert!(validate_skill_path("/SKILL.md").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_agent_event_tool_started_is_sent() {
+        // Verify the channel receives one event per tool name sent
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+        // Simulate what the agentic loop does
+        let names = vec!["search_memory", "run_command"];
+        for name in &names {
+            let _ = tx.send(AgentEvent::ToolStarted {
+                name: name.to_string(),
+            });
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::ToolStarted { name } => received.push(name),
+            }
+        }
+        assert_eq!(received, vec!["search_memory", "run_command"]);
     }
 }
