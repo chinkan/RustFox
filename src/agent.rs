@@ -513,8 +513,7 @@ impl Agent {
                     name: "read_skill_file".to_string(),
                     description: concat!(
                         "Read a file from a skill directory. Use this to load a skill's full instructions ",
-                        "or supporting files (style guides, templates, reference docs). ",
-                        "Available to both the main agent and subagents."
+                        "or supporting files (style guides, templates, reference docs)."
                     ).to_string(),
                     parameters: json!({
                         "type": "object",
@@ -523,12 +522,12 @@ impl Agent {
                                 "type": "string",
                                 "description": "Skill directory name (e.g. 'thread-writer')"
                             },
-                            "path": {
+                            "relative_path": {
                                 "type": "string",
-                                "description": "Relative path within the skill directory (e.g. 'SKILL.md', 'style-guide.md')"
+                                "description": "Path within the skill directory, e.g. 'SKILL.md', 'reference.md', 'scripts/helper.py'"
                             }
                         },
-                        "required": ["skill_name", "path"]
+                        "required": ["skill_name", "relative_path"]
                     }),
                 },
             },
@@ -775,9 +774,9 @@ impl Agent {
                     Some(n) => n.to_string(),
                     None => return "Missing skill_name".to_string(),
                 };
-                let relative_path = match arguments["path"].as_str() {
+                let relative_path = match arguments["relative_path"].as_str() {
                     Some(p) => p.to_string(),
-                    None => return "Missing path".to_string(),
+                    None => return "Missing relative_path".to_string(),
                 };
 
                 if let Err(e) = validate_skill_name(&skill_name) {
@@ -793,6 +792,20 @@ impl Agent {
                     .directory
                     .join(&skill_name)
                     .join(&relative_path);
+
+                // Canonicalize to detect symlink escapes (same pattern as validate_sandbox_path).
+                // If either path doesn't exist yet, canonicalize returns Err and we skip the
+                // check — read_to_string will fail with not-found in that case.
+                if let Ok(skills_canonical) = self.config.skills.directory.canonicalize() {
+                    if let Ok(target_canonical) = target.canonicalize() {
+                        if !target_canonical.starts_with(&skills_canonical) {
+                            return format!(
+                                "Access denied: path '{}/{}' resolves outside the skills directory",
+                                skill_name, relative_path
+                            );
+                        }
+                    }
+                }
 
                 match tokio::fs::read_to_string(&target).await {
                     Ok(content) => content,
