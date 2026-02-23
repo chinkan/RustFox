@@ -531,7 +531,169 @@ impl Agent {
                     }),
                 },
             },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "invoke_subagent".to_string(),
+                    description: concat!(
+                        "Delegate a task to a named skill running as an isolated subagent. ",
+                        "The subagent uses its own model and tool whitelist declared in its SKILL.md frontmatter. ",
+                        "Use this for skills listed under 'Available Subagent Skills' in the system prompt. ",
+                        "The subagent runs an isolated agentic loop and returns its final text response."
+                    ).to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "skill": {
+                                "type": "string",
+                                "description": "Name of the skill to run as a subagent (e.g. 'thread-writer')"
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "The task content to pass to the subagent"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional: override the skill's declared model for this invocation"
+                            },
+                            "tools": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional: override the skill's declared tool whitelist"
+                            }
+                        },
+                        "required": ["skill", "prompt"]
+                    }),
+                },
+            },
         ]
+    }
+
+    /// Run a named skill as an isolated subagent mini-loop.
+    /// Returns the subagent's final text response (or an error string).
+    async fn run_subagent(
+        &self,
+        skill_name: &str,
+        prompt: &str,
+        model_override: Option<&str>,
+        tools_override: Option<Vec<String>>,
+    ) -> String {
+        // Resolve model and tool list from skill metadata (or overrides)
+        let (resolved_model, declared_tools, max_iter) = {
+            let skills = self.skills.read().await;
+            let skill = skills.get(skill_name);
+            let model = model_override
+                .map(str::to_string)
+                .or_else(|| skill.and_then(|s| s.model.clone()))
+                .unwrap_or_else(|| self.config.openrouter.model.clone());
+            let tools = tools_override
+                .or_else(|| skill.map(|s| s.tools.clone()))
+                .unwrap_or_default();
+            let max_i = skill
+                .and_then(|s| s.max_iterations)
+                .unwrap_or_else(|| self.config.max_iterations())
+                .min(self.config.max_iterations());
+            (model, tools, max_i)
+        };
+
+        let allowed_tools = effective_subagent_tools(&declared_tools);
+
+        // Build the subagent tool definitions (filtered to whitelist only)
+        let all_possible_tools: Vec<ToolDefinition> = {
+            let mut t = tools::builtin_tool_definitions();
+            t.extend(self.mcp.tool_definitions());
+            t.extend(self.skill_tool_definitions()); // includes read_skill_file
+            t
+        };
+        let subagent_tools: Vec<ToolDefinition> = all_possible_tools
+            .into_iter()
+            .filter(|td| allowed_tools.contains(&td.function.name))
+            .collect();
+
+        // Bootstrap messages — system prompt instructs subagent to read its SKILL.md first
+        let system_content = format!(
+            "You are the '{}' subagent. Your first action MUST be to call \
+             read_skill_file with skill_name='{}' and relative_path='SKILL.md' to load your instructions.",
+            skill_name, skill_name
+        );
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(system_content),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(prompt.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        // Mini agentic loop (isolated — no memory, no scheduling)
+        for iteration in 0..max_iter {
+            let response = match self
+                .llm
+                .chat_with_model(&messages, &subagent_tools, &resolved_model)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return format!("Subagent '{}' error: {}", skill_name, e),
+            };
+
+            if let Some(tool_calls) = &response.tool_calls {
+                if !tool_calls.is_empty() {
+                    info!(
+                        "Subagent '{}' requested {} tool call(s) (iteration {})",
+                        skill_name,
+                        tool_calls.len(),
+                        iteration
+                    );
+
+                    messages.push(response.clone());
+
+                    for tool_call in tool_calls {
+                        let arguments: serde_json::Value =
+                            serde_json::from_str(&tool_call.function.arguments)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                        // Only allow whitelisted tools
+                        let result = if allowed_tools.contains(&tool_call.function.name) {
+                            self.execute_tool(
+                                &tool_call.function.name,
+                                &arguments,
+                                "", // subagent has no user_id context
+                                "", // subagent has no chat_id context
+                            )
+                            .await
+                        } else {
+                            format!(
+                                "Tool '{}' is not available to this subagent.",
+                                tool_call.function.name
+                            )
+                        };
+
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(result),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call.id.clone()),
+                        });
+                    }
+
+                    continue;
+                }
+            }
+
+            // Final response — no tool calls
+            return response.content.unwrap_or_default();
+        }
+
+        format!(
+            "Subagent '{}' reached the maximum number of iterations ({}).",
+            skill_name, max_iter
+        )
     }
 
     /// Execute a tool call by routing to the right handler
@@ -988,6 +1150,18 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the effective tool whitelist for a subagent.
+/// Always includes `read_skill_file`; deduplicates.
+fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
+    let mut tools = vec!["read_skill_file".to_string()];
+    for t in declared {
+        if t != "read_skill_file" {
+            tools.push(t.clone());
+        }
+    }
+    tools
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,5 +1264,30 @@ mod tests {
         assert!(validate_skill_path("../other-skill/SKILL.md").is_err());
         assert!(validate_skill_path("/etc/passwd").is_err());
         assert!(validate_skill_path("").is_err());
+    }
+
+    #[test]
+    fn test_subagent_tool_whitelist_always_includes_read_skill_file() {
+        // read_skill_file is always available to subagents regardless of whitelist
+        let declared: Vec<String> = vec!["mcp_threads_post".to_string()];
+        let effective = effective_subagent_tools(&declared);
+        assert!(effective.contains(&"read_skill_file".to_string()));
+        assert!(effective.contains(&"mcp_threads_post".to_string()));
+    }
+
+    #[test]
+    fn test_subagent_tool_whitelist_empty_gets_read_skill_file() {
+        let declared: Vec<String> = vec![];
+        let effective = effective_subagent_tools(&declared);
+        assert_eq!(effective, vec!["read_skill_file".to_string()]);
+    }
+
+    #[test]
+    fn test_subagent_tool_whitelist_deduplicates_read_skill_file() {
+        // If the skill already lists read_skill_file, it shouldn't appear twice
+        let declared = vec!["read_skill_file".to_string(), "mcp_something".to_string()];
+        let effective = effective_subagent_tools(&declared);
+        let count = effective.iter().filter(|t| *t == "read_skill_file").count();
+        assert_eq!(count, 1);
     }
 }
