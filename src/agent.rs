@@ -507,6 +507,31 @@ impl Agent {
                     parameters: json!({ "type": "object", "properties": {} }),
                 },
             },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "read_skill_file".to_string(),
+                    description: concat!(
+                        "Read a file from a skill directory. Use this to load a skill's full instructions ",
+                        "or supporting files (style guides, templates, reference docs). ",
+                        "Available to both the main agent and subagents."
+                    ).to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "skill_name": {
+                                "type": "string",
+                                "description": "Skill directory name (e.g. 'thread-writer')"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path within the skill directory (e.g. 'SKILL.md', 'style-guide.md')"
+                            }
+                        },
+                        "required": ["skill_name", "path"]
+                    }),
+                },
+            },
         ]
     }
 
@@ -743,6 +768,38 @@ impl Agent {
                 match self.task_store.set_status(&task_id, "cancelled").await {
                     Ok(()) => format!("Task '{}' ({}) cancelled.", task_id, task.description),
                     Err(e) => format!("Failed to update task status: {}", e),
+                }
+            }
+            "read_skill_file" => {
+                let skill_name = match arguments["skill_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return "Missing skill_name".to_string(),
+                };
+                let relative_path = match arguments["path"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return "Missing path".to_string(),
+                };
+
+                if let Err(e) = validate_skill_name(&skill_name) {
+                    return format!("Invalid skill_name: {}", e);
+                }
+                if let Err(e) = validate_skill_path(&relative_path) {
+                    return format!("Invalid path: {}", e);
+                }
+
+                let target = self
+                    .config
+                    .skills
+                    .directory
+                    .join(&skill_name)
+                    .join(&relative_path);
+
+                match tokio::fs::read_to_string(&target).await {
+                    Ok(content) => content,
+                    Err(e) => format!(
+                        "Failed to read skill file '{}/{}': {}",
+                        skill_name, relative_path, e
+                    ),
                 }
             }
             "write_skill_file" => {
@@ -1003,5 +1060,22 @@ mod tests {
     fn test_validate_skill_path_absolute() {
         assert!(validate_skill_path("/etc/passwd").is_err());
         assert!(validate_skill_path("/SKILL.md").is_err());
+    }
+
+    #[test]
+    fn test_read_skill_file_validates_skill_name() {
+        // validate_skill_name is reused — just verify the boundary
+        assert!(validate_skill_name("valid-skill").is_ok());
+        assert!(validate_skill_name("../evil").is_err());
+        assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn test_read_skill_file_validates_relative_path() {
+        assert!(validate_skill_path("SKILL.md").is_ok());
+        assert!(validate_skill_path("style-guide.md").is_ok());
+        assert!(validate_skill_path("../other-skill/SKILL.md").is_err());
+        assert!(validate_skill_path("/etc/passwd").is_err());
+        assert!(validate_skill_path("").is_err());
     }
 }
