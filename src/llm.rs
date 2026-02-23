@@ -143,7 +143,8 @@ impl LlmClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<ChatMessage> {
-        self.chat_with_model(messages, tools, &self.config.model).await
+        self.chat_with_model(messages, tools, &self.config.model)
+            .await
     }
 }
 
