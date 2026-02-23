@@ -86,7 +86,10 @@ impl SkillRegistry {
         }
 
         if !subagent_section.is_empty() {
-            context.push_str("\n## Available Subagent Skills\n\n");
+            if !instruction_section.is_empty() {
+                context.push('\n');
+            }
+            context.push_str("## Available Subagent Skills\n\n");
             context.push_str("Delegate these tasks using `invoke_subagent`:\n\n");
             context.push_str(&subagent_section);
         }
@@ -181,5 +184,7 @@ mod tests {
         assert!(ctx.contains("Follow these instructions."));
         assert!(!ctx.contains("Secret subagent body."));
         assert!(ctx.contains("invoke_subagent"));
+        assert!(ctx.contains("You have the following skills available"));
+        assert!(ctx.contains("Available Subagent Skills"));
     }
 }
