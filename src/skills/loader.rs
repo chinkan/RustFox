@@ -80,6 +80,9 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
                 description: description.unwrap_or_else(|| first_line_or_heading(&body)),
                 content: body,
                 tags,
+                model: None,
+                tools: vec![],
+                max_iterations: None,
             });
         }
     }
@@ -93,6 +96,9 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
         description,
         content: content.to_string(),
         tags: Vec::new(),
+        model: None,
+        tools: vec![],
+        max_iterations: None,
     })
 }
 
