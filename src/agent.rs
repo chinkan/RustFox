@@ -1029,6 +1029,35 @@ impl Agent {
                     Err(e) => format!("Failed to reload skills: {}", e),
                 }
             }
+            "invoke_subagent" => {
+                let skill = match arguments["skill"].as_str() {
+                    Some(s) => s.to_string(),
+                    None => return "Missing skill".to_string(),
+                };
+                let prompt = match arguments["prompt"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return "Missing prompt".to_string(),
+                };
+                let model_override = arguments["model"].as_str().map(str::to_string);
+                let tools_override = arguments["tools"].as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                });
+
+                info!(
+                    "Invoking subagent '{}' (model_override: {:?})",
+                    skill, model_override
+                );
+
+                Box::pin(self.run_subagent(
+                    &skill,
+                    &prompt,
+                    model_override.as_deref(),
+                    tools_override,
+                ))
+                .await
+            }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
                 Ok(result) => result,
                 Err(e) => format!("MCP tool error: {}", e),
