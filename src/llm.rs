@@ -106,7 +106,7 @@ impl LlmClient {
 
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        debug!("Sending request to OpenRouter: {}", url);
+        debug!("Sending request to OpenRouter: {} model={}", url, request.model);
 
         let response = self
             .client
