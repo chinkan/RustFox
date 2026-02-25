@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::{Arc, Weak};
-use tracing::info;
+use tracing::{debug, info};
 
 use teloxide::Bot;
 
@@ -155,6 +155,9 @@ impl Agent {
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
         for iteration in 0..max_iterations {
+
+            debug!("Trying iteration {}: {:?}", iteration, messages);
+            
             let response = self.llm.chat(&messages, &all_tools).await?;
 
             if let Some(tool_calls) = &response.tool_calls {
@@ -186,6 +189,8 @@ impl Agent {
                             tool_call.function.name,
                             tool_result.len()
                         );
+
+                        debug!("Tool '{}' result: {}", tool_call.function.name, tool_result);
 
                         let tool_msg = ChatMessage {
                             role: "tool".to_string(),
@@ -513,7 +518,8 @@ impl Agent {
                     name: "read_skill_file".to_string(),
                     description: concat!(
                         "Read a file from a skill directory. Use this to load a skill's full instructions ",
-                        "or supporting files (style guides, templates, reference docs)."
+                        "when you decide a skill is relevant (call with relative_path='SKILL.md'), then follow the loaded content. ",
+                        "Also use for supporting files (style guides, templates, reference docs)."
                     ).to_string(),
                     parameters: json!({
                         "type": "object",
@@ -598,6 +604,13 @@ impl Agent {
 
         let allowed_tools = effective_subagent_tools(&declared_tools);
 
+        info!(
+            "Subagent '{}' using model: {} (allowed_tools: {} tools)",
+            skill_name,
+            resolved_model,
+            allowed_tools.len()
+        );
+
         // Build the subagent tool definitions (filtered to whitelist only)
         let all_possible_tools: Vec<ToolDefinition> = {
             let mut t = tools::builtin_tool_definitions();
@@ -668,6 +681,12 @@ impl Agent {
                             )
                             .await
                         } else {
+                            info!(
+                                "Subagent '{}' denied tool '{}' (allowed: {:?})",
+                                skill_name,
+                                tool_call.function.name,
+                                allowed_tools
+                            );
                             format!(
                                 "Tool '{}' is not available to this subagent.",
                                 tool_call.function.name
