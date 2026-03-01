@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::{Arc, Weak};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use teloxide::Bot;
 
@@ -618,6 +618,21 @@ impl Agent {
             t.extend(self.skill_tool_definitions()); // includes read_skill_file
             t
         };
+
+        // Warn if any declared tool is not available at runtime (e.g. MCP server not configured).
+        let available_names: Vec<String> = all_possible_tools
+            .iter()
+            .map(|td| td.function.name.clone())
+            .collect();
+        let missing = missing_subagent_tools(&allowed_tools, &available_names);
+        if !missing.is_empty() {
+            warn!(
+                "Subagent '{}': declared tools not available at runtime \
+                 (MCP server not configured?): {:?}",
+                skill_name, missing
+            );
+        }
+
         let subagent_tools: Vec<ToolDefinition> = all_possible_tools
             .into_iter()
             .filter(|td| allowed_tools.contains(&td.function.name))
@@ -652,7 +667,13 @@ impl Agent {
                 .await
             {
                 Ok(r) => r,
-                Err(e) => return format!("Subagent '{}' error: {}", skill_name, e),
+                Err(e) => {
+                    error!(
+                        "Subagent '{}' API call failed (model: '{}'): {}",
+                        skill_name, resolved_model, e
+                    );
+                    return format!("Subagent '{}' error: {}", skill_name, e);
+                }
             };
 
             if let Some(tool_calls) = &response.tool_calls {
@@ -1210,6 +1231,16 @@ fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
     tools
 }
 
+/// Return declared tools that are not present in the set of all available tool names.
+/// Used to warn at subagent launch when the whitelist references unavailable tools.
+fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|t| !available_names.contains(t))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,5 +1368,22 @@ mod tests {
         let effective = effective_subagent_tools(&declared);
         let count = effective.iter().filter(|t| *t == "read_skill_file").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_missing_subagent_tools_detected() {
+        // If a declared tool is not in all_possible, it should be detectable.
+        let declared = vec!["read_skill_file".to_string(), "mcp_nonexistent_tool".to_string()];
+        let available: Vec<String> = vec!["read_skill_file".to_string()]; // mcp_nonexistent_tool missing
+        let missing = missing_subagent_tools(&declared, &available);
+        assert_eq!(missing, vec!["mcp_nonexistent_tool".to_string()]);
+    }
+
+    #[test]
+    fn test_missing_subagent_tools_empty_when_all_present() {
+        let declared = vec!["read_skill_file".to_string()];
+        let available = vec!["read_skill_file".to_string(), "write_file".to_string()];
+        let missing = missing_subagent_tools(&declared, &available);
+        assert!(missing.is_empty());
     }
 }
