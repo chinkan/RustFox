@@ -141,6 +141,8 @@ mod tests {
         assert!(ctx.contains("Do this and that."));
         // metadata is also present (as a section header)
         assert!(ctx.contains("my-skill"));
+        // regression guard: the internal tool name must NOT leak into the prompt
+        assert!(!ctx.contains("read_skill_file"));
     }
 
     #[test]
@@ -186,6 +188,9 @@ mod tests {
             Some("some/model"),
         ));
         let ctx = registry.build_context();
+        // Section headers are present
+        assert!(ctx.contains("You have the following skills available"));
+        assert!(ctx.contains("Available Subagent Skills"));
         // Instruction skill: full body present
         assert!(ctx.contains("Follow these instructions."));
         // Subagent skill: body NOT present
