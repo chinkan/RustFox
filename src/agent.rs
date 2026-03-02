@@ -155,9 +155,8 @@ impl Agent {
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
         for iteration in 0..max_iterations {
-
             debug!("Trying iteration {}: {:?}", iteration, messages);
-            
+
             let response = self.llm.chat(&messages, &all_tools).await?;
 
             if let Some(tool_calls) = &response.tool_calls {
@@ -704,9 +703,7 @@ impl Agent {
                         } else {
                             info!(
                                 "Subagent '{}' denied tool '{}' (allowed: {:?})",
-                                skill_name,
-                                tool_call.function.name,
-                                allowed_tools
+                                skill_name, tool_call.function.name, allowed_tools
                             );
                             format!(
                                 "Tool '{}' is not available to this subagent.",
@@ -1373,7 +1370,10 @@ mod tests {
     #[test]
     fn test_missing_subagent_tools_detected() {
         // If a declared tool is not in all_possible, it should be detectable.
-        let declared = vec!["read_skill_file".to_string(), "mcp_nonexistent_tool".to_string()];
+        let declared = vec![
+            "read_skill_file".to_string(),
+            "mcp_nonexistent_tool".to_string(),
+        ];
         let available: Vec<String> = vec!["read_skill_file".to_string()]; // mcp_nonexistent_tool missing
         let missing = missing_subagent_tools(&declared, &available);
         assert_eq!(missing, vec!["mcp_nonexistent_tool".to_string()]);
