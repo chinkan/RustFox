@@ -6,7 +6,7 @@ tags: [skills, meta]
 
 # Creating Skills
 
-Writes new bot skills as properly-formatted multi-file directories in `skills/` and activates them immediately without restarting the bot.
+Writes high-performance, token-efficient skill directories in `skills/` and activates them immediately without restarting the bot.
 
 ## When to Use
 
@@ -20,87 +20,110 @@ Writes new bot skills as properly-formatted multi-file directories in `skills/` 
 ### 1. Gather Requirements
 
 Ask the user (one question at a time if unclear):
-- **Name**: Slug for the skill directory — lowercase letters, numbers, hyphens, e.g. `processing-reports`
-- **Trigger**: When should this activate? (becomes the `description` field's "Use when...")
+- **Name**: Slug — lowercase, numbers, hyphens only, e.g. `processing-reports`
+- **Trigger**: When should this activate? (→ becomes the `description` field)
 - **Behavior**: What should the agent do step-by-step?
-- **Files**: Does it need supporting files (reference docs, templates, scripts)?
+- **Files**: Heavy reference content? Templates? Scripts?
 
-### 2. Design the Structure
+### 2. Select Archetype
 
-Plan the directory before writing:
+Pick the right pattern from [templates.md](templates.md):
+
+| Archetype | When | SKILL.md budget |
+|-----------|------|-----------------|
+| `workflow` | Step-by-step procedures | < 150 lines |
+| `reference-heavy` | Lookup tables, schemas, large specs | < 80 lines + reference.md |
+| `tool-wrapper` | Wraps specific tools with usage guidance | < 100 lines |
+| `persona` | Role-play or communication style shifts | < 60 lines |
+
+### 3. Design the Structure
 
 ```
 skills/<name>/
-├── SKILL.md           # Always required — main entry point
-├── reference.md       # Optional: heavy reference content (100+ lines)
-├── examples.md        # Optional: input/output examples
-└── scripts/           # Optional: utility scripts
+├── SKILL.md           # Always: main entry point (keep within archetype budget)
+├── reference.md       # When: heavy content that would exceed budget
+├── examples.md        # When: input/output examples help significantly
+└── scripts/           # Rarely: utility scripts
     └── helper.py
 ```
 
-Rules from official best practices:
-- References must be **one level deep** from SKILL.md — no chained references
-- Split into separate files only when SKILL.md would exceed ~500 lines
-- SKILL.md body should be concise — it loads into context on every trigger
+Rules:
+- References are **one level deep only** — no chained references
+- Split only when SKILL.md exceeds archetype budget
+- Every line earns its token cost — cut ruthlessly
 
-### 3. Write SKILL.md
+### 4. Write SKILL.md
 
-SKILL.md must follow this format:
+Required format:
 
 ```markdown
 ---
 name: skill-name-with-hyphens
-description: Use when [specific triggering conditions — third person, no workflow summary]
-tags: [optional, tags]
+description: Use when [triggering conditions only — third person, no workflow summary, max 1024 chars]
+tags: [optional]
 ---
 
 # Skill Title
 
-Brief overview (1-2 sentences).
+One sentence overview.
 
 ## When to Use
 
-- Trigger condition 1
-- Trigger condition 2
+- Concrete trigger phrase 1
+- Concrete trigger phrase 2
 
-## [Core Instructions]
+## [Core Section]
 
-[Clear, action-oriented, imperative instructions]
+Imperative instructions. No fluff.
 
-## Supporting Files (if any)
+## Supporting Files
 
-**Topic A**: See [reference.md](reference.md)
-**Topic B**: See [examples.md](examples.md)
+**Topic**: See [reference.md](reference.md)
 ```
 
 **Frontmatter rules:**
-- `name`: lowercase letters, numbers, hyphens only; max 64 chars; avoid "anthropic" / "claude"
-- `description`: starts with "Use when..."; third person; no workflow summary; max 1024 chars
-- `tags`: optional list
+- `name`: lowercase, numbers, hyphens; max 64 chars; avoid "anthropic" / "claude"
+- `description`: "Use when..."; triggers only; no how/what summary; third person; max 1024 chars
+- A bad description causes the agent to skip reading the body — be precise about triggers
 
-**Body rules:**
-- Under 500 lines total
-- Action-oriented and imperative
-- Consistent terminology throughout
-- No time-sensitive information
+**Body performance rules:**
+- Every sentence must directly enable action — delete explanatory prose
+- Prefer bullet lists over paragraphs
+- Use imperative mood throughout ("Call X", "Write Y", not "You should call X")
+- No meta-commentary ("This skill helps you..."), no caveats
 
-### 4. Write Files
+### 5. Self-Evaluate Before Writing
+
+Before calling `write_skill_file`, verify:
+
+```
+☐ Description triggers are specific (not vague like "when the user needs help")
+☐ Body is within archetype token budget
+☐ Every line earns its token cost (no filler sentences)
+☐ Instructions are imperative, not explanatory
+☐ No time-sensitive content, no hardcoded values
+☐ Description does NOT summarize how the skill works — triggers only
+```
+
+If any item fails — revise before writing.
+
+### 6. Write Files
 
 Call `write_skill_file` once per file. Always write `SKILL.md` first:
 
 ```
-write_skill_file(skill_name="my-skill", relative_path="SKILL.md", content="---\nname: ...")
-write_skill_file(skill_name="my-skill", relative_path="reference.md", content="# Reference\n...")
+write_skill_file(skill_name="my-skill", relative_path="SKILL.md", content="...")
+write_skill_file(skill_name="my-skill", relative_path="reference.md", content="...")
 ```
 
-### 5. Activate
+### 7. Activate
 
-Call `reload_skills` immediately after all files are written.
+Call `reload_skills` after all files are written.
 
-Tell the user:
-- The skill is now live (no restart needed)
-- Which files were created
-- What trigger phrase activates it
+Report to user:
+- Skill is live (no restart needed)
+- Files created
+- Trigger phrase that activates it
 
 ## Description Writing Guide
 
@@ -111,9 +134,13 @@ description: Use when the user asks to generate weekly reports, export data summ
 # ✅ Good — specific triggers
 description: Use when analyzing code for bugs, reviewing pull requests, or the user asks for a code review.
 
-# ❌ Bad — summarizes workflow (causes Claude to skip reading the skill body)
+# ❌ Bad — summarizes workflow (agent skips the body)
 description: Use when creating reports — reads data, formats it, writes to file.
 
 # ❌ Bad — first person
 description: I help users create reports from their data.
 ```
+
+## Supporting Files
+
+**Skill archetypes and starter templates**: See [templates.md](templates.md)
