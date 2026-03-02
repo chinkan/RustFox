@@ -19,7 +19,7 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 - **Persistent Memory** — SQLite-backed conversation history and knowledge base
 - **Vector Embedding Search** — Hybrid vector + FTS5 search using `qwen/qwen3-embedding-8b`
 - **MCP Integration** — Connect any MCP-compatible server to extend capabilities
-- **Bot Skills** — Folder-based natural-language skill instructions auto-loaded at startup
+- **Bot Skills** — Folder-based natural-language skill instructions auto-loaded at startup; orchestration and subagent skills (e.g. **daily-news-to-threads**) let the main agent delegate to specialized subagents and override models per task
 - **Agentic Loop** — Automatic multi-step tool calling until task completion (max iterations configurable, default 25)
 - **Per-user Conversations** — Independent conversation history per user
 

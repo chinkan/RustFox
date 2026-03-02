@@ -80,6 +80,9 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
                 description: description.unwrap_or_else(|| first_line_or_heading(&body)),
                 content: body,
                 tags,
+                model: extract_field(frontmatter, "model"),
+                tools: extract_list_field(frontmatter, "tools"),
+                max_iterations: extract_u32_field(frontmatter, "max_iterations"),
             });
         }
     }
@@ -93,6 +96,9 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
         description,
         content: content.to_string(),
         tags: Vec::new(),
+        model: None,
+        tools: vec![],
+        max_iterations: None,
     })
 }
 
@@ -130,6 +136,11 @@ fn extract_list_field(frontmatter: &str, key: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Extract a `key: N` unsigned integer field from YAML-like frontmatter
+fn extract_u32_field(frontmatter: &str, key: &str) -> Option<u32> {
+    extract_field(frontmatter, key)?.parse().ok()
+}
+
 /// Derive skill name from file path
 fn name_from_path(path: &Path) -> String {
     // If it's SKILL.md inside a directory, use the directory name
@@ -160,4 +171,50 @@ fn first_line_or_heading(content: &str) -> String {
         return line.to_string();
     }
     "No description".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_u32_field_present() {
+        let fm = "name: my-skill\nmax_iterations: 8\n";
+        assert_eq!(extract_u32_field(fm, "max_iterations"), Some(8));
+    }
+
+    #[test]
+    fn test_extract_u32_field_absent() {
+        let fm = "name: my-skill\n";
+        assert_eq!(extract_u32_field(fm, "max_iterations"), None);
+    }
+
+    #[test]
+    fn test_extract_u32_field_invalid_value() {
+        let fm = "max_iterations: not-a-number\n";
+        assert_eq!(extract_u32_field(fm, "max_iterations"), None);
+    }
+
+    #[test]
+    fn test_load_skill_parses_model_field() {
+        let frontmatter =
+            "name: thread-writer\ndescription: Write posts\nmodel: anthropic/claude-sonnet-4-6\n";
+        let model = extract_field(frontmatter, "model");
+        assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_load_skill_parses_tools_field() {
+        let frontmatter = "tools: [read_skill_file, mcp_threads_post]\n";
+        let tools = extract_list_field(frontmatter, "tools");
+        assert_eq!(tools, vec!["read_skill_file", "mcp_threads_post"]);
+    }
+
+    #[test]
+    fn test_load_skill_defaults_when_fields_absent() {
+        let frontmatter = "name: plain-skill\ndescription: Simple skill\n";
+        assert_eq!(extract_field(frontmatter, "model"), None);
+        assert!(extract_list_field(frontmatter, "tools").is_empty());
+        assert_eq!(extract_u32_field(frontmatter, "max_iterations"), None);
+    }
 }

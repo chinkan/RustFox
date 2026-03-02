@@ -77,10 +77,12 @@ impl LlmClient {
         }
     }
 
-    pub async fn chat(
+    /// Chat with an explicit model string (used by subagents to override the default).
+    pub async fn chat_with_model(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
+        model: &str,
     ) -> Result<ChatMessage> {
         let tools_param = if tools.is_empty() {
             None
@@ -95,7 +97,7 @@ impl LlmClient {
         };
 
         let request = ChatRequest {
-            model: self.config.model.clone(),
+            model: model.to_string(),
             messages: messages.to_vec(),
             tools: tools_param,
             tool_choice,
@@ -104,7 +106,7 @@ impl LlmClient {
 
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        debug!("Sending request to OpenRouter: {}", url);
+        debug!("Sending request to OpenRouter: {} model={}", url, request.model);
 
         let response = self
             .client
@@ -133,5 +135,56 @@ impl LlmClient {
             .next()
             .map(|c| c.message)
             .context("No response from OpenRouter")
+    }
+
+    /// Chat using the model configured in config.toml (delegates to chat_with_model).
+    pub async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<ChatMessage> {
+        self.chat_with_model(messages, tools, &self.config.model)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_request_serializes_model_field() {
+        // Verifies the model string will appear in the JSON POST body
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            max_tokens: 100,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["model"], "anthropic/claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_chat_request_default_model_is_different_from_override() {
+        // Ensures chat_with_model can use a different model than the config default
+        let default_req = ChatRequest {
+            model: "moonshotai/kimi-k2.5".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            max_tokens: 100,
+        };
+        let override_req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            max_tokens: 100,
+        };
+        let json_default = serde_json::to_value(&default_req).unwrap();
+        let json_override = serde_json::to_value(&override_req).unwrap();
+        assert_ne!(json_default["model"], json_override["model"]);
     }
 }

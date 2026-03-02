@@ -15,6 +15,12 @@ pub struct Skill {
     pub content: String,
     /// Category/tags for organization
     pub tags: Vec<String>,
+    /// If set, this skill runs as a subagent using this model
+    pub model: Option<String>,
+    /// Tool whitelist for the subagent (empty = read_skill_file only)
+    pub tools: Vec<String>,
+    /// Max loop iterations for the subagent (None = use global config default)
+    pub max_iterations: Option<u32>,
 }
 
 /// Registry of all loaded skills
@@ -48,19 +54,48 @@ impl SkillRegistry {
     }
 
     /// Build context string for the system prompt.
-    /// Gives the LLM awareness of all available skills.
+    /// Instruction skills (no model field): full body injected.
+    /// Subagent skills (have model field): metadata only + invoke_subagent hint.
     pub fn build_context(&self) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
 
-        let mut context = String::from(
-            "You have the following skills available. When relevant, follow these instructions:\n\n",
-        );
+        let mut instruction_section = String::new();
+        let mut subagent_section = String::new();
+
         for skill in self.skills.values() {
-            context.push_str(&format!("## Skill: {}\n", skill.name));
-            context.push_str(&format!("{}\n\n", skill.content));
+            if skill.model.is_some() {
+                // Subagent skill — metadata only
+                subagent_section.push_str(&format!(
+                    "- **{}**: {}\n  Invoke via: `invoke_subagent(skill=\"{}\", prompt=\"<task>\")`\n",
+                    skill.name, skill.description, skill.name
+                ));
+            } else {
+                // Instruction skill — full body
+                instruction_section.push_str(&format!("## Skill: {}\n", skill.name));
+                instruction_section.push_str(&format!("{}\n\n", skill.content));
+            }
         }
+
+        let mut context = String::new();
+
+        if !instruction_section.is_empty() {
+            context.push_str(
+                "You have the following skills available. When relevant, follow these instructions:\n\n",
+            );
+            context.push_str(&instruction_section);
+        }
+
+        if !subagent_section.is_empty() {
+            if !instruction_section.is_empty() {
+                context.push('\n');
+            }
+            context.push_str("## Available Subagent Skills\n\n");
+            context.push_str("Delegate these tasks using `invoke_subagent`:\n\n");
+            context.push_str(&subagent_section);
+        }
+
         context
     }
 
@@ -71,5 +106,96 @@ impl SkillRegistry {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_skill(name: &str, description: &str, content: &str, model: Option<&str>) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            model: model.map(str::to_string),
+            tools: vec![],
+            max_iterations: None,
+        }
+    }
+
+    #[test]
+    fn test_build_context_instruction_skill_injects_full_body() {
+        // Instruction skills (no model): full body is injected into system prompt.
+        // This is the spec behavior per design doc and CLAUDE.md.
+        let mut registry = SkillRegistry::new();
+        registry.register(make_skill(
+            "my-skill",
+            "Does things",
+            "# Instructions\nDo this and that.",
+            None, // no model = instruction skill
+        ));
+        let ctx = registry.build_context();
+        assert!(ctx.contains("# Instructions"));
+        assert!(ctx.contains("Do this and that."));
+        // metadata is also present (as a section header)
+        assert!(ctx.contains("my-skill"));
+        // regression guard: the internal tool name must NOT leak into the prompt
+        assert!(!ctx.contains("read_skill_file"));
+    }
+
+    #[test]
+    fn test_build_context_subagent_skill_injects_metadata_only() {
+        // Skills with a model field get only name + description + invoke hint
+        let mut registry = SkillRegistry::new();
+        registry.register(make_skill(
+            "thread-writer",
+            "Use when writing Thread posts.",
+            "# Super Secret Instructions\nLong style guide...",
+            Some("anthropic/claude-sonnet-4-6"),
+        ));
+        let ctx = registry.build_context();
+        // Metadata present
+        assert!(ctx.contains("thread-writer"));
+        assert!(ctx.contains("Use when writing Thread posts."));
+        assert!(ctx.contains("invoke_subagent"));
+        // Body NOT present
+        assert!(!ctx.contains("Super Secret Instructions"));
+        assert!(!ctx.contains("Long style guide"));
+    }
+
+    #[test]
+    fn test_build_context_empty_registry() {
+        let registry = SkillRegistry::new();
+        assert_eq!(registry.build_context(), String::new());
+    }
+
+    #[test]
+    fn test_build_context_mixed_skills() {
+        // Instruction skill body is injected; subagent skill body is NOT.
+        let mut registry = SkillRegistry::new();
+        registry.register(make_skill(
+            "instruction-skill",
+            "An instruction skill",
+            "Follow these instructions.",
+            None,
+        ));
+        registry.register(make_skill(
+            "subagent-skill",
+            "A subagent skill",
+            "Secret subagent body.",
+            Some("some/model"),
+        ));
+        let ctx = registry.build_context();
+        // Section headers are present
+        assert!(ctx.contains("You have the following skills available"));
+        assert!(ctx.contains("Available Subagent Skills"));
+        // Instruction skill: full body present
+        assert!(ctx.contains("Follow these instructions."));
+        // Subagent skill: body NOT present
+        assert!(!ctx.contains("Secret subagent body."));
+        // Both have invoke/load hints
+        assert!(ctx.contains("invoke_subagent"));
     }
 }
