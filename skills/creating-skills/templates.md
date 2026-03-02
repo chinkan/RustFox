@@ -1,6 +1,6 @@
 # Skill Archetypes & Starter Templates
 
-Four patterns cover ~90% of skills. Copy the right archetype and fill in the blanks.
+Copy the matching archetype and fill in the placeholders.
 
 ---
 
@@ -163,14 +163,14 @@ Return to default mode when user says "stop", "exit", or "back to normal".
 
 ## Token Budget Reference
 
-| File | Hard limit | Soft target |
-|------|-----------|-------------|
-| SKILL.md (workflow) | 200 lines | < 150 lines |
-| SKILL.md (reference-heavy) | 100 lines | < 80 lines |
-| SKILL.md (tool-wrapper) | 150 lines | < 100 lines |
-| SKILL.md (persona) | 80 lines | < 60 lines |
-| reference.md | no limit | keep sections scannable |
-| examples.md | no limit | max 20 examples |
+| File | Budget |
+|------|--------|
+| SKILL.md (workflow) | < 150 lines |
+| SKILL.md (reference-heavy) | < 80 lines |
+| SKILL.md (tool-wrapper) | < 100 lines |
+| SKILL.md (persona) | < 60 lines |
+| reference.md | no limit — keep sections scannable |
+| examples.md | no limit — max 20 examples |
 
 ---
 

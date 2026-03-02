@@ -8,13 +8,6 @@ tags: [skills, meta]
 
 Writes high-performance, token-efficient skill directories in `skills/` and activates them immediately without restarting the bot.
 
-## When to Use
-
-- "Create a skill for X"
-- "Teach the bot to Y"
-- "Add a skill that does Z"
-- "Write a skill for [topic]"
-
 ## Process
 
 ### 1. Gather Requirements
