@@ -180,6 +180,8 @@ tags: [tag1, tag2]     # optional: for organization
 
 Skills can be **instruction skills** (no `model` in frontmatter; full body injected into the system prompt) or **subagent skills** (`model` set; only name + description shown; invoke via `invoke_subagent(skill="name", prompt="...")`). The orchestration skill teaches the agent when to call which subagent and when to override the model (e.g. `model="anthropic/claude-sonnet-4-6"` for thread-writer-hk).
 
+**Subagent tool whitelist:** For subagent skills, the frontmatter `tools:` list must use the **exact** tool names as seen by the agent. MCP tools are named `mcp_{server_name}_{tool_name}` (e.g. `mcp_google-workspace_query_gmail_emails`). These names are logged at startup when MCP servers connect (`MCP server 'X' provides N tools`). A mismatch (e.g. declaring `search_gmail_messages` when the server exposes `query_gmail_emails`) causes the subagent to have no access to that tool.
+
 **Daily News to Threads flow:** The `daily-news-to-threads` orchestration skill (instruction) directs the main agent to: (1) call the `news-fetcher` subagent (default model) to get AI news from Gmail Google 快訊, (2) call the `thread-writer-hk` subagent with model override to write a HK-style Threads thread with verified links, (3) post the thread via Threads MCP and report success. Requires Gmail (google-workspace), fetch, and threads MCP servers in config.
 
 ## Files Not to Commit

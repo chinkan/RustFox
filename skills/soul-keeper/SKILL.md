@@ -1,7 +1,7 @@
 ---
 name: soul-keeper
 description: Updates the soul file when the user gives personality coaching or style preferences, or when you have learned something significant about the user that should permanently shape how you interact with them.
-model: qwen/qwen3-235b-a22b
+model: qwen/qwen3.5-122b-a10b
 tools: [read_skill_file, write_skill_file, reload_skills]
 max_iterations: 3
 tags: [soul, identity, meta]
