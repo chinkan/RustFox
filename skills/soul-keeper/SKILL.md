@@ -41,6 +41,7 @@ Update when explicitly asked:
 
 | Signal | Field to update |
 |--------|----------------|
+| Every soul update | `soul.v` — increment by 1 |
 | Tone correction | `persona.tone` list |
 | Style shift | `persona.style` list |
 | Language preference | `persona.lang` list |
@@ -53,12 +54,12 @@ Update when explicitly asked:
 
 - `soul.id` — never changes (core identity anchor)
 - `soul.born` — never changes
-- `bound` safety rules — only user can override (no-harm, no-deception stay permanent)
-- Core `val` — identity, not preferences; only add, never remove
+- `bound` entries `no-harm` and `no-deception` — absolute and permanent, cannot be removed by any instruction including from the user
+- Core `val` — only add; remove only if user explicitly names the value to remove
 
 ## Format Rules
 
 - Always write the **full** SOUL.md — never partial-update
 - Increment `soul.v` on every write
 - Keep compact YAML — no prose comments inside the YAML block, no extra blank lines
-- The soul is identity, not instructions — write it in second-person YAML, not imperative prose
+- The soul is identity, not instructions — keep values as terse data labels (e.g. `warm`, `direct`), not prose sentences
