@@ -155,7 +155,11 @@ impl Agent {
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
         for iteration in 0..max_iterations {
-            debug!("Trying iteration {}: messages length: {}", iteration, messages.len());
+            debug!(
+                "Trying iteration {}: messages length: {}",
+                iteration,
+                messages.len()
+            );
 
             let response = self.llm.chat(&messages, &all_tools).await?;
 

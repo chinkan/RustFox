@@ -6,6 +6,8 @@
 //! project root and then shuts the server down.
 //!
 //! With `--cli`: runs an interactive terminal wizard instead.
+//! With `--google-auth`: runs the Google Device Code OAuth flow to obtain a
+//! refresh token for the Google Workspace MCP server.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -286,6 +288,170 @@ fn run_cli(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── Google Device Code OAuth ────────────────────────────────────────────────────
+
+/// Google OAuth2 device authorization endpoint response.
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_url: String,
+    expires_in: u64,
+    interval: u64,
+}
+
+/// Google OAuth2 token endpoint response (success).
+#[derive(Deserialize)]
+struct TokenResponse {
+    refresh_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// The scopes required for full Google Workspace MCP functionality.
+const GOOGLE_WORKSPACE_SCOPES: &str = "https://www.googleapis.com/auth/drive \
+     https://www.googleapis.com/auth/gmail.modify \
+     https://www.googleapis.com/auth/calendar \
+     https://www.googleapis.com/auth/documents \
+     https://www.googleapis.com/auth/spreadsheets \
+     https://www.googleapis.com/auth/presentations";
+
+/// Run the Google Device Code OAuth flow to obtain a refresh token.
+///
+/// Instructs the user to visit a URL, enter a code, and then polls
+/// Google until the user completes authorization.  Prints the resulting
+/// refresh token so the user can paste it into config.toml.
+async fn run_google_auth() -> Result<()> {
+    use std::io::{self, Write};
+
+    println!("=== Google Workspace OAuth Setup ===\n");
+    println!("This wizard obtains a refresh token for the Google Workspace MCP server.");
+    println!("You will need a Google Cloud OAuth 2.0 Client ID and Secret.");
+    println!("Create one at: https://console.cloud.google.com/apis/credentials");
+    println!("  → Credentials → Create OAuth Client ID → Desktop app\n");
+
+    let read_line = |prompt: &str| -> Result<String> {
+        print!("{prompt}");
+        io::stdout().flush()?;
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        Ok(buf.trim().to_owned())
+    };
+
+    let client_id = read_line("Google OAuth Client ID: ")?;
+    let client_secret = read_line("Google OAuth Client Secret: ")?;
+
+    if client_id.is_empty() || client_secret.is_empty() {
+        anyhow::bail!("Client ID and Client Secret must not be empty.");
+    }
+
+    let http = reqwest::Client::new();
+
+    // ── Step 1: Request device code ────────────────────────────────────────
+    println!("\nRequesting device code from Google…");
+    let device_resp = http
+        .post("https://oauth2.googleapis.com/device/code")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("scope", GOOGLE_WORKSPACE_SCOPES),
+        ])
+        .send()
+        .await
+        .context("Failed to contact Google device auth endpoint")?;
+
+    if !device_resp.status().is_success() {
+        let text = device_resp.text().await.unwrap_or_default();
+        anyhow::bail!("Google device auth request failed: {text}");
+    }
+
+    let device: DeviceCodeResponse = device_resp
+        .json()
+        .await
+        .context("Failed to parse device code response")?;
+
+    // ── Step 2: Instruct the user ──────────────────────────────────────────
+    println!("\n────────────────────────────────────────");
+    println!("  1. Open this URL in your browser:");
+    println!("     {}", device.verification_url);
+    println!("  2. Enter this code when prompted:");
+    println!("     {}", device.user_code);
+    println!("────────────────────────────────────────\n");
+    println!(
+        "Waiting for you to authorize (expires in {} seconds)…",
+        device.expires_in
+    );
+
+    // ── Step 3: Poll for token ─────────────────────────────────────────────
+    let poll_interval = std::time::Duration::from_secs(device.interval.max(5));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(device.expires_in);
+
+    loop {
+        tokio::time::sleep(poll_interval).await;
+
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("Authorization timed out.  Run --google-auth again to retry.");
+        }
+
+        let token_resp = http
+            .post("https://oauth2.googleapis.com/token")
+            .form(&[
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+                ("device_code", device.device_code.as_str()),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+            .send()
+            .await
+            .context("Failed to poll Google token endpoint")?;
+
+        let body: TokenResponse = token_resp
+            .json()
+            .await
+            .context("Failed to parse token poll response")?;
+
+        match body.error.as_deref() {
+            None => {
+                // Success
+                match body.refresh_token {
+                    Some(rt) => {
+                        println!("\n✓  Authorization successful!\n");
+                        println!("Add the following to your config.toml under [[mcp_servers]] for google-workspace:\n");
+                        println!("  GOOGLE_WORKSPACE_CLIENT_ID     = \"{client_id}\"");
+                        println!("  GOOGLE_WORKSPACE_CLIENT_SECRET = \"{client_secret}\"");
+                        println!("  GOOGLE_WORKSPACE_REFRESH_TOKEN = \"{rt}\"");
+                        println!();
+                        return Ok(());
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "Token response succeeded but contained no refresh_token. \
+                             Make sure your OAuth client type is 'Desktop app'."
+                        );
+                    }
+                }
+            }
+            Some("authorization_pending") => {
+                print!(".");
+                io::stdout().flush().ok();
+            }
+            Some("slow_down") => {
+                // Back off a bit more
+                tokio::time::sleep(poll_interval).await;
+            }
+            Some("access_denied") => {
+                anyhow::bail!("Authorization was denied by the user.");
+            }
+            Some("expired_token") => {
+                anyhow::bail!("The device code expired.  Run --google-auth again to retry.");
+            }
+            Some(other) => {
+                let desc = body.error_description.as_deref().unwrap_or("");
+                anyhow::bail!("Unexpected error from Google: {other} — {desc}");
+            }
+        }
+    }
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -295,6 +461,10 @@ async fn main() -> Result<()> {
     // Resolve project root: prefer RUSTFOX_ROOT env, fall back to cwd.
     let project_root =
         PathBuf::from(std::env::var("RUSTFOX_ROOT").unwrap_or_else(|_| ".".to_string()));
+
+    if args.iter().any(|a| a == "--google-auth") {
+        return run_google_auth().await;
+    }
 
     if args.iter().any(|a| a == "--cli") {
         return run_cli(&project_root);

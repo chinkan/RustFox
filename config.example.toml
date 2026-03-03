@@ -75,23 +75,16 @@ directory = "skills"
 # Example: Google Workspace MCP server (Gmail, Calendar, Drive, Docs, Sheets, Slides)
 # Note: use --from because the package name differs from the executable name
 #
-# OAuth setup:
+# OAuth setup (one-time, ~2 minutes):
 #   1. https://console.cloud.google.com/apis/credentials
 #      → Create/select project → enable Drive, Gmail, Calendar, Docs, Sheets, Slides APIs
 #   2. OAuth consent screen → External → add your email as a test user
-#   3. Credentials → Create OAuth Client ID → Web application
-#      → add Authorised redirect URI: https://developers.google.com/oauthplayground
+#   3. Credentials → Create OAuth Client ID → Desktop app
 #      → save your Client ID and Client Secret
-#   4. Open https://developers.google.com/oauthplayground
-#      → gear icon → check "Use your own OAuth credentials" → enter Client ID + Secret
-#      → add scopes: https://www.googleapis.com/auth/drive
-#                    https://www.googleapis.com/auth/gmail.modify
-#                    https://www.googleapis.com/auth/calendar
-#                    https://www.googleapis.com/auth/documents
-#                    https://www.googleapis.com/auth/spreadsheets
-#                    https://www.googleapis.com/auth/presentations
-#      → "Authorize APIs" → sign in → "Exchange authorization code for tokens"
-#      → copy the Refresh token value
+#   4. Run the setup wizard to get your refresh token:
+#        cargo run --bin setup -- --google-auth
+#      Follow the prompts — it opens a browser page where you approve access,
+#      then prints the three environment variable values to paste below.
 #
 # [[mcp_servers]]
 # name = "google-workspace"
