@@ -53,3 +53,8 @@ sqlite-vec = "0.1"
 
 # Setup wizard web server (used only by src/bin/setup.rs)
 axum = "0.8"
+
+# Web UI templating + static file serving
+askama = "0.12"
+tower-http = { version = "0.6", features = ["fs", "compression-gzip"] }
+tokio-stream = "0.1"

@@ -46,6 +46,11 @@ directory = "skills"
 # [agent]
 # max_iterations = 25   # Agent loop cap (default 25)
 
+# Web UI (optional; disabled by default)
+# [web]
+# enabled = true
+# port = 8080
+
 # Embedding API for vector search (optional)
 # When configured, enables hybrid vector + FTS5 search for memory.
 # Without this, falls back to FTS5 keyword search only.

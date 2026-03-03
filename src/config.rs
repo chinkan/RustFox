@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default = "default_agent_config")]
     pub agent: AgentConfig,
     pub embedding: Option<EmbeddingApiConfig>,
+    #[serde(default = "default_web_config")]
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -90,6 +92,14 @@ pub struct AgentConfig {
     pub max_iterations: u32,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebConfig {
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+}
+
 fn default_model() -> String {
     "moonshotai/kimi-k2.5".to_string()
 }
@@ -148,6 +158,21 @@ fn default_max_iterations() -> u32 {
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         max_iterations: default_max_iterations(),
+    }
+}
+
+fn default_web_enabled() -> bool {
+    false
+}
+
+fn default_web_port() -> u16 {
+    8080
+}
+
+fn default_web_config() -> WebConfig {
+    WebConfig {
+        enabled: false,
+        port: 8080,
     }
 }
 
