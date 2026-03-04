@@ -93,20 +93,20 @@ textarea{resize:vertical;min-height:80px}
     <div class="oauth-panel" x-show="showOAuth" x-cloak>
       <h3 style="font-size:.9rem;margin-bottom:.75rem;color:#58a6ff">Connect Google Workspace</h3>
       <p style="font-size:.82rem;color:#8b949e;margin-bottom:.75rem">
-        Requires a Google Cloud OAuth Client ID (<strong>Desktop app</strong> type — TVs and Limited Input devices will not work because Google restricts Workspace scopes for that type).
+        Requires a Google Cloud OAuth Client ID (<strong>Desktop app</strong> type).
         <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color:#58a6ff">Create one here</a>.
+        In the client settings, add <code style="background:#161b22;padding:2px 4px;border-radius:3px" x-text="oauthRedirectUri()"></code> as an authorized redirect URI.
       </p>
       <div class="field"><label for="oauth-client-id">Client ID</label><input id="oauth-client-id" x-model="oauth.clientId" placeholder="xxx.apps.googleusercontent.com"></div>
       <div class="field"><label for="oauth-client-secret">Client Secret</label><input id="oauth-client-secret" type="password" x-model="oauth.clientSecret"></div>
       <button class="btn btn-primary" @click="startGoogleAuth()" :disabled="oauth.busy || !oauth.clientId || !oauth.clientSecret">
         <span x-show="!oauth.busy">Connect Google</span>
-        <span x-show="oauth.busy">Waiting…</span>
+        <span x-show="oauth.busy">Waiting for authorization…</span>
       </button>
-      <template x-if="oauth.userCode">
+      <template x-if="oauth.authUrl">
         <div style="margin-top:1rem">
-          <p style="font-size:.85rem;margin-bottom:.5rem">1. Open this URL: <a :href="oauth.verificationUrl" target="_blank" rel="noopener noreferrer" style="color:#58a6ff" x-text="oauth.verificationUrl"></a></p>
-          <p style="font-size:.85rem;margin-bottom:.5rem">2. Enter this code:</p>
-          <div class="code-box" x-text="oauth.userCode"></div>
+          <p style="font-size:.85rem;margin-bottom:.5rem">A Google authorization page was opened in a new tab. Complete the sign-in there, then return here.</p>
+          <p style="font-size:.82rem;color:#8b949e">If the tab did not open: <a :href="oauth.authUrl" target="_blank" rel="noopener noreferrer" style="color:#58a6ff">click here</a>.</p>
         </div>
       </template>
       <template x-if="oauth.error">
@@ -133,7 +133,7 @@ function configApp() {
     banner: { text:'', type:'success' },
     saving: false,
     showOAuth: false,
-    oauth: { clientId:'', clientSecret:'', busy:false, userCode:'', verificationUrl:'', deviceCode:'', interval:5, error:'' },
+    oauth: { clientId:'', clientSecret:'', busy:false, authUrl:'', pollTimer:null, error:'' },
 
     async loadConfig() {
       try {
@@ -180,34 +180,42 @@ function configApp() {
       }
     },
 
+    oauthRedirectUri() { return window.location.origin + '/api/google-auth/callback'; },
+
     async startGoogleAuth() {
-      this.oauth.busy = true; this.oauth.userCode = ''; this.oauth.error = '';
+      this.oauth.busy = true; this.oauth.authUrl = ''; this.oauth.error = '';
+      if (this.oauth.pollTimer) { clearInterval(this.oauth.pollTimer); this.oauth.pollTimer = null; }
       try {
+        const redirectUri = this.oauthRedirectUri();
         const r = await fetch('/api/google-auth/start', { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret }) });
+          body: JSON.stringify({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret, redirect_uri: redirectUri }) });
         if (!r.ok) throw new Error(await r.text());
         const d = await r.json();
         if (d.error) { this.oauth.error = d.error; this.oauth.busy = false; return; }
-        this.oauth.userCode = d.user_code;
-        this.oauth.verificationUrl = d.verification_url;
-        this.oauth.deviceCode = d.device_code;
-        this.oauth.interval = d.interval;
-        // Connect SSE poller
-        const params = new URLSearchParams({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret, interval: d.interval });
-        const src = new EventSource('/api/google-auth/poll/' + encodeURIComponent(d.device_code) + '?' + params);
-        src.addEventListener('token', e => {
-          src.close(); this.oauth.busy = false;
-          // Find or create google-workspace MCP server env and set the token
-          let gw = this.cfg.mcp_servers.find(s => s.name === 'google-workspace');
-          if (!gw) { gw = { name:'google-workspace', command:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], env:[] }; this.cfg.mcp_servers.push(gw); }
-          const setEnv = (env, key, val) => { const entry = env.find(e => e.key === key); if (entry) entry.val = val; else env.push({ key, val }); };
-          setEnv(gw.env, 'GOOGLE_WORKSPACE_CLIENT_ID', this.oauth.clientId);
-          setEnv(gw.env, 'GOOGLE_WORKSPACE_CLIENT_SECRET', this.oauth.clientSecret);
-          setEnv(gw.env, 'GOOGLE_WORKSPACE_REFRESH_TOKEN', e.data);
-          this.banner = { text:'Google Workspace connected! Remember to save.', type:'success' };
-        });
-        src.addEventListener('error_msg', e => { src.close(); this.oauth.busy = false; this.oauth.error = e.data; });
-        src.onerror = () => { src.close(); this.oauth.busy = false; this.oauth.error = 'Connection lost.'; };
+        window.open(d.auth_url, '_blank');
+        this.oauth.authUrl = d.auth_url;
+        // Poll /api/google-auth/status until success or error
+        this.oauth.pollTimer = setInterval(async () => {
+          try {
+            const sr = await fetch('/api/google-auth/status');
+            const sd = await sr.json();
+            if (sd.status === 'success') {
+              clearInterval(this.oauth.pollTimer); this.oauth.pollTimer = null;
+              this.oauth.busy = false; this.oauth.authUrl = '';
+              let gw = this.cfg.mcp_servers.find(s => s.name === 'google-workspace');
+              if (!gw) { gw = { name:'google-workspace', command:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], env:[] }; this.cfg.mcp_servers.push(gw); }
+              const setEnv = (env, key, val) => { const entry = env.find(e => e.key === key); if (entry) entry.val = val; else env.push({ key, val }); };
+              setEnv(gw.env, 'GOOGLE_WORKSPACE_CLIENT_ID', this.oauth.clientId);
+              setEnv(gw.env, 'GOOGLE_WORKSPACE_CLIENT_SECRET', this.oauth.clientSecret);
+              setEnv(gw.env, 'GOOGLE_WORKSPACE_REFRESH_TOKEN', sd.token);
+              this.banner = { text:'Google Workspace connected! Remember to save.', type:'success' };
+            } else if (sd.status === 'error') {
+              clearInterval(this.oauth.pollTimer); this.oauth.pollTimer = null;
+              this.oauth.busy = false; this.oauth.authUrl = '';
+              this.oauth.error = sd.error;
+            }
+          } catch (_) { /* network hiccup, keep polling */ }
+        }, 2000);
       } catch (err) {
         this.oauth.error = 'Failed to start Google auth: ' + err.message;
         this.oauth.busy = false;
