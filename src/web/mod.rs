@@ -31,7 +31,7 @@ pub fn build_router(agent: Arc<Agent>, config_path: PathBuf) -> Router {
     base_routes()
         .route("/", get(chat::page))
         .route("/chat/send", post(chat::send))
-        .route("/chat/stream/:session_id", get(chat::stream))
+        .route("/chat/stream/{session_id}", get(chat::stream))
         .with_state(state)
 }
 
@@ -71,5 +71,5 @@ fn base_routes() -> Router<WebState> {
         .route("/api/load-config", get(config_page::load_config))
         .route("/api/save-config", post(config_page::save_config))
         .route("/api/google-auth/start", post(google_auth::start))
-        .route("/api/google-auth/poll/:device_code", get(google_auth::poll))
+        .route("/api/google-auth/poll/{device_code}", get(google_auth::poll))
 }
