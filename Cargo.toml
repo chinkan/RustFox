@@ -36,6 +36,9 @@ futures = "0.3"
 # Async trait support
 async-trait = "0.1"
 
+# Async stream macro for SSE handlers
+async-stream = "0.3"
+
 # SQLite database with FTS5 and vector search support
 rusqlite = { version = "0.34", features = ["bundled", "modern-full"] }
 
@@ -51,10 +54,10 @@ tokio-cron-scheduler = "0.13"
 # SQLite vector search extension
 sqlite-vec = "0.1"
 
-# Setup wizard web server (used only by src/bin/setup.rs)
+# Web server
 axum = "0.8"
 
 # Web UI templating + static file serving
 askama = "0.12"
 tower-http = { version = "0.6", features = ["fs", "compression-gzip"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }

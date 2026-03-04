@@ -39,6 +39,10 @@ pub struct Agent {
     pub self_weak: Weak<Agent>,
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+    /// Broadcast channel for web UI token streaming.
+    /// Each message is (session_id, token). Sentinels: "\x00DONE", "\x00ERR:…"
+    #[allow(dead_code)]
+    pub web_tx: Arc<tokio::sync::broadcast::Sender<(String, String)>>,
 }
 
 impl Agent {
@@ -54,6 +58,8 @@ impl Agent {
         self_weak: Weak<Agent>,
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
     ) -> Self {
+        let (web_tx_inner, _) = tokio::sync::broadcast::channel(256);
+        let web_tx = Arc::new(web_tx_inner);
         let llm = LlmClient::new(config.openrouter.clone());
         Self {
             llm,
@@ -66,6 +72,7 @@ impl Agent {
             bot,
             self_weak,
             job_tx,
+            web_tx,
         }
     }
 

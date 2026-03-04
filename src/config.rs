@@ -19,6 +19,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub embedding: Option<EmbeddingApiConfig>,
     #[serde(default = "default_web_config")]
+    #[allow(dead_code)]
     pub web: WebConfig,
 }
 
@@ -93,6 +94,7 @@ pub struct AgentConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct WebConfig {
     #[serde(default = "default_web_enabled")]
     pub enabled: bool,
