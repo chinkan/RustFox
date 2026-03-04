@@ -31,52 +31,52 @@ textarea{resize:vertical;min-height:80px}
   <!-- Telegram -->
   <div class="section">
     <h2>Telegram</h2>
-    <div class="field"><label>Bot Token</label><input type="password" x-model="cfg.telegram_token" placeholder="1234567890:ABC..."></div>
-    <div class="field"><label>Allowed User IDs (comma-separated)</label><input x-model="cfg.allowed_user_ids" placeholder="123456789, 987654321"></div>
+    <div class="field"><label for="telegram-bot-token">Bot Token</label><input id="telegram-bot-token" type="password" x-model="cfg.telegram_token" placeholder="1234567890:ABC..."></div>
+    <div class="field"><label for="telegram-allowed-user-ids">Allowed User IDs (comma-separated)</label><input id="telegram-allowed-user-ids" x-model="cfg.allowed_user_ids" placeholder="123456789, 987654321"></div>
   </div>
 
   <!-- OpenRouter -->
   <div class="section">
     <h2>OpenRouter</h2>
-    <div class="field"><label>API Key</label><input type="password" x-model="cfg.openrouter_key" placeholder="sk-or-..."></div>
-    <div class="field"><label>Model</label><input x-model="cfg.model" placeholder="moonshotai/kimi-k2.5"></div>
-    <div class="field"><label>Max Tokens</label><input type="number" x-model.number="cfg.max_tokens" placeholder="4096"></div>
-    <div class="field"><label>System Prompt</label><textarea x-model="cfg.system_prompt" rows="4"></textarea></div>
+    <div class="field"><label for="openrouter-api-key">API Key</label><input id="openrouter-api-key" type="password" x-model="cfg.openrouter_key" placeholder="sk-or-..."></div>
+    <div class="field"><label for="openrouter-model">Model</label><input id="openrouter-model" x-model="cfg.model" placeholder="moonshotai/kimi-k2.5"></div>
+    <div class="field"><label for="openrouter-max-tokens">Max Tokens</label><input id="openrouter-max-tokens" type="number" x-model.number="cfg.max_tokens" placeholder="4096"></div>
+    <div class="field"><label for="openrouter-system-prompt">System Prompt</label><textarea id="openrouter-system-prompt" x-model="cfg.system_prompt" rows="4"></textarea></div>
   </div>
 
   <!-- Sandbox -->
   <div class="section">
     <h2>Sandbox</h2>
-    <div class="field"><label>Allowed Directory</label><input x-model="cfg.sandbox_dir" placeholder="/tmp/rustfox-sandbox"></div>
+    <div class="field"><label for="sandbox-allowed-dir">Allowed Directory</label><input id="sandbox-allowed-dir" x-model="cfg.sandbox_dir" placeholder="/tmp/rustfox-sandbox"></div>
   </div>
 
   <!-- Memory -->
   <div class="section">
     <h2>Memory</h2>
-    <div class="field"><label>Database Path</label><input x-model="cfg.db_path" placeholder="rustfox.db"></div>
+    <div class="field"><label for="memory-db-path">Database Path</label><input id="memory-db-path" x-model="cfg.db_path" placeholder="rustfox.db"></div>
   </div>
 
   <!-- General -->
   <div class="section">
     <h2>General</h2>
-    <div class="field"><label>Location (optional)</label><input x-model="cfg.location" placeholder="Tokyo, Japan"></div>
+    <div class="field"><label for="general-location">Location (optional)</label><input id="general-location" x-model="cfg.location" placeholder="Tokyo, Japan"></div>
   </div>
 
   <!-- MCP Servers -->
   <div class="section">
     <h2>MCP Servers</h2>
-    <template x-for="(srv, si) in cfg.mcp_servers" :key="si">
+    <template x-for="(srv, si) in cfg.mcp_servers" :key="srv.name || si">
       <div class="mcp-server">
         <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
           <strong x-text="srv.name || '(unnamed)'"></strong>
           <button class="btn btn-danger" @click="cfg.mcp_servers.splice(si,1)">Remove</button>
         </div>
-        <div class="field"><label>Name</label><input x-model="srv.name"></div>
-        <div class="field"><label>Command</label><input x-model="srv.command" placeholder="uvx"></div>
-        <div class="field"><label>Args (space-separated)</label><input :value="srv.args.join(' ')" @input="srv.args = $event.target.value.split(' ').filter(Boolean)"></div>
+        <div class="field"><label :for="'mcp-name-' + si">Name</label><input :id="'mcp-name-' + si" x-model="srv.name"></div>
+        <div class="field"><label :for="'mcp-command-' + si">Command</label><input :id="'mcp-command-' + si" x-model="srv.command" placeholder="uvx"></div>
+        <div class="field"><label :for="'mcp-args-' + si">Args (space-separated)</label><input :id="'mcp-args-' + si" :value="srv.args.join(' ')" @input="srv.args = $event.target.value.split(' ').filter(Boolean)"></div>
         <div class="field">
           <label>Environment Variables</label>
-          <template x-for="(val, key, ei) in srv.env" :key="key">
+          <template x-for="(val, key) in srv.env" :key="key">
             <div class="env-row">
               <input :value="key" @change="renameEnvKey(srv, key, $event.target.value)" placeholder="KEY">
               <input x-model="srv.env[key]" placeholder="value">
@@ -94,17 +94,17 @@ textarea{resize:vertical;min-height:80px}
       <h3 style="font-size:.9rem;margin-bottom:.75rem;color:#58a6ff">Connect Google Workspace</h3>
       <p style="font-size:.82rem;color:#8b949e;margin-bottom:.75rem">
         Requires a Google Cloud OAuth Client ID (Desktop app type).
-        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#58a6ff">Create one here</a>.
+        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color:#58a6ff">Create one here</a>.
       </p>
-      <div class="field"><label>Client ID</label><input x-model="oauth.clientId" placeholder="xxx.apps.googleusercontent.com"></div>
-      <div class="field"><label>Client Secret</label><input type="password" x-model="oauth.clientSecret"></div>
+      <div class="field"><label for="oauth-client-id">Client ID</label><input id="oauth-client-id" x-model="oauth.clientId" placeholder="xxx.apps.googleusercontent.com"></div>
+      <div class="field"><label for="oauth-client-secret">Client Secret</label><input id="oauth-client-secret" type="password" x-model="oauth.clientSecret"></div>
       <button class="btn btn-primary" @click="startGoogleAuth()" :disabled="oauth.busy || !oauth.clientId || !oauth.clientSecret">
         <span x-show="!oauth.busy">Connect Google</span>
         <span x-show="oauth.busy">Waiting…</span>
       </button>
       <template x-if="oauth.userCode">
         <div style="margin-top:1rem">
-          <p style="font-size:.85rem;margin-bottom:.5rem">1. Open this URL: <a :href="oauth.verificationUrl" target="_blank" style="color:#58a6ff" x-text="oauth.verificationUrl"></a></p>
+          <p style="font-size:.85rem;margin-bottom:.5rem">1. Open this URL: <a :href="oauth.verificationUrl" target="_blank" rel="noopener noreferrer" style="color:#58a6ff" x-text="oauth.verificationUrl"></a></p>
           <p style="font-size:.85rem;margin-bottom:.5rem">2. Enter this code:</p>
           <div class="code-box" x-text="oauth.userCode"></div>
         </div>
@@ -136,9 +136,16 @@ function configApp() {
     oauth: { clientId:'', clientSecret:'', busy:false, userCode:'', verificationUrl:'', deviceCode:'', interval:5, error:'' },
 
     async loadConfig() {
-      const r = await fetch('/api/load-config');
-      const d = await r.json();
-      if (d.exists) { Object.assign(this.cfg, d); }
+      try {
+        const r = await fetch('/api/load-config');
+        if (!r.ok) throw new Error(await r.text());
+        const d = await r.json();
+        if (d.exists) {
+          this.cfg = { ...this.cfg, ...d, mcp_servers: d.mcp_servers || [] };
+        }
+      } catch (err) {
+        this.banner = { text: 'Failed to load config: ' + err.message, type: 'error' };
+      }
     },
 
     addMcpServer() { this.cfg.mcp_servers.push({ name:'', command:'', args:[], env:{} }); },
@@ -150,46 +157,60 @@ function configApp() {
     },
 
     renameEnvKey(srv, oldKey, newKey) {
-      if (oldKey === newKey) return;
-      const val = srv.env[oldKey];
-      delete srv.env[oldKey];
-      srv.env[newKey] = val;
+      if (oldKey === newKey || !newKey) return;
+      const env = {};
+      for (const [k, v] of Object.entries(srv.env)) {
+        env[k === oldKey ? newKey : k] = v;
+      }
+      srv.env = env;
     },
 
     async saveConfig() {
       this.saving = true; this.banner = { text:'', type:'success' };
-      const r = await fetch('/api/save-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(this.cfg) });
-      const d = await r.json();
-      this.saving = false;
-      if (d.ok) { this.banner = { text:'Saved. Restart the bot to apply changes.', type:'success' }; }
-      else { this.banner = { text:'Save failed: ' + (d.error || 'unknown error'), type:'error' }; }
+      try {
+        const r = await fetch('/api/save-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(this.cfg) });
+        if (!r.ok) throw new Error(await r.text());
+        const d = await r.json();
+        if (d.ok) { this.banner = { text:'Saved. Restart the bot to apply changes.', type:'success' }; }
+        else { this.banner = { text:'Save failed: ' + (d.error || 'unknown error'), type:'error' }; }
+      } catch (err) {
+        this.banner = { text: 'Save failed: ' + err.message, type: 'error' };
+      } finally {
+        this.saving = false;
+      }
     },
 
     async startGoogleAuth() {
       this.oauth.busy = true; this.oauth.userCode = ''; this.oauth.error = '';
-      const r = await fetch('/api/google-auth/start', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret }) });
-      const d = await r.json();
-      if (d.error) { this.oauth.error = d.error; this.oauth.busy = false; return; }
-      this.oauth.userCode = d.user_code;
-      this.oauth.verificationUrl = d.verification_url;
-      this.oauth.deviceCode = d.device_code;
-      this.oauth.interval = d.interval;
-      // Connect SSE poller
-      const params = new URLSearchParams({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret, interval: d.interval });
-      const src = new EventSource('/api/google-auth/poll/' + encodeURIComponent(d.device_code) + '?' + params);
-      src.addEventListener('token', e => {
-        src.close(); this.oauth.busy = false;
-        // Find or create google-workspace MCP server env and set the token
-        let gw = this.cfg.mcp_servers.find(s => s.name === 'google-workspace');
-        if (!gw) { gw = { name:'google-workspace', command:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], env:{} }; this.cfg.mcp_servers.push(gw); }
-        gw.env['GOOGLE_WORKSPACE_CLIENT_ID'] = this.oauth.clientId;
-        gw.env['GOOGLE_WORKSPACE_CLIENT_SECRET'] = this.oauth.clientSecret;
-        gw.env['GOOGLE_WORKSPACE_REFRESH_TOKEN'] = e.data;
-        this.banner = { text:'Google Workspace connected! Remember to save.', type:'success' };
-      });
-      src.addEventListener('error_msg', e => { src.close(); this.oauth.busy = false; this.oauth.error = e.data; });
-      src.onerror = () => { src.close(); this.oauth.busy = false; this.oauth.error = 'Connection lost.'; };
+      try {
+        const r = await fetch('/api/google-auth/start', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret }) });
+        if (!r.ok) throw new Error(await r.text());
+        const d = await r.json();
+        if (d.error) { this.oauth.error = d.error; this.oauth.busy = false; return; }
+        this.oauth.userCode = d.user_code;
+        this.oauth.verificationUrl = d.verification_url;
+        this.oauth.deviceCode = d.device_code;
+        this.oauth.interval = d.interval;
+        // Connect SSE poller
+        const params = new URLSearchParams({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret, interval: d.interval });
+        const src = new EventSource('/api/google-auth/poll/' + encodeURIComponent(d.device_code) + '?' + params);
+        src.addEventListener('token', e => {
+          src.close(); this.oauth.busy = false;
+          // Find or create google-workspace MCP server env and set the token
+          let gw = this.cfg.mcp_servers.find(s => s.name === 'google-workspace');
+          if (!gw) { gw = { name:'google-workspace', command:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], env:{} }; this.cfg.mcp_servers.push(gw); }
+          gw.env['GOOGLE_WORKSPACE_CLIENT_ID'] = this.oauth.clientId;
+          gw.env['GOOGLE_WORKSPACE_CLIENT_SECRET'] = this.oauth.clientSecret;
+          gw.env['GOOGLE_WORKSPACE_REFRESH_TOKEN'] = e.data;
+          this.banner = { text:'Google Workspace connected! Remember to save.', type:'success' };
+        });
+        src.addEventListener('error_msg', e => { src.close(); this.oauth.busy = false; this.oauth.error = e.data; });
+        src.onerror = () => { src.close(); this.oauth.busy = false; this.oauth.error = 'Connection lost.'; };
+      } catch (err) {
+        this.oauth.error = 'Failed to start Google auth: ' + err.message;
+        this.oauth.busy = false;
+      }
     }
   };
 }

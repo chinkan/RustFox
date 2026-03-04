@@ -26,20 +26,27 @@
     const u = document.createElement('div');
     u.className = 'msg user'; u.textContent = msg;
     box.appendChild(u); box.scrollTop = box.scrollHeight;
-    const res = await fetch('/chat/send', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:msg})});
-    const {session_id, error} = await res.json();
-    if (error) {
+    try {
+      const res = await fetch('/chat/send', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:msg})});
+      if (!res.ok) throw new Error(await res.text());
+      const {session_id, error} = await res.json();
+      if (error) {
+        const e = document.createElement('div');
+        e.className = 'msg error'; e.textContent = 'Error: ' + error;
+        box.appendChild(e); this.busy = false; return;
+      }
+      const a = document.createElement('div');
+      a.className = 'msg assistant streaming'; a.id = 'stream-' + session_id;
+      box.appendChild(a); box.scrollTop = box.scrollHeight;
+      const src = new EventSource('/chat/stream/' + encodeURIComponent(session_id));
+      src.addEventListener('token', e => { a.textContent += e.data; box.scrollTop = box.scrollHeight; });
+      src.addEventListener('done', () => { a.classList.remove('streaming'); src.close(); this.busy = false; });
+      src.onerror = () => { a.classList.remove('streaming'); a.classList.add('error'); src.close(); this.busy = false; };
+    } catch (err) {
       const e = document.createElement('div');
-      e.className = 'msg error'; e.textContent = 'Error: ' + error;
-      box.appendChild(e); this.busy = false; return;
+      e.className = 'msg error'; e.textContent = 'Network error: ' + err.message;
+      box.appendChild(e); this.busy = false;
     }
-    const a = document.createElement('div');
-    a.className = 'msg assistant streaming'; a.id = 'stream-' + session_id;
-    box.appendChild(a); box.scrollTop = box.scrollHeight;
-    const src = new EventSource('/chat/stream/' + session_id);
-    src.addEventListener('token', e => { a.textContent += e.data; box.scrollTop = box.scrollHeight; });
-    src.addEventListener('done', () => { a.classList.remove('streaming'); src.close(); this.busy = false; });
-    src.onerror = () => { a.classList.remove('streaming'); a.classList.add('error'); src.close(); this.busy = false; };
   }
 }">
   <textarea x-model="text" placeholder="Message RustFox…" rows="2" :disabled="busy"
