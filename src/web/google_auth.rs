@@ -193,7 +193,7 @@ pub async fn poll(
                         }
                         None => {
                             yield Ok(Event::default().event("error_msg").data(
-                                "No refresh_token — ensure OAuth client type is 'Desktop app'."
+                                "No refresh_token in response. Ensure the OAuth client type is 'Desktop app' (not 'TVs and Limited Input devices')."
                             ));
                             break;
                         }
