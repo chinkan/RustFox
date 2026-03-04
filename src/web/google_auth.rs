@@ -60,6 +60,13 @@ pub async fn start(
         });
     }
 
+    tracing::info!(
+        client_id = %body.client_id,
+        client_id_len = body.client_id.len(),
+        scope = %GOOGLE_WORKSPACE_SCOPES,
+        "google-auth/start: sending device code request"
+    );
+
     let http = reqwest::Client::new();
     let resp = http
         .post("https://oauth2.googleapis.com/device/code")
@@ -80,7 +87,9 @@ pub async fn start(
             interval: 5,
         }),
         Ok(r) if !r.status().is_success() => {
+            let status = r.status();
             let text = r.text().await.unwrap_or_default();
+            tracing::error!(%status, body = %text, "google-auth/start: Google returned error");
             Json(StartResponse {
                 error: Some(format!("Google error: {text}")),
                 device_code: String::new(),
