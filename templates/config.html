@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Config{% endblock %}
+{% block extra_style %}
+.section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1.25rem;margin-bottom:1rem}
+.section h2{font-size:1rem;font-weight:600;margin-bottom:1rem;color:#58a6ff}
+.field{margin-bottom:.75rem}
+label{display:block;font-size:.85rem;color:#8b949e;margin-bottom:.3rem}
+input,select,textarea{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:.4rem .6rem;font-size:.9rem;font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#58a6ff}
+textarea{resize:vertical;min-height:80px}
+.btn{padding:.4rem .9rem;border:none;border-radius:6px;cursor:pointer;font-size:.85rem}
+.btn-primary{background:#238636;color:#fff}
+.btn-danger{background:#b91c1c;color:#fff}
+.btn-secondary{background:#30363d;color:#e6edf3}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.mcp-server{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:.75rem}
+.env-row{display:grid;grid-template-columns:1fr 1fr auto;gap:.4rem;margin-bottom:.3rem}
+.banner{padding:.6rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
+.banner.success{background:#0f2d17;border:1px solid #238636;color:#3fb950}
+.banner.error{background:#3d1c1c;border:1px solid #f85149;color:#f85149}
+.oauth-panel{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-top:.75rem}
+.code-box{font-family:monospace;font-size:1.3rem;letter-spacing:.15em;background:#161b22;border:1px solid #58a6ff;border-radius:6px;padding:.6rem 1rem;display:inline-block;color:#58a6ff}
+{% endblock %}
+{% block content %}
+<div x-data="configApp()" x-init="loadConfig()">
+
+  <template x-if="banner.text">
+    <div class="banner" :class="banner.type" x-text="banner.text"></div>
+  </template>
+
+  <!-- Telegram -->
+  <div class="section">
+    <h2>Telegram</h2>
+    <div class="field"><label>Bot Token</label><input type="password" x-model="cfg.telegram_token" placeholder="1234567890:ABC..."></div>
+    <div class="field"><label>Allowed User IDs (comma-separated)</label><input x-model="cfg.allowed_user_ids" placeholder="123456789, 987654321"></div>
+  </div>
+
+  <!-- OpenRouter -->
+  <div class="section">
+    <h2>OpenRouter</h2>
+    <div class="field"><label>API Key</label><input type="password" x-model="cfg.openrouter_key" placeholder="sk-or-..."></div>
+    <div class="field"><label>Model</label><input x-model="cfg.model" placeholder="moonshotai/kimi-k2.5"></div>
+    <div class="field"><label>Max Tokens</label><input type="number" x-model.number="cfg.max_tokens" placeholder="4096"></div>
+    <div class="field"><label>System Prompt</label><textarea x-model="cfg.system_prompt" rows="4"></textarea></div>
+  </div>
+
+  <!-- Sandbox -->
+  <div class="section">
+    <h2>Sandbox</h2>
+    <div class="field"><label>Allowed Directory</label><input x-model="cfg.sandbox_dir" placeholder="/tmp/rustfox-sandbox"></div>
+  </div>
+
+  <!-- Memory -->
+  <div class="section">
+    <h2>Memory</h2>
+    <div class="field"><label>Database Path</label><input x-model="cfg.db_path" placeholder="rustfox.db"></div>
+  </div>
+
+  <!-- General -->
+  <div class="section">
+    <h2>General</h2>
+    <div class="field"><label>Location (optional)</label><input x-model="cfg.location" placeholder="Tokyo, Japan"></div>
+  </div>
+
+  <!-- MCP Servers -->
+  <div class="section">
+    <h2>MCP Servers</h2>
+    <template x-for="(srv, si) in cfg.mcp_servers" :key="si">
+      <div class="mcp-server">
+        <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
+          <strong x-text="srv.name || '(unnamed)'"></strong>
+          <button class="btn btn-danger" @click="cfg.mcp_servers.splice(si,1)">Remove</button>
+        </div>
+        <div class="field"><label>Name</label><input x-model="srv.name"></div>
+        <div class="field"><label>Command</label><input x-model="srv.command" placeholder="uvx"></div>
+        <div class="field"><label>Args (space-separated)</label><input :value="srv.args.join(' ')" @input="srv.args = $event.target.value.split(' ').filter(Boolean)"></div>
+        <div class="field">
+          <label>Environment Variables</label>
+          <template x-for="(val, key, ei) in srv.env" :key="key">
+            <div class="env-row">
+              <input :value="key" @change="renameEnvKey(srv, key, $event.target.value)" placeholder="KEY">
+              <input x-model="srv.env[key]" placeholder="value">
+              <button class="btn btn-danger" @click="delete srv.env[key]">×</button>
+            </div>
+          </template>
+          <button class="btn btn-secondary" style="margin-top:.3rem" @click="addEnvKey(srv)">+ Add env var</button>
+        </div>
+      </div>
+    </template>
+    <button class="btn btn-secondary" @click="addMcpServer()">+ Add MCP Server</button>
+
+    <!-- Google Workspace quick-connect -->
+    <div class="oauth-panel" x-show="showOAuth" x-cloak>
+      <h3 style="font-size:.9rem;margin-bottom:.75rem;color:#58a6ff">Connect Google Workspace</h3>
+      <p style="font-size:.82rem;color:#8b949e;margin-bottom:.75rem">
+        Requires a Google Cloud OAuth Client ID (Desktop app type).
+        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#58a6ff">Create one here</a>.
+      </p>
+      <div class="field"><label>Client ID</label><input x-model="oauth.clientId" placeholder="xxx.apps.googleusercontent.com"></div>
+      <div class="field"><label>Client Secret</label><input type="password" x-model="oauth.clientSecret"></div>
+      <button class="btn btn-primary" @click="startGoogleAuth()" :disabled="oauth.busy || !oauth.clientId || !oauth.clientSecret">
+        <span x-show="!oauth.busy">Connect Google</span>
+        <span x-show="oauth.busy">Waiting…</span>
+      </button>
+      <template x-if="oauth.userCode">
+        <div style="margin-top:1rem">
+          <p style="font-size:.85rem;margin-bottom:.5rem">1. Open this URL: <a :href="oauth.verificationUrl" target="_blank" style="color:#58a6ff" x-text="oauth.verificationUrl"></a></p>
+          <p style="font-size:.85rem;margin-bottom:.5rem">2. Enter this code:</p>
+          <div class="code-box" x-text="oauth.userCode"></div>
+        </div>
+      </template>
+      <template x-if="oauth.error">
+        <p style="color:#f85149;margin-top:.5rem;font-size:.85rem" x-text="oauth.error"></p>
+      </template>
+    </div>
+    <button class="btn btn-secondary" style="margin-top:.5rem" @click="showOAuth = !showOAuth" x-text="showOAuth ? 'Hide Google Auth' : 'Connect Google Workspace'"></button>
+  </div>
+
+  <!-- Save -->
+  <div style="margin-top:1rem">
+    <button class="btn btn-primary" @click="saveConfig()" :disabled="saving" style="font-size:1rem;padding:.6rem 1.5rem">
+      <span x-show="!saving">Save Config</span>
+      <span x-show="saving">Saving…</span>
+    </button>
+  </div>
+
+</div>
+
+<script>
+function configApp() {
+  return {
+    cfg: { telegram_token:'', allowed_user_ids:'', openrouter_key:'', model:'', max_tokens:4096, system_prompt:'', location:'', sandbox_dir:'', db_path:'', mcp_servers:[] },
+    banner: { text:'', type:'success' },
+    saving: false,
+    showOAuth: false,
+    oauth: { clientId:'', clientSecret:'', busy:false, userCode:'', verificationUrl:'', deviceCode:'', interval:5, error:'' },
+
+    async loadConfig() {
+      const r = await fetch('/api/load-config');
+      const d = await r.json();
+      if (d.exists) { Object.assign(this.cfg, d); }
+    },
+
+    addMcpServer() { this.cfg.mcp_servers.push({ name:'', command:'', args:[], env:{} }); },
+
+    addEnvKey(srv) {
+      let k = 'KEY'; let i = 0;
+      while (k in srv.env) { k = 'KEY' + (++i); }
+      srv.env[k] = '';
+    },
+
+    renameEnvKey(srv, oldKey, newKey) {
+      if (oldKey === newKey) return;
+      const val = srv.env[oldKey];
+      delete srv.env[oldKey];
+      srv.env[newKey] = val;
+    },
+
+    async saveConfig() {
+      this.saving = true; this.banner = { text:'', type:'success' };
+      const r = await fetch('/api/save-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(this.cfg) });
+      const d = await r.json();
+      this.saving = false;
+      if (d.ok) { this.banner = { text:'Saved. Restart the bot to apply changes.', type:'success' }; }
+      else { this.banner = { text:'Save failed: ' + (d.error || 'unknown error'), type:'error' }; }
+    },
+
+    async startGoogleAuth() {
+      this.oauth.busy = true; this.oauth.userCode = ''; this.oauth.error = '';
+      const r = await fetch('/api/google-auth/start', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret }) });
+      const d = await r.json();
+      if (d.error) { this.oauth.error = d.error; this.oauth.busy = false; return; }
+      this.oauth.userCode = d.user_code;
+      this.oauth.verificationUrl = d.verification_url;
+      this.oauth.deviceCode = d.device_code;
+      this.oauth.interval = d.interval;
+      // Connect SSE poller
+      const params = new URLSearchParams({ client_id: this.oauth.clientId, client_secret: this.oauth.clientSecret, interval: d.interval });
+      const src = new EventSource('/api/google-auth/poll/' + encodeURIComponent(d.device_code) + '?' + params);
+      src.addEventListener('token', e => {
+        src.close(); this.oauth.busy = false;
+        // Find or create google-workspace MCP server env and set the token
+        let gw = this.cfg.mcp_servers.find(s => s.name === 'google-workspace');
+        if (!gw) { gw = { name:'google-workspace', command:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], env:{} }; this.cfg.mcp_servers.push(gw); }
+        gw.env['GOOGLE_WORKSPACE_CLIENT_ID'] = this.oauth.clientId;
+        gw.env['GOOGLE_WORKSPACE_CLIENT_SECRET'] = this.oauth.clientSecret;
+        gw.env['GOOGLE_WORKSPACE_REFRESH_TOKEN'] = e.data;
+        this.banner = { text:'Google Workspace connected! Remember to save.', type:'success' };
+      });
+      src.addEventListener('error_msg', e => { src.close(); this.oauth.busy = false; this.oauth.error = e.data; });
+      src.onerror = () => { src.close(); this.oauth.busy = false; this.oauth.error = 'Connection lost.'; };
+    }
+  };
+}
+</script>
+{% endblock %}

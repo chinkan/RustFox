@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Chat{% endblock %}
+{% block extra_style %}
+#messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.75rem;padding-bottom:.5rem;min-height:200px}
+.msg{padding:.6rem .9rem;border-radius:8px;max-width:80%;white-space:pre-wrap;word-break:break-word;line-height:1.5}
+.msg.user{background:#1f6feb;align-self:flex-end}
+.msg.assistant{background:#21262d;align-self:flex-start;border:1px solid #30363d}
+.msg.assistant.streaming{border-color:#58a6ff}
+.msg.error{background:#3d1c1c;border:1px solid #f85149;align-self:flex-start}
+#input-bar{display:flex;gap:.5rem;padding-top:.75rem;border-top:1px solid #30363d;margin-top:.5rem}
+#input-bar textarea{flex:1;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:.5rem .75rem;resize:none;font-size:.95rem;font-family:inherit}
+#input-bar textarea:focus{outline:none;border-color:#58a6ff}
+#input-bar button{background:#238636;color:#fff;border:none;border-radius:6px;padding:.5rem 1.2rem;cursor:pointer;font-size:.95rem}
+#input-bar button:disabled{opacity:.5;cursor:not-allowed}
+{% endblock %}
+{% block content %}
+<div id="messages" x-data x-ref="msgbox"></div>
+<div id="input-bar" x-data="{
+  text: '',
+  busy: false,
+  async send() {
+    const msg = this.text.trim();
+    if (!msg || this.busy) return;
+    this.busy = true; this.text = '';
+    const box = document.getElementById('messages');
+    const u = document.createElement('div');
+    u.className = 'msg user'; u.textContent = msg;
+    box.appendChild(u); box.scrollTop = box.scrollHeight;
+    const res = await fetch('/chat/send', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:msg})});
+    const {session_id, error} = await res.json();
+    if (error) {
+      const e = document.createElement('div');
+      e.className = 'msg error'; e.textContent = 'Error: ' + error;
+      box.appendChild(e); this.busy = false; return;
+    }
+    const a = document.createElement('div');
+    a.className = 'msg assistant streaming'; a.id = 'stream-' + session_id;
+    box.appendChild(a); box.scrollTop = box.scrollHeight;
+    const src = new EventSource('/chat/stream/' + session_id);
+    src.addEventListener('token', e => { a.textContent += e.data; box.scrollTop = box.scrollHeight; });
+    src.addEventListener('done', () => { a.classList.remove('streaming'); src.close(); this.busy = false; });
+    src.onerror = () => { a.classList.remove('streaming'); a.classList.add('error'); src.close(); this.busy = false; };
+  }
+}">
+  <textarea x-model="text" placeholder="Message RustFox…" rows="2" :disabled="busy"
+    @keydown.enter.prevent="if (!$event.shiftKey) send()"></textarea>
+  <button @click="send()" :disabled="busy || !text.trim()">Send</button>
+</div>
+{% endblock %}
