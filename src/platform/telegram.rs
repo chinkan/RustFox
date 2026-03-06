@@ -163,8 +163,33 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Process through agent
     match agent.process_message(&incoming).await {
         Ok(response) => {
-            for chunk in split_message(&response, 4000) {
-                bot.send_message(msg.chat.id, chunk).await.ok();
+            if response.is_empty() {
+                warn!(
+                    user_id = user_id,
+                    "Agent returned empty response — nothing will be sent to Telegram"
+                );
+            }
+            let chunks = split_message(&response, 4000);
+            let total = chunks.len();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if chunk.is_empty() {
+                    continue;
+                }
+                match bot.send_message(msg.chat.id, &chunk).await {
+                    Ok(_) => {
+                        if total > 1 {
+                            info!("Sent Telegram chunk {}/{} ({} chars)", i + 1, total, chunk.len());
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            user_id = user_id,
+                            chunk = i + 1,
+                            total_chunks = total,
+                            "Failed to send Telegram message: {:#}", e
+                        );
+                    }
+                }
             }
         }
         Err(e) => {
@@ -175,4 +200,31 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_message_empty_response_produces_no_chunks() {
+        let chunks = split_message("", 4000);
+        assert!(chunks.len() <= 1);
+    }
+
+    #[test]
+    fn test_split_message_short_stays_intact() {
+        let chunks = split_message("hello", 4000);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_split_message_long_splits_at_boundary() {
+        let text = "a ".repeat(3000); // 6000 chars
+        let chunks = split_message(&text, 4000);
+        assert_eq!(chunks.len(), 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 4000);
+        }
+    }
 }
