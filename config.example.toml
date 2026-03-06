@@ -46,6 +46,13 @@ directory = "skills"
 # [agent]
 # max_iterations = 25   # Agent loop cap (default 25)
 
+# LangSmith observability (optional)
+# Traces every LLM call and tool execution for debugging in the LangSmith UI.
+# Get your API key at https://smith.langchain.com → Settings → API Keys
+# [langsmith]
+# api_key = "ls__..."
+# project = "rustfox"   # LangSmith project name (default: "default")
+
 # Embedding API for vector search (optional)
 # When configured, enables hybrid vector + FTS5 search for memory.
 # Without this, falls back to FTS5 keyword search only.

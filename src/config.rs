@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default = "default_agent_config")]
     pub agent: AgentConfig,
     pub embedding: Option<EmbeddingApiConfig>,
+    #[serde(default)]
+    pub langsmith: Option<LangSmithConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -90,6 +92,15 @@ pub struct AgentConfig {
     pub max_iterations: u32,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct LangSmithConfig {
+    pub api_key: String,
+    #[serde(default = "default_langsmith_project")]
+    pub project: String,
+    #[serde(default = "default_langsmith_base_url")]
+    pub base_url: String,
+}
+
 fn default_model() -> String {
     "moonshotai/kimi-k2.5".to_string()
 }
@@ -151,6 +162,14 @@ fn default_agent_config() -> AgentConfig {
     }
 }
 
+fn default_langsmith_project() -> String {
+    "default".to_string()
+}
+
+fn default_langsmith_base_url() -> String {
+    "https://api.smith.langchain.com".to_string()
+}
+
 impl Config {
     /// Location string from [general], injected into the system prompt.
     pub fn user_location(&self) -> Option<&str> {
@@ -179,5 +198,63 @@ impl Config {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_langsmith_config_optional() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.langsmith.is_none());
+    }
+
+    #[test]
+    fn test_langsmith_config_parses() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [langsmith]
+            api_key = "ls__test"
+            project = "my-project"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let ls = cfg.langsmith.unwrap();
+        assert_eq!(ls.api_key, "ls__test");
+        assert_eq!(ls.project, "my-project");
+    }
+
+    #[test]
+    fn test_langsmith_config_default_project() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [langsmith]
+            api_key = "ls__test"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let ls = cfg.langsmith.unwrap();
+        assert_eq!(ls.project, "default");
     }
 }
