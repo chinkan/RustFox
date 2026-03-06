@@ -10,6 +10,7 @@ pub struct LangSmithClient {
 struct LangSmithInner {
     client: reqwest::Client,
     api_key: String,
+    #[allow(dead_code)]
     project: String,
     base_url: String,
 }
