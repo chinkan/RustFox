@@ -185,7 +185,11 @@ impl Agent {
         let mut iteration_count = 0u32;
 
         for iteration in 0..max_iterations {
-            debug!("Trying iteration {}: messages length: {}", iteration, messages.len());
+            debug!(
+                "Trying iteration {}: messages length: {}",
+                iteration,
+                messages.len()
+            );
 
             // --- LangSmith: start llm run (child of chain) ---
             let llm_run_id = uuid::Uuid::new_v4().to_string();
