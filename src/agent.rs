@@ -5,6 +5,7 @@ use tracing::{debug, error, info, warn};
 use teloxide::Bot;
 
 use crate::config::Config;
+use crate::langsmith::LangSmithClient;
 use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, ToolDefinition};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
@@ -39,6 +40,7 @@ pub struct Agent {
     pub self_weak: Weak<Agent>,
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+    pub langsmith: Arc<LangSmithClient>,
 }
 
 impl Agent {
@@ -53,6 +55,7 @@ impl Agent {
         bot: Arc<Bot>,
         self_weak: Weak<Agent>,
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+        langsmith: Arc<LangSmithClient>,
     ) -> Self {
         let llm = LlmClient::new(config.openrouter.clone());
         Self {
@@ -66,6 +69,7 @@ impl Agent {
             bot,
             self_weak,
             job_tx,
+            langsmith,
         }
     }
 

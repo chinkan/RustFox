@@ -50,6 +50,17 @@ async fn main() -> Result<()> {
     info!("  Sandbox: {}", config.sandbox.allowed_directory.display());
     info!("  Allowed users: {:?}", config.telegram.allowed_user_ids);
     info!("  MCP servers: {}", config.mcp_servers.len());
+    let langsmith = std::sync::Arc::new(crate::langsmith::LangSmithClient::new(
+        config.langsmith.as_ref(),
+    ));
+    if langsmith.is_enabled() {
+        info!(
+            "  LangSmith: enabled (project: {})",
+            config.langsmith.as_ref().unwrap().project
+        );
+    } else {
+        info!("  LangSmith: disabled (no [langsmith] config)");
+    }
 
     // Build embedding config if configured
     let embedding_config =
@@ -101,6 +112,7 @@ async fn main() -> Result<()> {
             Arc::clone(&bot),
             weak.clone(),
             job_tx,
+            Arc::clone(&langsmith),
         )
     });
 
