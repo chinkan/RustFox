@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::config::OpenRouterConfig;
 
@@ -62,6 +62,8 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ChatMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 pub struct LlmClient {
@@ -107,8 +109,11 @@ impl LlmClient {
         let url = format!("{}/chat/completions", self.config.base_url);
 
         debug!(
-            "Sending request to OpenRouter: {} model={}",
-            url, request.model
+            url = %url,
+            model = %model,
+            message_count = messages.len(),
+            tool_count = tools.len(),
+            "Sending request to OpenRouter"
         );
 
         let response = self
@@ -131,6 +136,23 @@ impl LlmClient {
             .json()
             .await
             .context("Failed to parse OpenRouter response")?;
+
+        if let Some(choice) = chat_response.choices.first() {
+            debug!(
+                finish_reason = ?choice.finish_reason,
+                has_content = choice.message.content.is_some(),
+                tool_call_count = choice.message.tool_calls.as_ref().map_or(0, |t| t.len()),
+                "Received LLM response"
+            );
+            if choice.message.content.as_deref().is_none_or(str::is_empty)
+                && choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty)
+            {
+                warn!(
+                    finish_reason = ?choice.finish_reason,
+                    "LLM returned no content and no tool calls"
+                );
+            }
+        }
 
         chat_response
             .choices
@@ -189,5 +211,17 @@ mod tests {
         let json_default = serde_json::to_value(&default_req).unwrap();
         let json_override = serde_json::to_value(&override_req).unwrap();
         assert_ne!(json_default["model"], json_override["model"]);
+    }
+
+    #[test]
+    fn test_chat_response_deserializes_finish_reason() {
+        let json = r#"{
+            "choices": [{
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 }
