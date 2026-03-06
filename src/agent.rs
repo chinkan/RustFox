@@ -655,8 +655,8 @@ impl Agent {
                 function: FunctionDefinition {
                     name: "read_skill_file".to_string(),
                     description: concat!(
-                        "Read a file from a skill directory. Use this to load a skill's full instructions ",
-                        "when you decide a skill is relevant (call with relative_path='SKILL.md'), then follow the loaded content. ",
+                        "Read a file from a skill directory. The system prompt lists instruction skills by name and description only; ",
+                        "use this tool to load a skill's full instructions when relevant (call with relative_path='SKILL.md'), then follow the loaded content. ",
                         "Also use for supporting files (style guides, templates, reference docs)."
                     ).to_string(),
                     parameters: json!({
