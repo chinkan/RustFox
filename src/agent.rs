@@ -726,10 +726,17 @@ impl Agent {
         let (resolved_model, declared_tools, max_iter) = {
             let skills = self.skills.read().await;
             let skill = skills.get(skill_name);
+            let default_model = self.config.openrouter.model.clone();
             let model = model_override
                 .map(str::to_string)
                 .or_else(|| skill.and_then(|s| s.model.clone()))
-                .unwrap_or_else(|| self.config.openrouter.model.clone());
+                .unwrap_or_else(|| default_model.clone());
+            if model == default_model && skill.is_none() {
+                warn!(
+                    "Subagent '{}' not found in registry; using default model. Reload skills or check skills directory.",
+                    skill_name
+                );
+            }
             let tools = tools_override
                 .or_else(|| skill.map(|s| s.tools.clone()))
                 .unwrap_or_default();
