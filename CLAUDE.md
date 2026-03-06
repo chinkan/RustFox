@@ -178,7 +178,7 @@ tags: [tag1, tag2]     # optional: for organization
 2. The skill is auto-loaded at startup — no code changes needed
 3. Configure the skills directory in `config.toml`: `[skills] directory = "skills"`
 
-Skills can be **instruction skills** (no `model` in frontmatter; full body injected into the system prompt) or **subagent skills** (`model` set; only name + description shown; invoke via `invoke_subagent(skill="name", prompt="...")`). The orchestration skill teaches the agent when to call which subagent and when to override the model (e.g. `model="anthropic/claude-sonnet-4-6"` for thread-writer-hk).
+All skills are represented in the system prompt by **metadata only** (name + description). **Instruction skills** (no `model` in frontmatter) have their full content loaded by the agent via `read_skill_file(skill_name="...", relative_path="SKILL.md")` when relevant. **Subagent skills** (`model` set) are invoked via `invoke_subagent(skill="name", prompt="...")`. The orchestration skill teaches the agent when to call which subagent and when to override the model (e.g. `model="anthropic/claude-sonnet-4-6"` for thread-writer-hk).
 
 **Subagent tool whitelist:** For subagent skills, the frontmatter `tools:` list must use the **exact** tool names as seen by the agent. MCP tools are named `mcp_{server_name}_{tool_name}` (e.g. `mcp_google-workspace_query_gmail_emails`). These names are logged at startup when MCP servers connect (`MCP server 'X' provides N tools`). A mismatch (e.g. declaring `search_gmail_messages` when the server exposes `query_gmail_emails`) causes the subagent to have no access to that tool.
 

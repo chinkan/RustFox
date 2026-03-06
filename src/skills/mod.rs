@@ -54,14 +54,15 @@ impl SkillRegistry {
     }
 
     /// Build context string for the system prompt.
-    /// Instruction skills (no model field): full body injected.
-    /// Subagent skills (have model field): metadata only + invoke_subagent hint.
+    /// All skills are metadata-only in the system prompt. Instruction skills (no model field)
+    /// are loaded by the agent via `read_skill_file` when relevant; subagent skills (have
+    /// model field) are invoked via `invoke_subagent`.
     pub fn build_context(&self) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
 
-        let mut instruction_section = String::new();
+        let mut instruction_lines = Vec::new();
         let mut subagent_section = String::new();
 
         for skill in self.skills.values() {
@@ -72,23 +73,26 @@ impl SkillRegistry {
                     skill.name, skill.description, skill.name
                 ));
             } else {
-                // Instruction skill — full body
-                instruction_section.push_str(&format!("## Skill: {}\n", skill.name));
-                instruction_section.push_str(&format!("{}\n\n", skill.content));
+                // Instruction skill — metadata only + read_skill_file hint (no full body)
+                instruction_lines.push(format!(
+                    "- **{}** (instruction): {}. Load with: read_skill_file(skill_name=\"{}\", relative_path=\"SKILL.md\") when relevant.",
+                    skill.name, skill.description, skill.name
+                ));
             }
         }
 
         let mut context = String::new();
 
-        if !instruction_section.is_empty() {
+        if !instruction_lines.is_empty() {
             context.push_str(
-                "You have the following skills available. When relevant, follow these instructions:\n\n",
+                "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them. For subagent skills use invoke_subagent.\n\nYou have the following skills available:\n\n",
             );
-            context.push_str(&instruction_section);
+            context.push_str(&instruction_lines.join("\n"));
+            context.push('\n');
         }
 
         if !subagent_section.is_empty() {
-            if !instruction_section.is_empty() {
+            if !instruction_lines.is_empty() {
                 context.push('\n');
             }
             context.push_str("## Available Subagent Skills\n\n");
@@ -126,9 +130,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_context_instruction_skill_injects_full_body() {
-        // Instruction skills (no model): full body is injected into system prompt.
-        // This is the spec behavior per design doc and CLAUDE.md.
+    fn test_build_context_instruction_skill_metadata_only() {
+        // Instruction skills (no model): metadata only in system prompt; agent loads full content via read_skill_file.
         let mut registry = SkillRegistry::new();
         registry.register(make_skill(
             "my-skill",
@@ -137,12 +140,13 @@ mod tests {
             None, // no model = instruction skill
         ));
         let ctx = registry.build_context();
-        assert!(ctx.contains("# Instructions"));
-        assert!(ctx.contains("Do this and that."));
-        // metadata is also present (as a section header)
         assert!(ctx.contains("my-skill"));
-        // regression guard: the internal tool name must NOT leak into the prompt
-        assert!(!ctx.contains("read_skill_file"));
+        assert!(ctx.contains("Does things"));
+        assert!(ctx.contains("read_skill_file"));
+        assert!(ctx.contains("SKILL.md"));
+        // Full body must NOT be in context
+        assert!(!ctx.contains("# Instructions"));
+        assert!(!ctx.contains("Do this and that."));
     }
 
     #[test]
@@ -173,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_build_context_mixed_skills() {
-        // Instruction skill body is injected; subagent skill body is NOT.
+        // Instruction skill: metadata + read_skill_file hint only (no body). Subagent: metadata only (no body).
         let mut registry = SkillRegistry::new();
         registry.register(make_skill(
             "instruction-skill",
@@ -188,14 +192,14 @@ mod tests {
             Some("some/model"),
         ));
         let ctx = registry.build_context();
-        // Section headers are present
         assert!(ctx.contains("You have the following skills available"));
         assert!(ctx.contains("Available Subagent Skills"));
-        // Instruction skill: full body present
-        assert!(ctx.contains("Follow these instructions."));
-        // Subagent skill: body NOT present
+        // Instruction skill: body NOT in context
+        assert!(!ctx.contains("Follow these instructions."));
+        // Subagent skill: body NOT in context
         assert!(!ctx.contains("Secret subagent body."));
-        // Both have invoke/load hints
+        // Both hints present
+        assert!(ctx.contains("read_skill_file"));
         assert!(ctx.contains("invoke_subagent"));
     }
 }
