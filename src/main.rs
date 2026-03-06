@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod langsmith;
 mod llm;
 mod mcp;
 mod memory;
