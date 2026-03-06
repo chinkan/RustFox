@@ -98,6 +98,10 @@ impl Agent {
     }
 
     /// Process an incoming message and return the response text
+    pub(crate) fn now_iso8601_static() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
     pub async fn process_message(&self, incoming: &IncomingMessage) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
@@ -156,12 +160,83 @@ impl Agent {
         all_tools.extend(self.scheduling_tool_definitions());
         all_tools.extend(self.skill_tool_definitions());
 
+        // --- LangSmith: start root chain run ---
+        let chain_run_id = uuid::Uuid::new_v4().to_string();
+        let ls_project = self
+            .config
+            .langsmith
+            .as_ref()
+            .map(|l| l.project.as_str())
+            .unwrap_or("default")
+            .to_string();
+
+        self.langsmith.start_run(crate::langsmith::RunParams {
+            id: chain_run_id.clone(),
+            name: "rustfox_request".to_string(),
+            run_type: crate::langsmith::RunType::Chain,
+            parent_run_id: None,
+            inputs: serde_json::json!({ "message": incoming.text }),
+            session_name: ls_project.clone(),
+            start_time: Self::now_iso8601_static(),
+        });
+
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
+        let mut iteration_count = 0u32;
+
         for iteration in 0..max_iterations {
             debug!("Trying iteration {}: messages length: {}", iteration, messages.len());
 
-            let response = self.llm.chat(&messages, &all_tools).await?;
+            // --- LangSmith: start llm run (child of chain) ---
+            let llm_run_id = uuid::Uuid::new_v4().to_string();
+            let llm_start = Self::now_iso8601_static();
+            self.langsmith.start_run(crate::langsmith::RunParams {
+                id: llm_run_id.clone(),
+                name: "llm_call".to_string(),
+                run_type: crate::langsmith::RunType::Llm,
+                parent_run_id: Some(chain_run_id.clone()),
+                inputs: serde_json::json!({ "messages": messages }),
+                session_name: ls_project.clone(),
+                start_time: llm_start,
+            });
+
+            let response = self.llm.chat(&messages, &all_tools).await;
+
+            // Handle LLM errors
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
+                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                        id: llm_run_id,
+                        outputs: None,
+                        error: Some(format!("{:#}", e)),
+                        end_time: Self::now_iso8601_static(),
+                    });
+                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                        id: chain_run_id,
+                        outputs: None,
+                        error: Some(format!("{:#}", e)),
+                        end_time: Self::now_iso8601_static(),
+                    });
+                    return Err(e);
+                }
+            };
+
+            // --- LangSmith: end llm run ---
+            self.langsmith.end_run(crate::langsmith::EndRunParams {
+                id: llm_run_id,
+                outputs: Some(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "role": response.role,
+                            "content": response.content,
+                            "tool_calls": response.tool_calls,
+                        }
+                    }]
+                })),
+                error: None,
+                end_time: Self::now_iso8601_static(),
+            });
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
@@ -183,6 +258,18 @@ impl Agent {
                             serde_json::from_str(&tool_call.function.arguments)
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
+                        // --- LangSmith: start tool run (child of chain) ---
+                        let tool_run_id = uuid::Uuid::new_v4().to_string();
+                        self.langsmith.start_run(crate::langsmith::RunParams {
+                            id: tool_run_id.clone(),
+                            name: tool_call.function.name.clone(),
+                            run_type: crate::langsmith::RunType::Tool,
+                            parent_run_id: Some(chain_run_id.clone()),
+                            inputs: serde_json::json!({ "arguments": arguments }),
+                            session_name: ls_project.clone(),
+                            start_time: Self::now_iso8601_static(),
+                        });
+
                         let tool_result = self
                             .execute_tool(&tool_call.function.name, &arguments, user_id, chat_id)
                             .await;
@@ -192,8 +279,15 @@ impl Agent {
                             tool_call.function.name,
                             tool_result.len()
                         );
-
                         debug!("Tool '{}' result: {}", tool_call.function.name, tool_result);
+
+                        // --- LangSmith: end tool run ---
+                        self.langsmith.end_run(crate::langsmith::EndRunParams {
+                            id: tool_run_id,
+                            outputs: Some(serde_json::json!({ "result": tool_result })),
+                            error: None,
+                            end_time: Self::now_iso8601_static(),
+                        });
 
                         let tool_msg = ChatMessage {
                             role: "tool".to_string(),
@@ -207,18 +301,55 @@ impl Agent {
                         messages.push(tool_msg);
                     }
 
+                    iteration_count = iteration + 1;
                     continue;
                 }
             }
 
             // Final response — no tool calls
             let content = response.content.clone().unwrap_or_default();
+
+            if content.is_empty() {
+                warn!(
+                    user_id = %user_id,
+                    iteration = iteration,
+                    "LLM returned empty content with no tool calls — bot will send nothing"
+                );
+            }
+
             self.memory
                 .save_message(&conversation_id, &response)
                 .await?;
 
+            // --- LangSmith: end chain run (success) ---
+            self.langsmith.end_run(crate::langsmith::EndRunParams {
+                id: chain_run_id,
+                outputs: Some(serde_json::json!({
+                    "response": content,
+                    "iterations": iteration,
+                })),
+                error: None,
+                end_time: Self::now_iso8601_static(),
+            });
+
             return Ok(content);
         }
+
+        // Reached max iterations
+        warn!(
+            user_id = %user_id,
+            max_iterations = max_iterations,
+            iteration_count = iteration_count,
+            "Reached max iterations without final text response"
+        );
+
+        // --- LangSmith: end chain run (max iterations) ---
+        self.langsmith.end_run(crate::langsmith::EndRunParams {
+            id: chain_run_id,
+            outputs: None,
+            error: Some(format!("Reached max iterations ({})", max_iterations)),
+            end_time: Self::now_iso8601_static(),
+        });
 
         Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
     }
@@ -1245,6 +1376,13 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_now_iso8601_is_valid_rfc3339() {
+        let ts = Agent::now_iso8601_static();
+        chrono::DateTime::parse_from_rfc3339(&ts).unwrap();
+        assert!(ts.ends_with('Z'), "timestamp must be UTC: {}", ts);
+    }
 
     #[test]
     fn test_parse_one_shot_delay_valid() {
