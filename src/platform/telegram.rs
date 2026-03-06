@@ -178,7 +178,12 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 match bot.send_message(msg.chat.id, &chunk).await {
                     Ok(_) => {
                         if total > 1 {
-                            info!("Sent Telegram chunk {}/{} ({} chars)", i + 1, total, chunk.len());
+                            info!(
+                                "Sent Telegram chunk {}/{} ({} chars)",
+                                i + 1,
+                                total,
+                                chunk.len()
+                            );
                         }
                     }
                     Err(e) => {
@@ -186,7 +191,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                             user_id = user_id,
                             chunk = i + 1,
                             total_chunks = total,
-                            "Failed to send Telegram message: {:#}", e
+                            "Failed to send Telegram message: {:#}",
+                            e
                         );
                     }
                 }
