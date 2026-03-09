@@ -358,8 +358,8 @@ pub async fn execute_builtin_tool(
             let content = tokio::fs::read_to_string(&plan_path)
                 .await
                 .context("No active plan found. Call plan_create first.")?;
-            let mut plan: serde_json::Value = serde_json::from_str(&content)
-                .context("Invalid plan file format")?;
+            let mut plan: serde_json::Value =
+                serde_json::from_str(&content).context("Invalid plan file format")?;
 
             let steps = plan["steps"]
                 .as_array_mut()
@@ -368,10 +368,7 @@ pub async fn execute_builtin_tool(
                 .get_mut(step_id)
                 .with_context(|| format!("Step {} not found in plan", step_id))?;
 
-            let description = step["description"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let description = step["description"].as_str().unwrap_or("").to_string();
             step["status"] = json!(status);
             step["notes"] = json!(notes);
 
