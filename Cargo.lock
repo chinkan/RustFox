@@ -1631,6 +1631,7 @@ dependencies = [
  "serde_json",
  "sqlite-vec",
  "teloxide",
+ "tempfile",
  "tokio",
  "tokio-cron-scheduler",
  "toml",
