@@ -53,3 +53,6 @@ sqlite-vec = "0.1"
 
 # Setup wizard web server (used only by src/bin/setup.rs)
 axum = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
