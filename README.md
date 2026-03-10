@@ -20,6 +20,9 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 - **Vector Embedding Search** — Hybrid vector + FTS5 search using `qwen/qwen3-embedding-8b`
 - **MCP Integration** — Connect any MCP-compatible server to extend capabilities
 - **Bot Skills** — Folder-based natural-language skill instructions auto-loaded at startup; orchestration and subagent skills (e.g. **daily-news-to-threads**) let the main agent delegate to specialized subagents and override models per task
+- **Agents Layer** — Isolated agentic mini-loops in `agents/` with their own model, tool whitelist, and `AGENT.md` instructions; invoked via `invoke_agent`, with `read_agent_file`/`write_agent_file` for file I/O and `reload_agents` for hot-reloading
+- **Plan Tools** — `plan_create`, `plan_update`, `plan_view` built-in tools let the agent create and manage structured execution plans stored in the sandbox; power the `problem-solver` subagent skill
+- **Bundled Subagent Skills** — `code-interpreter` (executes and iterates code snippets) and `problem-solver` (orchestrates multi-step reasoning with plan tools) ship out of the box
 - **Agentic Loop** — Automatic multi-step tool calling until task completion (max iterations configurable, default 25)
 - **Per-user Conversations** — Independent conversation history per user
 
@@ -75,6 +78,7 @@ See [`config.example.toml`](config.example.toml) for all options.
 | `memory.database_path` | SQLite DB path (default: `rustfox.db`) |
 | `embedding` (optional) | Vector search API config (default model: `qwen/qwen3-embedding-8b`) |
 | `skills.directory` | Folder of bot skill files (default: `skills/`) |
+| `agents.directory` | Folder of agent definition files (default: `agents/`) |
 | `mcp_servers` | List of MCP servers to connect |
 | `general.location` | Your location string (under `[general]`), injected into system prompt |
 
@@ -179,6 +183,23 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 | `list_scheduled_tasks` | List all active scheduled tasks |
 | `cancel_scheduled_task` | Cancel a scheduled task by ID |
 
+### Agent Tools
+
+| Tool | Description |
+|------|-------------|
+| `invoke_agent` | Run an agent from the `agents/` directory in an isolated agentic loop |
+| `read_agent_file` | Read a file from within an agent's directory |
+| `write_agent_file` | Write a file into an agent's directory |
+| `reload_agents` | Hot-reload the agent registry without restarting the bot |
+
+### Plan Tools
+
+| Tool | Description |
+|------|-------------|
+| `plan_create` | Create a new structured execution plan (stored as `.rustfox_plan.json` in the sandbox) |
+| `plan_update` | Update a step's status or notes in the current plan |
+| `plan_view` | View the current plan and its step statuses |
+
 ## Bot Commands
 
 | Command | Description |
@@ -194,13 +215,19 @@ src/
 ├── main.rs           # Entry point, config loading, initialization
 ├── config.rs         # TOML configuration parsing
 ├── llm.rs            # OpenRouter API client with tool calling
-├── agent.rs          # Agentic loop, tool dispatch, scheduling tools
-├── tools.rs          # Built-in tools (file I/O, command execution)
+├── agent.rs          # Agentic loop, tool dispatch, scheduling tools; agents/ layer
+├── tools.rs          # Built-in tools (file I/O, command execution, plan tools)
 ├── mcp.rs            # MCP client manager for external tool servers
 ├── memory/           # SQLite persistence, vector embeddings
 ├── scheduler/        # Cron/one-shot task scheduler with DB persistence
 ├── skills/           # Skill loader (auto-loads from skills/ directory)
 └── platform/         # Telegram bot handler
+
+agents/               # Agent definition files (AGENT.md per agent)
+skills/
+├── code-interpreter/ # Subagent skill: execute and iterate code snippets
+├── problem-solver/   # Subagent skill: multi-step reasoning with plan tools
+└── creating-agents/  # Instruction skill: how to author new agents
 ```
 
 ## Roadmap
@@ -220,6 +247,9 @@ src/
 - [x] Agent skill writer (`write_skill_file` tool — creates/updates skill files from within the agent)
 - [x] Agent skill reload (`reload_skills` tool — hot-reloads skill registry without restart)
 - [x] Meta Threads MCP integration (setup wizard entry, config example, token setup guide)
+- [x] Agents layer (`invoke_agent`, `read_agent_file`, `write_agent_file`, `reload_agents` — isolated agentic mini-loops in `agents/` with own model and tool whitelist)
+- [x] Plan tools (`plan_create`, `plan_update`, `plan_view` — structured execution plans in the sandbox)
+- [x] Bundled subagent skills: `code-interpreter` and `problem-solver`
 
 ### Planned
 
