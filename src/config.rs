@@ -13,6 +13,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default = "default_skills_config")]
     pub skills: SkillsConfig,
+    #[serde(default = "default_agents_config")]
+    pub agents: AgentsConfig,
     #[serde(default)]
     pub general: Option<GeneralConfig>,
     #[serde(default = "default_agent_config")]
@@ -79,6 +81,12 @@ pub struct SkillsConfig {
     pub directory: PathBuf,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentsConfig {
+    #[serde(default = "default_agents_dir")]
+    pub directory: PathBuf,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct GeneralConfig {
     /// Optional location string injected into the system prompt (e.g. "Tokyo, Japan")
@@ -128,6 +136,10 @@ fn default_skills_dir() -> PathBuf {
     PathBuf::from("skills")
 }
 
+fn default_agents_dir() -> PathBuf {
+    PathBuf::from("agents")
+}
+
 fn default_embedding_base_url() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
@@ -149,6 +161,12 @@ fn default_memory_config() -> MemoryConfig {
 fn default_skills_config() -> SkillsConfig {
     SkillsConfig {
         directory: default_skills_dir(),
+    }
+}
+
+fn default_agents_config() -> AgentsConfig {
+    AgentsConfig {
+        directory: default_agents_dir(),
     }
 }
 

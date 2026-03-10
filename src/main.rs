@@ -87,6 +87,10 @@ async fn main() -> Result<()> {
     let skills = load_skills_from_dir(&config.skills.directory).await?;
     info!("  Skills: {}", skills.len());
 
+    // Load agents from the agents directory
+    let agents = load_skills_from_dir(&config.agents.directory).await?;
+    info!("  Agents: {}", agents.len());
+
     // Create ScheduledTaskStore sharing the existing SQLite connection
     let task_store = crate::scheduler::reminders::ScheduledTaskStore::new(memory.connection());
 
@@ -107,6 +111,7 @@ async fn main() -> Result<()> {
             mcp_manager,
             memory.clone(),
             skills,
+            agents,
             task_store.clone(),
             Arc::clone(&scheduler),
             Arc::clone(&bot),
