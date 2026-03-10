@@ -1645,10 +1645,7 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
 fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
-    let mut tools = vec![
-        "read_skill_file".to_string(),
-        "read_agent_file".to_string(),
-    ];
+    let mut tools = vec!["read_skill_file".to_string(), "read_agent_file".to_string()];
     for t in declared {
         if t != "read_skill_file" && t != "read_agent_file" {
             tools.push(t.clone());
