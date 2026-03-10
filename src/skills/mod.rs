@@ -53,10 +53,9 @@ impl SkillRegistry {
         self.skills.values().collect()
     }
 
-    /// Build context string for the system prompt.
-    /// All skills are metadata-only in the system prompt. Instruction skills (no model field)
-    /// are loaded by the agent via `read_skill_file` when relevant; subagent skills (have
-    /// model field) are invoked via `invoke_subagent`.
+    /// Build context string for the system prompt (skills directory).
+    /// Instruction skills (no model field) are loaded via `read_skill_file` when relevant.
+    /// Subagent skills (model field set) are invoked via `invoke_agent`.
     pub fn build_context(&self) -> String {
         if self.skills.is_empty() {
             return String::new();
@@ -69,7 +68,7 @@ impl SkillRegistry {
             if skill.model.is_some() {
                 // Subagent skill — metadata only
                 subagent_section.push_str(&format!(
-                    "- **{}**: {}\n  Invoke via: `invoke_subagent(skill=\"{}\", prompt=\"<task>\")`\n",
+                    "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`\n",
                     skill.name, skill.description, skill.name
                 ));
             } else {
@@ -85,7 +84,7 @@ impl SkillRegistry {
 
         if !instruction_lines.is_empty() {
             context.push_str(
-                "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them. For subagent skills use invoke_subagent.\n\nYou have the following skills available:\n\n",
+                "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them. For subagent skills use invoke_agent.\n\nYou have the following skills available:\n\n",
             );
             context.push_str(&instruction_lines.join("\n"));
             context.push('\n');
@@ -96,10 +95,32 @@ impl SkillRegistry {
                 context.push('\n');
             }
             context.push_str("## Available Subagent Skills\n\n");
-            context.push_str("Delegate these tasks using `invoke_subagent`:\n\n");
+            context.push_str("Delegate these tasks using `invoke_agent`:\n\n");
             context.push_str(&subagent_section);
         }
 
+        context
+    }
+
+    /// Build context string for the agents directory (agents with their own model/tools).
+    /// All agents are invoked via `invoke_agent`.
+    pub fn build_agents_context(&self) -> String {
+        if self.skills.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+        for agent in self.skills.values() {
+            lines.push(format!(
+                "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
+                agent.name, agent.description, agent.name
+            ));
+        }
+
+        let mut context =
+            String::from("Delegate these tasks to specialized agents using `invoke_agent`:\n\n");
+        context.push_str(&lines.join("\n"));
+        context.push('\n');
         context
     }
 
@@ -163,7 +184,7 @@ mod tests {
         // Metadata present
         assert!(ctx.contains("thread-writer"));
         assert!(ctx.contains("Use when writing Thread posts."));
-        assert!(ctx.contains("invoke_subagent"));
+        assert!(ctx.contains("invoke_agent"));
         // Body NOT present
         assert!(!ctx.contains("Super Secret Instructions"));
         assert!(!ctx.contains("Long style guide"));
@@ -200,6 +221,6 @@ mod tests {
         assert!(!ctx.contains("Secret subagent body."));
         // Both hints present
         assert!(ctx.contains("read_skill_file"));
-        assert!(ctx.contains("invoke_subagent"));
+        assert!(ctx.contains("invoke_agent"));
     }
 }

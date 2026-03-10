@@ -32,6 +32,7 @@ pub struct Agent {
     pub mcp: McpManager,
     pub memory: MemoryStore,
     pub skills: tokio::sync::RwLock<SkillRegistry>,
+    pub agents: tokio::sync::RwLock<SkillRegistry>,
     // Fields used by scheduling / job closures
     pub task_store: ScheduledTaskStore,
     pub scheduler: Arc<Scheduler>,
@@ -43,6 +44,15 @@ pub struct Agent {
     pub langsmith: Arc<LangSmithClient>,
 }
 
+/// Which registry/directory an agent invocation targets.
+#[derive(Clone, Copy)]
+enum AgentKind {
+    /// Look up in the skills registry; bootstrap uses `read_skill_file` / SKILL.md
+    Skill,
+    /// Look up in agents registry first, fall back to skills; bootstrap uses `read_agent_file` / AGENT.md
+    Agent,
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -50,6 +60,7 @@ impl Agent {
         mcp: McpManager,
         memory: MemoryStore,
         skills: SkillRegistry,
+        agents: SkillRegistry,
         task_store: ScheduledTaskStore,
         scheduler: Arc<Scheduler>,
         bot: Arc<Bot>,
@@ -64,6 +75,7 @@ impl Agent {
             mcp,
             memory,
             skills: tokio::sync::RwLock::new(skills),
+            agents: tokio::sync::RwLock::new(agents),
             task_store,
             scheduler,
             bot,
@@ -73,7 +85,7 @@ impl Agent {
         }
     }
 
-    /// Build the system prompt, incorporating loaded skills
+    /// Build the system prompt, incorporating loaded skills and agents
     async fn build_system_prompt(&self) -> String {
         let mut prompt = self.config.openrouter.system_prompt.clone();
 
@@ -84,6 +96,14 @@ impl Agent {
             prompt.push_str(&skill_context);
         }
         drop(skills); // release read lock before further work
+
+        let agents = self.agents.read().await;
+        let agent_context = agents.build_agents_context();
+        if !agent_context.is_empty() {
+            prompt.push_str("\n\n# Available Agents\n\n");
+            prompt.push_str(&agent_context);
+        }
+        drop(agents);
 
         // Append current timestamp and optional location
         let now = chrono::Utc::now()
@@ -680,10 +700,9 @@ impl Agent {
                 function: FunctionDefinition {
                     name: "invoke_subagent".to_string(),
                     description: concat!(
+                        "Deprecated alias for invoke_agent. ",
                         "Delegate a task to a named skill running as an isolated subagent. ",
-                        "The subagent uses its own model and tool whitelist declared in its SKILL.md frontmatter. ",
-                        "Use this for skills listed under 'Available Subagent Skills' in the system prompt. ",
-                        "The subagent runs an isolated agentic loop and returns its final text response."
+                        "Prefer invoke_agent for new agent invocations."
                     ).to_string(),
                     parameters: json!({
                         "type": "object",
@@ -710,10 +729,112 @@ impl Agent {
                     }),
                 },
             },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "invoke_agent".to_string(),
+                    description: concat!(
+                        "Delegate a task to a named agent running as an isolated agentic loop. ",
+                        "Agents are listed under 'Available Agents' and 'Available Subagent Skills' in the system prompt. ",
+                        "The agent uses its own model and tool whitelist declared in its frontmatter. ",
+                        "Looks up in the agents/ directory first, then falls back to the skills/ directory."
+                    ).to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "description": "Name of the agent to invoke (e.g. 'soul-keeper', 'thread-writer')"
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "The task content to pass to the agent"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional: override the agent's declared model for this invocation"
+                            },
+                            "tools": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional: override the agent's declared tool whitelist"
+                            }
+                        },
+                        "required": ["agent", "prompt"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "read_agent_file".to_string(),
+                    description: concat!(
+                        "Read a file from an agent directory under the configured agents folder. ",
+                        "Use this to load an agent's full instructions (call with relative_path='AGENT.md'), ",
+                        "or to read supporting files (reference docs, templates, scripts)."
+                    ).to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "agent_name": {
+                                "type": "string",
+                                "description": "Agent directory name (e.g. 'soul-keeper')"
+                            },
+                            "relative_path": {
+                                "type": "string",
+                                "description": "Path within the agent directory, e.g. 'AGENT.md', 'reference.md'"
+                            }
+                        },
+                        "required": ["agent_name", "relative_path"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "write_agent_file".to_string(),
+                    description: concat!(
+                        "Write a file into an agent directory under the configured agents folder. ",
+                        "Use this to create AGENT.md and any supporting files. ",
+                        "Call reload_agents after ALL files for the agent are written."
+                    ).to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "agent_name": {
+                                "type": "string",
+                                "description": "Agent directory name: lowercase letters, numbers, hyphens only, max 64 chars (e.g. 'news-fetcher')"
+                            },
+                            "relative_path": {
+                                "type": "string",
+                                "description": "Path within the agent directory, e.g. 'AGENT.md', 'reference.md'"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Full file content to write"
+                            }
+                        },
+                        "required": ["agent_name", "relative_path", "content"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "reload_agents".to_string(),
+                    description: concat!(
+                        "Reload all agents from the agents directory into memory. ",
+                        "Call this after writing agent files to make the new agent immediately active ",
+                        "without restarting the bot."
+                    ).to_string(),
+                    parameters: json!({ "type": "object", "properties": {} }),
+                },
+            },
         ]
     }
 
-    /// Run a named skill as an isolated subagent mini-loop.
+    /// Run a named skill/agent as an isolated subagent mini-loop.
+    /// `kind` controls which registry to look up and which read tool to use in the bootstrap.
     /// Returns the subagent's final text response (or an error string).
     async fn run_subagent(
         &self,
@@ -721,26 +842,47 @@ impl Agent {
         prompt: &str,
         model_override: Option<&str>,
         tools_override: Option<Vec<String>>,
+        kind: AgentKind,
     ) -> String {
-        // Resolve model and tool list from skill metadata (or overrides)
+        // Resolve model and tool list from registry metadata (or overrides).
+        // For invoke_agent: check agents registry first, fall back to skills registry.
         let (resolved_model, declared_tools, max_iter) = {
-            let skills = self.skills.read().await;
-            let skill = skills.get(skill_name);
             let default_model = self.config.openrouter.model.clone();
+
+            let skill_opt = match kind {
+                AgentKind::Agent => {
+                    let agents = self.agents.read().await;
+                    let from_agents = agents.get(skill_name).cloned();
+                    drop(agents);
+                    if from_agents.is_some() {
+                        from_agents
+                    } else {
+                        // fall back to skills registry
+                        let skills = self.skills.read().await;
+                        skills.get(skill_name).cloned()
+                    }
+                }
+                AgentKind::Skill => {
+                    let skills = self.skills.read().await;
+                    skills.get(skill_name).cloned()
+                }
+            };
+
             let model = model_override
                 .map(str::to_string)
-                .or_else(|| skill.and_then(|s| s.model.clone()))
+                .or_else(|| skill_opt.as_ref().and_then(|s| s.model.clone()))
                 .unwrap_or_else(|| default_model.clone());
-            if model == default_model && skill.is_none() {
+            if model == default_model && skill_opt.is_none() {
                 warn!(
-                    "Subagent '{}' not found in registry; using default model. Reload skills or check skills directory.",
+                    "Agent/skill '{}' not found in registry; using default model.",
                     skill_name
                 );
             }
             let tools = tools_override
-                .or_else(|| skill.map(|s| s.tools.clone()))
+                .or_else(|| skill_opt.as_ref().map(|s| s.tools.clone()))
                 .unwrap_or_default();
-            let max_i = skill
+            let max_i = skill_opt
+                .as_ref()
                 .and_then(|s| s.max_iterations)
                 .unwrap_or_else(|| self.config.max_iterations())
                 .min(self.config.max_iterations());
@@ -750,7 +892,7 @@ impl Agent {
         let allowed_tools = effective_subagent_tools(&declared_tools);
 
         info!(
-            "Subagent '{}' using model: {} (allowed_tools: {} tools)",
+            "Agent/subagent '{}' using model: {} (allowed_tools: {} tools)",
             skill_name,
             resolved_model,
             allowed_tools.len()
@@ -760,7 +902,7 @@ impl Agent {
         let all_possible_tools: Vec<ToolDefinition> = {
             let mut t = tools::builtin_tool_definitions();
             t.extend(self.mcp.tool_definitions());
-            t.extend(self.skill_tool_definitions()); // includes read_skill_file
+            t.extend(self.skill_tool_definitions()); // includes read_skill_file + read_agent_file
             t
         };
 
@@ -772,7 +914,7 @@ impl Agent {
         let missing = missing_subagent_tools(&allowed_tools, &available_names);
         if !missing.is_empty() {
             warn!(
-                "Subagent '{}': declared tools not available at runtime \
+                "Agent '{}': declared tools not available at runtime \
                  (MCP server not configured?): {:?}",
                 skill_name, missing
             );
@@ -783,12 +925,19 @@ impl Agent {
             .filter(|td| allowed_tools.contains(&td.function.name))
             .collect();
 
-        // Bootstrap messages — system prompt instructs subagent to read its SKILL.md first
-        let system_content = format!(
-            "You are the '{}' subagent. Your first action MUST be to call \
-             read_skill_file with skill_name='{}' and relative_path='SKILL.md' to load your instructions.",
-            skill_name, skill_name
-        );
+        // Bootstrap messages — instruct the agent to read its instructions file first
+        let system_content = match kind {
+            AgentKind::Agent => format!(
+                "You are the '{}' agent. Your first action MUST be to call \
+                 read_agent_file with agent_name='{}' and relative_path='AGENT.md' to load your instructions.",
+                skill_name, skill_name
+            ),
+            AgentKind::Skill => format!(
+                "You are the '{}' subagent. Your first action MUST be to call \
+                 read_skill_file with skill_name='{}' and relative_path='SKILL.md' to load your instructions.",
+                skill_name, skill_name
+            ),
+        };
         let mut messages = vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -814,17 +963,17 @@ impl Agent {
                 Ok(r) => r,
                 Err(e) => {
                     error!(
-                        "Subagent '{}' API call failed (model: '{}'): {}",
+                        "Agent '{}' API call failed (model: '{}'): {}",
                         skill_name, resolved_model, e
                     );
-                    return format!("Subagent '{}' error: {}", skill_name, e);
+                    return format!("Agent '{}' error: {}", skill_name, e);
                 }
             };
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
                     info!(
-                        "Subagent '{}' requested {} tool call(s) (iteration {})",
+                        "Agent '{}' requested {} tool call(s) (iteration {})",
                         skill_name,
                         tool_calls.len(),
                         iteration
@@ -842,17 +991,17 @@ impl Agent {
                             self.execute_tool(
                                 &tool_call.function.name,
                                 &arguments,
-                                "", // subagent has no user_id context
-                                "", // subagent has no chat_id context
+                                "", // agent has no user_id context
+                                "", // agent has no chat_id context
                             )
                             .await
                         } else {
                             info!(
-                                "Subagent '{}' denied tool '{}' (allowed: {:?})",
+                                "Agent '{}' denied tool '{}' (allowed: {:?})",
                                 skill_name, tool_call.function.name, allowed_tools
                             );
                             format!(
-                                "Tool '{}' is not available to this subagent.",
+                                "Tool '{}' is not available to this agent.",
                                 tool_call.function.name
                             )
                         };
@@ -874,7 +1023,7 @@ impl Agent {
         }
 
         format!(
-            "Subagent '{}' reached the maximum number of iterations ({}).",
+            "Agent '{}' reached the maximum number of iterations ({}).",
             skill_name, max_iter
         )
     }
@@ -1213,6 +1362,7 @@ impl Agent {
                 }
             }
             "invoke_subagent" => {
+                // Backward-compat alias for invoke_agent (skills registry only)
                 let skill = match arguments["skill"].as_str() {
                     Some(s) => s.to_string(),
                     None => return "Missing skill".to_string(),
@@ -1229,7 +1379,7 @@ impl Agent {
                 });
 
                 info!(
-                    "Invoking subagent '{}' (model_override: {:?})",
+                    "Invoking subagent (skill) '{}' (model_override: {:?})",
                     skill, model_override
                 );
 
@@ -1238,8 +1388,138 @@ impl Agent {
                     &prompt,
                     model_override.as_deref(),
                     tools_override,
+                    AgentKind::Skill,
                 ))
                 .await
+            }
+            "invoke_agent" => {
+                // Accepts `agent` parameter; falls back to `skill` for compat
+                let agent = match arguments["agent"]
+                    .as_str()
+                    .or_else(|| arguments["skill"].as_str())
+                {
+                    Some(a) => a.to_string(),
+                    None => return "Missing agent".to_string(),
+                };
+                let prompt = match arguments["prompt"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return "Missing prompt".to_string(),
+                };
+                let model_override = arguments["model"].as_str().map(str::to_string);
+                let tools_override = arguments["tools"].as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                });
+
+                info!(
+                    "Invoking agent '{}' (model_override: {:?})",
+                    agent, model_override
+                );
+
+                Box::pin(self.run_subagent(
+                    &agent,
+                    &prompt,
+                    model_override.as_deref(),
+                    tools_override,
+                    AgentKind::Agent,
+                ))
+                .await
+            }
+            "read_agent_file" => {
+                let agent_name = match arguments["agent_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return "Missing agent_name".to_string(),
+                };
+                let relative_path = match arguments["relative_path"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return "Missing relative_path".to_string(),
+                };
+
+                if let Err(e) = validate_skill_name(&agent_name) {
+                    return format!("Invalid agent_name: {}", e);
+                }
+                if let Err(e) = validate_skill_path(&relative_path) {
+                    return format!("Invalid path: {}", e);
+                }
+
+                let target = self
+                    .config
+                    .agents
+                    .directory
+                    .join(&agent_name)
+                    .join(&relative_path);
+
+                if let Ok(agents_canonical) = self.config.agents.directory.canonicalize() {
+                    if let Ok(target_canonical) = target.canonicalize() {
+                        if !target_canonical.starts_with(&agents_canonical) {
+                            return format!(
+                                "Access denied: path '{}/{}' resolves outside the agents directory",
+                                agent_name, relative_path
+                            );
+                        }
+                    }
+                }
+
+                match tokio::fs::read_to_string(&target).await {
+                    Ok(content) => content,
+                    Err(e) => format!(
+                        "Failed to read agent file '{}/{}': {}",
+                        agent_name, relative_path, e
+                    ),
+                }
+            }
+            "write_agent_file" => {
+                let agent_name = match arguments["agent_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return "Missing agent_name".to_string(),
+                };
+                let relative_path = match arguments["relative_path"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return "Missing relative_path".to_string(),
+                };
+                let content = arguments["content"].as_str().unwrap_or("").to_string();
+
+                if let Err(e) = validate_skill_name(&agent_name) {
+                    return format!("Invalid agent_name: {}", e);
+                }
+                if let Err(e) = validate_skill_path(&relative_path) {
+                    return format!("Invalid relative_path: {}", e);
+                }
+
+                let target = self
+                    .config
+                    .agents
+                    .directory
+                    .join(&agent_name)
+                    .join(&relative_path);
+
+                if let Some(parent) = target.parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        return format!("Failed to create directories: {}", e);
+                    }
+                }
+
+                match tokio::fs::write(&target, &content).await {
+                    Ok(()) => {
+                        info!("Agent file written: {}", target.display());
+                        format!("Written: {}", target.display())
+                    }
+                    Err(e) => format!("Failed to write agent file: {}", e),
+                }
+            }
+            "reload_agents" => {
+                use crate::skills::loader::load_skills_from_dir;
+                match load_skills_from_dir(&self.config.agents.directory).await {
+                    Ok(new_registry) => {
+                        let count = new_registry.len();
+                        let mut agents = self.agents.write().await;
+                        *agents = new_registry;
+                        info!("Agents reloaded: {} agent(s) active", count);
+                        format!("Agents reloaded. {} agent(s) now active.", count)
+                    }
+                    Err(e) => format!("Failed to reload agents: {}", e),
+                }
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
                 Ok(result) => result,
@@ -1362,12 +1642,15 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Build the effective tool whitelist for a subagent.
-/// Always includes `read_skill_file`; deduplicates.
+/// Build the effective tool whitelist for a subagent/agent.
+/// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
 fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
-    let mut tools = vec!["read_skill_file".to_string()];
+    let mut tools = vec![
+        "read_skill_file".to_string(),
+        "read_agent_file".to_string(),
+    ];
     for t in declared {
-        if t != "read_skill_file" {
+        if t != "read_skill_file" && t != "read_agent_file" {
             tools.push(t.clone());
         }
     }
@@ -1505,10 +1788,11 @@ mod tests {
     }
 
     #[test]
-    fn test_subagent_tool_whitelist_empty_gets_read_skill_file() {
+    fn test_subagent_tool_whitelist_empty_gets_read_tools() {
         let declared: Vec<String> = vec![];
         let effective = effective_subagent_tools(&declared);
-        assert_eq!(effective, vec!["read_skill_file".to_string()]);
+        assert!(effective.contains(&"read_skill_file".to_string()));
+        assert!(effective.contains(&"read_agent_file".to_string()));
     }
 
     #[test]

@@ -34,11 +34,14 @@ pub async fn load_skills_from_dir(dir: &Path) -> Result<SkillRegistry> {
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
 
-        // Support .md files and directories containing SKILL.md
+        // Support .md files and directories containing SKILL.md or AGENT.md
         let skill_path = if path.is_dir() {
             let skill_file = path.join("SKILL.md");
+            let agent_file = path.join("AGENT.md");
             if skill_file.exists() {
                 skill_file
+            } else if agent_file.exists() {
+                agent_file
             } else {
                 continue;
             }
@@ -141,10 +144,11 @@ fn extract_u32_field(frontmatter: &str, key: &str) -> Option<u32> {
     extract_field(frontmatter, key)?.parse().ok()
 }
 
-/// Derive skill name from file path
+/// Derive skill/agent name from file path
 fn name_from_path(path: &Path) -> String {
-    // If it's SKILL.md inside a directory, use the directory name
-    if path.file_name().and_then(|f| f.to_str()) == Some("SKILL.md") {
+    // If it's SKILL.md or AGENT.md inside a directory, use the directory name
+    let filename = path.file_name().and_then(|f| f.to_str());
+    if matches!(filename, Some("SKILL.md") | Some("AGENT.md")) {
         if let Some(parent) = path.parent() {
             if let Some(dir_name) = parent.file_name().and_then(|f| f.to_str()) {
                 return dir_name.to_string();
