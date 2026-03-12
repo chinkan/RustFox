@@ -144,6 +144,11 @@ user_name: ~
 
 **Step 3 — Write back USER.md** with only that field changed. Everything else identical.
 
+**Step 4 — Reload:**
+```
+reload_skills()
+```
+
 **Step 5 — Acknowledge:** "Got it, Marcus."
 
 ---
@@ -163,6 +168,11 @@ preferences: []
 ```yaml
 preferences:
   - use-bullet-points-for-lists
+```
+
+**Step 4 — Reload:**
+```
+reload_skills()
 ```
 
 **Step 5 — Acknowledge:** "Bullets it is."
