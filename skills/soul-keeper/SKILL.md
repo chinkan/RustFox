@@ -52,7 +52,10 @@ read_skill_file(skill_name="soul", relative_path="USER.md")
 
 - Only change what the signal directly demands
 - Do not "improve" other fields while you're in there
+- If the signal is a **correction** ("stop being X"), remove X and optionally add the opposite
+- If the signal is an **addition** ("be more Y"), append Y — do not remove existing values
 - For SOUL.md: increment `version` by 1
+- For USER.md: there is no version field — do not add one
 - Never remove from `boundaries` for any reason
 - Never modify `id` or `born`
 
@@ -118,6 +121,11 @@ style:
 ```
 
 Everything else in the file stays byte-for-byte identical.
+
+**Step 4 — Reload:**
+```
+reload_skills()
+```
 
 **Step 5 — Acknowledge:** "Done — dropping the formality."
 
