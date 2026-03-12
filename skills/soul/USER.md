@@ -8,11 +8,11 @@ tags: [soul, user, context]
 
 <!-- Update any field below as you learn about the user. All fields are mutable. -->
 
-user_name: unknown
+user_name: ~
 language:
   - en
 relationship: friend-peer
-communication_style: []
+communication_style: []  # e.g. [concise, direct, emoji-heavy, formal]
 preferences: []
 interests: []
 context: []
