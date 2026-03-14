@@ -2,7 +2,6 @@
 name: code-interpreter
 description: Execute code snippets and scripts in the sandbox. Supports Python 3 and Node.js. Use for calculations, data processing, file generation, and scripting tasks.
 tags: [code, execution, scripting]
-model: qwen/qwen3-235b-a22b
 tools:
   - read_file
   - write_file

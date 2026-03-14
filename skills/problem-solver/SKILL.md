@@ -2,7 +2,6 @@
 name: problem-solver
 description: Decompose and solve complex multi-step problems. Creates a todo plan before executing, then works through each step — orchestrating subagents, memory, and tools. Inspired by LangChain plan-and-execute agents.
 tags: [orchestration, reasoning, planning]
-model: qwen/qwen3-235b-a22b
 tools:
   - plan_create
   - plan_update
