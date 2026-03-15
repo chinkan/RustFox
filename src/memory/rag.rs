@@ -86,7 +86,9 @@ mod tests {
             .save_message(&conv, &user_msg("I use Docker"))
             .await
             .unwrap();
-        let result = auto_retrieve_context(&store, None, "hi", &[], &conv, 5).await.unwrap();
+        let result = auto_retrieve_context(&store, None, "hi", &[], &conv, 5)
+            .await
+            .unwrap();
         assert!(result.is_none(), "Short query should return None");
     }
 
@@ -150,7 +152,10 @@ mod tests {
     #[tokio::test]
     async fn test_auto_retrieve_uses_rewritten_query_for_search() {
         let store = crate::memory::MemoryStore::open_in_memory().unwrap();
-        let conv = store.get_or_create_conversation("test", "rewrite_test").await.unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "rewrite_test")
+            .await
+            .unwrap();
 
         let msg = crate::llm::ChatMessage {
             role: "user".to_string(),

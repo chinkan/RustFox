@@ -88,11 +88,7 @@ fn parse_sse_content(line: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
-    let content = value
-        .get("choices")?
-        .get(0)?
-        .get("delta")?
-        .get("content")?;
+    let content = value.get("choices")?.get(0)?.get("delta")?.get("content")?;
     match content {
         serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
         _ => None,
@@ -249,7 +245,11 @@ impl LlmClient {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter streaming API error ({}): {}", status, error_body);
+            anyhow::bail!(
+                "OpenRouter streaming API error ({}): {}",
+                status,
+                error_body
+            );
         }
 
         // Accumulate bytes into lines (SSE lines end with \n)
