@@ -134,7 +134,10 @@ impl Agent {
             .await?;
 
         // Load existing messages from memory
-        let mut messages = self.memory.load_messages(&conversation_id).await?;
+        let mut messages = self
+            .memory
+            .load_messages_with_limit(&conversation_id, self.config.memory.max_raw_messages)
+            .await?;
 
         // Always build the system prompt from the live registry.
         // For new conversations: save to DB and push.
@@ -158,6 +161,25 @@ impl Agent {
             // Find the system message by role (defensive: don't assume messages[0] is system).
             if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
                 system_msg.content = Some(current_system_prompt);
+            }
+        }
+
+        // RAG: auto-retrieve relevant past messages and inject into system prompt
+        if !incoming.text.is_empty() {
+            if let Ok(Some(rag_block)) = crate::memory::rag::auto_retrieve_context(
+                &self.memory,
+                &incoming.text,
+                &conversation_id,
+                self.config.memory.rag_limit,
+            )
+            .await
+            {
+                if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
+                    if let Some(ref mut content) = system_msg.content {
+                        content.push_str("\n\n");
+                        content.push_str(&rag_block);
+                    }
+                }
             }
         }
 

@@ -73,6 +73,16 @@ pub struct McpServerConfig {
 pub struct MemoryConfig {
     #[serde(default = "default_db_path")]
     pub database_path: PathBuf,
+    #[serde(default = "default_rag_limit")]
+    pub rag_limit: usize,
+    #[serde(default = "default_max_raw_messages")]
+    pub max_raw_messages: usize,
+    #[serde(default = "default_summarize_threshold")]
+    #[allow(dead_code)]
+    pub summarize_threshold: usize,
+    #[serde(default = "default_summarize_cron")]
+    #[allow(dead_code)]
+    pub summarize_cron: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -150,6 +160,22 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("rustfox.db")
 }
 
+fn default_rag_limit() -> usize {
+    5
+}
+
+fn default_max_raw_messages() -> usize {
+    50
+}
+
+fn default_summarize_threshold() -> usize {
+    20
+}
+
+fn default_summarize_cron() -> String {
+    "0 0 2 * * *".to_string()
+}
+
 fn default_skills_dir() -> PathBuf {
     PathBuf::from("skills")
 }
@@ -173,6 +199,10 @@ fn default_embedding_dimensions() -> usize {
 fn default_memory_config() -> MemoryConfig {
     MemoryConfig {
         database_path: default_db_path(),
+        rag_limit: default_rag_limit(),
+        max_raw_messages: default_max_raw_messages(),
+        summarize_threshold: default_summarize_threshold(),
+        summarize_cron: default_summarize_cron(),
     }
 }
 
