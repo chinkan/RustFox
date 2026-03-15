@@ -1,4 +1,5 @@
 pub mod telegram;
+pub mod tool_notifier;
 
 /// A message received from any platform
 #[derive(Debug, Clone)]

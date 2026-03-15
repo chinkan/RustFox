@@ -161,7 +161,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent
-    match agent.process_message(&incoming).await {
+    match agent.process_message(&incoming, None).await {
         Ok(response) => {
             if response.is_empty() {
                 warn!(
