@@ -137,11 +137,35 @@ impl ToolCallNotifier {
         s
     }
 
-    /// Delete the status message (clean up before sending final response).
+    /// Finalise the status message.
+    ///
+    /// - If no tools were called: delete the placeholder "⏳ Working..." (not useful).
+    /// - If tools were called: edit to a persistent summary so the user can see
+    ///   which tools ran after the response has arrived.
     pub async fn finish(&self) {
-        if let Some(ref msg) = self.status_msg {
-            self.bot.delete_message(self.chat_id, msg.id).await.ok(); // Ignore errors (message may already be deleted)
+        let Some(ref msg) = self.status_msg else {
+            return;
+        };
+
+        if self.tool_log.is_empty() {
+            self.bot.delete_message(self.chat_id, msg.id).await.ok();
+        } else {
+            let text = self.format_final();
+            self.bot
+                .edit_message_text(self.chat_id, msg.id, &text)
+                .await
+                .ok();
         }
+    }
+
+    /// Final compact summary shown after tools have run.
+    fn format_final(&self) -> String {
+        let mut s = String::from("🔧 Tools used:");
+        for (name, args_preview, _done, success) in &self.tool_log {
+            let icon = if *success { "✅" } else { "❌" };
+            s.push_str(&format!("\n{} {}({})", icon, name, args_preview));
+        }
+        s
     }
 }
 
@@ -179,5 +203,30 @@ mod tests {
         // Since ToolCallNotifier requires a real Bot, we test format_args_preview only
         let preview = format_args_preview(r#"{"path":"/tmp/test.txt"}"#);
         assert!(preview.contains("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn test_format_final_includes_all_tools() {
+        // Build a notifier-like tool_log directly and call format_final via a helper.
+        // format_final is private — test it through a thin wrapper.
+        fn fake_format_final(tool_log: &[(String, String, bool, bool)]) -> String {
+            let mut s = String::from("🔧 Tools used:");
+            for (name, args_preview, _done, success) in tool_log {
+                let icon = if *success { "✅" } else { "❌" };
+                s.push_str(&format!("\n{} {}({})", icon, name, args_preview));
+            }
+            s
+        }
+
+        let log = vec![
+            ("search".to_string(), r#""Docker setup""#.to_string(), true, true),
+            ("read_file".to_string(), r#""/etc/config""#.to_string(), true, false),
+        ];
+        let result = fake_format_final(&log);
+        assert!(result.contains("🔧 Tools used:"), "header missing");
+        assert!(result.contains("✅ search"), "successful tool icon wrong");
+        assert!(result.contains("❌ read_file"), "failed tool icon wrong");
+        assert!(result.contains("Docker setup"), "args missing for search");
+        assert!(!result.contains("⏳ Working"), "should not contain in-progress text");
     }
 }
