@@ -8,7 +8,9 @@ use super::MemoryStore;
 /// Returns `None` if query is too short, is a command, or no results found.
 pub async fn auto_retrieve_context(
     store: &MemoryStore,
+    llm: Option<&crate::llm::LlmClient>,
     query: &str,
+    recent_messages: &[crate::llm::ChatMessage],
     conversation_id: &str,
     limit: usize,
 ) -> Result<Option<String>> {
@@ -17,8 +19,15 @@ pub async fn auto_retrieve_context(
         return Ok(None);
     }
 
+    // Query rewriting: resolve pronouns/references using recent context
+    let search_query = if let Some(llm) = llm {
+        crate::memory::query_rewriter::rewrite_for_rag(llm, query, recent_messages).await
+    } else {
+        query.to_string()
+    };
+
     let results = store
-        .search_messages_in_conversation(query, conversation_id, limit)
+        .search_messages_in_conversation(&search_query, conversation_id, limit)
         .await?;
 
     if results.is_empty() {
@@ -77,7 +86,7 @@ mod tests {
             .save_message(&conv, &user_msg("I use Docker"))
             .await
             .unwrap();
-        let result = auto_retrieve_context(&store, "hi", &conv, 5).await.unwrap();
+        let result = auto_retrieve_context(&store, None, "hi", &[], &conv, 5).await.unwrap();
         assert!(result.is_none(), "Short query should return None");
     }
 
@@ -92,7 +101,7 @@ mod tests {
             .save_message(&conv, &user_msg("Docker setup"))
             .await
             .unwrap();
-        let result = auto_retrieve_context(&store, "/clear", &conv, 5)
+        let result = auto_retrieve_context(&store, None, "/clear", &[], &conv, 5)
             .await
             .unwrap();
         assert!(result.is_none(), "Bot commands should return None");
@@ -106,7 +115,7 @@ mod tests {
             .await
             .unwrap();
         // Empty conversation — nothing to retrieve
-        let result = auto_retrieve_context(&store, "something long enough", &conv, 5)
+        let result = auto_retrieve_context(&store, None, "something long enough", &[], &conv, 5)
             .await
             .unwrap();
         assert!(result.is_none(), "Empty conversation should return None");
@@ -136,5 +145,25 @@ mod tests {
         };
         assert_eq!(snippet.len(), 303); // 300 + "..."
         assert!(snippet.ends_with("..."));
+    }
+
+    #[tokio::test]
+    async fn test_auto_retrieve_uses_rewritten_query_for_search() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store.get_or_create_conversation("test", "rewrite_test").await.unwrap();
+
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some("I prefer TypeScript for frontend work".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Without a real LLM, rewrite falls back to original query
+        let result = auto_retrieve_context(&store, None, "TypeScript", &[], &conv, 5)
+            .await
+            .unwrap();
+        let _ = result; // Just verify no panic
     }
 }

@@ -170,9 +170,20 @@ impl Agent {
 
         // RAG: auto-retrieve relevant past messages and inject into system prompt
         if !incoming.text.is_empty() {
+            // Take last 6 messages for rewrite context (skip system messages)
+            let filtered_msgs: Vec<_> = messages
+                .iter()
+                .filter(|m| m.role == "user" || m.role == "assistant")
+                .cloned()
+                .collect();
+            let rewrite_start = filtered_msgs.len().saturating_sub(6);
+            let recent_for_rewrite = filtered_msgs[rewrite_start..].to_vec();
+
             if let Ok(Some(rag_block)) = crate::memory::rag::auto_retrieve_context(
                 &self.memory,
+                Some(&self.llm),
                 &incoming.text,
+                &recent_for_rewrite,
                 &conversation_id,
                 self.config.memory.rag_limit,
             )
