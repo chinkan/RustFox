@@ -66,6 +66,7 @@ struct Choice {
     finish_reason: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
     config: OpenRouterConfig,
