@@ -73,6 +73,10 @@ pub async fn run(
     Ok(())
 }
 
+fn is_verbose_enabled(value: Option<&str>) -> bool {
+    value.map(|v| v == "true").unwrap_or(false)
+}
+
 async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseResult<()> {
     let user = match msg.from.as_ref() {
         Some(user) => user,
@@ -112,7 +116,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              Commands:\n\
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
-             /skills - List loaded skills",
+             /skills - List loaded skills\n\
+             /verbose - Toggle tool call progress display",
         )
         .await?;
         return Ok(());
@@ -146,10 +151,73 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         return Ok(());
     }
 
+    if text == "/verbose" {
+        let current = agent
+            .memory
+            .recall("settings", &format!("tool_ui_enabled_{}", user_id))
+            .await
+            .unwrap_or(None);
+        let currently_on = is_verbose_enabled(current.as_deref());
+        let new_value = if currently_on { "false" } else { "true" };
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("tool_ui_enabled_{}", user_id),
+                new_value,
+                None,
+            )
+            .await
+            .ok();
+        let reply = if new_value == "true" {
+            "🔧 Tool call UI enabled. I'll show you what I'm working on."
+        } else {
+            "🔇 Tool call UI disabled. I'll respond silently."
+        };
+        bot.send_message(msg.chat.id, reply).await?;
+        return Ok(());
+    }
+
     // Send "typing" indicator
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await
         .ok();
+
+    // Check if verbose tool UI is enabled for this user
+    let verbose_setting = agent
+        .memory
+        .recall("settings", &format!("tool_ui_enabled_{}", user_id))
+        .await
+        .unwrap_or(None);
+    let verbose_enabled = is_verbose_enabled(verbose_setting.as_deref());
+
+    // Set up tool event channel if verbose is on
+    let (tool_event_tx, tool_event_rx) = if verbose_enabled {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::platform::tool_notifier::ToolEvent>(32);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    // Spawn notifier task if verbose
+    let notifier_handle = if verbose_enabled {
+        let bot_clone = bot.clone();
+        let chat_id = msg.chat.id;
+        let mut rx = tool_event_rx.expect("rx exists when verbose");
+        Some(tokio::spawn(async move {
+            let mut notifier = crate::platform::tool_notifier::ToolCallNotifier::new(
+                bot_clone,
+                chat_id,
+            );
+            notifier.start().await;
+            while let Some(event) = rx.recv().await {
+                notifier.handle_event(event).await;
+            }
+            notifier.finish().await;
+        }))
+    } else {
+        None
+    };
 
     // Build platform-agnostic message
     let incoming = IncomingMessage {
@@ -161,7 +229,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent
-    match agent.process_message(&incoming, None).await {
+    match agent.process_message(&incoming, tool_event_tx).await {
         Ok(response) => {
             if response.is_empty() {
                 warn!(
@@ -205,12 +273,25 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         }
     }
 
+    // Drop the sender to signal the notifier to stop, then await cleanup.
+    // tool_event_tx is already moved into process_message — it's dropped when process_message returns.
+    if let Some(handle) = notifier_handle {
+        handle.await.ok();
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_verbose_enabled_parses_true() {
+        assert!(is_verbose_enabled(Some("true")));
+        assert!(!is_verbose_enabled(Some("false")));
+        assert!(!is_verbose_enabled(None));
+    }
 
     #[test]
     fn test_split_message_empty_response_produces_no_chunks() {
