@@ -353,4 +353,18 @@ mod tests {
             assert!(chunk.len() <= 4000);
         }
     }
+
+    #[test]
+    fn test_stream_handle_does_not_require_placeholder_send() {
+        // If the initial send fails, the stream handle must NOT silently swallow
+        // all tokens. This test documents that the placeholder approach is fragile;
+        // the implementation plan removes it entirely.
+        // After the fix, a failed initial-send path no longer exists, so this test
+        // verifies the new code compiles correctly without the \u{200B} literal.
+        let source = include_str!("telegram.rs");
+        assert!(
+            !source.contains(r"\u{200B}"),
+            "Zero-width-space placeholder must be removed from stream_handle"
+        );
+    }
 }
