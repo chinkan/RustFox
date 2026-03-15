@@ -122,7 +122,11 @@ impl Agent {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
 
-    pub async fn process_message(&self, incoming: &IncomingMessage) -> Result<String> {
+    pub async fn process_message(
+        &self,
+        incoming: &IncomingMessage,
+        tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
+    ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
         let chat_id = &incoming.chat_id;
@@ -316,9 +320,29 @@ impl Agent {
                             start_time: Self::now_iso8601_static(),
                         });
 
+                        // Notify tool start
+                        let args_preview = crate::platform::tool_notifier::format_args_preview(
+                            &tool_call.function.arguments,
+                        );
+                        if let Some(ref tx) = tool_event_tx {
+                            let _ = tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
+                                name: tool_call.function.name.clone(),
+                                args_preview: args_preview.clone(),
+                            });
+                        }
+
                         let tool_result = self
                             .execute_tool(&tool_call.function.name, &arguments, user_id, chat_id)
                             .await;
+
+                        // Notify tool completion
+                        if let Some(ref tx) = tool_event_tx {
+                            let success = !tool_result.starts_with("Error");
+                            let _ = tx.try_send(crate::platform::tool_notifier::ToolEvent::Completed {
+                                name: tool_call.function.name.clone(),
+                                success,
+                            });
+                        }
 
                         info!(
                             "Tool '{}' result length: {} chars",
