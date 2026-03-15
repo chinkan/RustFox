@@ -344,6 +344,64 @@ impl MemoryStore {
             Ok(messages)
         }
     }
+
+    /// Return all messages in a conversation that have not yet been summarized.
+    /// Returns tuples of (message_id, role, content).
+    pub async fn get_unsummarized_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content FROM messages
+             WHERE conversation_id = ?1
+               AND (is_summarized IS NULL OR is_summarized = 0)
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![conversation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load unsummarized messages")?;
+        Ok(rows)
+    }
+
+    /// Mark a list of messages as summarized (is_summarized = 1).
+    pub async fn mark_messages_summarized(&self, message_ids: &[String]) -> Result<()> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().await;
+        for id in message_ids {
+            conn.execute(
+                "UPDATE messages SET is_summarized = 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .context("Failed to mark message as summarized")?;
+        }
+        Ok(())
+    }
+
+    /// Return conversation IDs that have had activity in the last `days` days.
+    pub async fn get_active_conversations(&self, days: u32) -> Result<Vec<String>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations
+             WHERE updated_at >= datetime('now', ?1)
+             ORDER BY updated_at DESC",
+        )?;
+        let days_param = format!("-{} days", days);
+        let ids = stmt
+            .query_map(rusqlite::params![days_param], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()
+            .context("Failed to load active conversations")?;
+        Ok(ids)
+    }
 }
 
 fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
