@@ -138,6 +138,7 @@ impl MemoryStore {
     }
 
     /// Load all messages for a conversation, with raw message limit and [SUMMARY] messages first.
+    #[allow(dead_code)]
     pub async fn load_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>> {
         self.load_messages_with_limit(conversation_id, 50).await
     }
