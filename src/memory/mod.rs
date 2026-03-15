@@ -2,6 +2,7 @@ pub mod conversations;
 pub mod embeddings;
 pub mod knowledge;
 pub mod rag;
+pub mod summarizer;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};

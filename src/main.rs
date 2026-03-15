@@ -165,7 +165,14 @@ async fn main() -> Result<()> {
     });
 
     // Register built-in background tasks and start scheduler
-    register_builtin_tasks(&scheduler, memory).await?;
+    register_builtin_tasks(
+        &scheduler,
+        memory.clone(),
+        crate::llm::LlmClient::new(config.openrouter.clone()),
+        config.memory.summarize_cron.clone(),
+        config.memory.summarize_threshold,
+    )
+    .await?;
     scheduler.start().await?;
     info!("  Scheduler: active");
     agent.restore_scheduled_tasks().await;
