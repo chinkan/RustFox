@@ -1624,6 +1624,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "futures-util",
  "reqwest",
  "rmcp",
  "rusqlite",
