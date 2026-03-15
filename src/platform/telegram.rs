@@ -229,46 +229,58 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     let stream_handle = tokio::spawn(async move {
         use std::time::{Duration, Instant};
 
-        // Send initial placeholder message
-        let Ok(stream_msg) = stream_bot.send_message(stream_chat_id, "\u{200B}").await else {
-            return;
-        };
-
         let mut buffer = String::new();
-        let mut current_msg_id = stream_msg.id;
-        let mut last_edit = Instant::now();
+        let mut current_msg_id: Option<teloxide::types::MessageId> = None;
+        let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
 
         while let Some(token) = rx.recv().await {
             buffer.push_str(&token);
 
+            // When buffer exceeds split threshold, send a NEW message and reset
             if buffer.len() > TELEGRAM_STREAM_SPLIT {
                 match stream_bot.send_message(stream_chat_id, &buffer).await {
                     Ok(new_msg) => {
-                        current_msg_id = new_msg.id;
+                        current_msg_id = Some(new_msg.id);
                         buffer.clear();
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::error!(error = %e, "stream_handle: send_message failed at split");
+                        break;
+                    }
                 }
-                last_edit = Instant::now();
+                last_action = Instant::now();
                 continue;
             }
 
-            if last_edit.elapsed() >= Duration::from_millis(500) {
-                stream_bot
-                    .edit_message_text(stream_chat_id, current_msg_id, &buffer)
-                    .await
-                    .ok();
-                last_edit = Instant::now();
+            // Every 500 ms: send first message or edit existing one
+            if last_action.elapsed() >= Duration::from_millis(500) {
+                if let Some(msg_id) = current_msg_id {
+                    stream_bot
+                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .await
+                        .ok();
+                } else {
+                    match stream_bot.send_message(stream_chat_id, &buffer).await {
+                        Ok(sent) => current_msg_id = Some(sent.id),
+                        Err(e) => tracing::warn!(error = %e, "stream_handle: initial send failed"),
+                    }
+                }
+                last_action = Instant::now();
             }
         }
 
-        // Final edit with complete content
+        // Final: flush whatever is left in the buffer
         if !buffer.is_empty() {
-            stream_bot
-                .edit_message_text(stream_chat_id, current_msg_id, &buffer)
-                .await
-                .ok();
+            if let Some(msg_id) = current_msg_id {
+                stream_bot
+                    .edit_message_text(stream_chat_id, msg_id, &buffer)
+                    .await
+                    .ok();
+            } else {
+                // No intermediate message was sent — deliver the complete response now
+                stream_bot.send_message(stream_chat_id, &buffer).await.ok();
+            }
         }
     });
 
@@ -360,10 +372,12 @@ mod tests {
         // all tokens. This test documents that the placeholder approach is fragile;
         // the implementation plan removes it entirely.
         // After the fix, a failed initial-send path no longer exists, so this test
-        // verifies the new code compiles correctly without the \u{200B} literal.
+        // verifies the new code compiles correctly without the zero-width-space literal.
         let source = include_str!("telegram.rs");
+        // Check that the actual zero-width space character (U+200B) is not used as a
+        // placeholder in send_message calls.
         assert!(
-            !source.contains(r"\u{200B}"),
+            !source.contains('\u{200B}'),
             "Zero-width-space placeholder must be removed from stream_handle"
         );
     }
