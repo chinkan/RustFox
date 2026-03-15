@@ -108,34 +108,6 @@ impl MemoryStore {
         Ok(id)
     }
 
-    /// Load all messages for a conversation
-    pub async fn load_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT role, content, tool_calls, tool_call_id
-             FROM messages
-             WHERE conversation_id = ?1
-             ORDER BY created_at ASC",
-        )?;
-
-        let messages = stmt
-            .query_map(rusqlite::params![conversation_id], |row| {
-                let tool_calls_json: Option<String> = row.get(2)?;
-                let tool_calls = tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
-
-                Ok(ChatMessage {
-                    role: row.get(0)?,
-                    content: row.get(1)?,
-                    tool_calls,
-                    tool_call_id: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .context("Failed to load messages")?;
-
-        Ok(messages)
-    }
-
     /// Clear a conversation (delete all its messages and embeddings)
     pub async fn clear_conversation(&self, platform: &str, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
@@ -163,6 +135,143 @@ impl MemoryStore {
         )?;
 
         Ok(())
+    }
+
+    /// Load all messages for a conversation, with raw message limit and [SUMMARY] messages first.
+    pub async fn load_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>> {
+        self.load_messages_with_limit(conversation_id, 50).await
+    }
+
+    /// Load messages for a conversation: [SUMMARY] system messages first, then the most recent
+    /// `raw_limit` non-summary messages, all ordered by created_at ASC.
+    pub async fn load_messages_with_limit(
+        &self,
+        conversation_id: &str,
+        raw_limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        let conn = self.conn.lock().await;
+
+        // Load all [SUMMARY] system messages ordered by created_at ASC
+        let mut summary_stmt = conn.prepare(
+            "SELECT role, content, tool_calls, tool_call_id
+             FROM messages
+             WHERE conversation_id = ?1
+               AND role = 'system'
+               AND content LIKE '[SUMMARY]%'
+             ORDER BY created_at ASC",
+        )?;
+        let summaries = summary_stmt
+            .query_map(rusqlite::params![conversation_id], |row| {
+                parse_message_row(row)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load summary messages")?;
+
+        // Load the most recent raw_limit non-summary messages, re-ordered ASC
+        let mut raw_stmt = conn.prepare(
+            "SELECT role, content, tool_calls, tool_call_id FROM (
+                SELECT role, content, tool_calls, tool_call_id, created_at
+                FROM messages
+                WHERE conversation_id = ?1
+                  AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
+                ORDER BY created_at DESC
+                LIMIT ?2
+            ) ORDER BY created_at ASC",
+        )?;
+        let raw_messages = raw_stmt
+            .query_map(rusqlite::params![conversation_id, raw_limit as i64], |row| {
+                parse_message_row(row)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load raw messages")?;
+
+        let mut result = summaries;
+        result.extend(raw_messages);
+        Ok(result)
+    }
+
+    /// Conversation-scoped hybrid search using Reciprocal Rank Fusion (vector + FTS5).
+    /// Falls back to FTS5-only if embeddings are not available.
+    /// Only returns non-summarized messages with role 'user' or 'assistant'.
+    #[allow(dead_code)]
+    pub async fn search_messages_in_conversation(
+        &self,
+        query: &str,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        let query_embedding = self.embeddings.try_embed_one(query).await;
+
+        let conn = self.conn.lock().await;
+
+        if let Some(ref qe) = query_embedding {
+            // Hybrid search with Reciprocal Rank Fusion, scoped to conversation
+            let query_bytes = f32_vec_to_bytes(qe);
+            let sql = "
+                WITH vec_matches AS (
+                    SELECT rowid, distance,
+                           row_number() OVER (ORDER BY distance) as rank_number
+                    FROM message_embeddings
+                    WHERE embedding MATCH ?1
+                    ORDER BY distance
+                    LIMIT ?2
+                ),
+                fts_matches AS (
+                    SELECT rowid,
+                           row_number() OVER (ORDER BY rank) as rank_number
+                    FROM messages_fts
+                    WHERE messages_fts MATCH ?3
+                    LIMIT ?2
+                )
+                SELECT m.role, m.content, m.tool_calls, m.tool_call_id,
+                       coalesce(1.0 / (60 + fts.rank_number), 0.0) * 0.5
+                       + coalesce(1.0 / (60 + vec.rank_number), 0.0) * 0.5 as combined_rank
+                FROM messages m
+                LEFT JOIN vec_matches vec ON m.rowid = vec.rowid
+                LEFT JOIN fts_matches fts ON m.rowid = fts.rowid
+                WHERE (vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL)
+                  AND m.conversation_id = ?4
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
+                ORDER BY combined_rank DESC
+                LIMIT ?2
+            ";
+
+            let search_limit = (limit * 3) as i64;
+            let mut stmt = conn.prepare(sql)?;
+            let messages = stmt
+                .query_map(
+                    rusqlite::params![query_bytes, search_limit, query, conversation_id],
+                    parse_message_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+                .context("Failed to hybrid-search messages in conversation")?;
+
+            Ok(messages.into_iter().take(limit).collect())
+        } else {
+            // FTS5-only fallback, scoped to conversation
+            let sql = "
+                SELECT m.role, m.content, m.tool_calls, m.tool_call_id
+                FROM messages m
+                JOIN messages_fts fts ON m.rowid = fts.rowid
+                WHERE messages_fts MATCH ?1
+                  AND m.conversation_id = ?2
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
+                ORDER BY fts.rank
+                LIMIT ?3
+            ";
+            let mut stmt = conn.prepare(sql)?;
+            let messages = stmt
+                .query_map(
+                    rusqlite::params![query, conversation_id, limit as i64],
+                    parse_message_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+                .context("Failed to FTS-search messages in conversation")?;
+
+            Ok(messages)
+        }
     }
 
     /// Hybrid search across messages using Reciprocal Rank Fusion (vector + FTS5).
@@ -246,4 +355,71 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
         tool_calls,
         tool_call_id: row.get(3)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::ChatMessage;
+
+    fn make_msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_messages_scoped_to_conversation() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv_a = store
+            .get_or_create_conversation("test", "user_a")
+            .await
+            .unwrap();
+        let conv_b = store
+            .get_or_create_conversation("test", "user_b")
+            .await
+            .unwrap();
+
+        store
+            .save_message(&conv_a, &make_msg("user", "I love Rust programming"))
+            .await
+            .unwrap();
+        store
+            .save_message(&conv_b, &make_msg("user", "I hate Rust programming"))
+            .await
+            .unwrap();
+
+        let results = store
+            .search_messages_in_conversation("Rust", &conv_a, 5)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.as_deref().unwrap().contains("love"));
+    }
+
+    #[tokio::test]
+    async fn test_load_messages_respects_raw_limit() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "user_limit")
+            .await
+            .unwrap();
+
+        for i in 0..60 {
+            store
+                .save_message(&conv, &make_msg("user", &format!("message {}", i)))
+                .await
+                .unwrap();
+        }
+
+        let messages = store.load_messages(&conv).await.unwrap();
+        assert!(
+            messages.len() <= 50,
+            "Expected ≤50 messages, got {}",
+            messages.len()
+        );
+    }
 }
