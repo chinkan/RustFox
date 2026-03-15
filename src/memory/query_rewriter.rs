@@ -66,11 +66,7 @@ pub async fn rewrite_for_rag(
                 );
                 user_message.to_string()
             } else {
-                tracing::debug!(
-                    "Query rewritten: {:?} → {:?}",
-                    user_message,
-                    rewritten
-                );
+                tracing::debug!("Query rewritten: {:?} → {:?}", user_message, rewritten);
                 rewritten
             }
         }
@@ -88,13 +84,7 @@ fn format_history(messages: &[ChatMessage]) -> String {
         .filter(|m| m.role == "user" || m.role == "assistant")
         .collect();
 
-    let window: Vec<&ChatMessage> = relevant
-        .iter()
-        .rev()
-        .take(3)
-        .rev()
-        .copied()
-        .collect();
+    let window: Vec<&ChatMessage> = relevant.iter().rev().take(3).rev().copied().collect();
 
     if window.is_empty() {
         return "(no prior context)".to_string();
@@ -138,7 +128,10 @@ mod tests {
 
     #[test]
     fn test_format_history_includes_role_and_content() {
-        let msgs = vec![msg("user", "Who is Linus?"), msg("assistant", "Linus is the creator of Linux.")];
+        let msgs = vec![
+            msg("user", "Who is Linus?"),
+            msg("assistant", "Linus is the creator of Linux."),
+        ];
         let result = format_history(&msgs);
         assert!(result.contains("user: Who is Linus?"));
         assert!(result.contains("assistant: Linus is the creator of Linux."));
@@ -151,7 +144,10 @@ mod tests {
             msg("user", "What is Rust?"),
         ];
         let result = format_history(&msgs);
-        assert!(!result.contains("system"), "System messages must not appear in history");
+        assert!(
+            !result.contains("system"),
+            "System messages must not appear in history"
+        );
         assert!(result.contains("user: What is Rust?"));
     }
 
@@ -162,7 +158,10 @@ mod tests {
             msg("user", "What does that mean?"),
         ];
         let result = format_history(&msgs);
-        assert!(!result.contains("tool"), "Tool messages must not appear in history");
+        assert!(
+            !result.contains("tool"),
+            "Tool messages must not appear in history"
+        );
         assert!(result.contains("user: What does that mean?"));
     }
 
@@ -175,7 +174,10 @@ mod tests {
         assert!(result.contains("message 9"));
         assert!(result.contains("message 8"));
         assert!(result.contains("message 7"));
-        assert!(!result.contains("message 6"), "Older messages must be excluded");
+        assert!(
+            !result.contains("message 6"),
+            "Older messages must be excluded"
+        );
     }
 
     #[test]
@@ -184,6 +186,10 @@ mod tests {
         let msgs = vec![msg("user", &long)];
         let result = format_history(&msgs);
         let line = result.lines().next().unwrap_or("");
-        assert!(line.len() <= 220, "Content should be truncated: len={}", line.len());
+        assert!(
+            line.len() <= 220,
+            "Content should be truncated: len={}",
+            line.len()
+        );
     }
 }

@@ -8,6 +8,7 @@ use crate::agent::Agent;
 use crate::platform::IncomingMessage;
 
 /// Split long messages for Telegram's 4096 char limit
+#[cfg(test)]
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_string()];
@@ -229,10 +230,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         use std::time::{Duration, Instant};
 
         // Send initial placeholder message
-        let Ok(stream_msg) = stream_bot
-            .send_message(stream_chat_id, "\u{200B}")
-            .await
-        else {
+        let Ok(stream_msg) = stream_bot.send_message(stream_chat_id, "\u{200B}").await else {
             return;
         };
 
@@ -283,56 +281,33 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         text,
     };
 
-    // Process through agent
-    match agent.process_message(&incoming, tool_event_tx, None).await {
-        Ok(response) => {
-            if response.is_empty() {
-                warn!(
-                    user_id = user_id,
-                    "Agent returned empty response — nothing will be sent to Telegram"
-                );
-            }
-            let chunks = split_message(&response, 4000);
-            let total = chunks.len();
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                if chunk.is_empty() {
-                    continue;
-                }
-                match bot.send_message(msg.chat.id, &chunk).await {
-                    Ok(_) => {
-                        if total > 1 {
-                            info!(
-                                "Sent Telegram chunk {}/{} ({} chars)",
-                                i + 1,
-                                total,
-                                chunk.len()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            user_id = user_id,
-                            chunk = i + 1,
-                            total_chunks = total,
-                            "Failed to send Telegram message: {:#}",
-                            e
-                        );
-                    }
-                }
-            }
-        }
+    // Process through agent — moves stream_token_tx and tool_event_tx
+    let process_result = match agent
+        .process_message(&incoming, tool_event_tx, Some(stream_token_tx))
+        .await
+    {
+        Ok(text) => Ok(text),
         Err(e) => {
-            error!("Error processing message: {:#}", e);
-            bot.send_message(msg.chat.id, format!("Error: {}", e))
-                .await?;
+            stream_handle.abort();
+            Err(e)
         }
-    }
+    };
 
     // Drop the sender to signal the notifier to stop, then await cleanup.
     // tool_event_tx is already moved into process_message — it's dropped when process_message returns.
     if let Some(handle) = notifier_handle {
         handle.await.ok();
     }
+
+    // Wait for stream receiver to complete its final edit
+    stream_handle.await.ok();
+
+    if let Err(e) = process_result {
+        warn!(error = %e, "Agent processing failed");
+        bot.send_message(msg.chat.id, format!("Error: {:#}", e))
+            .await?;
+    }
+    // Success: response already delivered via streaming
 
     Ok(())
 }
