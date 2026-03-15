@@ -227,7 +227,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent
-    match agent.process_message(&incoming, tool_event_tx).await {
+    match agent.process_message(&incoming, tool_event_tx, None).await {
         Ok(response) => {
             if response.is_empty() {
                 warn!(
