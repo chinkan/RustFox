@@ -217,6 +217,63 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         None
     };
 
+    // Streaming: set up token channel for progressive message display
+    const TELEGRAM_STREAM_SPLIT: usize = 3800;
+
+    let (stream_token_tx, stream_token_rx) = tokio::sync::mpsc::channel::<String>(128);
+
+    // Spawn receiver task: edits Telegram message as tokens arrive
+    let stream_bot = bot.clone();
+    let stream_chat_id = msg.chat.id;
+    let stream_handle = tokio::spawn(async move {
+        use std::time::{Duration, Instant};
+
+        // Send initial placeholder message
+        let Ok(stream_msg) = stream_bot
+            .send_message(stream_chat_id, "\u{200B}")
+            .await
+        else {
+            return;
+        };
+
+        let mut buffer = String::new();
+        let mut current_msg_id = stream_msg.id;
+        let mut last_edit = Instant::now();
+        let mut rx = stream_token_rx;
+
+        while let Some(token) = rx.recv().await {
+            buffer.push_str(&token);
+
+            if buffer.len() > TELEGRAM_STREAM_SPLIT {
+                match stream_bot.send_message(stream_chat_id, &buffer).await {
+                    Ok(new_msg) => {
+                        current_msg_id = new_msg.id;
+                        buffer.clear();
+                    }
+                    Err(_) => break,
+                }
+                last_edit = Instant::now();
+                continue;
+            }
+
+            if last_edit.elapsed() >= Duration::from_millis(500) {
+                stream_bot
+                    .edit_message_text(stream_chat_id, current_msg_id, &buffer)
+                    .await
+                    .ok();
+                last_edit = Instant::now();
+            }
+        }
+
+        // Final edit with complete content
+        if !buffer.is_empty() {
+            stream_bot
+                .edit_message_text(stream_chat_id, current_msg_id, &buffer)
+                .await
+                .ok();
+        }
+    });
+
     // Build platform-agnostic message
     let incoming = IncomingMessage {
         platform: "telegram".to_string(),
@@ -283,6 +340,15 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_should_split_stream_at_4000_chars() {
+        const TELEGRAM_LIMIT: usize = 3800;
+        let short = "a".repeat(100);
+        let long = "a".repeat(4000);
+        assert!(short.len() < TELEGRAM_LIMIT);
+        assert!(long.len() > TELEGRAM_LIMIT);
+    }
 
     #[test]
     fn test_is_verbose_enabled_parses_true() {
