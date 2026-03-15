@@ -1,6 +1,7 @@
 pub mod conversations;
 pub mod embeddings;
 pub mod knowledge;
+pub mod query_rewriter;
 pub mod rag;
 pub mod summarizer;
 
