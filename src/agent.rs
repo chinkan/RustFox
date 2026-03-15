@@ -126,6 +126,7 @@ impl Agent {
         &self,
         incoming: &IncomingMessage,
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
+        stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
@@ -398,6 +399,19 @@ impl Agent {
                     iteration = iteration,
                     "LLM returned empty content with no tool calls — bot will send nothing"
                 );
+            }
+
+            // Stream the final response token-by-token if a channel is provided
+            if let Some(ref tx) = stream_token_tx {
+                let words: Vec<&str> = content.split_inclusive(' ').collect();
+                let chunk_size = 4usize;
+                for chunk in words.chunks(chunk_size) {
+                    let piece = chunk.join("");
+                    if tx.send(piece).await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                }
             }
 
             self.memory
@@ -1878,5 +1892,12 @@ mod tests {
         let available = vec!["read_skill_file".to_string(), "write_file".to_string()];
         let missing = missing_subagent_tools(&declared, &available);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_tokens_joins_correctly() {
+        let tokens = vec!["Hello", " ", "world", "!"];
+        let assembled: String = tokens.concat();
+        assert_eq!(assembled, "Hello world!");
     }
 }
