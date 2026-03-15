@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["full"] }
 teloxide = { version = "0.17", features = ["macros"] }
 
 # HTTP client for OpenRouter
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +32,7 @@ anyhow = "1"
 
 # Async utilities
 futures = "0.3"
+futures-util = "0.3"
 
 # Async trait support
 async-trait = "0.1"

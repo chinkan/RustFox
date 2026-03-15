@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -54,6 +55,19 @@ struct ChatRequest {
     max_tokens: u32,
 }
 
+/// Like ChatRequest but with stream=true for SSE streaming.
+#[derive(Debug, Serialize)]
+struct StreamRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+    max_tokens: u32,
+    stream: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
@@ -64,6 +78,25 @@ struct Choice {
     message: ChatMessage,
     #[serde(default)]
     finish_reason: Option<String>,
+}
+
+/// Parse a single SSE line and extract the text content token, if any.
+/// Returns `None` for non-data lines, `[DONE]`, empty deltas, or parse errors.
+fn parse_sse_content(line: &str) -> Option<String> {
+    let data = line.strip_prefix("data: ")?;
+    if data == "[DONE]" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let content = value
+        .get("choices")?
+        .get(0)?
+        .get("delta")?
+        .get("content")?;
+    match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -172,6 +205,88 @@ impl LlmClient {
         self.chat_with_model(messages, tools, &self.config.model)
             .await
     }
+
+    /// Stream the final LLM response token-by-token via an mpsc channel.
+    /// Sends each content token as a separate `String` message.
+    /// Closes the sender when the stream ends or on error.
+    /// Does NOT pass tools — use this only for the final text-only response.
+    #[allow(dead_code)]
+    pub async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        token_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<()> {
+        let request = StreamRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+            tools: None,
+            tool_choice: None,
+            max_tokens: self.config.max_tokens,
+            stream: true,
+        };
+
+        let url = format!("{}/chat/completions", self.config.base_url);
+
+        debug!(
+            url = %url,
+            model = %model,
+            message_count = messages.len(),
+            "Starting streaming request to OpenRouter"
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send streaming request to OpenRouter")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter streaming API error ({}): {}", status, error_body);
+        }
+
+        // Accumulate bytes into lines (SSE lines end with \n)
+        let mut stream = response.bytes_stream();
+        let mut line_buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("Stream read error")?;
+            let text = String::from_utf8_lossy(&bytes);
+
+            for ch in text.chars() {
+                if ch == '\n' {
+                    let line = line_buf.trim().to_string();
+                    line_buf.clear();
+
+                    if let Some(token) = parse_sse_content(&line) {
+                        if token_tx.send(token).await.is_err() {
+                            debug!("Stream receiver dropped — stopping early");
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    line_buf.push(ch);
+                }
+            }
+        }
+
+        // Process any remaining buffered line
+        if !line_buf.is_empty() {
+            let line = line_buf.trim().to_string();
+            if let Some(token) = parse_sse_content(&line) {
+                token_tx.send(token).await.ok();
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +339,54 @@ mod tests {
         }"#;
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn test_parse_sse_line_data_returns_content() {
+        let line = r#"data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+        let result = parse_sse_content(line);
+        assert_eq!(result, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_line_done_returns_none() {
+        let result = parse_sse_content("data: [DONE]");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_line_empty_delta_returns_none() {
+        let line = r#"data: {"choices":[{"delta":{},"finish_reason":null}]}"#;
+        let result = parse_sse_content(line);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_sse_line_non_data_prefix_returns_none() {
+        assert_eq!(parse_sse_content(": OPENROUTER PROCESSING"), None);
+        assert_eq!(parse_sse_content(""), None);
+        assert_eq!(parse_sse_content("event: ping"), None);
+    }
+
+    #[test]
+    fn test_parse_sse_line_null_content_returns_none() {
+        let line = r#"data: {"choices":[{"delta":{"content":null},"finish_reason":"stop"}]}"#;
+        let result = parse_sse_content(line);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_stream_request_serializes_stream_true() {
+        let req = StreamRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            max_tokens: 100,
+            stream: true,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["stream"], true);
+        assert_eq!(json["model"], "test-model");
     }
 }
