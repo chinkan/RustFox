@@ -325,10 +325,11 @@ impl Agent {
                             &tool_call.function.arguments,
                         );
                         if let Some(ref tx) = tool_event_tx {
-                            let _ = tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
-                                name: tool_call.function.name.clone(),
-                                args_preview: args_preview.clone(),
-                            });
+                            let _ =
+                                tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
+                                    name: tool_call.function.name.clone(),
+                                    args_preview: args_preview.clone(),
+                                });
                         }
 
                         let tool_result = self
@@ -338,10 +339,11 @@ impl Agent {
                         // Notify tool completion
                         if let Some(ref tx) = tool_event_tx {
                             let success = !tool_result.starts_with("Error");
-                            let _ = tx.try_send(crate::platform::tool_notifier::ToolEvent::Completed {
-                                name: tool_call.function.name.clone(),
-                                success,
-                            });
+                            let _ =
+                                tx.try_send(crate::platform::tool_notifier::ToolEvent::Completed {
+                                    name: tool_call.function.name.clone(),
+                                    success,
+                                });
                         }
 
                         info!(

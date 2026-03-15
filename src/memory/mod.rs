@@ -213,10 +213,8 @@ impl MemoryStore {
         )?;
 
         // Migration: add is_summarized column (safe no-op if column already exists)
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;"
-        )
-        .ok(); // ok() because ALTER TABLE fails if column already exists — that's intentional
+        conn.execute_batch("ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;")
+            .ok(); // ok() because ALTER TABLE fails if column already exists — that's intentional
 
         // Stored embedding dimension (None if legacy DB without schema_meta row)
         let raw: Option<String> = conn

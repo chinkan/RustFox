@@ -205,10 +205,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let chat_id = msg.chat.id;
         let mut rx = tool_event_rx.expect("rx exists when verbose");
         Some(tokio::spawn(async move {
-            let mut notifier = crate::platform::tool_notifier::ToolCallNotifier::new(
-                bot_clone,
-                chat_id,
-            );
+            let mut notifier =
+                crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id);
             notifier.start().await;
             while let Some(event) = rx.recv().await {
                 notifier.handle_event(event).await;

@@ -43,7 +43,11 @@ pub async fn auto_retrieve_context(
     }
 
     block.push_str("</retrieved_context>");
-    debug!("RAG: injecting {} snippets for query: {:?}", results.len(), query);
+    debug!(
+        "RAG: injecting {} snippets for query: {:?}",
+        results.len(),
+        query
+    );
     Ok(Some(block))
 }
 
@@ -69,7 +73,10 @@ mod tests {
             .get_or_create_conversation("test", "rag_u1")
             .await
             .unwrap();
-        store.save_message(&conv, &user_msg("I use Docker")).await.unwrap();
+        store
+            .save_message(&conv, &user_msg("I use Docker"))
+            .await
+            .unwrap();
         let result = auto_retrieve_context(&store, "hi", &conv, 5).await.unwrap();
         assert!(result.is_none(), "Short query should return None");
     }
@@ -81,8 +88,13 @@ mod tests {
             .get_or_create_conversation("test", "rag_u2")
             .await
             .unwrap();
-        store.save_message(&conv, &user_msg("Docker setup")).await.unwrap();
-        let result = auto_retrieve_context(&store, "/clear", &conv, 5).await.unwrap();
+        store
+            .save_message(&conv, &user_msg("Docker setup"))
+            .await
+            .unwrap();
+        let result = auto_retrieve_context(&store, "/clear", &conv, 5)
+            .await
+            .unwrap();
         assert!(result.is_none(), "Bot commands should return None");
     }
 

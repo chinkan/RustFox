@@ -180,9 +180,10 @@ impl MemoryStore {
             ) ORDER BY created_at ASC",
         )?;
         let raw_messages = raw_stmt
-            .query_map(rusqlite::params![conversation_id, raw_limit as i64], |row| {
-                parse_message_row(row)
-            })?
+            .query_map(
+                rusqlite::params![conversation_id, raw_limit as i64],
+                parse_message_row,
+            )?
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to load raw messages")?;
 

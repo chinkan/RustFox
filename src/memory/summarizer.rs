@@ -21,9 +21,7 @@ pub async fn summarize_conversation(
 
     let conversation_text: String = unsummarized
         .iter()
-        .filter_map(|(_, role, content)| {
-            content.as_ref().map(|c| format!("[{}]: {}", role, c))
-        })
+        .filter_map(|(_, role, content)| content.as_ref().map(|c| format!("[{}]: {}", role, c)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -107,7 +105,10 @@ pub async fn summarize_all_active(
         }
     }
 
-    info!("Nightly summarization complete: {} conversations summarized", count);
+    info!(
+        "Nightly summarization complete: {} conversations summarized",
+        count
+    );
     Ok(count)
 }
 
@@ -133,8 +134,14 @@ mod tests {
             .get_or_create_conversation("test", "sum_u1")
             .await
             .unwrap();
-        store.save_message(&conv, &user_msg("first message")).await.unwrap();
-        store.save_message(&conv, &user_msg("second message")).await.unwrap();
+        store
+            .save_message(&conv, &user_msg("first message"))
+            .await
+            .unwrap();
+        store
+            .save_message(&conv, &user_msg("second message"))
+            .await
+            .unwrap();
 
         let unsummarized = store.get_unsummarized_messages(&conv).await.unwrap();
         assert_eq!(unsummarized.len(), 2);
@@ -170,7 +177,10 @@ mod tests {
             .await
             .unwrap();
         let active = store.get_active_conversations(7).await.unwrap();
-        assert!(!active.is_empty(), "Should have at least one active conversation");
+        assert!(
+            !active.is_empty(),
+            "Should have at least one active conversation"
+        );
     }
 
     #[tokio::test]
