@@ -30,12 +30,9 @@ pub async fn register_builtin_tasks(
                 let llm = llm_clone.clone();
                 let threshold = summarize_threshold;
                 Box::pin(async move {
-                    if let Err(e) = crate::memory::summarizer::summarize_all_active(
-                        &store,
-                        &llm,
-                        threshold,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::memory::summarizer::summarize_all_active(&store, &llm, threshold)
+                            .await
                     {
                         tracing::error!("Nightly summarization failed: {:#}", e);
                     }

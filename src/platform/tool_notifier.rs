@@ -14,10 +14,7 @@ pub enum ToolEvent {
         args_preview: String,
     },
     /// A tool call completed (successfully or with error).
-    Completed {
-        name: String,
-        success: bool,
-    },
+    Completed { name: String, success: bool },
 }
 
 /// Formats `args_preview` for display: truncate to 60 chars, strip outer braces for common single-arg calls.
@@ -143,10 +140,7 @@ impl ToolCallNotifier {
     /// Delete the status message (clean up before sending final response).
     pub async fn finish(&self) {
         if let Some(ref msg) = self.status_msg {
-            self.bot
-                .delete_message(self.chat_id, msg.id)
-                .await
-                .ok(); // Ignore errors (message may already be deleted)
+            self.bot.delete_message(self.chat_id, msg.id).await.ok(); // Ignore errors (message may already be deleted)
         }
     }
 }
