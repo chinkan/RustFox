@@ -21,8 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      pull-requests: write  # required to post review comments (read silently fails)
+      issues: write         # used when posting/updating PR comment
       id-token: write
 
     steps:
@@ -36,9 +36,13 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}  # ensures workflow permissions are used for posting
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          track_progress: true  # forces tag mode so a PR comment is created and updated (fixes #944)
+          # If gh CLI calls are blocked, uncomment:
+          # claude_args: '--allowedTools "Bash(gh api*),Bash(gh pr*),Bash(git*)"'
+          # See https://github.com/anthropics/claude-code-action/issues/944
+          # and https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
