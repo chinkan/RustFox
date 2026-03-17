@@ -29,28 +29,14 @@ pub fn format_args_preview(args_json: &str) -> String {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    let truncated = truncate_chars(&s, 60);
+                    let truncated = crate::utils::str::truncate_chars(&s, 60);
                     return format!("\"{}\"", truncated);
                 }
             }
         }
     }
     // Fallback: truncate raw JSON
-    truncate_chars(args_json, 60)
-}
-
-/// Truncate `s` to at most `max_chars` Unicode scalar values.
-/// Appends "..." if truncation occurred.
-/// Safe for any UTF-8 input including Chinese, Japanese, emoji, etc.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let mut byte_end = 0usize;
-    for (char_count, ch) in s.chars().enumerate() {
-        if char_count == max_chars {
-            return format!("{}...", &s[..byte_end]);
-        }
-        byte_end += ch.len_utf8();
-    }
-    s.to_string()
+    crate::utils::str::truncate_chars(args_json, 60)
 }
 
 /// Manages the live-edited Telegram status message during agent tool execution.
