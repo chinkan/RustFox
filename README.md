@@ -23,6 +23,11 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 - **Agents Layer** — Isolated agentic mini-loops in `agents/` with their own model, tool whitelist, and `AGENT.md` instructions; invoked via `invoke_agent`, with `read_agent_file`/`write_agent_file` for file I/O and `reload_agents` for hot-reloading
 - **Plan Tools** — `plan_create`, `plan_update`, `plan_view` built-in tools let the agent create and manage structured execution plans stored in the sandbox; power the `problem-solver` subagent skill
 - **Bundled Subagent Skills** — `code-interpreter` (executes and iterates code snippets) and `problem-solver` (orchestrates multi-step reasoning with plan tools) ship out of the box
+- **Streaming Responses** — LLM tokens streamed progressively; Telegram message is live-edited as the response arrives
+- **Chat History RAG** — Semantically relevant past messages are auto-injected into each turn's system prompt using vector search
+- **RAG Query Rewriting** — Ambiguous follow-up questions are rewritten before vector search for more accurate retrieval
+- **Nightly Summarization** — LLM-based cron job summarizes long conversations overnight to keep memory efficient
+- **Verbose Tool UI** — `/verbose` command toggles a live Telegram status message showing tool calls as they run
 - **Agentic Loop** — Automatic multi-step tool calling until task completion (max iterations configurable, default 25)
 - **Per-user Conversations** — Independent conversation history per user
 
@@ -207,6 +212,7 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 | `/start` | Show welcome message |
 | `/clear` | Clear conversation history |
 | `/tools` | List all available tools |
+| `/verbose` | Toggle live tool call progress display |
 
 ## Architecture
 
@@ -218,7 +224,7 @@ src/
 ├── agent.rs          # Agentic loop, tool dispatch, scheduling tools; agents/ layer
 ├── tools.rs          # Built-in tools (file I/O, command execution, plan tools)
 ├── mcp.rs            # MCP client manager for external tool servers
-├── memory/           # SQLite persistence, vector embeddings
+├── memory/           # SQLite persistence, vector embeddings, RAG, query rewriter, summarizer
 ├── scheduler/        # Cron/one-shot task scheduler with DB persistence
 ├── skills/           # Skill loader (auto-loads from skills/ directory)
 └── platform/         # Telegram bot handler
@@ -250,6 +256,11 @@ skills/
 - [x] Agents layer (`invoke_agent`, `read_agent_file`, `write_agent_file`, `reload_agents` — isolated agentic mini-loops in `agents/` with own model and tool whitelist)
 - [x] Plan tools (`plan_create`, `plan_update`, `plan_view` — structured execution plans in the sandbox)
 - [x] Bundled subagent skills: `code-interpreter` and `problem-solver`
+- [x] LLM streaming (SSE token-by-token, live Telegram message edits)
+- [x] Chat history RAG (auto-inject relevant past context per turn)
+- [x] RAG query rewriting (disambiguates follow-up questions before vector search)
+- [x] Nightly conversation summarization (LLM-based cron job)
+- [x] Verbose tool UI (`/verbose` command — live tool call progress in Telegram)
 
 ### Planned
 
