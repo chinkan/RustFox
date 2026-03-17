@@ -94,6 +94,5 @@ Code-quality-reviewer follows the template at [../requesting-code-review/code-re
 
 - [Anthropic Agent Skills](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) — Skills overview, progressive loading, structure.
 - [Claude Code Subagents](https://code.claude.com/docs/en/sub-agents) — Custom subagents in `.claude/agents/`, model options (`haiku`, `sonnet`, `opus`, `inherit`).
-- [Cursor Subagents](https://cursor.com/docs/agent/subagents) — `.cursor/agents/` or `.claude/agents/`, foreground vs background.
 - [Claude Code Sub-Agents: Best Practices](https://zoer.ai/posts/zoer/claude-code-sub-agents-best-practices) — Three-tier pattern, context budget, validator pattern.
 - [Sub-Agent Routing and Invocation](https://claudefa.st/blog/guide/agents/sub-agent-best-practices) — Parallel/sequential/background rules, invocation quality.
