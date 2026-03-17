@@ -8,6 +8,7 @@ mod platform;
 mod scheduler;
 mod skills;
 mod tools;
+mod utils;
 
 use std::path::PathBuf;
 use std::sync::Arc;
