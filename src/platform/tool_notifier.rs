@@ -29,22 +29,28 @@ pub fn format_args_preview(args_json: &str) -> String {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    let truncated = if s.len() > 60 {
-                        format!("{}...", &s[..60])
-                    } else {
-                        s
-                    };
+                    let truncated = truncate_chars(&s, 60);
                     return format!("\"{}\"", truncated);
                 }
             }
         }
     }
     // Fallback: truncate raw JSON
-    if args_json.len() > 60 {
-        format!("{}...", &args_json[..60])
-    } else {
-        args_json.to_string()
+    truncate_chars(args_json, 60)
+}
+
+/// Truncate `s` to at most `max_chars` Unicode scalar values.
+/// Appends "..." if truncation occurred.
+/// Safe for any UTF-8 input including Chinese, Japanese, emoji, etc.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut byte_end = 0usize;
+    for (char_count, ch) in s.chars().enumerate() {
+        if char_count == max_chars {
+            return format!("{}...", &s[..byte_end]);
+        }
+        byte_end += ch.len_utf8();
     }
+    s.to_string()
 }
 
 /// Manages the live-edited Telegram status message during agent tool execution.
@@ -219,15 +225,28 @@ mod tests {
         }
 
         let log = vec![
-            ("search".to_string(), r#""Docker setup""#.to_string(), true, true),
-            ("read_file".to_string(), r#""/etc/config""#.to_string(), true, false),
+            (
+                "search".to_string(),
+                r#""Docker setup""#.to_string(),
+                true,
+                true,
+            ),
+            (
+                "read_file".to_string(),
+                r#""/etc/config""#.to_string(),
+                true,
+                false,
+            ),
         ];
         let result = fake_format_final(&log);
         assert!(result.contains("🔧 Tools used:"), "header missing");
         assert!(result.contains("✅ search"), "successful tool icon wrong");
         assert!(result.contains("❌ read_file"), "failed tool icon wrong");
         assert!(result.contains("Docker setup"), "args missing for search");
-        assert!(!result.contains("⏳ Working"), "should not contain in-progress text");
+        assert!(
+            !result.contains("⏳ Working"),
+            "should not contain in-progress text"
+        );
     }
 
     #[test]
@@ -235,10 +254,14 @@ mod tests {
         // Tests the single-arg extraction path with a Chinese string.
         // This particular string's byte-60 happens to fall on a valid UTF-8 boundary,
         // so it currently passes — after the UTF-8 truncation fix it will continue to pass.
-        let long_chinese = "每日上午10點 arXiv AI 論文摘要（香港時間）很長的標題讓我們繼續寫下去直到超過六十個字";
+        let long_chinese =
+            "每日上午10點 arXiv AI 論文摘要（香港時間）很長的標題讓我們繼續寫下去直到超過六十個字";
         let json = format!(r#"{{"query":"{}"}}"#, long_chinese);
         let preview = format_args_preview(&json);
-        assert!(preview.contains("\""), "should be quoted single-arg preview");
+        assert!(
+            preview.contains("\""),
+            "should be quoted single-arg preview"
+        );
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
     }
 
