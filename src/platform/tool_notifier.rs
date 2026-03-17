@@ -231,22 +231,24 @@ mod tests {
     }
 
     #[test]
-    fn test_format_args_preview_single_arg_chinese() {
-        // Chinese chars are 3 bytes each; byte index 60 falls mid-char without the fix.
+    fn test_format_args_preview_single_arg_with_chinese() {
+        // Tests the single-arg extraction path with a Chinese string.
+        // This particular string's byte-60 happens to fall on a valid UTF-8 boundary,
+        // so it currently passes — after the UTF-8 truncation fix it will continue to pass.
         let long_chinese = "每日上午10點 arXiv AI 論文摘要（香港時間）很長的標題讓我們繼續寫下去直到超過六十個字";
         let json = format!(r#"{{"query":"{}"}}"#, long_chinese);
-        // Must not panic — any result is acceptable as long as it doesn't crash.
         let preview = format_args_preview(&json);
         assert!(preview.contains("\""), "should be quoted single-arg preview");
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
     }
 
     #[test]
-    fn test_format_args_preview_multi_arg_chinese_no_panic() {
+    fn test_format_args_preview_multi_arg_chinese_panics_before_fix() {
         // Multi-arg JSON falls through to the raw-JSON fallback path (lines 43-44).
-        // This is the exact case that crashed in production.
+        // This test currently PANICS (fails) because &args_json[..60] hits byte 60
+        // inside the multi-byte character '香'. After the UTF-8 truncation fix is
+        // applied, the slice will be adjusted to a safe boundary and this test will pass.
         let args = r#"{"description":"每日上午10點 arXiv AI 論文摘要（香港時間）","prompt":"使用 arxiv-daily-briefing skill","trigger_type":"recurring","trigger_value":"0 0 2 * * *"}"#;
-        // Must not panic
         let preview = format_args_preview(args);
         assert!(!preview.is_empty());
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
