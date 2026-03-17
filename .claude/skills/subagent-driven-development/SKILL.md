@@ -84,9 +84,13 @@ digraph process {
 
 ## Prompt Templates
 
-- `./implementer-prompt.md` - Dispatch implementer subagent
+- `./implementer-prompt.md` - Dispatch implementer subagent (full task text for Task tool)
 - `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
 - `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
+
+**Custom subagent definitions** (Claude Code / Cursor): `.claude/agents/implementer.md`, `.claude/agents/spec-reviewer.md`, `.claude/agents/code-quality-reviewer.md`. Invoke by name (e.g. `/implementer`) or use the prompt templates below.
+
+**Reference (load when needed):** For routing (parallel vs sequential vs background), invocation quality, and skills-vs-subagents, read [ORCHESTRATION.md](./ORCHESTRATION.md) in this directory.
 
 ## Example Workflow
 
