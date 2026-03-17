@@ -94,11 +94,7 @@ fn format_history(messages: &[ChatMessage]) -> String {
         .iter()
         .filter_map(|m| {
             m.content.as_ref().map(|c| {
-                let snippet = if c.len() > 200 {
-                    format!("{}...", &c[..200])
-                } else {
-                    c.clone()
-                };
+                let snippet = crate::utils::str::truncate_chars(c, 200);
                 format!("{}: {}", m.role, snippet)
             })
         })
@@ -190,6 +186,24 @@ mod tests {
             line.len() <= 220,
             "Content should be truncated: len={}",
             line.len()
+        );
+    }
+
+    #[test]
+    fn test_format_history_truncates_long_chinese_no_panic() {
+        // Old &c[..200] panics when byte 200 falls inside a multibyte char.
+        // Chinese chars are 3 bytes each — 67 chars already exceed 200 bytes.
+        let long_chinese = "每日論文摘要（香港時間）人工智能最新研究".repeat(15);
+        let msgs = vec![msg("user", &long_chinese)];
+        let result = format_history(&msgs);
+        // Must not panic
+        assert!(!result.is_empty());
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        // Must be truncated with ellipsis
+        assert!(
+            result.contains("..."),
+            "should truncate long content: {}",
+            &result[..result.len().min(80)]
         );
     }
 }
