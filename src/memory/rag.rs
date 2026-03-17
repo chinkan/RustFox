@@ -42,11 +42,7 @@ pub async fn auto_retrieve_context(
     for msg in &results {
         if let Some(content) = &msg.content {
             let role = &msg.role;
-            let snippet = if content.len() > 300 {
-                format!("{}...", &content[..300])
-            } else {
-                content.clone()
-            };
+            let snippet = crate::utils::str::truncate_chars(content, 300);
             block.push_str(&format!("[{}] {}\n", role, snippet));
         }
     }
@@ -138,15 +134,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_retrieve_truncates_long_snippets() {
-        // Verify the 300-char truncation logic
+        // Verify the 300-char truncation logic via truncate_chars
         let content = "x".repeat(500);
-        let snippet = if content.len() > 300 {
-            format!("{}...", &content[..300])
-        } else {
-            content.clone()
-        };
+        let snippet = crate::utils::str::truncate_chars(&content, 300);
         assert_eq!(snippet.len(), 303); // 300 + "..."
         assert!(snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn test_snippet_truncation_chinese_no_panic() {
+        // Directly tests that truncate_chars handles the exact scenario rag.rs uses:
+        // content longer than 300 bytes with Chinese characters.
+        // Old &content[..300] would panic here.
+        let long_chinese = "每日論文摘要（香港時間）人工智能".repeat(25); // ~400 chars, >1200 bytes
+        let result = crate::utils::str::truncate_chars(&long_chinese, 300);
+        assert!(result.ends_with("..."), "should be truncated");
+        assert!(
+            std::str::from_utf8(result.as_bytes()).is_ok(),
+            "must be valid UTF-8"
+        );
     }
 
     #[tokio::test]
