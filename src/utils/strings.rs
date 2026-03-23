@@ -60,4 +60,12 @@ mod tests {
         assert!(result.ends_with("..."));
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
     }
+
+    #[test]
+    fn test_truncate_chars_zero_max() {
+        // max_chars=0: every non-empty string is truncated immediately to "..."
+        assert_eq!(truncate_chars("hello", 0), "...");
+        // Empty string is never truncated (loop body never entered)
+        assert_eq!(truncate_chars("", 0), "");
+    }
 }

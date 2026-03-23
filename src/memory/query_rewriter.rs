@@ -94,7 +94,7 @@ fn format_history(messages: &[ChatMessage]) -> String {
         .iter()
         .filter_map(|m| {
             m.content.as_ref().map(|c| {
-                let snippet = crate::utils::str::truncate_chars(c, 200);
+                let snippet = crate::utils::strings::truncate_chars(c, 200);
                 format!("{}: {}", m.role, snippet)
             })
         })
