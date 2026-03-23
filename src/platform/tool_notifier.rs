@@ -29,14 +29,14 @@ pub fn format_args_preview(args_json: &str) -> String {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    let truncated = crate::utils::str::truncate_chars(&s, 60);
+                    let truncated = crate::utils::strings::truncate_chars(&s, 60);
                     return format!("\"{}\"", truncated);
                 }
             }
         }
     }
     // Fallback: truncate raw JSON
-    crate::utils::str::truncate_chars(args_json, 60)
+    crate::utils::strings::truncate_chars(args_json, 60)
 }
 
 /// Manages the live-edited Telegram status message during agent tool execution.
