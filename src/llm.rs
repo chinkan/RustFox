@@ -354,6 +354,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_message_content_text_serializes_as_string() {
+        let content = MessageContent::from_text("hello world");
+        let json = serde_json::to_string(&content).unwrap();
+        assert_eq!(json, r#""hello world""#);
+    }
+
+    #[test]
+    fn test_message_content_parts_serializes_as_array() {
+        let content = MessageContent::Parts(vec![ContentPart::Text {
+            text: "hello".to_string(),
+        }]);
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json[0]["type"], "text");
+        assert_eq!(json[0]["text"], "hello");
+    }
+
+    #[test]
+    fn test_message_content_as_text_from_parts() {
+        let content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "hello".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,abc".to_string(),
+                },
+            },
+        ]);
+        assert_eq!(content.as_text(), "hello");
+    }
+
+    #[test]
     fn test_chat_request_serializes_model_field() {
         // Verifies the model string will appear in the JSON POST body
         let req = ChatRequest {

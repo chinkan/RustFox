@@ -191,11 +191,9 @@ impl Agent {
             .await
             {
                 if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
-                    if let Some(ref mut content) = system_msg.content {
-                        if let MessageContent::Text(ref mut s) = content {
-                            s.push_str("\n\n");
-                            s.push_str(&rag_block);
-                        }
+                    if let Some(MessageContent::Text(ref mut s)) = system_msg.content {
+                        s.push_str("\n\n");
+                        s.push_str(&rag_block);
                     }
                 }
             }

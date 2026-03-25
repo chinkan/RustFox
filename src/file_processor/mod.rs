@@ -11,13 +11,7 @@ const LONG_CONTEXT_THRESHOLD: usize = 6000;
 const CHUNK_SIZE: usize = 1000;
 const CHUNK_OVERLAP: usize = 100;
 
-/// Result of processing all attachments for a message
-pub struct ProcessedAttachments {
-    /// Extracted text context (from OCR, PDF, DOCX) — injected into user message
-    pub text_context: String,
-    /// Vision content parts (base64 images) — only when supports_vision = true
-    pub image_parts: Vec<ContentPart>,
-}
+
 
 /// Returned by `process_image` to indicate whether we got a vision part or OCR text.
 pub enum ImageResult {
