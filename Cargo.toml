@@ -55,5 +55,22 @@ sqlite-vec = "0.1"
 # Setup wizard web server (used only by src/bin/setup.rs)
 axum = "0.8"
 
+# OCR (pure Rust, neural-network based)
+ocrs = "0.12"
+rten = { version = "0.24", features = ["rten_format"] }
+
+# Image loading/processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+# Document processing
+pdf-extract = "0.10"
+docx-rs = "0.4"
+
+# MIME type detection
+infer = "0.19"
+
+# Base64 for vision API content parts
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"
