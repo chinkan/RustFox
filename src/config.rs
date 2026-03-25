@@ -22,6 +22,8 @@ pub struct Config {
     pub embedding: Option<EmbeddingApiConfig>,
     #[serde(default)]
     pub langsmith: Option<LangSmithConfig>,
+    #[serde(default = "default_ocr_config")]
+    pub ocr: OcrConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -52,6 +54,19 @@ pub struct OpenRouterConfig {
     pub max_tokens: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Whether the configured model supports vision (image inputs).
+    /// When true, images are sent as base64-encoded content parts.
+    /// When false, OCR is used to extract text from images.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OcrConfig {
+    /// Directory where OCR model files are cached.
+    /// Models are downloaded automatically on first OCR use.
+    #[serde(default = "default_ocr_model_dir")]
+    pub model_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -244,6 +259,19 @@ fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
 }
 
+fn default_ocr_model_dir() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(".cache/ocrs")
+}
+
+fn default_ocr_config() -> OcrConfig {
+    OcrConfig {
+        model_dir: default_ocr_model_dir(),
+    }
+}
+
 impl Config {
     /// Location string from [general], injected into the system prompt.
     pub fn user_location(&self) -> Option<&str> {
@@ -330,5 +358,51 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         let ls = cfg.langsmith.unwrap();
         assert_eq!(ls.project, "default");
+    }
+
+    #[test]
+    fn test_supports_vision_defaults_false() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.openrouter.supports_vision);
+    }
+
+    #[test]
+    fn test_supports_vision_parses_true() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            supports_vision = true
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.openrouter.supports_vision);
+    }
+
+    #[test]
+    fn test_ocr_config_default_model_dir() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.ocr.model_dir.to_str().unwrap().contains("ocrs"));
     }
 }
