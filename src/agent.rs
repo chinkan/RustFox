@@ -6,7 +6,7 @@ use teloxide::Bot;
 
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
-use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, MessageContent, ToolDefinition};
+use crate::llm::{ChatMessage, ContentPart, FunctionDefinition, LlmClient, MessageContent, ToolDefinition};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
@@ -201,16 +201,70 @@ impl Agent {
             }
         }
 
-        // Add user message
-        let user_msg = ChatMessage {
+        // Process attachments (images → vision parts or OCR text; PDFs/DOCXs → extracted text)
+        let (attachment_text, image_parts) = if !incoming.attachments.is_empty() {
+            crate::file_processor::process_attachments(
+                &incoming.attachments,
+                &incoming.text,
+                &self.config,
+                &self.memory,
+            )
+            .await
+        } else {
+            (String::new(), vec![])
+        };
+
+        // Build user message content
+        let user_msg_content = if image_parts.is_empty() {
+            // Text-only path: combine user text with any extracted document text
+            let mut combined = incoming.text.clone();
+            if !attachment_text.is_empty() {
+                combined.push_str("\n\n");
+                combined.push_str(&attachment_text);
+            }
+            MessageContent::from_text(combined)
+        } else {
+            // Multi-modal path: text part + image content parts
+            let mut parts: Vec<ContentPart> = Vec::new();
+            let mut text_content = incoming.text.clone();
+            if !attachment_text.is_empty() {
+                text_content.push_str("\n\n");
+                text_content.push_str(&attachment_text);
+            }
+            if !text_content.is_empty() {
+                parts.push(ContentPart::Text { text: text_content });
+            }
+            parts.extend(image_parts);
+            MessageContent::Parts(parts)
+        };
+
+        // Save a text-only version to DB (avoid storing base64 image data in message history)
+        let db_content = if incoming.attachments.is_empty() {
+            user_msg_content.clone()
+        } else {
+            let mut db_text = incoming.text.clone();
+            if !attachment_text.is_empty() {
+                db_text.push_str("\n\n[Attachment processed]");
+            }
+            MessageContent::from_text(db_text)
+        };
+        let db_msg = ChatMessage {
             role: "user".to_string(),
-            content: Some(MessageContent::from_text(incoming.text.clone())),
+            content: Some(db_content),
             tool_calls: None,
             tool_call_id: None,
         };
         self.memory
-            .save_message(&conversation_id, &user_msg)
+            .save_message(&conversation_id, &db_msg)
             .await?;
+
+        // Push the full message (with image parts if any) to in-memory context
+        let user_msg = ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_msg_content),
+            tool_calls: None,
+            tool_call_id: None,
+        };
         messages.push(user_msg);
 
         // Gather all tool definitions
