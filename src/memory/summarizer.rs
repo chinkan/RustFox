@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::llm::{ChatMessage, LlmClient};
+use crate::llm::{ChatMessage, LlmClient, MessageContent};
 
 use super::MemoryStore;
 
@@ -44,23 +44,22 @@ pub async fn summarize_conversation(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: Some(
-                "You produce concise, factual conversation summaries. Output only bullet points."
-                    .to_string(),
-            ),
+            content: Some(MessageContent::from_text(
+                "You produce concise, factual conversation summaries. Output only bullet points.",
+            )),
             tool_calls: None,
             tool_call_id: None,
         },
         ChatMessage {
             role: "user".to_string(),
-            content: Some(summarization_prompt),
+            content: Some(MessageContent::from_text(summarization_prompt)),
             tool_calls: None,
             tool_call_id: None,
         },
     ];
 
     let response = llm.chat(&messages, &[]).await?;
-    let summary_text = response.content.unwrap_or_default();
+    let summary_text = response.content.map(|c| c.as_text()).unwrap_or_default();
 
     if summary_text.trim().is_empty() {
         warn!(conversation_id = %conversation_id, "LLM returned empty summary — skipping");
@@ -69,7 +68,7 @@ pub async fn summarize_conversation(
 
     let summary_msg = ChatMessage {
         role: "system".to_string(),
-        content: Some(format!("[SUMMARY]\n{}", summary_text.trim())),
+        content: Some(MessageContent::from_text(format!("[SUMMARY]\n{}", summary_text.trim()))),
         tool_calls: None,
         tool_call_id: None,
     };
@@ -115,13 +114,13 @@ pub async fn summarize_all_active(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
+    use crate::llm::{ChatMessage, MessageContent};
     use crate::memory::MemoryStore;
 
     fn user_msg(text: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
-            content: Some(text.to_string()),
+            content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
         }

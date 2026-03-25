@@ -5,11 +5,71 @@ use tracing::{debug, warn};
 
 use crate::config::OpenRouterConfig;
 
+/// A single part in a multi-modal message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlContent },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlContent {
+    /// "data:image/jpeg;base64,..." or a URL
+    pub url: String,
+}
+
+/// Either a plain text string or a list of content parts (multi-modal).
+/// Serializes as a plain JSON string for text-only, or as a JSON array for multi-modal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract all text from the content (for logging, RAG, DB storage, etc.)
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| {
+                    if let ContentPart::Text { text } = p {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    pub fn from_text(s: impl Into<String>) -> Self {
+        Self::Text(s.into())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(s) => s.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,7 +234,7 @@ impl LlmClient {
                 tool_call_count = choice.message.tool_calls.as_ref().map_or(0, |t| t.len()),
                 "Received LLM response"
             );
-            if choice.message.content.as_deref().is_none_or(str::is_empty)
+            if choice.message.content.as_ref().is_none_or(MessageContent::is_empty)
                 && choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty)
             {
                 warn!(

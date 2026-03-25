@@ -6,7 +6,7 @@ use teloxide::Bot;
 
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
-use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, ToolDefinition};
+use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, MessageContent, ToolDefinition};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
@@ -152,7 +152,7 @@ impl Agent {
         if messages.is_empty() {
             let system_msg = ChatMessage {
                 role: "system".to_string(),
-                content: Some(current_system_prompt),
+                content: Some(MessageContent::from_text(current_system_prompt)),
                 tool_calls: None,
                 tool_call_id: None,
             };
@@ -165,7 +165,7 @@ impl Agent {
             // on the very next message without restarting the bot.
             // Find the system message by role (defensive: don't assume messages[0] is system).
             if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
-                system_msg.content = Some(current_system_prompt);
+                system_msg.content = Some(MessageContent::from_text(current_system_prompt));
             }
         }
 
@@ -192,8 +192,10 @@ impl Agent {
             {
                 if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
                     if let Some(ref mut content) = system_msg.content {
-                        content.push_str("\n\n");
-                        content.push_str(&rag_block);
+                        if let MessageContent::Text(ref mut s) = content {
+                            s.push_str("\n\n");
+                            s.push_str(&rag_block);
+                        }
                     }
                 }
             }
@@ -202,7 +204,7 @@ impl Agent {
         // Add user message
         let user_msg = ChatMessage {
             role: "user".to_string(),
-            content: Some(incoming.text.clone()),
+            content: Some(MessageContent::from_text(incoming.text.clone())),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -375,7 +377,7 @@ impl Agent {
 
                         let tool_msg = ChatMessage {
                             role: "tool".to_string(),
-                            content: Some(tool_result),
+                            content: Some(MessageContent::from_text(tool_result)),
                             tool_calls: None,
                             tool_call_id: Some(tool_call.id.clone()),
                         };
@@ -391,7 +393,7 @@ impl Agent {
             }
 
             // Final response — no tool calls
-            let content = response.content.clone().unwrap_or_default();
+            let content = response.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
 
             if content.is_empty() {
                 warn!(
@@ -1015,13 +1017,13 @@ impl Agent {
         let mut messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: Some(system_content),
+                content: Some(MessageContent::from_text(system_content)),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: Some(prompt.to_string()),
+                content: Some(MessageContent::from_text(prompt)),
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -1082,7 +1084,7 @@ impl Agent {
 
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
-                            content: Some(result),
+                            content: Some(MessageContent::from_text(result)),
                             tool_calls: None,
                             tool_call_id: Some(tool_call.id.clone()),
                         });
@@ -1093,7 +1095,7 @@ impl Agent {
             }
 
             // Final response — no tool calls
-            return response.content.unwrap_or_default();
+            return response.content.map(|c| c.as_text()).unwrap_or_default();
         }
 
         format!(
@@ -1139,7 +1141,7 @@ impl Agent {
                 if let Ok(msgs) = self.memory.search_messages(query, limit).await {
                     for msg in msgs {
                         if let Some(content) = &msg.content {
-                            results.push(format!("[{}]: {}", msg.role, content));
+                            results.push(format!("[{}]: {}", msg.role, content.as_text()));
                         }
                     }
                 }

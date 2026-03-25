@@ -1,4 +1,4 @@
-use crate::llm::{ChatMessage, LlmClient};
+use crate::llm::{ChatMessage, LlmClient, MessageContent};
 
 /// Rewrite an ambiguous follow-up question into a self-contained search query.
 /// Uses the last ≤3 non-system messages as conversation context.
@@ -32,16 +32,15 @@ pub async fn rewrite_for_rag(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: Some(
-                "You are a query rewriter. Output only the rewritten query, nothing else."
-                    .to_string(),
-            ),
+            content: Some(MessageContent::from_text(
+                "You are a query rewriter. Output only the rewritten query, nothing else.",
+            )),
             tool_calls: None,
             tool_call_id: None,
         },
         ChatMessage {
             role: "user".to_string(),
-            content: Some(prompt),
+            content: Some(MessageContent::from_text(prompt)),
             tool_calls: None,
             tool_call_id: None,
         },
@@ -51,6 +50,7 @@ pub async fn rewrite_for_rag(
         Ok(response) => {
             let rewritten = response
                 .content
+                .map(|c| c.as_text())
                 .unwrap_or_default()
                 .trim()
                 .lines()
@@ -94,7 +94,8 @@ fn format_history(messages: &[ChatMessage]) -> String {
         .iter()
         .filter_map(|m| {
             m.content.as_ref().map(|c| {
-                let snippet = crate::utils::strings::truncate_chars(c, 200);
+                let text = c.as_text();
+                let snippet = crate::utils::strings::truncate_chars(&text, 200);
                 format!("{}: {}", m.role, snippet)
             })
         })
@@ -105,12 +106,12 @@ fn format_history(messages: &[ChatMessage]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
+    use crate::llm::{ChatMessage, MessageContent};
 
     fn msg(role: &str, text: &str) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
-            content: Some(text.to_string()),
+            content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
         }

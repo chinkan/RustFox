@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use super::MemoryStore;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, MessageContent};
 
 /// Cast a &[f32] to &[u8] for SQLite blob storage
 pub(crate) fn f32_slice_to_bytes(floats: &[f32]) -> &[u8] {
@@ -62,7 +62,8 @@ impl MemoryStore {
             .map(|tc| serde_json::to_string(tc).unwrap_or_default());
 
         // Generate embedding before acquiring the DB lock (async HTTP call)
-        let embedding = if let Some(content) = &message.content {
+        let content_text: Option<String> = message.content.as_ref().map(|c| c.as_text());
+        let embedding = if let Some(ref content) = content_text {
             if !content.is_empty() && message.role != "tool" {
                 self.embeddings.try_embed_one(content).await
             } else {
@@ -81,7 +82,7 @@ impl MemoryStore {
                 &id,
                 conversation_id,
                 &message.role,
-                &message.content,
+                &content_text,
                 &tool_calls_json,
                 &message.tool_call_id,
             ],
@@ -409,9 +410,10 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let tool_calls_json: Option<String> = row.get(2)?;
     let tool_calls = tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
 
+    let content_str: Option<String> = row.get(1)?;
     Ok(ChatMessage {
         role: row.get(0)?,
-        content: row.get(1)?,
+        content: content_str.map(MessageContent::Text),
         tool_calls,
         tool_call_id: row.get(3)?,
     })
@@ -420,12 +422,12 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
+    use crate::llm::{ChatMessage, MessageContent};
 
     fn make_msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
-            content: Some(content.to_string()),
+            content: Some(MessageContent::from_text(content)),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -457,7 +459,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].content.as_deref().unwrap().contains("love"));
+        assert!(results[0].content.as_ref().map(|c| c.as_text()).unwrap().contains("love"));
     }
 
     #[tokio::test]

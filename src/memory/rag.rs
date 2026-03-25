@@ -42,7 +42,8 @@ pub async fn auto_retrieve_context(
     for msg in &results {
         if let Some(content) = &msg.content {
             let role = &msg.role;
-            let snippet = crate::utils::strings::truncate_chars(content, 300);
+            let text = content.as_text();
+            let snippet = crate::utils::strings::truncate_chars(&text, 300);
             block.push_str(&format!("[{}] {}\n", role, snippet));
         }
     }
@@ -59,13 +60,13 @@ pub async fn auto_retrieve_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
+    use crate::llm::{ChatMessage, MessageContent};
     use crate::memory::MemoryStore;
 
     fn user_msg(text: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
-            content: Some(text.to_string()),
+            content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -165,7 +166,7 @@ mod tests {
 
         let msg = crate::llm::ChatMessage {
             role: "user".to_string(),
-            content: Some("I prefer TypeScript for frontend work".to_string()),
+            content: Some(crate::llm::MessageContent::from_text("I prefer TypeScript for frontend work")),
             tool_calls: None,
             tool_call_id: None,
         };
