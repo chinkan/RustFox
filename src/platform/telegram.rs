@@ -364,9 +364,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Wait for stream receiver to complete its final edit
     stream_handle.await.ok();
 
-    // Cleanup temp dir used for file downloads
+    // Cleanup temp dir used for file downloads (async to avoid blocking the executor)
     if temp_dir.exists() {
-        std::fs::remove_dir_all(&temp_dir).ok();
+        tokio::fs::remove_dir_all(&temp_dir).await.ok();
     }
 
     if let Err(e) = process_result {
