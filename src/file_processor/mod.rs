@@ -197,6 +197,7 @@ async fn download_model(url: &str, dest: &Path) -> Result<()> {
 /// Extract text content from a PDF file.
 fn extract_pdf_text(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).context("Failed to read PDF")?;
+    // unwrap_or_default: malformed PDFs return empty string rather than propagating
     let text = pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default();
     Ok(text)
 }
@@ -249,7 +250,8 @@ async fn handle_context_length(
     query: &str,
     memory: &MemoryStore,
 ) -> String {
-    if text.chars().count() <= LONG_CONTEXT_THRESHOLD {
+    let char_count = text.chars().count();
+    if char_count <= LONG_CONTEXT_THRESHOLD {
         return format!("[File: {}]\n{}", filename, text);
     }
 
@@ -257,7 +259,7 @@ async fn handle_context_length(
     tracing::info!(
         "Document '{}' is {} chars — storing {} chunks in knowledge base",
         filename,
-        text.chars().count(),
+        char_count,
         chunks.len()
     );
 
