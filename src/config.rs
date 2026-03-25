@@ -403,6 +403,6 @@ mod tests {
             allowed_directory = "/tmp"
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        assert!(cfg.ocr.model_dir.to_str().unwrap().contains("ocrs"));
+        assert!(cfg.ocr.model_dir.to_string_lossy().contains("ocrs"));
     }
 }
