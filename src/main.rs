@@ -8,6 +8,7 @@ mod platform;
 mod scheduler;
 mod skills;
 mod tools;
+mod file_processor;
 mod utils;
 
 use std::path::PathBuf;
