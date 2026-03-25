@@ -490,6 +490,7 @@ impl Agent {
                         chat_id: cid,
                         user_name: String::new(),
                         text: prompt,
+                        attachments: vec![],
                     };
                     let req = ScheduledJobRequest {
                         incoming,
@@ -1247,6 +1248,7 @@ impl Agent {
                             chat_id: cid,
                             user_name: String::new(),
                             text: prompt,
+                            attachments: vec![],
                         };
                         let req = ScheduledJobRequest {
                             incoming,

@@ -291,6 +291,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         chat_id: msg.chat.id.0.to_string(),
         user_name,
         text,
+        attachments: vec![],
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
