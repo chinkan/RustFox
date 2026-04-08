@@ -95,6 +95,55 @@ fn parse_sse_content(line: &str) -> Option<String> {
     }
 }
 
+/// Sanitize a JSON Schema so it is accepted by strict providers (e.g. Google AI Studio).
+///
+/// Rules applied:
+/// 1. If both `properties` and `required` are present, filter `required` to only include
+///    keys that actually exist in `properties`.
+/// 2. After filtering, remove a `required` key entirely if the resulting array is empty.
+/// 3. Recurse into nested `properties` values and `items` schemas.
+fn sanitize_schema(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // Collect defined property names (if any)
+    let defined_props: Option<std::collections::HashSet<String>> = obj
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().cloned().collect());
+
+    if let Some(ref props) = defined_props {
+        if let Some(required) = obj.get_mut("required") {
+            if let Some(req_arr) = required.as_array_mut() {
+                req_arr.retain(|v| v.as_str().map(|s| props.contains(s)).unwrap_or(false));
+            }
+        }
+    }
+
+    // Remove empty required array
+    if obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(false)
+    {
+        obj.remove("required");
+    }
+
+    // Recurse into nested property schemas
+    if let Some(properties) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for prop_schema in properties.values_mut() {
+            sanitize_schema(prop_schema);
+        }
+    }
+
+    // Recurse into array item schema
+    if let Some(items) = obj.get_mut("items") {
+        sanitize_schema(items);
+    }
+}
+
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
@@ -119,7 +168,11 @@ impl LlmClient {
         let tools_param = if tools.is_empty() {
             None
         } else {
-            Some(tools.to_vec())
+            let mut sanitized = tools.to_vec();
+            for tool in &mut sanitized {
+                sanitize_schema(&mut tool.function.parameters);
+            }
+            Some(sanitized)
         };
 
         let tool_choice = if tools_param.is_some() {
@@ -388,5 +441,77 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["stream"], true);
         assert_eq!(json["model"], "test-model");
+    }
+
+    #[test]
+    fn test_sanitize_schema_removes_undefined_required() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name", "ghost_field"]
+        });
+        sanitize_schema(&mut schema);
+        let req = schema["required"].as_array().unwrap();
+        assert_eq!(req.len(), 1);
+        assert_eq!(req[0], "name");
+    }
+
+    #[test]
+    fn test_sanitize_schema_removes_empty_required() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        });
+        sanitize_schema(&mut schema);
+        assert!(schema.get("required").is_none(), "empty required should be removed");
+    }
+
+    #[test]
+    fn test_sanitize_schema_leaves_valid_required_untouched() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" }
+            },
+            "required": ["a", "b"]
+        });
+        sanitize_schema(&mut schema);
+        let req = schema["required"].as_array().unwrap();
+        assert_eq!(req.len(), 2);
+    }
+
+    #[test]
+    fn test_sanitize_schema_no_properties_no_panic() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "required": ["something"]
+        });
+        // Without a `properties` key, required should be left as-is (no crash)
+        sanitize_schema(&mut schema);
+        // Still present because we can't verify against missing properties
+        assert!(schema.get("required").is_some());
+    }
+
+    #[test]
+    fn test_sanitize_schema_recurses_into_nested_properties() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": { "x": { "type": "string" } },
+                    "required": ["x", "nonexistent"]
+                }
+            },
+            "required": []
+        });
+        sanitize_schema(&mut schema);
+        let inner_req = schema["properties"]["inner"]["required"].as_array().unwrap();
+        assert_eq!(inner_req.len(), 1);
+        assert_eq!(inner_req[0], "x");
     }
 }
