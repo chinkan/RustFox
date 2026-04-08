@@ -514,4 +514,20 @@ mod tests {
         assert_eq!(inner_req.len(), 1);
         assert_eq!(inner_req[0], "x");
     }
+
+    #[test]
+    fn test_sanitize_schema_recurses_into_items() {
+        let mut schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x", "missing"]
+            }
+        });
+        sanitize_schema(&mut schema);
+        let items_req = schema["items"]["required"].as_array().unwrap();
+        assert_eq!(items_req.len(), 1);
+        assert_eq!(items_req[0], "x");
+    }
 }
