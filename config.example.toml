@@ -136,3 +136,13 @@ directory = "skills"
 # args = ["-y", "@brave/brave-search-mcp-server"]
 # [mcp_servers.env]
 # BRAVE_API_KEY = "your-brave-api-key"
+
+# Example: Exa neural search MCP (remote server, requires mcp-remote via npx)
+# Get your API key at https://exa.ai → Dashboard → API Keys
+#
+# [[mcp_servers]]
+# name = "exa"
+# command = "npx"
+# args = ["-y", "mcp-remote", "https://mcp.exa.ai/mcp"]
+# [mcp_servers.env]
+# EXA_API_KEY = "your-exa-api-key"
