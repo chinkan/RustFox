@@ -466,7 +466,10 @@ mod tests {
             "required": []
         });
         sanitize_schema(&mut schema);
-        assert!(schema.get("required").is_none(), "empty required should be removed");
+        assert!(
+            schema.get("required").is_none(),
+            "empty required should be removed"
+        );
     }
 
     #[test]
@@ -510,7 +513,9 @@ mod tests {
             "required": []
         });
         sanitize_schema(&mut schema);
-        let inner_req = schema["properties"]["inner"]["required"].as_array().unwrap();
+        let inner_req = schema["properties"]["inner"]["required"]
+            .as_array()
+            .unwrap();
         assert_eq!(inner_req.len(), 1);
         assert_eq!(inner_req[0], "x");
     }
