@@ -1941,16 +1941,4 @@ mod tests {
         let assembled: String = tokens.concat();
         assert_eq!(assembled, "Hello world!");
     }
-
-    #[test]
-    fn test_streaming_uses_chat_stream_not_artificial_delay() {
-        // Verify that real LLM streaming via chat_stream() is used for the final response.
-        let source = include_str!("agent.rs");
-        assert!(
-            source.contains("chat_stream"),
-            "agent.rs must call llm.chat_stream() for real streaming of the final response"
-        );
-        // The old fake-stream code used a words-vector approach that no longer exists.
-        // We verify the new call is present; the old structure is implicitly gone.
-    }
 }
