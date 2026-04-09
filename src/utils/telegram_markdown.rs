@@ -1,8 +1,8 @@
 /// MarkdownV2 special characters that must be escaped with `\` in plain text context.
 /// See: https://core.telegram.org/bots/api#markdownv2-style
+/// Backslash is listed first so the intent (escape the escaper) is self-evident.
 const SPECIAL_CHARS_V2: &[char] = &[
-    '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
-    '\\',
+    '\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
 ];
 
 /// Escape all MarkdownV2 special characters in a plain-text string.
