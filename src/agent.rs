@@ -180,9 +180,29 @@ impl Agent {
             let rewrite_start = filtered_msgs.len().saturating_sub(6);
             let recent_for_rewrite = filtered_msgs[rewrite_start..].to_vec();
 
+            // Determine if query rewriting is enabled: per-user setting overrides config default.
+            let per_user_setting = self
+                .memory
+                .recall(
+                    "settings",
+                    &format!("query_rewrite_enabled_{}", incoming.user_id),
+                )
+                .await
+                .unwrap_or(None);
+            let rewrite_enabled = match per_user_setting.as_deref() {
+                Some("true") => true,
+                Some("false") => false,
+                _ => self.config.memory.query_rewriter_enabled,
+            };
+            let llm_for_rewrite = if rewrite_enabled {
+                Some(&self.llm)
+            } else {
+                None
+            };
+
             if let Ok(Some(rag_block)) = crate::memory::rag::auto_retrieve_context(
                 &self.memory,
-                Some(&self.llm),
+                llm_for_rewrite,
                 &incoming.text,
                 &recent_for_rewrite,
                 &conversation_id,
