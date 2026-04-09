@@ -121,7 +121,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
              /skills - List loaded skills\n\
-             /verbose - Toggle tool call progress display",
+             /verbose - Toggle tool call progress display\n\
+             /query-rewrite - Toggle query rewriting for memory search",
         );
         bot.send_message(msg.chat.id, help)
             .parse_mode(ParseMode::MarkdownV2)
@@ -185,6 +186,43 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             "🔧 Tool call UI enabled. I'll show you what I'm working on."
         } else {
             "🔇 Tool call UI disabled. I'll respond silently."
+        };
+        bot.send_message(msg.chat.id, escape_text(reply))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        return Ok(());
+    }
+
+    if text == "/query-rewrite" {
+        let current = agent
+            .memory
+            .recall(
+                "settings",
+                &format!("query_rewrite_enabled_{}", user_id),
+            )
+            .await
+            .unwrap_or(None);
+        // When no per-user setting exists, fall back to the global config default.
+        let currently_on = match current.as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => agent.config.memory.query_rewriter_enabled,
+        };
+        let new_value = if currently_on { "false" } else { "true" };
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("query_rewrite_enabled_{}", user_id),
+                new_value,
+                None,
+            )
+            .await
+            .ok();
+        let reply = if new_value == "true" {
+            "🔍 Query rewriting enabled. Follow-up questions will be rewritten before memory search."
+        } else {
+            "🔍 Query rewriting disabled. Messages will be searched as-is."
         };
         bot.send_message(msg.chat.id, escape_text(reply))
             .parse_mode(ParseMode::MarkdownV2)

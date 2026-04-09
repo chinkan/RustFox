@@ -32,6 +32,13 @@ allowed_directory = "/tmp/rustfox-sandbox"
 # Stores conversations, knowledge base, and vector embeddings
 database_path = "rustfox.db"
 
+# Query rewriting for memory search (optional; default: false)
+# When enabled, ambiguous follow-up questions are rewritten into self-contained
+# search queries using an LLM call before the RAG vector search.
+# This improves recall accuracy but adds one extra LLM round-trip per message.
+# Can also be toggled per-user at runtime via the /query-rewrite Telegram command.
+# query_rewriter_enabled = false
+
 [skills]
 # Directory containing skill markdown files
 # Skills are natural-language instructions loaded at startup

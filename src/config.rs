@@ -96,6 +96,12 @@ pub struct MemoryConfig {
     #[serde(default = "default_summarize_cron")]
     #[allow(dead_code)]
     pub summarize_cron: String,
+    /// When `true`, an LLM call rewrites ambiguous follow-up questions into
+    /// self-contained search queries before the RAG vector search.
+    /// Defaults to `false` to avoid the extra LLM round-trip.
+    /// Can be toggled per-user at runtime via the `/query-rewrite` command.
+    #[serde(default)]
+    pub query_rewriter_enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -224,6 +230,7 @@ fn default_memory_config() -> MemoryConfig {
         max_raw_messages: default_max_raw_messages(),
         summarize_threshold: default_summarize_threshold(),
         summarize_cron: default_summarize_cron(),
+        query_rewriter_enabled: false,
     }
 }
 
@@ -410,5 +417,43 @@ mod tests {
         let s = &cfg.mcp_servers[0];
         assert!(s.url.is_some());
         assert!(s.auth_token.is_none());
+    }
+
+    #[test]
+    fn test_query_rewriter_disabled_by_default() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            !cfg.memory.query_rewriter_enabled,
+            "query_rewriter_enabled must default to false"
+        );
+    }
+
+    #[test]
+    fn test_query_rewriter_can_be_enabled() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [memory]
+            query_rewriter_enabled = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            cfg.memory.query_rewriter_enabled,
+            "query_rewriter_enabled should be true when set"
+        );
     }
 }
