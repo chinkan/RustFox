@@ -368,14 +368,18 @@ impl Agent {
                                 });
                         }
 
-                        // Stream tool status into the Telegram message so users always
-                        // see which tool is running, regardless of verbose mode.
-                        if let Some(ref tx) = stream_status_tx {
-                            let status = crate::platform::tool_notifier::format_tool_status_line(
-                                &tool_call.function.name,
-                                &args_preview,
-                            );
-                            tx.try_send(status).ok();
+                        // Stream tool status into the Telegram message only when
+                        // tool-progress notifications are enabled, to avoid
+                        // prepending status lines to otherwise silent/final output.
+                        if tool_event_tx.is_some() {
+                            if let Some(ref tx) = stream_status_tx {
+                                let status =
+                                    crate::platform::tool_notifier::format_tool_status_line(
+                                        &tool_call.function.name,
+                                        &args_preview,
+                                    );
+                                tx.try_send(status).ok();
+                            }
                         }
 
                         let tool_result = self
