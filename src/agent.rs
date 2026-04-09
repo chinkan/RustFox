@@ -242,6 +242,10 @@ impl Agent {
         let max_iterations = self.config.max_iterations();
         let mut iteration_count = 0u32;
 
+        // Clone the stream sender so tool status can be pushed into the same Telegram
+        // message during tool execution, before the final response starts streaming.
+        let stream_status_tx = stream_token_tx.clone();
+
         for iteration in 0..max_iterations {
             debug!(
                 "Trying iteration {}: messages length: {}",
@@ -342,6 +346,16 @@ impl Agent {
                                     name: tool_call.function.name.clone(),
                                     args_preview: args_preview.clone(),
                                 });
+                        }
+
+                        // Stream tool status into the Telegram message so users always
+                        // see which tool is running, regardless of verbose mode.
+                        if let Some(ref tx) = stream_status_tx {
+                            let status = crate::platform::tool_notifier::format_tool_status_line(
+                                &tool_call.function.name,
+                                &args_preview,
+                            );
+                            tx.try_send(status).ok();
                         }
 
                         let tool_result = self
