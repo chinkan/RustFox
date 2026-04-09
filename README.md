@@ -290,3 +290,6 @@ If you find RustFox useful, consider supporting the project:
 - [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client for OpenRouter
 - [tokio](https://tokio.rs/) — Async runtime
 - [tokio-cron-scheduler](https://github.com/mvniekerk/tokio-cron-scheduler) — Task scheduling
+- [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) — Markdown parser (entity-based Telegram formatting)
+
+> **Thanks:** Markdown-to-entities conversion approach inspired by [telegramify-markdown](https://github.com/sudoskys/telegramify-markdown) by sudoskys.

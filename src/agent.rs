@@ -446,7 +446,9 @@ impl Agent {
                 tool_calls: response.tool_calls.clone(),
                 tool_call_id: response.tool_call_id.clone(),
             };
-            self.memory.save_message(&conversation_id, &save_msg).await?;
+            self.memory
+                .save_message(&conversation_id, &save_msg)
+                .await?;
 
             // --- LangSmith: end chain run (success) ---
             self.langsmith.end_run(crate::langsmith::EndRunParams {

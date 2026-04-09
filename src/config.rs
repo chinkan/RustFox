@@ -366,7 +366,10 @@ mod tests {
         assert_eq!(server.name, "exa");
         assert_eq!(server.url.as_deref(), Some("https://mcp.exa.ai/mcp"));
         assert_eq!(server.auth_token.as_deref(), Some("exa-key-123"));
-        assert!(server.command.is_none(), "HTTP server should have no command");
+        assert!(
+            server.command.is_none(),
+            "HTTP server should have no command"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub fn escape_text(s: &str) -> String {
 
 /// Escape characters inside a code span or code block.
 /// Only backtick (`) and backslash (\) need escaping inside code.
+#[allow(dead_code)]
 fn escape_code(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -33,6 +34,7 @@ fn escape_code(s: &str) -> String {
 
 /// Find the position of the first unescaped occurrence of `needle` in `haystack`.
 /// Returns `None` if not found.
+#[allow(dead_code)]
 fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
     let mut i = 0;
     let bytes = haystack.as_bytes();
@@ -58,6 +60,7 @@ fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
 /// Convert a line of inline-formatted text to MarkdownV2.
 /// Handles: **bold**, `inline code`, [links](url), and plain text escaping.
 /// Leaves `_italic_` as-is (MarkdownV2 already uses `_` for italic).
+#[allow(dead_code)]
 fn convert_inline(s: &str) -> String {
     let mut result = String::new();
     let mut remaining = s;
@@ -163,6 +166,7 @@ fn convert_inline(s: &str) -> String {
 }
 
 /// Find the index of the matching `]` for a `[` at the start of `s`.
+#[allow(dead_code)]
 fn find_matching_bracket(s: &str) -> Option<usize> {
     debug_assert!(s.starts_with('['));
     let mut depth = 0usize;
@@ -182,6 +186,7 @@ fn find_matching_bracket(s: &str) -> Option<usize> {
 }
 
 /// Convert a single non-code line, handling headers and inline formatting.
+#[allow(dead_code)]
 fn convert_line(line: &str) -> String {
     // ATX headers: # / ## / ### → *Heading* (bold)
     for prefix in &["### ", "## ", "# "] {
@@ -203,6 +208,7 @@ fn convert_line(line: &str) -> String {
 /// - `# Heading` / `## Heading` / `### Heading` → `*Heading*`
 /// - `[text](url)` → `[text](url)` (text part escaped, URL left as-is)
 /// - All other MarkdownV2 special characters in plain text are escaped with `\`.
+#[allow(dead_code)]
 pub fn markdown_to_telegram_v2(text: &str) -> String {
     let mut result = String::new();
     let mut in_code_block = false;
@@ -346,7 +352,11 @@ mod tests {
     fn test_fenced_code_block_with_language() {
         let input = "```rust\nfn main() {}\n```";
         let output = markdown_to_telegram_v2(input);
-        assert!(output.starts_with("```rust\n"), "language tag must be kept: {}", output);
+        assert!(
+            output.starts_with("```rust\n"),
+            "language tag must be kept: {}",
+            output
+        );
         assert!(
             output.contains("fn main() {}"),
             "function body must not be escaped: {}",
@@ -372,7 +382,11 @@ mod tests {
     fn test_inline_code_backtick_escaped() {
         let input = "This `has \\` inside` it";
         let output = markdown_to_telegram_v2(input);
-        assert!(output.contains("\\`"), "backtick in inline code must be escaped: {}", output);
+        assert!(
+            output.contains("\\`"),
+            "backtick in inline code must be escaped: {}",
+            output
+        );
     }
 
     // --- markdown_to_telegram_v2: bold ---
@@ -390,8 +404,16 @@ mod tests {
     #[test]
     fn test_bold_in_sentence() {
         let out = markdown_to_telegram_v2("This is **important** text.");
-        assert!(out.contains("*important*"), "bold must be converted: {}", out);
-        assert!(out.ends_with("\\."), "trailing dot must be escaped: {}", out);
+        assert!(
+            out.contains("*important*"),
+            "bold must be converted: {}",
+            out
+        );
+        assert!(
+            out.ends_with("\\."),
+            "trailing dot must be escaped: {}",
+            out
+        );
     }
 
     // --- markdown_to_telegram_v2: italic ---
@@ -434,8 +456,16 @@ mod tests {
     #[test]
     fn test_link_passes_through() {
         let out = markdown_to_telegram_v2("[RustFox](https://github.com)");
-        assert!(out.starts_with("[RustFox]"), "display text must be kept: {}", out);
-        assert!(out.contains("(https://github.com)"), "URL must be kept: {}", out);
+        assert!(
+            out.starts_with("[RustFox]"),
+            "display text must be kept: {}",
+            out
+        );
+        assert!(
+            out.contains("(https://github.com)"),
+            "URL must be kept: {}",
+            out
+        );
     }
 
     #[test]
@@ -453,7 +483,11 @@ mod tests {
     #[test]
     fn test_bullet_list_dash_escaped() {
         let out = markdown_to_telegram_v2("- item one");
-        assert!(out.starts_with("\\- "), "leading dash must be escaped: {}", out);
+        assert!(
+            out.starts_with("\\- "),
+            "leading dash must be escaped: {}",
+            out
+        );
     }
 
     #[test]
@@ -473,7 +507,10 @@ mod tests {
         let output = markdown_to_telegram_v2(input);
         assert!(output.contains("*Summary"), "bold must be converted");
         assert!(output.contains("```rust"), "code block must be kept");
-        assert!(output.contains("fn hello() {}"), "code body must not be over-escaped");
+        assert!(
+            output.contains("fn hello() {}"),
+            "code body must not be over-escaped"
+        );
     }
 
     #[test]
@@ -510,7 +547,10 @@ mod tests {
     fn test_bold_wrapping_chinese_text_converts_correctly() {
         let input = "**2025 年度回顧**";
         let out = markdown_to_telegram_v2(input);
-        assert!(out.starts_with('*') && out.ends_with('*'), "bold must wrap: {out}");
+        assert!(
+            out.starts_with('*') && out.ends_with('*'),
+            "bold must wrap: {out}"
+        );
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }

@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::Agent;
 use crate::platform::IncomingMessage;
+use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
 
 /// Split long messages for Telegram's 4096 char limit
@@ -282,35 +283,38 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             }
         }
 
-        // Final: flush whatever is left in the buffer
+        // Final: flush whatever is left in the buffer.
+        // Use the entity-based approach: convert completed Markdown to (plain_text, entities).
+        // This is robust for LLM output — no escaping needed, no risk of Telegram 400 errors.
+        // Intermediate streaming edits remain plain text (partial markdown is fragile).
         if !buffer.is_empty() {
-            // Convert the completed response to MarkdownV2 for rich formatting.
-            // Intermediate edits use plain text (partial markdown is fragile);
-            // the final edit/send renders the full formatted response.
-            let md_text =
-                crate::utils::telegram_markdown::markdown_to_telegram_v2(&buffer);
+            const MAX_UTF16: usize = 4090;
+            let (plain_text, entities) = markdown_to_entities(&buffer);
+            let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
 
-            if let Some(msg_id) = current_msg_id {
-                let res = stream_bot
-                    .edit_message_text(stream_chat_id, msg_id, &md_text)
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .await;
-                if res.is_err() {
-                    // Fallback: send plain text if MarkdownV2 parsing fails
+            for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
+                if i == 0 {
+                    // First chunk: edit or replace the existing in-progress message
+                    if let Some(msg_id) = current_msg_id {
+                        stream_bot
+                            .edit_message_text(stream_chat_id, msg_id, chunk_text)
+                            .entities(chunk_entities.clone())
+                            .await
+                            .ok();
+                    } else {
+                        stream_bot
+                            .send_message(stream_chat_id, chunk_text)
+                            .entities(chunk_entities.clone())
+                            .await
+                            .ok();
+                    }
+                } else {
+                    // Subsequent chunks: send as new messages
                     stream_bot
-                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .send_message(stream_chat_id, chunk_text)
+                        .entities(chunk_entities.clone())
                         .await
                         .ok();
-                }
-            } else {
-                // No intermediate message was sent — deliver the complete response now
-                let res = stream_bot
-                    .send_message(stream_chat_id, &md_text)
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .await;
-                if res.is_err() {
-                    // Fallback: send plain text if MarkdownV2 parsing fails
-                    stream_bot.send_message(stream_chat_id, &buffer).await.ok();
                 }
             }
         }
@@ -400,17 +404,17 @@ mod tests {
     }
 
     #[test]
-    fn test_final_flush_uses_markdown_v2_conversion() {
-        // Verify that the stream_handle final flush applies MarkdownV2 conversion.
-        // This is a source inspection test that ensures the conversion function is called.
+    fn test_final_flush_uses_entity_based_conversion() {
+        // The final flush must call markdown_to_entities (entity-based approach) instead of
+        // MarkdownV2 parse_mode. This is a source inspection test.
         let source = include_str!("telegram.rs");
         assert!(
-            source.contains("markdown_to_telegram_v2"),
-            "Final flush must call markdown_to_telegram_v2 for rich formatting"
+            source.contains("markdown_to_entities"),
+            "Final flush must call markdown_to_entities for robust formatting"
         );
         assert!(
-            source.contains("ParseMode::MarkdownV2"),
-            "Final flush must set MarkdownV2 parse mode"
+            source.contains("split_entities"),
+            "Final flush must call split_entities for long message handling"
         );
     }
 
