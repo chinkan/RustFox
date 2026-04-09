@@ -435,26 +435,15 @@ impl Agent {
                 );
             }
 
-            // Stream the final response via real LLM streaming when a channel is provided.
-            // chat_stream() makes a second streaming API call so the user sees tokens
-            // appear progressively as the model generates them, instead of waiting for
-            // the full response. It returns the accumulated content for memory persistence.
+            // Stream the final response directly from the already-complete content.
+            // Previously this made a second chat_stream() API call, which could return
+            // Ok(partial) if the SSE connection was dropped mid-generation (e.g. after an
+            // 11-minute kimi-k2.5 response), silently saving a truncated reply.
+            // Now we pipe the guaranteed-complete content through the channel in small
+            // chunks so Telegram still sees tokens arrive progressively.
             let final_content = if let Some(tx) = stream_token_tx {
-                match self
-                    .llm
-                    .chat_stream(&messages, &self.config.openrouter.model, tx)
-                    .await
-                {
-                    Ok(streamed) => streamed,
-                    Err(e) => {
-                        warn!(
-                            user_id = %user_id,
-                            error = %e,
-                            "LLM streaming failed — falling back to non-streamed content"
-                        );
-                        content.clone()
-                    }
-                }
+                LlmClient::stream_text(content.clone(), tx).await.ok();
+                content.clone()
             } else {
                 content.clone()
             };

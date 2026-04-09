@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -53,19 +52,6 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     max_tokens: u32,
-}
-
-/// Like ChatRequest but with stream=true for SSE streaming.
-#[derive(Debug, Serialize)]
-struct StreamRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-    max_tokens: u32,
-    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,21 +147,6 @@ fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
         None
     } else {
         Some(calls)
-    }
-}
-
-/// Parse a single SSE line and extract the text content token, if any.
-/// Returns `None` for non-data lines, `[DONE]`, empty deltas, or parse errors.
-fn parse_sse_content(line: &str) -> Option<String> {
-    let data = line.strip_prefix("data: ")?;
-    if data == "[DONE]" {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(data).ok()?;
-    let content = value.get("choices")?.get(0)?.get("delta")?.get("content")?;
-    match content {
-        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
     }
 }
 
@@ -309,93 +280,36 @@ impl LlmClient {
             .await
     }
 
-    /// Stream the final LLM response token-by-token via an mpsc channel.
-    /// Sends each content token as a separate `String` message.
-    /// Closes the sender when the stream ends or on error.
-    /// Does NOT pass tools — use this only for the final text-only response.
-    /// Returns the complete accumulated response content.
-    pub async fn chat_stream(
-        &self,
-        messages: &[ChatMessage],
-        model: &str,
+    /// Stream an already-complete `content` string through a token channel in small chunks.
+    ///
+    /// This avoids a second LLM API call when the full response is already available from a
+    /// preceding non-streaming call.  The caller still sees tokens arrive progressively,
+    /// keeping the Telegram streaming UX intact, but there is no risk of the SSE connection
+    /// being dropped mid-stream and silently returning a truncated response.
+    pub async fn stream_text(
+        content: String,
         token_tx: tokio::sync::mpsc::Sender<String>,
-    ) -> Result<String> {
-        let request = StreamRequest {
-            model: model.to_string(),
-            messages: messages.to_vec(),
-            tools: None,
-            tool_choice: None,
-            max_tokens: self.config.max_tokens,
-            stream: true,
-        };
+    ) -> Result<()> {
+        const CHUNK_SIZE: usize = 30;
 
-        let url = format!("{}/chat/completions", self.config.base_url);
+        let chars: Vec<char> = content.chars().collect();
+        let mut start = 0;
 
-        debug!(
-            url = %url,
-            model = %model,
-            message_count = messages.len(),
-            "Starting streaming request to OpenRouter"
-        );
+        while start < chars.len() {
+            let end = (start + CHUNK_SIZE).min(chars.len());
+            let chunk: String = chars[start..end].iter().collect();
+            start = end;
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send streaming request to OpenRouter")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "OpenRouter streaming API error ({}): {}",
-                status,
-                error_body
-            );
-        }
-
-        // Accumulate bytes into lines (SSE lines end with \n)
-        let mut stream = response.bytes_stream();
-        let mut line_buf = String::new();
-        let mut full_content = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk.context("Stream read error")?;
-            let text = String::from_utf8_lossy(&bytes);
-
-            for ch in text.chars() {
-                if ch == '\n' {
-                    let line = line_buf.trim().to_string();
-                    line_buf.clear();
-
-                    if let Some(token) = parse_sse_content(&line) {
-                        full_content.push_str(&token);
-                        if token_tx.send(token).await.is_err() {
-                            debug!("Stream receiver dropped — stopping early");
-                            return Ok(full_content);
-                        }
-                    }
-                } else {
-                    line_buf.push(ch);
-                }
+            if token_tx.send(chunk).await.is_err() {
+                // Receiver dropped — stop early, this is not an error
+                debug!("stream_text: receiver dropped — stopping early");
+                return Ok(());
             }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
         }
 
-        // Process any remaining buffered line
-        if !line_buf.is_empty() {
-            let line = line_buf.trim().to_string();
-            if let Some(token) = parse_sse_content(&line) {
-                full_content.push_str(&token);
-                token_tx.send(token).await.ok();
-            }
-        }
-
-        Ok(full_content)
+        Ok(())
     }
 }
 
@@ -452,55 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sse_line_data_returns_content() {
-        let line = r#"data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-        let result = parse_sse_content(line);
-        assert_eq!(result, Some("Hello".to_string()));
-    }
-
-    #[test]
-    fn test_parse_sse_line_done_returns_none() {
-        let result = parse_sse_content("data: [DONE]");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_parse_sse_line_empty_delta_returns_none() {
-        let line = r#"data: {"choices":[{"delta":{},"finish_reason":null}]}"#;
-        let result = parse_sse_content(line);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_parse_sse_line_non_data_prefix_returns_none() {
-        assert_eq!(parse_sse_content(": OPENROUTER PROCESSING"), None);
-        assert_eq!(parse_sse_content(""), None);
-        assert_eq!(parse_sse_content("event: ping"), None);
-    }
-
-    #[test]
-    fn test_parse_sse_line_null_content_returns_none() {
-        let line = r#"data: {"choices":[{"delta":{"content":null},"finish_reason":"stop"}]}"#;
-        let result = parse_sse_content(line);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_stream_request_serializes_stream_true() {
-        let req = StreamRequest {
-            model: "test-model".to_string(),
-            messages: vec![],
-            tools: None,
-            tool_choice: None,
-            max_tokens: 100,
-            stream: true,
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["stream"], true);
-        assert_eq!(json["model"], "test-model");
-    }
-
-    #[test]
     fn test_parse_kimi_tool_calls_single_call() {
         let content = " <|tool_calls_section_begin|> <|tool_call_begin|> functions.read_skill_file:5 \
             <|tool_call_argument_begin|> {\"skill_name\": \"reddit-fetcher\", \"relative_path\": \"SKILL.md\"} \
@@ -509,8 +374,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "read_skill_file");
         assert_eq!(calls[0].call_type, "function");
-        let args: serde_json::Value =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["skill_name"], "reddit-fetcher");
     }
 
@@ -553,23 +417,31 @@ mod tests {
         assert!(calls[0].id.contains("7"), "id should embed the call index");
     }
 
-    #[test]
-    fn test_chat_stream_returns_string_result() {
-        // Verify the function signature returns Result<String>, not Result<()>.
-        // This ensures accumulated content is available for memory persistence
-        // without requiring a second API call.
-        let source = include_str!("llm.rs");
+    #[tokio::test]
+    async fn test_stream_text_sends_all_content() {
+        let content = "Hello, world! This is a test of stream_text.".to_string();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        LlmClient::stream_text(content.clone(), tx).await.unwrap();
+
+        let mut received = String::new();
+        while let Ok(chunk) = rx.try_recv() {
+            received.push_str(&chunk);
+        }
+        assert_eq!(received, content);
+    }
+
+    #[tokio::test]
+    async fn test_stream_text_stops_when_receiver_dropped() {
+        let content = "A".repeat(1000);
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        // Drop the receiver immediately — stream_text should return Ok without panic
+        drop(rx);
+
+        let result = LlmClient::stream_text(content, tx).await;
         assert!(
-            source.contains("-> Result<String>"),
-            "chat_stream must return Result<String> so callers can save the content"
-        );
-        // The function must be active (not gated as dead code) — verified by absence of
-        // the dead_code allow attribute on the chat_stream function itself.
-        // We check for the specific pattern that used to gate it.
-        let dead_code_on_fn = source.contains("dead_code)]\n    pub async fn chat_stream");
-        assert!(
-            !dead_code_on_fn,
-            "chat_stream must not be marked dead_code — it is called by agent.rs"
+            result.is_ok(),
+            "stream_text must return Ok even when receiver is dropped"
         );
     }
 }

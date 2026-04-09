@@ -196,10 +196,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     if text == "/query-rewrite" {
         let current = agent
             .memory
-            .recall(
-                "settings",
-                &format!("query_rewrite_enabled_{}", user_id),
-            )
+            .recall("settings", &format!("query_rewrite_enabled_{}", user_id))
             .await
             .unwrap_or(None);
         // When no per-user setting exists, fall back to the global config default.

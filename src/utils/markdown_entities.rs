@@ -153,7 +153,10 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                                 if let Ok(url) = reqwest::Url::parse(&url_str) {
                                     entities.push(MessageEntity::text_link(url, start, length));
                                 } else {
-                                    warn!("markdown_to_entities: invalid link URL ignored: {}", url_str);
+                                    warn!(
+                                        "markdown_to_entities: invalid link URL ignored: {}",
+                                        url_str
+                                    );
                                 }
                             }
                         }
