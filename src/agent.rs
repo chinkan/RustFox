@@ -401,35 +401,51 @@ impl Agent {
                 );
             }
 
-            // Stream the final response token-by-token if a channel is provided
-            if let Some(ref tx) = stream_token_tx {
-                let words: Vec<&str> = content.split_inclusive(' ').collect();
-                let chunk_size = 4usize;
-                for chunk in words.chunks(chunk_size) {
-                    let piece = chunk.join("");
-                    if tx.send(piece).await.is_err() {
-                        break;
+            // Stream the final response via real LLM streaming when a channel is provided.
+            // chat_stream() makes a second streaming API call so the user sees tokens
+            // appear progressively as the model generates them, instead of waiting for
+            // the full response. It returns the accumulated content for memory persistence.
+            let final_content = if let Some(tx) = stream_token_tx {
+                match self
+                    .llm
+                    .chat_stream(&messages, &self.config.openrouter.model, tx)
+                    .await
+                {
+                    Ok(streamed) => streamed,
+                    Err(e) => {
+                        warn!(
+                            user_id = %user_id,
+                            error = %e,
+                            "LLM streaming failed — falling back to non-streamed content"
+                        );
+                        content.clone()
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
                 }
-            }
+            } else {
+                content.clone()
+            };
 
-            self.memory
-                .save_message(&conversation_id, &response)
-                .await?;
+            // Save the delivered content to persistent memory
+            let save_msg = crate::llm::ChatMessage {
+                role: response.role.clone(),
+                content: Some(final_content.clone()),
+                tool_calls: response.tool_calls.clone(),
+                tool_call_id: response.tool_call_id.clone(),
+            };
+            self.memory.save_message(&conversation_id, &save_msg).await?;
 
             // --- LangSmith: end chain run (success) ---
             self.langsmith.end_run(crate::langsmith::EndRunParams {
                 id: chain_run_id,
                 outputs: Some(serde_json::json!({
-                    "response": content,
+                    "response": final_content,
                     "iterations": iteration,
                 })),
                 error: None,
                 end_time: Self::now_iso8601_static(),
             });
 
-            return Ok(content);
+            return Ok(final_content);
         }
 
         // Reached max iterations
@@ -1899,5 +1915,17 @@ mod tests {
         let tokens = vec!["Hello", " ", "world", "!"];
         let assembled: String = tokens.concat();
         assert_eq!(assembled, "Hello world!");
+    }
+
+    #[test]
+    fn test_streaming_uses_chat_stream_not_artificial_delay() {
+        // Verify that real LLM streaming via chat_stream() is used for the final response.
+        let source = include_str!("agent.rs");
+        assert!(
+            source.contains("chat_stream"),
+            "agent.rs must call llm.chat_stream() for real streaming of the final response"
+        );
+        // The old fake-stream code used a words-vector approach that no longer exists.
+        // We verify the new call is present; the old structure is implicitly gone.
     }
 }

@@ -136,3 +136,21 @@ directory = "skills"
 # args = ["-y", "@brave/brave-search-mcp-server"]
 # [mcp_servers.env]
 # BRAVE_API_KEY = "your-brave-api-key"
+
+# ── HTTP-based MCP Servers (Streamable HTTP transport) ────────────────────────
+# These servers are reached over HTTPS and do not require a local command.
+# Use `url` instead of `command`; optionally set `auth_token` for Bearer auth.
+
+# Example: Exa AI web search (https://mcp.exa.ai)
+# Get your API key at https://dashboard.exa.ai/api-keys
+#
+# Option A — Bearer token (recommended; keeps the key out of URLs and logs)
+# [[mcp_servers]]
+# name = "exa"
+# url = "https://mcp.exa.ai/mcp"
+# auth_token = "your-exa-api-key"
+#
+# Option B — Inline API key in URL (simpler; key will appear in logs)
+# [[mcp_servers]]
+# name = "exa"
+# url = "https://mcp.exa.ai/mcp?exaApiKey=your-exa-api-key"

@@ -124,6 +124,14 @@ struct RawMcpServer {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    // `url` and `auth_token` are parsed but not used by the setup wizard;
+    // they are accepted so configs with HTTP MCP servers load without error.
+    #[serde(default)]
+    #[allow(dead_code)]
+    url: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    auth_token: Option<String>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────────
