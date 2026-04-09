@@ -66,6 +66,58 @@ struct Choice {
     finish_reason: Option<String>,
 }
 
+/// Sanitize a JSON Schema parameter object so it is accepted by strict providers
+/// (e.g. Google Gemini via OpenRouter).
+///
+/// Gemini enforces that every entry in the `required` array corresponds to a key
+/// that is actually defined in `properties`.  Some MCP servers return schemas where
+/// `required` contains field names that do not exist in `properties` — this causes a
+/// 400 INVALID_ARGUMENT from Google AI Studio.  Additionally, Gemini does not accept
+/// `additionalProperties`, `$schema`, `$defs`, or `$ref`.
+///
+/// This function mutates the schema in-place and recurses into `properties` and
+/// `items` sub-schemas.
+fn sanitize_parameters(schema: &mut serde_json::Value) {
+    let obj = match schema.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Remove fields that Gemini rejects.
+    obj.remove("additionalProperties");
+    obj.remove("$schema");
+    obj.remove("$defs");
+    obj.remove("$ref");
+
+    // Collect the set of property names that are actually defined.
+    let known_props: std::collections::HashSet<String> = obj
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // Filter `required` so it only lists names that appear in `properties`.
+    if let Some(required) = obj.get_mut("required") {
+        if let Some(arr) = required.as_array_mut() {
+            arr.retain(|v| v.as_str().is_some_and(|s| known_props.contains(s)));
+        }
+    }
+
+    // Recurse into property sub-schemas.
+    if let Some(properties) = obj.get_mut("properties") {
+        if let Some(props_obj) = properties.as_object_mut() {
+            for prop_schema in props_obj.values_mut() {
+                sanitize_parameters(prop_schema);
+            }
+        }
+    }
+
+    // Recurse into array item schema.
+    if let Some(items) = obj.get_mut("items") {
+        sanitize_parameters(items);
+    }
+}
+
 /// Parse Kimi's native tool-call text format and convert it into `ToolCall` structs.
 ///
 /// Some models (e.g. `moonshotai/kimi-k2.5`) occasionally leak their internal
@@ -174,7 +226,15 @@ impl LlmClient {
         let tools_param = if tools.is_empty() {
             None
         } else {
-            Some(tools.to_vec())
+            let sanitized = tools
+                .iter()
+                .map(|t| {
+                    let mut t = t.clone();
+                    sanitize_parameters(&mut t.function.parameters);
+                    t
+                })
+                .collect();
+            Some(sanitized)
         };
 
         let tool_choice = if tools_param.is_some() {
@@ -443,5 +503,106 @@ mod tests {
             result.is_ok(),
             "stream_text must return Ok even when receiver is dropped"
         );
+    }
+
+    #[test]
+    fn test_sanitize_parameters_removes_undefined_required_entries() {
+        // Google Gemini rejects required entries not present in properties.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            },
+            "required": ["foo", "bar"]  // "bar" is not in properties
+        });
+        sanitize_parameters(&mut schema);
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "foo");
+    }
+
+    #[test]
+    fn test_sanitize_parameters_removes_additional_properties() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        });
+        sanitize_parameters(&mut schema);
+        assert!(schema.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_parameters_removes_schema_metadata_fields() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$defs": {},
+            "$ref": "#/$defs/SomeType",
+            "properties": {}
+        });
+        sanitize_parameters(&mut schema);
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("$defs").is_none());
+        assert!(schema.get("$ref").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_parameters_recurses_into_properties() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "string" }
+                    },
+                    "required": ["x", "missing"],
+                    "additionalProperties": true
+                }
+            }
+        });
+        sanitize_parameters(&mut schema);
+        let nested = &schema["properties"]["nested"];
+        let required = nested["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "x");
+        assert!(nested.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_parameters_recurses_into_array_items() {
+        let mut schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "a": { "type": "number" }
+                },
+                "required": ["a", "b"],
+                "additionalProperties": false
+            }
+        });
+        sanitize_parameters(&mut schema);
+        let items = &schema["items"];
+        let required = items["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "a");
+        assert!(items.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_parameters_valid_schema_unchanged() {
+        // A schema that is already valid should pass through unmodified.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path" }
+            },
+            "required": ["path"]
+        });
+        let original = schema.clone();
+        sanitize_parameters(&mut schema);
+        assert_eq!(schema, original);
     }
 }
