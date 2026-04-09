@@ -43,26 +43,35 @@ pub fn friendly_tool_name(name: &str) -> String {
 
     // 2. MCP tools: mcp_<server>_<function>
     if let Some(rest) = label.strip_prefix("mcp_") {
-        // Find the server name — everything up to the second underscore-separated segment
+        // Known server names (with both hyphen and underscore variants)
+        // Sorted by length descending to match longest first (handles server names with underscores)
+        let known_servers = [
+            ("google-workspace", "📧"),
+            ("google_workspace", "📧"),
+            ("brave-search", "🔍"),
+            ("brave_search", "🔍"),
+            ("puppeteer", "🌐"),
+            ("filesystem", "📁"),
+            ("github", "🐙"),
+            ("sqlite", "🗄️"),
+            ("threads", "🧵"),
+            ("fetch", "🌐"),
+            ("git", "📦"),
+        ];
+
+        // Try to match against known server names
+        for (server_name, icon) in &known_servers {
+            if let Some(func) = rest.strip_prefix(&format!("{}_", server_name)) {
+                let human = humanise_function_name(func);
+                return format!("{} {}", icon, human);
+            }
+        }
+
+        // Fallback: split on first underscore (for unknown servers)
         if let Some(sep) = rest.find('_') {
-            let server = &rest[..sep];
             let func = &rest[sep + 1..];
-
-            let icon = match server {
-                "google-workspace" | "google_workspace" => "📧",
-                "brave-search" | "brave_search" => "🔍",
-                "fetch" => "🌐",
-                "git" => "📦",
-                "threads" => "🧵",
-                "filesystem" => "📁",
-                "github" => "🐙",
-                "sqlite" => "🗄️",
-                "puppeteer" => "🌐",
-                _ => "🔧",
-            };
-
             let human = humanise_function_name(func);
-            return format!("{} {}", icon, human);
+            return format!("🔧 {}", human);
         }
     }
 
