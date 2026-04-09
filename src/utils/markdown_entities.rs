@@ -50,50 +50,52 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
     // We push on Start and pop+emit on End.
     let mut stack: Vec<(StackTag, usize)> = Vec::new();
 
+    // Track UTF-16 length incrementally to avoid O(n²) rescanning
+    let mut plain_utf16_len = 0usize;
+
     for event in parser {
         match event {
             // --- Text content ---
             Event::Text(text) => {
                 plain.push_str(&text);
+                plain_utf16_len += text.encode_utf16().count();
             }
             Event::Code(text) => {
                 // Inline code: emit as a Code entity
-                let start_utf16 = plain.encode_utf16().count();
+                let start_utf16 = plain_utf16_len;
                 plain.push_str(&text);
-                let end_utf16 = plain.encode_utf16().count();
-                let length = end_utf16 - start_utf16;
+                let text_utf16_len = text.encode_utf16().count();
+                plain_utf16_len += text_utf16_len;
+                let length = text_utf16_len;
                 if length > 0 {
                     entities.push(MessageEntity::code(start_utf16, length));
                 }
             }
             Event::SoftBreak => {
                 plain.push('\n');
+                plain_utf16_len += 1;
             }
             Event::HardBreak => {
                 plain.push('\n');
+                plain_utf16_len += 1;
             }
 
             // --- Block / inline formatting starts ---
             Event::Start(tag) => match tag {
                 Tag::Strong => {
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::Bold, utf16_off));
+                    stack.push((StackTag::Bold, plain_utf16_len));
                 }
                 Tag::Emphasis => {
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::Italic, utf16_off));
+                    stack.push((StackTag::Italic, plain_utf16_len));
                 }
                 Tag::Strikethrough => {
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::Strikethrough, utf16_off));
+                    stack.push((StackTag::Strikethrough, plain_utf16_len));
                 }
                 Tag::Link { dest_url, .. } => {
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::Link(dest_url.to_string()), utf16_off));
+                    stack.push((StackTag::Link(dest_url.to_string()), plain_utf16_len));
                 }
                 Tag::Heading { .. } => {
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::Heading, utf16_off));
+                    stack.push((StackTag::Heading, plain_utf16_len));
                 }
                 Tag::CodeBlock(kind) => {
                     let lang = match &kind {
@@ -107,8 +109,7 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         }
                         CodeBlockKind::Indented => None,
                     };
-                    let utf16_off = plain.encode_utf16().count();
-                    stack.push((StackTag::CodeBlock(lang), utf16_off));
+                    stack.push((StackTag::CodeBlock(lang), plain_utf16_len));
                 }
                 // Paragraph, list, etc. — no entity emitted on start.
                 _ => {}
@@ -119,8 +120,7 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                 match tag_end {
                     TagEnd::Strong => {
                         if let Some((StackTag::Bold, start)) = stack.pop() {
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 entities.push(MessageEntity::bold(start, length));
                             }
@@ -128,8 +128,7 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     }
                     TagEnd::Emphasis => {
                         if let Some((StackTag::Italic, start)) = stack.pop() {
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 entities.push(MessageEntity::italic(start, length));
                             }
@@ -137,8 +136,7 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     }
                     TagEnd::Strikethrough => {
                         if let Some((StackTag::Strikethrough, start)) = stack.pop() {
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 entities.push(MessageEntity::strikethrough(start, length));
                             }
@@ -146,8 +144,7 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     }
                     TagEnd::Link => {
                         if let Some((StackTag::Link(url_str), start)) = stack.pop() {
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 // Parse the URL; if invalid, skip the entity (text is still kept)
                                 if let Ok(url) = reqwest::Url::parse(&url_str) {
@@ -163,35 +160,38 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     }
                     TagEnd::Heading(_) => {
                         if let Some((StackTag::Heading, start)) = stack.pop() {
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 entities.push(MessageEntity::bold(start, length));
                             }
                         }
                         // Headings are block elements — add a newline after
                         plain.push('\n');
+                        plain_utf16_len += 1;
                     }
                     TagEnd::CodeBlock => {
                         if let Some((StackTag::CodeBlock(lang), start)) = stack.pop() {
                             // Trim trailing newline added by pulldown-cmark inside the block
                             if plain.ends_with('\n') {
                                 plain.pop();
+                                plain_utf16_len -= 1;
                             }
-                            let end_utf16 = plain.encode_utf16().count();
-                            let length = end_utf16.saturating_sub(start);
+                            let length = plain_utf16_len.saturating_sub(start);
                             if length > 0 {
                                 entities.push(MessageEntity::pre(lang, start, length));
                             }
                         }
                         plain.push('\n');
+                        plain_utf16_len += 1;
                     }
                     TagEnd::Paragraph => {
-                        // Add blank line after each paragraph
-                        plain.push('\n');
+                        // Add blank line after each paragraph (double newline to preserve paragraph breaks)
+                        plain.push_str("\n\n");
+                        plain_utf16_len += 2;
                     }
                     TagEnd::Item => {
                         plain.push('\n');
+                        plain_utf16_len += 1;
                     }
                     _ => {}
                 }
@@ -202,9 +202,10 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
         }
     }
 
-    // Trim a single trailing newline that pulldown-cmark often adds
-    if plain.ends_with('\n') {
+    // Trim trailing newlines (at most two, from the last paragraph's \n\n)
+    while plain.ends_with('\n') && plain_utf16_len > 0 {
         plain.pop();
+        plain_utf16_len -= 1;
     }
 
     (plain, entities)
@@ -248,12 +249,23 @@ pub fn split_entities(
 
         // Find the byte position corresponding to chunk_utf16_end_ideal (or the last
         // char boundary at or before it).
-        let split_utf16 = find_split_point(
+        let mut split_utf16 = find_split_point(
             text,
             &char_utf16_boundaries,
             chunk_utf16_start,
             chunk_utf16_end_ideal,
         );
+
+        // Ensure progress even if `find_split_point` cannot find a boundary inside
+        // the requested window (for example, when `max_utf16_len` is smaller than
+        // a single character's UTF-16 length, such as an emoji/surrogate pair).
+        if split_utf16 <= chunk_utf16_start {
+            split_utf16 = char_utf16_boundaries
+                .iter()
+                .map(|&(_, utf16)| utf16)
+                .find(|&utf16| utf16 > chunk_utf16_start)
+                .unwrap_or(total_utf16);
+        }
 
         // Convert UTF-16 offsets back to byte offsets for slicing
         let start_byte = utf16_to_byte(&char_utf16_boundaries, chunk_utf16_start);
