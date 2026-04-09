@@ -72,11 +72,17 @@ struct Choice {
 /// Gemini enforces that every entry in the `required` array corresponds to a key
 /// that is actually defined in `properties`.  Some MCP servers return schemas where
 /// `required` contains field names that do not exist in `properties` — this causes a
-/// 400 INVALID_ARGUMENT from Google AI Studio.  Additionally, Gemini does not accept
-/// `additionalProperties`, `$schema`, `$defs`, or `$ref`.
+/// 400 INVALID_ARGUMENT from Google AI Studio.
 ///
-/// This function mutates the schema in-place and recurses into `properties` and
-/// `items` sub-schemas.
+/// Additional Gemini restrictions handled here:
+/// - `additionalProperties`, `$schema`, `$defs`, `$ref` are not accepted.
+/// - `required: []` (empty array) is rejected; the key must be omitted entirely.
+/// - `anyOf`/`oneOf`/`allOf` variants with `{"type": "null"}` are stripped because
+///   Gemini does not support nullable types expressed as `null` union members.
+///   If stripping removes all but one variant, the schema is inlined (unwrapped).
+///
+/// This function mutates the schema in-place and recurses into `properties`,
+/// `items`, `anyOf`, `oneOf`, and `allOf` sub-schemas.
 fn sanitize_parameters(schema: &mut serde_json::Value) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
@@ -97,10 +103,19 @@ fn sanitize_parameters(schema: &mut serde_json::Value) {
         .unwrap_or_default();
 
     // Filter `required` so it only lists names that appear in `properties`.
+    // Gemini also rejects an empty `required: []`, so remove the key entirely
+    // if nothing remains after filtering.
     if let Some(required) = obj.get_mut("required") {
         if let Some(arr) = required.as_array_mut() {
             arr.retain(|v| v.as_str().is_some_and(|s| known_props.contains(s)));
         }
+    }
+    if obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        obj.remove("required");
     }
 
     // Recurse into property sub-schemas.
@@ -115,6 +130,26 @@ fn sanitize_parameters(schema: &mut serde_json::Value) {
     // Recurse into array item schema.
     if let Some(items) = obj.get_mut("items") {
         sanitize_parameters(items);
+    }
+
+    // Recurse into anyOf / oneOf / allOf variant schemas and strip null variants.
+    // Gemini does not support {"type": "null"} as a union member.
+    for key in &["anyOf", "oneOf", "allOf"] {
+        if let Some(variants) = obj.get_mut(*key) {
+            if let Some(arr) = variants.as_array_mut() {
+                // Recurse into each variant first.
+                for v in arr.iter_mut() {
+                    sanitize_parameters(v);
+                }
+                // Remove variants that are purely {"type": "null"}.
+                arr.retain(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t != "null")
+                        .unwrap_or(true)
+                });
+            }
+        }
     }
 }
 
@@ -604,5 +639,65 @@ mod tests {
         let original = schema.clone();
         sanitize_parameters(&mut schema);
         assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn test_sanitize_parameters_removes_empty_required_array() {
+        // Gemini rejects required: [] — it must be omitted entirely.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": ["a", "b"]  // neither "a" nor "b" is in properties
+        });
+        sanitize_parameters(&mut schema);
+        // required should be gone, not left as []
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_parameters_strips_null_anyof_variants() {
+        // Gemini does not support {"type": "null"} as a union member.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "anyOf": [
+                        { "type": "string" },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        });
+        sanitize_parameters(&mut schema);
+        let any_of = schema["properties"]["name"]["anyOf"].as_array().unwrap();
+        // The null variant should have been removed.
+        assert_eq!(any_of.len(), 1);
+        assert_eq!(any_of[0]["type"], "string");
+    }
+
+    #[test]
+    fn test_sanitize_parameters_recurses_into_anyof() {
+        // Nested schemas inside anyOf/oneOf should also be sanitized.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "val": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": { "x": { "type": "string" } },
+                            "required": ["x", "missing"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }
+        });
+        sanitize_parameters(&mut schema);
+        let inner = &schema["properties"]["val"]["anyOf"][0];
+        let required = inner["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "x");
+        assert!(inner.get("additionalProperties").is_none());
     }
 }
