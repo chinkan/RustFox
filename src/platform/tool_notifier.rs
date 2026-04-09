@@ -17,6 +17,85 @@ pub enum ToolEvent {
     Completed { name: String, success: bool },
 }
 
+/// Convert a technical tool name to a human-readable label with an emoji prefix.
+///
+/// Priority:
+/// 1. Exact match for known built-in tools.
+/// 2. MCP tools prefixed with `mcp_<server>_` — server icon + humanised function name.
+/// 3. Fallback — replace underscores with spaces and capitalise the first letter.
+pub fn friendly_tool_name(name: &str) -> String {
+    // 1. Built-in tools — exact matches
+    let label = match name {
+        "read_file" => return "📄 Reading a file".to_string(),
+        "write_file" => return "✏️ Writing a file".to_string(),
+        "list_files" => return "📁 Listing files".to_string(),
+        "execute_command" => return "💻 Running a command".to_string(),
+        "schedule_task" => return "🗓️ Scheduling a task".to_string(),
+        "list_scheduled_tasks" => return "🗓️ Checking scheduled tasks".to_string(),
+        "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
+        "invoke_agent" | "invoke_subagent" => return "🤖 Calling a specialist".to_string(),
+        "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
+        "read_skill_file" | "write_skill_file" => return "📖 Reading skill".to_string(),
+        "reload_skills" | "reload_agents" => return "🔄 Reloading".to_string(),
+        "read_agent_file" | "write_agent_file" => return "🤖 Agent file".to_string(),
+        _ => name,
+    };
+
+    // 2. MCP tools: mcp_<server>_<function>
+    if let Some(rest) = label.strip_prefix("mcp_") {
+        // Find the server name — everything up to the second underscore-separated segment
+        if let Some(sep) = rest.find('_') {
+            let server = &rest[..sep];
+            let func = &rest[sep + 1..];
+
+            let icon = match server {
+                "google-workspace" | "google_workspace" => "📧",
+                "brave-search" | "brave_search" => "🔍",
+                "fetch" => "🌐",
+                "git" => "📦",
+                "threads" => "🧵",
+                "filesystem" => "📁",
+                "github" => "🐙",
+                "sqlite" => "🗄️",
+                "puppeteer" => "🌐",
+                _ => "🔧",
+            };
+
+            let human = humanise_function_name(func);
+            return format!("{} {}", icon, human);
+        }
+    }
+
+    // 3. Fallback — snake_case → "Snake case"
+    let human = humanise_function_name(label);
+    format!("🔧 {}", human)
+}
+
+/// Convert a `snake_case_function_name` to a human-readable sentence.
+/// Strips common verbose verb prefixes and capitalises the first letter.
+fn humanise_function_name(func: &str) -> String {
+    // Strip common verbose prefixes that don't add meaning to the user
+    let stripped = func
+        .strip_prefix("query_")
+        .or_else(|| func.strip_prefix("search_"))
+        .or_else(|| func.strip_prefix("get_"))
+        .or_else(|| func.strip_prefix("list_"))
+        .unwrap_or(func);
+
+    // Replace underscores with spaces
+    let spaced = stripped.replace('_', " ");
+
+    // Capitalise first letter
+    let mut chars = spaced.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let upper: String = first.to_uppercase().collect();
+            upper + chars.as_str()
+        }
+    }
+}
+
 /// Formats `args_preview` for display: truncate to 60 chars, strip outer braces for common single-arg calls.
 pub fn format_args_preview(args_json: &str) -> String {
     // Try to extract a single-value preview for readability
@@ -30,7 +109,7 @@ pub fn format_args_preview(args_json: &str) -> String {
                         other => other.to_string(),
                     };
                     let truncated = crate::utils::strings::truncate_chars(&s, 60);
-                    return format!("\"{}\"", truncated);
+                    return truncated;
                 }
             }
         }
@@ -42,10 +121,11 @@ pub fn format_args_preview(args_json: &str) -> String {
 /// Build the one-line tool status string streamed into the Telegram message
 /// while the tool is running. Ends with `\n` so multiple calls stack visibly.
 pub fn format_tool_status_line(name: &str, args_preview: &str) -> String {
+    let label = friendly_tool_name(name);
     if args_preview.is_empty() {
-        format!("⏳ {}\n", name)
+        format!("⏳ {}\n", label)
     } else {
-        format!("⏳ {}({})\n", name, args_preview)
+        format!("⏳ {}: {}\n", label, args_preview)
     }
 }
 
@@ -134,7 +214,12 @@ impl ToolCallNotifier {
             } else {
                 "❌"
             };
-            s.push_str(&format!("\n{} {}({})", icon, name, args_preview));
+            let label = friendly_tool_name(name);
+            if args_preview.is_empty() {
+                s.push_str(&format!("\n{} {}", icon, label));
+            } else {
+                s.push_str(&format!("\n{} {}: {}", icon, label, args_preview));
+            }
         }
         s
     }
@@ -165,7 +250,12 @@ impl ToolCallNotifier {
         let mut s = String::from("🔧 Tools used:");
         for (name, args_preview, _done, success) in &self.tool_log {
             let icon = if *success { "✅" } else { "❌" };
-            s.push_str(&format!("\n{} {}({})", icon, name, args_preview));
+            let label = friendly_tool_name(name);
+            if args_preview.is_empty() {
+                s.push_str(&format!("\n{} {}", icon, label));
+            } else {
+                s.push_str(&format!("\n{} {}: {}", icon, label, args_preview));
+            }
         }
         s
     }
@@ -179,7 +269,8 @@ mod tests {
     fn test_format_args_preview_single_string_arg() {
         let json = r#"{"query":"Docker setup preferences"}"#;
         let preview = format_args_preview(json);
-        assert_eq!(preview, r#""Docker setup preferences""#);
+        // Quotes are no longer added — value is returned directly
+        assert_eq!(preview, "Docker setup preferences");
     }
 
     #[test]
@@ -188,7 +279,7 @@ mod tests {
         let json = format!(r#"{{"query":"{}"}}"#, long);
         let preview = format_args_preview(&json);
         assert!(preview.len() <= 70, "Preview should be truncated");
-        assert!(preview.ends_with("...\"") || preview.contains("..."));
+        assert!(preview.contains("..."));
     }
 
     #[test]
@@ -209,93 +300,192 @@ mod tests {
 
     #[test]
     fn test_format_final_includes_all_tools() {
-        // Build a notifier-like tool_log directly and call format_final via a helper.
-        // format_final is private — test it through a thin wrapper.
+        // Build a notifier-like tool_log directly and call format_final via a helper
+        // that mirrors the real implementation using friendly_tool_name.
         fn fake_format_final(tool_log: &[(String, String, bool, bool)]) -> String {
             let mut s = String::from("🔧 Tools used:");
             for (name, args_preview, _done, success) in tool_log {
                 let icon = if *success { "✅" } else { "❌" };
-                s.push_str(&format!("\n{} {}({})", icon, name, args_preview));
+                let label = friendly_tool_name(name);
+                if args_preview.is_empty() {
+                    s.push_str(&format!("\n{} {}", icon, label));
+                } else {
+                    s.push_str(&format!("\n{} {}: {}", icon, label, args_preview));
+                }
             }
             s
         }
 
         let log = vec![
-            (
-                "search".to_string(),
-                r#""Docker setup""#.to_string(),
-                true,
-                true,
-            ),
+            ("search".to_string(), "Docker setup".to_string(), true, true),
             (
                 "read_file".to_string(),
-                r#""/etc/config""#.to_string(),
+                "/etc/config".to_string(),
                 true,
                 false,
             ),
         ];
         let result = fake_format_final(&log);
         assert!(result.contains("🔧 Tools used:"), "header missing");
-        assert!(result.contains("✅ search"), "successful tool icon wrong");
-        assert!(result.contains("❌ read_file"), "failed tool icon wrong");
+        assert!(result.contains("✅"), "successful tool icon wrong");
+        assert!(result.contains("❌"), "failed tool icon wrong");
         assert!(result.contains("Docker setup"), "args missing for search");
         assert!(
             !result.contains("⏳ Working"),
             "should not contain in-progress text"
         );
+        // read_file should be humanised
+        assert!(
+            result.contains("📄 Reading a file"),
+            "read_file must be humanised"
+        );
     }
 
     #[test]
     fn test_format_args_preview_single_arg_with_chinese() {
-        // Tests the single-arg extraction path with a Chinese string.
-        // This particular string's byte-60 happens to fall on a valid UTF-8 boundary,
-        // so it currently passes — after the UTF-8 truncation fix it will continue to pass.
         let long_chinese =
             "每日上午10點 arXiv AI 論文摘要（香港時間）很長的標題讓我們繼續寫下去直到超過六十個字";
         let json = format!(r#"{{"query":"{}"}}"#, long_chinese);
         let preview = format_args_preview(&json);
-        assert!(
-            preview.contains("\""),
-            "should be quoted single-arg preview"
-        );
+        assert!(!preview.is_empty());
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
     }
 
     #[test]
-    fn test_format_tool_status_line_shows_hourglass_and_name() {
-        let line = format_tool_status_line("web_search", r#""Docker setup""#);
+    fn test_format_tool_status_line_shows_hourglass_and_friendly_name() {
+        // web_search has no built-in mapping → falls through to 🔧 fallback
+        let line = format_tool_status_line("web_search", "Docker setup");
         assert!(
             line.starts_with("⏳"),
             "status line must start with hourglass: {line}"
         );
-        assert!(line.contains("web_search"), "status line must include tool name: {line}");
         assert!(
             line.contains("Docker setup"),
             "status line must include args preview: {line}"
         );
+        assert!(
+            line.ends_with('\n'),
+            "status line must end with newline: {line}"
+        );
+    }
+
+    #[test]
+    fn test_format_tool_status_line_builtin_tool_humanised() {
+        let line = format_tool_status_line("read_file", "/etc/config");
+        assert!(
+            line.contains("📄 Reading a file"),
+            "built-in tool must be humanised: {line}"
+        );
+        assert!(line.contains("/etc/config"), "args must be shown: {line}");
+        assert!(line.ends_with('\n'), "must end with newline: {line}");
     }
 
     #[test]
     fn test_format_tool_status_line_ends_with_newline() {
-        let line = format_tool_status_line("read_file", r#""/etc/config""#);
-        assert!(line.ends_with('\n'), "status line must end with newline for streaming: {line}");
+        let line = format_tool_status_line("read_file", "/etc/config");
+        assert!(
+            line.ends_with('\n'),
+            "status line must end with newline for streaming: {line}"
+        );
     }
 
     #[test]
     fn test_format_tool_status_line_empty_args() {
-        let line = format_tool_status_line("list_tools", "");
-        assert!(!line.is_empty(), "status line must not be empty even with no args");
-        assert!(line.contains("list_tools"));
+        let line = format_tool_status_line("list_files", "");
+        assert!(
+            !line.is_empty(),
+            "status line must not be empty even with no args"
+        );
+        assert!(
+            line.contains("📁 Listing files"),
+            "list_files must be humanised: {line}"
+        );
     }
 
     #[test]
     fn test_format_args_preview_multi_arg_chinese_truncates_safely() {
-        // Multi-arg JSON falls through to the raw-JSON fallback path.
-        // Verifies that UTF-8 char boundaries are respected when truncating
-        // so that multi-byte characters (e.g. '香') are not split mid-byte.
         let args = r#"{"description":"每日上午10點 arXiv AI 論文摘要（香港時間）","prompt":"使用 arxiv-daily-briefing skill","trigger_type":"recurring","trigger_value":"0 0 2 * * *"}"#;
         let preview = format_args_preview(args);
         assert!(!preview.is_empty());
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+    }
+
+    // --- friendly_tool_name ---
+
+    #[test]
+    fn test_friendly_tool_name_builtin_read_file() {
+        assert_eq!(friendly_tool_name("read_file"), "📄 Reading a file");
+    }
+
+    #[test]
+    fn test_friendly_tool_name_builtin_execute_command() {
+        assert_eq!(
+            friendly_tool_name("execute_command"),
+            "💻 Running a command"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_builtin_invoke_agent() {
+        assert_eq!(
+            friendly_tool_name("invoke_agent"),
+            "🤖 Calling a specialist"
+        );
+        assert_eq!(
+            friendly_tool_name("invoke_subagent"),
+            "🤖 Calling a specialist"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_mcp_brave_search() {
+        let name = "mcp_brave-search_search_web";
+        let friendly = friendly_tool_name(name);
+        assert!(friendly.contains("🔍"), "brave-search icon: {friendly}");
+        assert!(
+            !friendly.contains("mcp_"),
+            "should not contain raw prefix: {friendly}"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_mcp_google_workspace() {
+        let name = "mcp_google-workspace_query_gmail_emails";
+        let friendly = friendly_tool_name(name);
+        assert!(friendly.contains("📧"), "google-workspace icon: {friendly}");
+    }
+
+    #[test]
+    fn test_friendly_tool_name_mcp_unknown_server() {
+        let name = "mcp_myserver_do_something";
+        let friendly = friendly_tool_name(name);
+        assert!(
+            friendly.contains("🔧"),
+            "unknown server must use fallback icon: {friendly}"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_fallback_snake_case() {
+        let friendly = friendly_tool_name("some_unknown_tool");
+        assert!(
+            friendly.starts_with("🔧"),
+            "unknown tool must use 🔧: {friendly}"
+        );
+        assert!(
+            friendly.contains("Some unknown tool"),
+            "should humanise snake_case: {friendly}"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_strips_verb_prefixes() {
+        // "query_" prefix is stripped in MCP humanisation
+        let name = "mcp_fetch_query_url";
+        let friendly = friendly_tool_name(name);
+        assert!(
+            !friendly.contains("query_"),
+            "verb prefix should be stripped: {friendly}"
+        );
     }
 }

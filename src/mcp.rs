@@ -3,9 +3,8 @@ use rmcp::{
     model::{CallToolRequestParams, Tool as McpTool},
     service::RunningService,
     transport::{
-        ConfigureCommandExt, StreamableHttpClientTransport,
-        TokioChildProcess,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
+        StreamableHttpClientTransport, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -52,26 +51,19 @@ impl McpManager {
             .as_deref()
             .context("HTTP MCP server config missing 'url'")?;
 
-        info!(
-            "Connecting to HTTP MCP server '{}': {}",
-            config.name, url
-        );
+        info!("Connecting to HTTP MCP server '{}': {}", config.name, url);
 
-        let transport_config =
-            StreamableHttpClientTransportConfig::with_uri(url.to_string())
-                .auth_header(config.auth_token.clone().unwrap_or_default());
+        let transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
+            .auth_header(config.auth_token.clone().unwrap_or_default());
 
         let transport = StreamableHttpClientTransport::from_config(transport_config);
 
         // `()` implements rmcp's `ServiceExt` as the default no-op client handler;
         // calling `.serve(transport)` on it returns a `RunningService` connected
         // to the given transport without any application-level request handling.
-        let client = ()
-            .serve(transport)
-            .await
-            .with_context(|| {
-                format!("Failed to initialize HTTP MCP connection: {}", config.name)
-            })?;
+        let client = ().serve(transport).await.with_context(|| {
+            format!("Failed to initialize HTTP MCP connection: {}", config.name)
+        })?;
 
         self.register_client(config, client).await
     }
