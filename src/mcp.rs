@@ -63,6 +63,9 @@ impl McpManager {
 
         let transport = StreamableHttpClientTransport::from_config(transport_config);
 
+        // `()` implements rmcp's `ServiceExt` as the default no-op client handler;
+        // calling `.serve(transport)` on it returns a `RunningService` connected
+        // to the given transport without any application-level request handling.
         let client = ()
             .serve(transport)
             .await
@@ -99,6 +102,7 @@ impl McpManager {
         }))
         .with_context(|| format!("Failed to start MCP server process: {}", config.name))?;
 
+        // `()` is rmcp's default no-op client handler; see `connect_http` for details.
         let client = ()
             .serve(transport)
             .await
