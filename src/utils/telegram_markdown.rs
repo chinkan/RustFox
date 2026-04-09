@@ -38,7 +38,7 @@ fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
     let bytes = haystack.as_bytes();
     let n = needle.len();
     while i + n <= bytes.len() {
-        if &haystack[i..i + n] == needle {
+        if haystack.is_char_boundary(i + n) && &haystack[i..i + n] == needle {
             // Check it's not preceded by backslash (simple check)
             if i == 0 || bytes[i - 1] != b'\\' {
                 return Some(i);
@@ -493,5 +493,24 @@ mod tests {
     #[test]
     fn test_empty_string_returns_empty() {
         assert_eq!(markdown_to_telegram_v2(""), "");
+    }
+
+    // --- UTF-8 multi-byte character safety ---
+
+    #[test]
+    fn test_bold_in_chinese_text_does_not_panic() {
+        // Reproduces: byte index 14 is not a char boundary inside '年'
+        let input = "ComfyUI 2025 年度回顧** 🔥";
+        // Must not panic; output must be valid UTF-8
+        let out = markdown_to_telegram_v2(input);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_bold_wrapping_chinese_text_converts_correctly() {
+        let input = "**2025 年度回顧**";
+        let out = markdown_to_telegram_v2(input);
+        assert!(out.starts_with('*') && out.ends_with('*'), "bold must wrap: {out}");
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }
