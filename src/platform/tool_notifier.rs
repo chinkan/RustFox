@@ -289,11 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_args_preview_multi_arg_chinese_panics_before_fix() {
-        // Multi-arg JSON falls through to the raw-JSON fallback path (lines 43-44).
-        // This test currently PANICS (fails) because &args_json[..60] hits byte 60
-        // inside the multi-byte character '香'. After the UTF-8 truncation fix is
-        // applied, the slice will be adjusted to a safe boundary and this test will pass.
+    fn test_format_args_preview_multi_arg_chinese_truncates_safely() {
+        // Multi-arg JSON falls through to the raw-JSON fallback path.
+        // Verifies that UTF-8 char boundaries are respected when truncating
+        // so that multi-byte characters (e.g. '香') are not split mid-byte.
         let args = r#"{"description":"每日上午10點 arXiv AI 論文摘要（香港時間）","prompt":"使用 arxiv-daily-briefing skill","trigger_type":"recurring","trigger_value":"0 0 2 * * *"}"#;
         let preview = format_args_preview(args);
         assert!(!preview.is_empty());
