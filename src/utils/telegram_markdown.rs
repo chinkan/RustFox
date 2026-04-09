@@ -208,8 +208,12 @@ pub fn markdown_to_telegram_v2(text: &str) -> String {
     let mut in_code_block = false;
     let mut code_fence = String::new(); // tracks the opening fence (e.g. "```" or "```rust")
 
-    for (idx, line) in text.lines().enumerate() {
-        let is_last_line = idx == text.lines().count() - 1;
+    // Collect lines once to avoid re-scanning for count on every iteration.
+    let lines: Vec<&str> = text.lines().collect();
+    let line_count = lines.len();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let is_last_line = idx == line_count.saturating_sub(1);
         let newline = if is_last_line && !text.ends_with('\n') {
             ""
         } else {
