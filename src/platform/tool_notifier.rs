@@ -39,6 +39,16 @@ pub fn format_args_preview(args_json: &str) -> String {
     crate::utils::strings::truncate_chars(args_json, 60)
 }
 
+/// Build the one-line tool status string streamed into the Telegram message
+/// while the tool is running. Ends with `\n` so multiple calls stack visibly.
+pub fn format_tool_status_line(name: &str, args_preview: &str) -> String {
+    if args_preview.is_empty() {
+        format!("⏳ {}\n", name)
+    } else {
+        format!("⏳ {}({})\n", name, args_preview)
+    }
+}
+
 /// Manages the live-edited Telegram status message during agent tool execution.
 #[allow(dead_code)]
 pub struct ToolCallNotifier {
@@ -249,6 +259,33 @@ mod tests {
             "should be quoted single-arg preview"
         );
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_format_tool_status_line_shows_hourglass_and_name() {
+        let line = format_tool_status_line("web_search", r#""Docker setup""#);
+        assert!(
+            line.starts_with("⏳"),
+            "status line must start with hourglass: {line}"
+        );
+        assert!(line.contains("web_search"), "status line must include tool name: {line}");
+        assert!(
+            line.contains("Docker setup"),
+            "status line must include args preview: {line}"
+        );
+    }
+
+    #[test]
+    fn test_format_tool_status_line_ends_with_newline() {
+        let line = format_tool_status_line("read_file", r#""/etc/config""#);
+        assert!(line.ends_with('\n'), "status line must end with newline for streaming: {line}");
+    }
+
+    #[test]
+    fn test_format_tool_status_line_empty_args() {
+        let line = format_tool_status_line("list_tools", "");
+        assert!(!line.is_empty(), "status line must not be empty even with no args");
+        assert!(line.contains("list_tools"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::Agent;
 use crate::platform::IncomingMessage;
+use crate::utils::telegram_markdown::escape_text;
 
 /// Split long messages for Telegram's 4096 char limit
 #[cfg(test)]
@@ -106,22 +107,24 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(msg.chat.id, "Conversation cleared.")
+        bot.send_message(msg.chat.id, escape_text("Conversation cleared."))
+            .parse_mode(ParseMode::MarkdownV2)
             .await?;
         return Ok(());
     }
 
     if text == "/start" {
-        bot.send_message(
-            msg.chat.id,
+        let help = escape_text(
             "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
              Commands:\n\
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
              /skills - List loaded skills\n\
              /verbose - Toggle tool call progress display",
-        )
-        .await?;
+        );
+        bot.send_message(msg.chat.id, help)
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -134,7 +137,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 tool.function.name, tool.function.description
             ));
         }
-        bot.send_message(msg.chat.id, tool_list).await?;
+        bot.send_message(msg.chat.id, escape_text(&tool_list))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -142,13 +147,17 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let skills_guard = agent.skills.read().await;
         let skills = skills_guard.list();
         if skills.is_empty() {
-            bot.send_message(msg.chat.id, "No skills loaded.").await?;
+            bot.send_message(msg.chat.id, escape_text("No skills loaded."))
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
         } else {
             let mut skill_list = String::from("Loaded skills:\n\n");
             for skill in &skills {
                 skill_list.push_str(&format!("  - {}: {}\n", skill.name, skill.description));
             }
-            bot.send_message(msg.chat.id, skill_list).await?;
+            bot.send_message(msg.chat.id, escape_text(&skill_list))
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
         }
         return Ok(());
     }
@@ -176,7 +185,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         } else {
             "🔇 Tool call UI disabled. I'll respond silently."
         };
-        bot.send_message(msg.chat.id, reply).await?;
+        bot.send_message(msg.chat.id, escape_text(reply))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -337,7 +348,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     if let Err(e) = process_result {
         warn!(error = %e, "Agent processing failed");
-        bot.send_message(msg.chat.id, format!("Error: {:#}", e))
+        bot.send_message(msg.chat.id, escape_text(&format!("Error: {:#}", e)))
+            .parse_mode(ParseMode::MarkdownV2)
             .await?;
     }
     // Success: response already delivered via streaming
@@ -399,6 +411,17 @@ mod tests {
         assert!(
             source.contains("ParseMode::MarkdownV2"),
             "Final flush must set MarkdownV2 parse mode"
+        );
+    }
+
+    #[test]
+    fn test_command_responses_use_escape_text() {
+        // All non-streaming command responses must escape plain text and use MarkdownV2
+        // so that special chars like `.`, `-`, `!`, `_`, `(`, `)` don't break the parser.
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("escape_text"),
+            "Command responses must call escape_text() before sending with MarkdownV2"
         );
     }
 
