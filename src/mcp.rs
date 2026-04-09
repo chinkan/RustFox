@@ -2,7 +2,11 @@ use anyhow::{Context, Result};
 use rmcp::{
     model::{CallToolRequestParams, Tool as McpTool},
     service::RunningService,
-    transport::{ConfigureCommandExt, TokioChildProcess},
+    transport::{
+        ConfigureCommandExt, StreamableHttpClientTransport,
+        TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig,
+    },
     ServiceExt,
 };
 use serde_json::Value;
@@ -32,23 +36,65 @@ impl McpManager {
         }
     }
 
-    /// Connect to an MCP server via stdio child process
+    /// Connect to an MCP server — dispatches to HTTP or stdio based on config.
     pub async fn connect(&mut self, config: &McpServerConfig) -> Result<()> {
+        if config.url.is_some() {
+            self.connect_http(config).await
+        } else {
+            self.connect_stdio(config).await
+        }
+    }
+
+    /// Connect to an HTTP-based MCP server using the Streamable HTTP transport.
+    async fn connect_http(&mut self, config: &McpServerConfig) -> Result<()> {
+        let url = config
+            .url
+            .as_deref()
+            .context("HTTP MCP server config missing 'url'")?;
+
         info!(
-            "Connecting to MCP server '{}': {} {:?}",
-            config.name, config.command, config.args
+            "Connecting to HTTP MCP server '{}': {}",
+            config.name, url
+        );
+
+        let transport_config =
+            StreamableHttpClientTransportConfig::with_uri(url.to_string())
+                .auth_header(config.auth_token.clone().unwrap_or_default());
+
+        let transport = StreamableHttpClientTransport::from_config(transport_config);
+
+        let client = ()
+            .serve(transport)
+            .await
+            .with_context(|| {
+                format!("Failed to initialize HTTP MCP connection: {}", config.name)
+            })?;
+
+        self.register_client(config, client).await
+    }
+
+    /// Connect to a stdio-based MCP server via a child process.
+    async fn connect_stdio(&mut self, config: &McpServerConfig) -> Result<()> {
+        let command_str = config
+            .command
+            .as_deref()
+            .context("Stdio MCP server config missing 'command'")?;
+
+        info!(
+            "Connecting to stdio MCP server '{}': {} {:?}",
+            config.name, command_str, config.args
         );
 
         let args = config.args.clone();
         let env = config.env.clone();
-        let command_str = config.command.clone();
+        let cmd = command_str.to_string();
 
-        let transport = TokioChildProcess::new(Command::new(&command_str).configure(move |cmd| {
+        let transport = TokioChildProcess::new(Command::new(&cmd).configure(move |c| {
             for arg in &args {
-                cmd.arg(arg);
+                c.arg(arg);
             }
             for (key, value) in &env {
-                cmd.env(key, value);
+                c.env(key, value);
             }
         }))
         .with_context(|| format!("Failed to start MCP server process: {}", config.name))?;
@@ -58,6 +104,15 @@ impl McpManager {
             .await
             .with_context(|| format!("Failed to initialize MCP connection: {}", config.name))?;
 
+        self.register_client(config, client).await
+    }
+
+    /// Register a connected client, listing its tools and storing it.
+    async fn register_client(
+        &mut self,
+        config: &McpServerConfig,
+        client: RunningService<rmcp::service::RoleClient, ()>,
+    ) -> Result<()> {
         let server_info = client.peer_info();
         info!(
             "Connected to MCP server '{}': {:?}",

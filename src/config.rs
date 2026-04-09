@@ -62,11 +62,24 @@ pub struct SandboxConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct McpServerConfig {
     pub name: String,
-    pub command: String,
+    /// Command to run for stdio-based MCP servers (e.g. "uvx", "npx").
+    /// Required for stdio servers; omit for HTTP servers.
+    #[serde(default)]
+    pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// URL for HTTP-based MCP servers using the Streamable HTTP transport.
+    /// Required for HTTP servers; omit for stdio servers.
+    /// The API key may be embedded as a query parameter (e.g. `?exaApiKey=KEY`)
+    /// or provided separately via `auth_token`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Bearer token sent in the `Authorization` header for HTTP servers.
+    /// Used with `url`; ignored for stdio servers.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -330,5 +343,69 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         let ls = cfg.langsmith.unwrap();
         assert_eq!(ls.project, "default");
+    }
+
+    #[test]
+    fn test_mcp_server_url_config_parses() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [[mcp_servers]]
+            name = "exa"
+            url = "https://mcp.exa.ai/mcp"
+            auth_token = "exa-key-123"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.mcp_servers.len(), 1);
+        let server = &cfg.mcp_servers[0];
+        assert_eq!(server.name, "exa");
+        assert_eq!(server.url.as_deref(), Some("https://mcp.exa.ai/mcp"));
+        assert_eq!(server.auth_token.as_deref(), Some("exa-key-123"));
+        assert!(server.command.is_none(), "HTTP server should have no command");
+    }
+
+    #[test]
+    fn test_mcp_server_stdio_command_optional() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [[mcp_servers]]
+            name = "git"
+            command = "uvx"
+            args = ["mcp-server-git"]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.mcp_servers[0].command.as_deref(), Some("uvx"));
+        assert!(cfg.mcp_servers[0].url.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_url_without_auth_token() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [[mcp_servers]]
+            name = "exa"
+            url = "https://mcp.exa.ai/mcp?exaApiKey=inline-key"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let s = &cfg.mcp_servers[0];
+        assert!(s.url.is_some());
+        assert!(s.auth_token.is_none());
     }
 }

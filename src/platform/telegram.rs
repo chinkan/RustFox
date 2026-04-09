@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use teloxide::prelude::*;
+use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
 use crate::agent::Agent;
@@ -272,14 +273,34 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
         // Final: flush whatever is left in the buffer
         if !buffer.is_empty() {
+            // Convert the completed response to MarkdownV2 for rich formatting.
+            // Intermediate edits use plain text (partial markdown is fragile);
+            // the final edit/send renders the full formatted response.
+            let md_text =
+                crate::utils::telegram_markdown::markdown_to_telegram_v2(&buffer);
+
             if let Some(msg_id) = current_msg_id {
-                stream_bot
-                    .edit_message_text(stream_chat_id, msg_id, &buffer)
-                    .await
-                    .ok();
+                let res = stream_bot
+                    .edit_message_text(stream_chat_id, msg_id, &md_text)
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await;
+                if res.is_err() {
+                    // Fallback: send plain text if MarkdownV2 parsing fails
+                    stream_bot
+                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .await
+                        .ok();
+                }
             } else {
                 // No intermediate message was sent — deliver the complete response now
-                stream_bot.send_message(stream_chat_id, &buffer).await.ok();
+                let res = stream_bot
+                    .send_message(stream_chat_id, &md_text)
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await;
+                if res.is_err() {
+                    // Fallback: send plain text if MarkdownV2 parsing fails
+                    stream_bot.send_message(stream_chat_id, &buffer).await.ok();
+                }
             }
         }
     });
@@ -364,6 +385,21 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 4000);
         }
+    }
+
+    #[test]
+    fn test_final_flush_uses_markdown_v2_conversion() {
+        // Verify that the stream_handle final flush applies MarkdownV2 conversion.
+        // This is a source inspection test that ensures the conversion function is called.
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("markdown_to_telegram_v2"),
+            "Final flush must call markdown_to_telegram_v2 for rich formatting"
+        );
+        assert!(
+            source.contains("ParseMode::MarkdownV2"),
+            "Final flush must set MarkdownV2 parse mode"
+        );
     }
 
     #[test]

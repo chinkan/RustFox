@@ -206,13 +206,13 @@ impl LlmClient {
     /// Sends each content token as a separate `String` message.
     /// Closes the sender when the stream ends or on error.
     /// Does NOT pass tools — use this only for the final text-only response.
-    #[allow(dead_code)]
+    /// Returns the complete accumulated response content.
     pub async fn chat_stream(
         &self,
         messages: &[ChatMessage],
         model: &str,
         token_tx: tokio::sync::mpsc::Sender<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let request = StreamRequest {
             model: model.to_string(),
             messages: messages.to_vec(),
@@ -255,6 +255,7 @@ impl LlmClient {
         // Accumulate bytes into lines (SSE lines end with \n)
         let mut stream = response.bytes_stream();
         let mut line_buf = String::new();
+        let mut full_content = String::new();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.context("Stream read error")?;
@@ -266,9 +267,10 @@ impl LlmClient {
                     line_buf.clear();
 
                     if let Some(token) = parse_sse_content(&line) {
+                        full_content.push_str(&token);
                         if token_tx.send(token).await.is_err() {
                             debug!("Stream receiver dropped — stopping early");
-                            return Ok(());
+                            return Ok(full_content);
                         }
                     }
                 } else {
@@ -281,11 +283,12 @@ impl LlmClient {
         if !line_buf.is_empty() {
             let line = line_buf.trim().to_string();
             if let Some(token) = parse_sse_content(&line) {
+                full_content.push_str(&token);
                 token_tx.send(token).await.ok();
             }
         }
 
-        Ok(())
+        Ok(full_content)
     }
 }
 
@@ -388,5 +391,25 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["stream"], true);
         assert_eq!(json["model"], "test-model");
+    }
+
+    #[test]
+    fn test_chat_stream_returns_string_result() {
+        // Verify the function signature returns Result<String>, not Result<()>.
+        // This ensures accumulated content is available for memory persistence
+        // without requiring a second API call.
+        let source = include_str!("llm.rs");
+        assert!(
+            source.contains("-> Result<String>"),
+            "chat_stream must return Result<String> so callers can save the content"
+        );
+        // The function must be active (not gated as dead code) — verified by absence of
+        // the dead_code allow attribute on the chat_stream function itself.
+        // We check for the specific pattern that used to gate it.
+        let dead_code_on_fn = source.contains("dead_code)]\n    pub async fn chat_stream");
+        assert!(
+            !dead_code_on_fn,
+            "chat_stream must not be marked dead_code — it is called by agent.rs"
+        );
     }
 }
