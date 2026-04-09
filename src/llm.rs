@@ -80,6 +80,90 @@ struct Choice {
     finish_reason: Option<String>,
 }
 
+/// Parse Kimi's native tool-call text format and convert it into `ToolCall` structs.
+///
+/// Some models (e.g. `moonshotai/kimi-k2.5`) occasionally leak their internal
+/// tool-invocation syntax into the `content` field instead of populating the
+/// standard `tool_calls` API field.  The leaked text looks like:
+///
+/// ```text
+/// <|tool_calls_section_begin|> <|tool_call_begin|> functions.my_tool:0
+/// <|tool_call_argument_begin|> {"arg": "value"} <|tool_call_end|>
+/// <|tool_calls_section_end|>
+/// ```
+///
+/// Returns `Some(Vec<ToolCall>)` with at least one entry when the format is
+/// detected, or `None` if the content does not contain the Kimi markers.
+fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
+    if !content.contains("<|tool_calls_section_begin|>") {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+
+    // Split on the per-call begin marker; the first chunk is the preamble/section
+    // header and is discarded.
+    for block in content.split("<|tool_call_begin|>").skip(1) {
+        // Strip everything from the closing marker onwards (handles trailing
+        // section-end marker and whitespace).
+        let block = block
+            .split("<|tool_call_end|>")
+            .next()
+            .unwrap_or(block)
+            .trim();
+
+        // Split into function descriptor and JSON arguments.
+        let (descriptor, args_raw) = if let Some(pos) = block.find("<|tool_call_argument_begin|>") {
+            let d = block[..pos].trim();
+            let a = block[pos + "<|tool_call_argument_begin|>".len()..].trim();
+            (d, a)
+        } else {
+            continue;
+        };
+
+        // Descriptor format: `functions.{name}:{index}` or just `functions.{name}`.
+        // Extract the plain function name.
+        let func_name = descriptor
+            .trim_start_matches("functions.")
+            .split(':')
+            .next()
+            .unwrap_or(descriptor)
+            .trim()
+            .to_string();
+
+        if func_name.is_empty() {
+            continue;
+        }
+
+        // Use the call index (if present) as part of the synthetic tool-call ID.
+        let call_index = descriptor.split(':').nth(1).unwrap_or("0").trim();
+        let call_id = format!("kimi_fallback_{func_name}_{call_index}");
+
+        // Verify the arguments are valid JSON; fall back to an empty object on
+        // parse failure so the tool handler can still attempt execution.
+        let arguments = if serde_json::from_str::<serde_json::Value>(args_raw).is_ok() {
+            args_raw.to_string()
+        } else {
+            "{}".to_string()
+        };
+
+        calls.push(ToolCall {
+            id: call_id,
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: func_name,
+                arguments,
+            },
+        });
+    }
+
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
 /// Parse a single SSE line and extract the text content token, if any.
 /// Returns `None` for non-data lines, `[DONE]`, empty deltas, or parse errors.
 fn parse_sse_content(line: &str) -> Option<String> {
@@ -184,12 +268,35 @@ impl LlmClient {
             }
         }
 
-        chat_response
+        let mut choice = chat_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
-            .context("No response from OpenRouter")
+            .context("No response from OpenRouter")?;
+
+        // Kimi-family models occasionally leak their native tool-call syntax into
+        // the `content` field instead of populating `tool_calls`.  Detect and fix.
+        let has_tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|t| !t.is_empty());
+        if !has_tool_calls {
+            if let Some(ref content) = choice.message.content.clone() {
+                if let Some(parsed) = parse_kimi_tool_calls(content) {
+                    warn!(
+                        tool_count = parsed.len(),
+                        "Kimi native tool-call format detected in content — \
+                         extracting tool calls and clearing content"
+                    );
+                    choice.message.tool_calls = Some(parsed);
+                    choice.message.content = None;
+                    choice.finish_reason = Some("tool_calls".to_string());
+                }
+            }
+        }
+
+        Ok(choice.message)
     }
 
     /// Chat using the model configured in config.toml (delegates to chat_with_model).
@@ -391,6 +498,59 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["stream"], true);
         assert_eq!(json["model"], "test-model");
+    }
+
+    #[test]
+    fn test_parse_kimi_tool_calls_single_call() {
+        let content = " <|tool_calls_section_begin|> <|tool_call_begin|> functions.read_skill_file:5 \
+            <|tool_call_argument_begin|> {\"skill_name\": \"reddit-fetcher\", \"relative_path\": \"SKILL.md\"} \
+            <|tool_call_end|> <|tool_calls_section_end|>";
+        let calls = parse_kimi_tool_calls(content).expect("should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_skill_file");
+        assert_eq!(calls[0].call_type, "function");
+        let args: serde_json::Value =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["skill_name"], "reddit-fetcher");
+    }
+
+    #[test]
+    fn test_parse_kimi_tool_calls_multiple_calls() {
+        let content = "<|tool_calls_section_begin|>\
+            <|tool_call_begin|> functions.tool_a:0 <|tool_call_argument_begin|> {\"x\": 1} <|tool_call_end|>\
+            <|tool_call_begin|> functions.tool_b:1 <|tool_call_argument_begin|> {\"y\": 2} <|tool_call_end|>\
+            <|tool_calls_section_end|>";
+        let calls = parse_kimi_tool_calls(content).expect("should parse");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "tool_a");
+        assert_eq!(calls[1].function.name, "tool_b");
+    }
+
+    #[test]
+    fn test_parse_kimi_tool_calls_no_markers_returns_none() {
+        assert!(parse_kimi_tool_calls("Hello, world!").is_none());
+        assert!(parse_kimi_tool_calls("").is_none());
+    }
+
+    #[test]
+    fn test_parse_kimi_tool_calls_invalid_json_falls_back_to_empty_object() {
+        let content = "<|tool_calls_section_begin|>\
+            <|tool_call_begin|> functions.my_tool:0 \
+            <|tool_call_argument_begin|> not valid json <|tool_call_end|>\
+            <|tool_calls_section_end|>";
+        let calls = parse_kimi_tool_calls(content).expect("should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn test_parse_kimi_tool_calls_id_uses_index() {
+        let content = "<|tool_calls_section_begin|>\
+            <|tool_call_begin|> functions.do_thing:7 \
+            <|tool_call_argument_begin|> {} <|tool_call_end|>\
+            <|tool_calls_section_end|>";
+        let calls = parse_kimi_tool_calls(content).expect("should parse");
+        assert!(calls[0].id.contains("7"), "id should embed the call index");
     }
 
     #[test]
