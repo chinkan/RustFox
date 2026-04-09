@@ -20,6 +20,7 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use teloxide::types::MessageEntity;
+use tracing::warn;
 
 /// Convert `markdown` to a `(plain_text, entities)` pair ready to pass to Telegram.
 ///
@@ -151,6 +152,8 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                                 // Parse the URL; if invalid, skip the entity (text is still kept)
                                 if let Ok(url) = reqwest::Url::parse(&url_str) {
                                     entities.push(MessageEntity::text_link(url, start, length));
+                                } else {
+                                    warn!("markdown_to_entities: invalid link URL ignored: {}", url_str);
                                 }
                             }
                         }
