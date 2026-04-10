@@ -313,12 +313,14 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             // next batch of tokens creates a fresh message.
             if buffer.len() > TELEGRAM_STREAM_SPLIT {
                 if let Some(msg_id) = current_msg_id {
-                    stream_bot
+                    if let Err(e) = stream_bot
                         .edit_message_text(stream_chat_id, msg_id, &buffer)
                         .await
-                        .ok();
-                } else {
-                    stream_bot.send_message(stream_chat_id, &buffer).await.ok();
+                    {
+                        tracing::warn!(error = %e, "stream_handle: edit failed at split");
+                    }
+                } else if let Err(e) = stream_bot.send_message(stream_chat_id, &buffer).await {
+                    tracing::warn!(error = %e, "stream_handle: send failed at split");
                 }
                 buffer.clear();
                 current_msg_id = None;
