@@ -233,28 +233,23 @@ impl ToolCallNotifier {
         s
     }
 
-    /// Finalise the status message.
+    /// Finalise the status message by deleting it.
     ///
-    /// - If no tools were called: delete the placeholder "⏳ Working..." (not useful).
-    /// - If tools were called: edit to a persistent summary so the user can see
-    ///   which tools ran after the response has arrived.
+    /// The status message is always deleted once agent processing is complete.
+    /// The final LLM response (streamed separately) is the only message that
+    /// remains visible to the user.
     pub async fn finish(&self) {
         let Some(ref msg) = self.status_msg else {
             return;
         };
 
-        if self.tool_log.is_empty() {
-            self.bot.delete_message(self.chat_id, msg.id).await.ok();
-        } else {
-            let text = self.format_final();
-            self.bot
-                .edit_message_text(self.chat_id, msg.id, &text)
-                .await
-                .ok();
-        }
+        self.bot.delete_message(self.chat_id, msg.id).await.ok();
     }
 
-    /// Final compact summary shown after tools have run.
+    /// Format a compact summary of tools that ran.
+    /// Currently unused because `finish()` always deletes the status message,
+    /// but kept for potential future use (e.g. re-enabling persistent summaries).
+    #[allow(dead_code)]
     fn format_final(&self) -> String {
         let mut s = String::from("🔧 Tools used:");
         for (name, args_preview, _done, success) in &self.tool_log {
