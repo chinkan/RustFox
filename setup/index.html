@@ -1050,7 +1050,7 @@ function buildSteps() {
         : (tool.envVars || []);
       const envHtml = envVars.map(k => {
         const existingVal = state.mcp_selections[tool.name]?.env?.[k] || (tool.envDefaults && tool.envDefaults[k]) || '';
-        const placeholder = tool.url ? 'access token (auto-filled after OAuth or paste manually)' : k;
+        const placeholder = tool.url ? 'access token (autofilled after OAuth or paste manually)' : k;
         return `<div class="env-row" onclick="event.stopPropagation()">
           <div class="mcp-env-label">${k}</div>
           <input type="text" id="mcp-env-input-${tool.name}-${k}" placeholder="${placeholder}" value="${escHtml(existingVal)}"
@@ -1291,7 +1291,7 @@ async function connectOAuth(serverName, mcpUrl, authTokenVar) {
           status.style.color = '#48bb78';
           btn.textContent    = '🔄 Re-authorize';
         }
-      } catch (_) { /* ignore transient poll errors */ }
+      } catch (err) { console.debug('OAuth poll error:', err); }
     }, 1500);
 
     // Abort after 5 minutes.
@@ -1301,7 +1301,7 @@ async function connectOAuth(serverName, mcpUrl, authTokenVar) {
       if (popup && !popup.closed) popup.close();
       status.textContent = '✗ Timed out. Please try again.';
       status.style.color = '#fc8181';
-    }, 300_000);
+    }, 300000);
 
   } catch (err) {
     cleanup();
