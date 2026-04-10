@@ -269,6 +269,7 @@ impl Agent {
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
         let mut iteration_count = 0u32;
+        let mut tool_call_count = 0u32;
 
         // Clone the stream sender so tool status can be pushed into the same Telegram
         // message during tool execution, before the final response starts streaming.
@@ -334,6 +335,7 @@ impl Agent {
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
+                    tool_call_count += tool_calls.len() as u32;
                     info!(
                         "LLM requested {} tool call(s) (iteration {})",
                         tool_calls.len(),
@@ -484,10 +486,9 @@ impl Agent {
 
             // --- Self-learning: post-task skill extraction (background) ---
             if self.config.learning.skill_extraction_enabled
-                && iteration_count >= self.config.learning.skill_extraction_threshold
+                && tool_call_count >= self.config.learning.skill_extraction_threshold
             {
                 let msgs_clone = messages.clone();
-                let skill_count = iteration_count;
                 // Run inline with a timeout so it doesn't block too long.
                 let _extraction_result = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
@@ -496,7 +497,7 @@ impl Agent {
                         &self.config.skills.directory,
                         &self.skills,
                         &msgs_clone,
-                        skill_count,
+                        tool_call_count,
                     ),
                 )
                 .await;
@@ -1707,8 +1708,8 @@ impl Agent {
                     return format!("Failed to create experiment dir: {}", e);
                 }
 
-                let (filename, check_cmd) = match language.as_str() {
-                    "javascript" => ("experiment.js", "node experiment.js"),
+                let (filename, check_cmd, check_args) = match language.as_str() {
+                    "javascript" => ("experiment.js", "node", vec!["experiment.js".to_string()]),
                     _ => {
                         // Rust: create a minimal Cargo project structure
                         let cargo_toml = "[package]\nname = \"experiment\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string();
@@ -1726,7 +1727,7 @@ impl Agent {
                         {
                             return format!("Failed to write main.rs: {}", e);
                         }
-                        ("src/main.rs", "cargo check")
+                        ("src/main.rs", "cargo", vec!["check".to_string()])
                     }
                 };
 
@@ -1744,9 +1745,8 @@ impl Agent {
                     exp_dir.display()
                 );
 
-                let output = match tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(check_cmd)
+                let output = match tokio::process::Command::new(check_cmd)
+                    .args(&check_args)
                     .current_dir(&exp_dir)
                     .output()
                     .await
@@ -1785,12 +1785,15 @@ impl Agent {
                     Ok(exe) => {
                         // Navigate up from target/release/rustfox or target/debug/rustfox
                         let mut root = exe.clone();
+                        let mut depth = 0;
+                        const MAX_DEPTH: usize = 10;
                         // Try to find Cargo.toml by walking up
                         loop {
                             if root.join("Cargo.toml").exists() {
                                 break;
                             }
-                            if !root.pop() {
+                            depth += 1;
+                            if depth > MAX_DEPTH || !root.pop() {
                                 // Fallback to current directory
                                 root = std::env::current_dir()
                                     .unwrap_or_else(|_| std::path::PathBuf::from("."));
