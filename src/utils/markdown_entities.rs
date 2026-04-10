@@ -324,12 +324,14 @@ enum StackTag {
 }
 
 /// Given a `(byte_pos, cumulative_utf16)` table, convert a UTF-16 offset to a byte offset.
-/// Returns the byte position of the first char whose UTF-16 start is >= `utf16_off`.
+/// Returns the byte position of the char boundary at or just before `utf16_off`.
+/// When `utf16_off` falls in the middle of a surrogate pair (i.e. it does not exactly
+/// match any entry), the byte position of the preceding character is returned.
 fn utf16_to_byte(boundaries: &[(usize, usize)], utf16_off: usize) -> usize {
     match boundaries.binary_search_by_key(&utf16_off, |&(_, u)| u) {
         Ok(idx) => boundaries[idx].0,
         Err(idx) => {
-            // idx is the insertion point — the byte just before
+            // idx is the insertion point — snap to the preceding char boundary.
             if idx == 0 {
                 0
             } else {
