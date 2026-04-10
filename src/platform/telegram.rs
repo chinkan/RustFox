@@ -266,6 +266,21 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         None
     };
 
+    // When verbose is OFF, send a transient "Thinking..." placeholder so the user
+    // knows the bot is processing. The stream handle will edit it in-place with the
+    // first LLM tokens, so only one message is ever visible.
+    let placeholder_msg_id: Option<teloxide::types::MessageId> = if !verbose_enabled {
+        match bot.send_message(msg.chat.id, "⏳ Thinking...").await {
+            Ok(sent) => Some(sent.id),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to send thinking placeholder");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Streaming: set up token channel for progressive message display
     const TELEGRAM_STREAM_SPLIT: usize = 3800;
 
@@ -278,7 +293,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         use std::time::{Duration, Instant};
 
         let mut buffer = String::new();
-        let mut current_msg_id: Option<teloxide::types::MessageId> = None;
+        // Seed current_msg_id with the placeholder so the first edit reuses it.
+        let mut current_msg_id: Option<teloxide::types::MessageId> = placeholder_msg_id;
         let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
 
@@ -352,6 +368,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                         .ok();
                 }
             }
+        } else if let Some(msg_id) = current_msg_id {
+            // Edge case: no tokens were streamed but we have a placeholder — delete it
+            stream_bot.delete_message(stream_chat_id, msg_id).await.ok();
         }
     });
 
