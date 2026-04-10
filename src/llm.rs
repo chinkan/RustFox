@@ -79,7 +79,8 @@ struct Choice {
 /// - `required: []` (empty array) is rejected; the key must be omitted entirely.
 /// - `anyOf`/`oneOf`/`allOf` variants with `{"type": "null"}` are stripped because
 ///   Gemini does not support nullable types expressed as `null` union members.
-///   If stripping removes all but one variant, the schema is inlined (unwrapped).
+///   If stripping leaves exactly one variant, it is inlined (unwrapped) into the
+///   parent object.  If stripping leaves zero variants, the key is removed entirely.
 ///
 /// This function mutates the schema in-place and recurses into `properties`,
 /// `items`, `anyOf`, `oneOf`, and `allOf` sub-schemas.
@@ -149,6 +150,28 @@ fn sanitize_parameters(schema: &mut serde_json::Value) {
                         .unwrap_or(true)
                 });
             }
+        }
+
+        // If only one variant remains, unwrap it by merging into the parent.
+        // If zero variants remain, remove the key entirely.
+        let should_unwrap = obj.get(*key).and_then(|v| v.as_array()).map(|a| a.len());
+        match should_unwrap {
+            Some(0) => {
+                obj.remove(*key);
+            }
+            Some(1) => {
+                if let Some(single) = obj
+                    .remove(*key)
+                    .and_then(|mut v| v.as_array_mut().and_then(|a| a.pop()))
+                {
+                    if let Some(inner) = single.as_object() {
+                        for (k, v) in inner {
+                            obj.entry(k.clone()).or_insert(v.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -657,6 +680,7 @@ mod tests {
     #[test]
     fn test_sanitize_parameters_strips_null_anyof_variants() {
         // Gemini does not support {"type": "null"} as a union member.
+        // When only one variant remains after stripping, it is unwrapped.
         let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -669,15 +693,16 @@ mod tests {
             }
         });
         sanitize_parameters(&mut schema);
-        let any_of = schema["properties"]["name"]["anyOf"].as_array().unwrap();
-        // The null variant should have been removed.
-        assert_eq!(any_of.len(), 1);
-        assert_eq!(any_of[0]["type"], "string");
+        let name = &schema["properties"]["name"];
+        // The null variant was stripped, leaving one variant which was unwrapped.
+        assert!(name.get("anyOf").is_none(), "anyOf should be unwrapped");
+        assert_eq!(name["type"], "string");
     }
 
     #[test]
     fn test_sanitize_parameters_recurses_into_anyof() {
         // Nested schemas inside anyOf/oneOf should also be sanitized.
+        // Single-variant anyOf is unwrapped into the parent.
         let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -694,10 +719,12 @@ mod tests {
             }
         });
         sanitize_parameters(&mut schema);
-        let inner = &schema["properties"]["val"]["anyOf"][0];
-        let required = inner["required"].as_array().unwrap();
+        // Single-variant anyOf is unwrapped: inner object fields are inlined into "val".
+        let val = &schema["properties"]["val"];
+        assert!(val.get("anyOf").is_none(), "anyOf should be unwrapped");
+        let required = val["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
         assert_eq!(required[0], "x");
-        assert!(inner.get("additionalProperties").is_none());
+        assert!(val.get("additionalProperties").is_none());
     }
 }
