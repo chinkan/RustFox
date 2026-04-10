@@ -22,6 +22,8 @@ pub struct Config {
     pub embedding: Option<EmbeddingApiConfig>,
     #[serde(default)]
     pub langsmith: Option<LangSmithConfig>,
+    #[serde(default = "default_learning_config")]
+    pub learning: LearningConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -136,6 +138,25 @@ pub struct LangSmithConfig {
     pub project: String,
     #[serde(default = "default_langsmith_base_url")]
     pub base_url: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LearningConfig {
+    /// Path to the user model file (Honcho-style USER.md).
+    #[serde(default = "default_user_model_path")]
+    pub user_model_path: PathBuf,
+    /// Whether post-task skill extraction is enabled.
+    #[serde(default = "default_true")]
+    pub skill_extraction_enabled: bool,
+    /// Minimum tool calls to trigger skill extraction (default 5).
+    #[serde(default = "default_skill_extraction_threshold")]
+    pub skill_extraction_threshold: u32,
+    /// Message count between user model updates (default 10).
+    #[serde(default = "default_user_model_update_interval")]
+    pub user_model_update_interval: usize,
+    /// Cron expression for weekly user model update (default: Sunday 3am).
+    #[serde(default = "default_user_model_cron")]
+    pub user_model_cron: String,
 }
 
 fn default_model() -> String {
@@ -262,6 +283,36 @@ fn default_langsmith_project() -> String {
 
 fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
+}
+
+fn default_user_model_path() -> PathBuf {
+    PathBuf::from("memory/USER.md")
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_skill_extraction_threshold() -> u32 {
+    5
+}
+
+fn default_user_model_update_interval() -> usize {
+    10
+}
+
+fn default_user_model_cron() -> String {
+    "0 0 3 * * SUN".to_string()
+}
+
+fn default_learning_config() -> LearningConfig {
+    LearningConfig {
+        user_model_path: default_user_model_path(),
+        skill_extraction_enabled: true,
+        skill_extraction_threshold: default_skill_extraction_threshold(),
+        user_model_update_interval: default_user_model_update_interval(),
+        user_model_cron: default_user_model_cron(),
+    }
 }
 
 impl Config {

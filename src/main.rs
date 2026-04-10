@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod langsmith;
+mod learning;
 mod llm;
 mod mcp;
 mod memory;
@@ -172,6 +173,8 @@ async fn main() -> Result<()> {
         crate::llm::LlmClient::new(config.openrouter.clone()),
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
+        config.learning.user_model_cron.clone(),
+        config.learning.user_model_path.clone(),
     )
     .await?;
     scheduler.start().await?;
