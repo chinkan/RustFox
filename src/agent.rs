@@ -105,6 +105,14 @@ impl Agent {
         }
         drop(agents);
 
+        // Inject Honcho-style user model if available
+        let user_model =
+            crate::learning::read_user_model(&self.config.learning.user_model_path).await;
+        if !user_model.is_empty() {
+            prompt.push_str("\n\n# User Model\n\n");
+            prompt.push_str(&user_model);
+        }
+
         // Append current timestamp and optional location
         let now = chrono::Utc::now()
             .format("%Y-%m-%d %H:%M:%S UTC")
@@ -473,6 +481,47 @@ impl Agent {
                 error: None,
                 end_time: Self::now_iso8601_static(),
             });
+
+            // --- Self-learning: post-task skill extraction (background) ---
+            if self.config.learning.skill_extraction_enabled
+                && iteration_count >= self.config.learning.skill_extraction_threshold
+            {
+                let msgs_clone = messages.clone();
+                let skill_count = iteration_count;
+                // Run inline with a timeout so it doesn't block too long.
+                let _extraction_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    crate::learning::post_task_skill_extractor(
+                        &self.llm,
+                        &self.config.skills.directory,
+                        &self.skills,
+                        &msgs_clone,
+                        skill_count,
+                    ),
+                )
+                .await;
+            }
+
+            // --- Self-learning: periodic user model update ---
+            {
+                let msg_count = messages.iter().filter(|m| m.role == "user").count();
+                let update_interval = self.config.learning.user_model_update_interval;
+                if update_interval > 0 && msg_count % update_interval == 0 && msg_count > 0 {
+                    info!(
+                        "Triggering periodic user model update ({} user messages)",
+                        msg_count
+                    );
+                    let _update_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        crate::learning::update_user_model(
+                            &self.llm,
+                            &self.memory,
+                            &self.config.learning.user_model_path,
+                        ),
+                    )
+                    .await;
+                }
+            }
 
             return Ok(final_content);
         }
@@ -1637,6 +1686,149 @@ impl Agent {
                         format!("Agents reloaded. {} agent(s) now active.", count)
                     }
                     Err(e) => format!("Failed to reload agents: {}", e),
+                }
+            }
+            "try_new_tech" => {
+                let technology = match arguments["technology"].as_str() {
+                    Some(t) => t.to_string(),
+                    None => return "Missing technology".to_string(),
+                };
+                let experiment_code = match arguments["experiment_code"].as_str() {
+                    Some(c) => c.to_string(),
+                    None => return "Missing experiment_code".to_string(),
+                };
+                let language = arguments["language"].as_str().unwrap_or("rust").to_string();
+
+                let sandbox = &self.config.sandbox.allowed_directory;
+                let exp_id = uuid::Uuid::new_v4().to_string();
+                let exp_dir = sandbox.join("experiments").join(&exp_id);
+
+                if let Err(e) = tokio::fs::create_dir_all(&exp_dir).await {
+                    return format!("Failed to create experiment dir: {}", e);
+                }
+
+                let (filename, check_cmd) = match language.as_str() {
+                    "javascript" => ("experiment.js", "node experiment.js"),
+                    _ => {
+                        // Rust: create a minimal Cargo project structure
+                        let cargo_toml = "[package]\nname = \"experiment\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string();
+                        let src_dir = exp_dir.join("src");
+                        if let Err(e) = tokio::fs::create_dir_all(&src_dir).await {
+                            return format!("Failed to create src dir: {}", e);
+                        }
+                        if let Err(e) =
+                            tokio::fs::write(exp_dir.join("Cargo.toml"), cargo_toml).await
+                        {
+                            return format!("Failed to write Cargo.toml: {}", e);
+                        }
+                        if let Err(e) =
+                            tokio::fs::write(src_dir.join("main.rs"), &experiment_code).await
+                        {
+                            return format!("Failed to write main.rs: {}", e);
+                        }
+                        ("src/main.rs", "cargo check")
+                    }
+                };
+
+                // Write experiment code for JS (Rust already written above)
+                if language == "javascript" {
+                    if let Err(e) = tokio::fs::write(exp_dir.join(filename), &experiment_code).await
+                    {
+                        return format!("Failed to write experiment file: {}", e);
+                    }
+                }
+
+                info!(
+                    "Running experiment '{}' in {}",
+                    technology,
+                    exp_dir.display()
+                );
+
+                let output = match tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(check_cmd)
+                    .current_dir(&exp_dir)
+                    .output()
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(e) => return format!("Failed to run experiment: {}", e),
+                };
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let exit_code = output.status.code().unwrap_or(-1);
+                let success = output.status.success();
+
+                let mut result = format!("Experiment: {}\nLanguage: {}\n", technology, language);
+                if !stdout.is_empty() {
+                    result.push_str(&format!("STDOUT:\n{}\n", stdout));
+                }
+                if !stderr.is_empty() {
+                    result.push_str(&format!("STDERR:\n{}\n", stderr));
+                }
+                result.push_str(&format!(
+                    "Exit code: {}\nResult: {}\n",
+                    exit_code,
+                    if success { "SUCCESS" } else { "FAILED" }
+                ));
+
+                result
+            }
+            "self_update_to_branch" => {
+                let branch = arguments["branch"].as_str().unwrap_or("main").to_string();
+
+                info!("Self-update requested: branch '{}'", branch);
+
+                // Determine project root from the current executable's location.
+                let project_root = match std::env::current_exe() {
+                    Ok(exe) => {
+                        // Navigate up from target/release/rustfox or target/debug/rustfox
+                        let mut root = exe.clone();
+                        // Try to find Cargo.toml by walking up
+                        loop {
+                            if root.join("Cargo.toml").exists() {
+                                break;
+                            }
+                            if !root.pop() {
+                                // Fallback to current directory
+                                root = std::env::current_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                break;
+                            }
+                        }
+                        root
+                    }
+                    Err(_) => {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    }
+                };
+
+                match crate::learning::self_update(&branch, &project_root).await {
+                    Ok(log) => log,
+                    Err(e) => format!("Self-update failed: {:#}", e),
+                }
+            }
+            "patch_skill" => {
+                let skill_name = match arguments["skill_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return "Missing skill_name".to_string(),
+                };
+                let patch_content = match arguments["patch_content"].as_str() {
+                    Some(c) => c.to_string(),
+                    None => return "Missing patch_content".to_string(),
+                };
+
+                match crate::learning::self_patch_skill(
+                    &self.config.skills.directory,
+                    &skill_name,
+                    &patch_content,
+                    &self.skills,
+                )
+                .await
+                {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Patch failed: {:#}", e),
                 }
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {

@@ -161,3 +161,11 @@ directory = "skills"
 # [[mcp_servers]]
 # name = "exa"
 # url = "https://mcp.exa.ai/mcp?exaApiKey=your-exa-api-key"
+
+# ── Self-Learning (optional; defaults apply if section omitted) ─────────────
+# [learning]
+# user_model_path = "memory/USER.md"          # Honcho-style user model file
+# skill_extraction_enabled = true              # Auto-generate skills from tool-heavy tasks
+# skill_extraction_threshold = 5              # Min tool calls to trigger extraction
+# user_model_update_interval = 10             # Update user model every N user messages
+# user_model_cron = "0 0 3 * * SUN"           # Weekly user model refresh (6-field cron)
