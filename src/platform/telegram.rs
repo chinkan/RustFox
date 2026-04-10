@@ -301,18 +301,27 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         while let Some(token) = rx.recv().await {
             buffer.push_str(&token);
 
-            // When buffer exceeds split threshold, send a NEW message and reset
+            // When buffer exceeds split threshold, finalize the current message
+            // and reset so subsequent tokens start a new message.
+            //
+            // Previous logic sent the full buffer as a NEW message, then cleared
+            // the buffer.  This caused the new message to visually shrink on the
+            // next edit (which only contained the small post-split tokens).
+            //
+            // Fix: edit/send the current message with its accumulated content
+            // (finalizing it), then clear the buffer AND current_msg_id so the
+            // next batch of tokens creates a fresh message.
             if buffer.len() > TELEGRAM_STREAM_SPLIT {
-                match stream_bot.send_message(stream_chat_id, &buffer).await {
-                    Ok(new_msg) => {
-                        current_msg_id = Some(new_msg.id);
-                        buffer.clear();
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "stream_handle: send_message failed at split");
-                        break;
-                    }
+                if let Some(msg_id) = current_msg_id {
+                    stream_bot
+                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .await
+                        .ok();
+                } else {
+                    stream_bot.send_message(stream_chat_id, &buffer).await.ok();
                 }
+                buffer.clear();
+                current_msg_id = None;
                 last_action = Instant::now();
                 continue;
             }
