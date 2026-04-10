@@ -9,6 +9,9 @@ use crate::skills::SkillRegistry;
 /// Minimum number of tool calls in a conversation to trigger skill extraction.
 const MIN_TOOL_CALLS_FOR_EXTRACTION: u32 = 5;
 
+/// Minimum number of conversation messages needed before updating the user model.
+const MIN_MESSAGES_FOR_USER_MODEL: usize = 3;
+
 // ─── Feature 1: Post-task Skill Extractor ───────────────────────────────────
 
 /// Analyze a completed agentic loop and, if the conversation used enough tool
@@ -271,11 +274,22 @@ interests: []
 context: []
 ";
 
-/// Read the user model file, or return a default if it doesn't exist.
+/// Read the user model file, or return empty string if it doesn't exist.
 pub async fn read_user_model(user_model_path: &Path) -> String {
-    tokio::fs::read_to_string(user_model_path)
-        .await
-        .unwrap_or_default()
+    match tokio::fs::read_to_string(user_model_path).await {
+        Ok(content) => content,
+        Err(e) => {
+            // Only warn if the file exists but can't be read (permission errors, etc.)
+            if user_model_path.exists() {
+                warn!(
+                    "User model file exists but could not be read ({}): {}",
+                    user_model_path.display(),
+                    e
+                );
+            }
+            String::new()
+        }
+    }
 }
 
 /// Update the user model by summarizing recent conversations through the LLM.
@@ -302,7 +316,7 @@ async fn update_user_model_inner(
         .await
         .unwrap_or_default();
 
-    if recent.len() < 3 {
+    if recent.len() < MIN_MESSAGES_FOR_USER_MODEL {
         return Ok(false); // Not enough data yet
     }
 
@@ -485,7 +499,8 @@ fn build_transcript(messages: &[ChatMessage]) -> String {
 
 /// Truncate a string to at most `max_len` characters.
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else {
         let truncated: String = s.chars().take(max_len).collect();
