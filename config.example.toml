@@ -148,6 +148,16 @@ directory = "skills"
 # These servers are reached over HTTPS and do not require a local command.
 # Use `url` instead of `command`; optionally set `auth_token` for Bearer auth.
 
+# Example: Notion MCP server (official HTTP MCP — no Node.js required)
+# Docs: https://developers.notion.com/guides/mcp/mcp
+# Get your integration token at https://www.notion.so/profile/integrations
+# Note: the old @notionhq/notion-mcp-server npm package is deprecated.
+#
+# [[mcp_servers]]
+# name = "notion"
+# url = "https://mcp.notion.com/mcp"
+# auth_token = "your-notion-integration-token"
+
 # Example: Exa AI web search (https://mcp.exa.ai)
 # Get your API key at https://dashboard.exa.ai/api-keys
 #
