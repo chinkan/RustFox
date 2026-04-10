@@ -154,8 +154,8 @@ fn sanitize_parameters(schema: &mut serde_json::Value) {
 
         // If only one variant remains, unwrap it by merging into the parent.
         // If zero variants remain, remove the key entirely.
-        let should_unwrap = obj.get(*key).and_then(|v| v.as_array()).map(|a| a.len());
-        match should_unwrap {
+        let variant_count = obj.get(*key).and_then(|v| v.as_array()).map(|a| a.len());
+        match variant_count {
             Some(0) => {
                 obj.remove(*key);
             }
