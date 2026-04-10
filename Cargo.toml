@@ -58,5 +58,10 @@ sqlite-vec = "0.1"
 # Setup wizard web server (used only by src/bin/setup.rs)
 axum = "0.8"
 
+# OAuth 2.0 / PKCE helpers (used only by src/bin/setup.rs)
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"
