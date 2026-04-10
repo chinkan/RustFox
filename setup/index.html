@@ -486,6 +486,60 @@
   </div>
 </div>
 
+<!-- Notion MCP Setup Modal -->
+<div class="modal-overlay" id="notion-modal" onclick="closeNotionModal(event)">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="notion-modal-title">
+    <button class="modal-close" onclick="closeNotionModal()" aria-label="Close">&#x2715;</button>
+    <h3 id="notion-modal-title">Notion — Integration Token Setup</h3>
+    <p class="modal-subtitle">
+      Notion now provides an official HTTP MCP server at <code>https://mcp.notion.com/mcp</code> — no Node.js required.
+      Follow these 3 steps to generate your integration token.
+      Full guide: <a href="https://developers.notion.com/guides/mcp/mcp" target="_blank" rel="noopener">developers.notion.com/guides/mcp/mcp ↗</a>
+    </p>
+    <ol class="oauth-steps">
+      <li class="oauth-step">
+        <div class="oauth-step-num">1</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Create an internal integration</div>
+          <div class="oauth-step-desc">
+            Go to <a href="https://www.notion.so/profile/integrations" target="_blank" rel="noopener">notion.so/profile/integrations</a>
+            and click <strong>New integration</strong>.<br>
+            Choose <strong>Internal</strong>, give it a name (e.g. <em>RustFox</em>), select your workspace, and click <strong>Save</strong>.<br>
+            Under <strong>Capabilities</strong>, enable <em>Read content</em>, <em>Update content</em>, and <em>Insert content</em> as needed.
+          </div>
+        </div>
+      </li>
+      <li class="oauth-step">
+        <div class="oauth-step-num">2</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Copy the integration token</div>
+          <div class="oauth-step-desc">
+            After saving, click <strong>Show</strong> next to <em>Internal Integration Secret</em>.<br>
+            Copy the token (starts with <code>ntn_</code> or <code>secret_</code>) and paste it into the
+            <code>NOTION_TOKEN</code> field below.
+          </div>
+        </div>
+      </li>
+      <li class="oauth-step">
+        <div class="oauth-step-num">3</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Connect pages to the integration</div>
+          <div class="oauth-step-desc">
+            Open each Notion page or database the agent should access.<br>
+            Click the <strong>⋯ menu → Connections</strong> and select your integration by name.<br>
+            The agent can only see pages explicitly shared with it — child pages inherit access automatically.
+          </div>
+        </div>
+      </li>
+    </ol>
+    <div class="oauth-warning">
+      <strong>HTTP transport — no local server needed.</strong>
+      RustFox connects directly to <code>https://mcp.notion.com/mcp</code> using Bearer authentication.
+      The old <code>@notionhq/notion-mcp-server</code> npm package is deprecated.
+    </div>
+  </div>
+</div>
+
 <script>
 // ── MCP Catalog ────────────────────────────────────────────────────────────────
 const MCP_CATALOG = [
@@ -494,7 +548,7 @@ const MCP_CATALOG = [
   { name:'firecrawl',        category:'Browser & Web',      desc:'URL to clean Markdown scraping',               runner:'npx', args:['-y','firecrawl-mcp'],                            envVars:['FIRECRAWL_API_KEY'],                        link:'https://www.npmjs.com/package/firecrawl-mcp' },
   { name:'fetch',            category:'Browser & Web',      desc:'Lightweight page fetching',                    runner:'uvx', args:['mcp-server-fetch'],                              envVars:[],                                           link:'https://pypi.org/project/mcp-server-fetch' },
   { name:'google-workspace', category:'Productivity',       desc:'Gmail, Calendar, Drive, Docs',                 runner:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], envVars:['GOOGLE_WORKSPACE_CLIENT_ID','GOOGLE_WORKSPACE_CLIENT_SECRET','GOOGLE_WORKSPACE_REFRESH_TOKEN','GOOGLE_WORKSPACE_ENABLED_CAPABILITIES'], envDefaults:{'GOOGLE_WORKSPACE_ENABLED_CAPABILITIES':'["drive","docs","gmail","calendar","sheets","slides"]'}, setupGuide:'__OAUTH_GUIDE_BUTTON__', link:'https://pypi.org/project/google-workspace-mcp' },
-  { name:'notion',           category:'Productivity',       desc:'Read/write Notion workspace',                  runner:'npx', args:['-y','@notionhq/notion-mcp-server'],              envVars:['NOTION_API_KEY'],                           link:'https://www.npmjs.com/package/@notionhq/notion-mcp-server' },
+  { name:'notion',           category:'Productivity',       desc:'Read/write Notion workspace (official HTTP MCP)', url:'https://mcp.notion.com/mcp', authTokenVar:'NOTION_TOKEN', setupGuide:'__NOTION_GUIDE_BUTTON__', link:'https://developers.notion.com/guides/mcp/mcp' },
   { name:'obsidian',         category:'Productivity',       desc:'Local Obsidian vault access',                  runner:'npx', args:['-y','obsidian-mcp'],                             envVars:[],                                           link:'https://www.npmjs.com/package/obsidian-mcp' },
   { name:'slack',            category:'Communication',      desc:'Read channels, post Slack messages',           runner:'npx', args:['-y','@modelcontextprotocol/server-slack'],         envVars:['SLACK_BOT_TOKEN'],                          link:'https://www.npmjs.com/package/@modelcontextprotocol/server-slack' },
   { name:'discord',          category:'Communication',      desc:'Send and read Discord messages',               runner:'npx', args:['-y','discord-mcp'],                              envVars:['DISCORD_TOKEN'],                            link:'https://www.npmjs.com/package/discord-mcp' },
@@ -659,15 +713,26 @@ function generateToml() {
     if (!sel.selected) continue;
     const tool = MCP_CATALOG.find(t => t.name === name);
     if (!tool) continue;
-    const args = tool.args.map(a => '"' + esc(a) + '"').join(', ');
     toml += '\n[[mcp_servers]]\n';
     toml += 'name = "' + name + '"\n';
-    toml += 'command = "' + tool.runner + '"\n';
-    toml += 'args = [' + args + ']\n';
-    if (tool.envVars.length > 0) {
-      toml += '[mcp_servers.env]\n';
-      for (const k of tool.envVars) {
-        toml += k + ' = "' + esc((sel.env && sel.env[k]) || (tool.envDefaults && tool.envDefaults[k]) || '') + '"\n';
+    if (tool.url) {
+      // HTTP-based MCP server (url + optional auth_token)
+      toml += 'url = "' + tool.url + '"\n';
+      const token = tool.authTokenVar && sel.env && sel.env[tool.authTokenVar];
+      if (token) {
+        toml += 'auth_token = "' + esc(token) + '"\n';
+      }
+    } else {
+      // stdio-based MCP server (command + args + optional env)
+      const args = tool.args.map(a => '"' + esc(a) + '"').join(', ');
+      toml += 'command = "' + tool.runner + '"\n';
+      toml += 'args = [' + args + ']\n';
+      const envVars = tool.envVars || [];
+      if (envVars.length > 0) {
+        toml += '[mcp_servers.env]\n';
+        for (const k of envVars) {
+          toml += k + ' = "' + esc((sel.env && sel.env[k]) || (tool.envDefaults && tool.envDefaults[k]) || '') + '"\n';
+        }
       }
     }
   }
@@ -766,7 +831,12 @@ async function loadExistingConfig() {
     for (const s of (cfg.mcp_servers || [])) {
       const inCatalog = MCP_CATALOG.find(c => c.name === s.name);
       if (inCatalog) {
-        state.mcp_selections[s.name] = { selected: true, env: s.env || {} };
+        const env = s.env || {};
+        // For HTTP catalog entries, map auth_token back to the authTokenVar key
+        if (inCatalog.authTokenVar && s.auth_token) {
+          env[inCatalog.authTokenVar] = s.auth_token;
+        }
+        state.mcp_selections[s.name] = { selected: true, env };
       } else {
         state.custom_mcp_servers.push({
           name: s.name,
@@ -942,12 +1012,20 @@ function buildSteps() {
   for (const cat of categories) {
     html5 += `<div class="mcp-category"><h3>${cat}</h3>`;
     for (const tool of MCP_CATALOG.filter(t => t.category === cat)) {
-      const cmd = tool.runner + ' ' + tool.args.join(' ');
-      const envHtml = tool.envVars.map(k => {
+      // Display line: HTTP servers show the URL; stdio servers show runner + args
+      const cmd = tool.url
+        ? 'HTTP · ' + tool.url
+        : (tool.runner + ' ' + (tool.args || []).join(' '));
+      // Env fields: HTTP servers show their authTokenVar; stdio servers show envVars
+      const envVars = tool.url
+        ? (tool.authTokenVar ? [tool.authTokenVar] : [])
+        : (tool.envVars || []);
+      const envHtml = envVars.map(k => {
         const existingVal = state.mcp_selections[tool.name]?.env?.[k] || (tool.envDefaults && tool.envDefaults[k]) || '';
+        const placeholder = tool.url ? 'Notion integration token' : k;
         return `<div class="env-row" onclick="event.stopPropagation()">
           <div class="mcp-env-label">${k}</div>
-          <input type="text" placeholder="${k}" value="${escHtml(existingVal)}"
+          <input type="text" placeholder="${placeholder}" value="${escHtml(existingVal)}"
                  oninput="setEnv('${tool.name}','${k}',this.value)">
         </div>`;
       }).join('');
@@ -956,10 +1034,12 @@ function buildSteps() {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openOAuthModal()" type="button">&#9432; OAuth Setup Guide</button>`;
       } else if (tool.setupGuide === '__THREADS_GUIDE_BUTTON__') {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openThreadsModal()" type="button">&#9432; Threads Setup Guide</button>`;
+      } else if (tool.setupGuide === '__NOTION_GUIDE_BUTTON__') {
+        guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openNotionModal()" type="button">&#9432; Notion Setup Guide</button>`;
       } else if (tool.setupGuide) {
         guideHtml = `<div class="mcp-setup-guide" onclick="event.stopPropagation()">${tool.setupGuide}</div>`;
       }
-      const hasExtras = tool.envVars.length || tool.setupGuide;
+      const hasExtras = envVars.length || tool.setupGuide;
       const linkHtml = tool.link
         ? `<a class="mcp-tool-link" href="${tool.link}" target="_blank" rel="noopener" onclick="event.stopPropagation()">docs ↗</a>`
         : '';
@@ -1073,10 +1153,22 @@ function closeThreadsModal(event) {
   document.body.style.overflow = '';
 }
 
+function openNotionModal() {
+  document.getElementById('notion-modal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeNotionModal(event) {
+  if (event && event.target !== document.getElementById('notion-modal')) return;
+  document.getElementById('notion-modal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     document.getElementById('oauth-modal').classList.remove('open');
     document.getElementById('threads-modal').classList.remove('open');
+    document.getElementById('notion-modal').classList.remove('open');
     document.body.style.overflow = '';
   }
 });

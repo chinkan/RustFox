@@ -55,6 +55,7 @@ pub fn friendly_tool_name(name: &str) -> String {
             ("github", "🐙"),
             ("sqlite", "🗄️"),
             ("threads", "🧵"),
+            ("notion", "📝"),
             ("fetch", "🌐"),
             ("git", "📦"),
         ];
