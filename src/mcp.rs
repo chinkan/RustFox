@@ -53,8 +53,25 @@ impl McpManager {
 
         info!("Connecting to HTTP MCP server '{}': {}", config.name, url);
 
-        let transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
-            .auth_header(config.auth_token.clone().unwrap_or_default());
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+
+        // Only set the auth header when a non-empty token is provided.
+        // Using unwrap_or_default() would pass an empty string, causing
+        // reqwest to send "Authorization: Bearer " (empty token) which
+        // remote servers (e.g. Notion) reject with 401 invalid_token.
+        match &config.auth_token {
+            Some(token) if !token.is_empty() => {
+                transport_config = transport_config.auth_header(token.clone());
+            }
+            None => {
+                tracing::warn!(
+                    "HTTP MCP server '{}' has no auth_token configured; \
+                     requests will be sent without an Authorization header",
+                    config.name
+                );
+            }
+            _ => {}
+        }
 
         let transport = StreamableHttpClientTransport::from_config(transport_config);
 
