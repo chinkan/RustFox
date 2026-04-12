@@ -59,6 +59,10 @@ struct OAuthSession {
     token_endpoint: String,
     /// Populated once /oauth/callback completes the token exchange.
     access_token: Option<String>,
+    /// Refresh token returned by the authorization server (if any).
+    refresh_token: Option<String>,
+    /// Lifetime in seconds of the access token (e.g. 3600).
+    expires_in: Option<u64>,
 }
 
 // ── Shared state ───────────────────────────────────────────────────────────────
@@ -204,6 +208,21 @@ struct OAuthTokenPollResponse {
     ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// Refresh token from the authorization server — include in config.toml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    /// Lifetime of the access token in seconds (e.g. 3600).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in: Option<u64>,
+    /// Token endpoint needed for refresh-token exchanges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_endpoint: Option<String>,
+    /// OAuth client ID used for refresh-token requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_client_id: Option<String>,
+    /// OAuth client secret (if any) for refresh-token requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_client_secret: Option<String>,
 }
 
 /// Minimal shape of `.well-known/oauth-authorization-server` or
@@ -233,6 +252,12 @@ struct ClientRegistrationResponse {
 #[derive(Deserialize)]
 struct OAuthTokenResponse {
     access_token: String,
+    /// Refresh token for obtaining new access tokens after expiry.
+    #[serde(default)]
+    refresh_token: Option<String>,
+    /// Lifetime of the access token in seconds (e.g. 3600).
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 // ── OAuth helpers ──────────────────────────────────────────────────────────────
@@ -417,6 +442,8 @@ async fn oauth_start(
             client_secret: reg_resp.client_secret,
             token_endpoint: discovery.token_endpoint,
             access_token: None,
+            refresh_token: None,
+            expires_in: None,
         },
     );
 
@@ -481,6 +508,8 @@ async fn oauth_callback(
                 // Re-acquire the lock only to write back the access token.
                 if let Some(session) = st.oauth_sessions.lock().await.get_mut(&params.state) {
                     session.access_token = Some(tok.access_token);
+                    session.refresh_token = tok.refresh_token;
+                    session.expires_in = tok.expires_in;
                 }
                 Html(format!(
                     "<html><head><title>Authorized</title></head><body>\
@@ -523,6 +552,11 @@ async fn oauth_token_poll(
     Ok(Json(OAuthTokenPollResponse {
         ready: session.access_token.is_some(),
         token: session.access_token.clone(),
+        refresh_token: session.refresh_token.clone(),
+        expires_in: session.expires_in,
+        token_endpoint: Some(session.token_endpoint.clone()),
+        oauth_client_id: Some(session.client_id.clone()),
+        oauth_client_secret: session.client_secret.clone(),
     }))
 }
 
