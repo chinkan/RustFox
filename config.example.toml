@@ -150,13 +150,27 @@ directory = "skills"
 
 # Example: Notion MCP server (official HTTP MCP — no Node.js required)
 # Docs: https://developers.notion.com/guides/mcp/mcp
-# Get your integration token at https://www.notion.so/profile/integrations
-# Note: the old @notionhq/notion-mcp-server npm package is deprecated.
+#
+# Recommended: use the setup wizard (cargo run --bin setup) to obtain an OAuth
+# access token via the built-in OAuth 2.0 flow.  The wizard also stores the
+# refresh token and expiry so the bot can automatically renew the connection.
+#
+# The bot refreshes the access token automatically when it is within 5 minutes
+# of expiry and writes the new credentials back to this file.  Manual setup:
+#   1. Create a Notion integration at https://www.notion.so/my-integrations
+#      and note your client_id and client_secret.
+#   2. Complete the OAuth flow to obtain an access_token and refresh_token.
+#   3. Fill in the fields below.
 #
 # [[mcp_servers]]
 # name = "notion"
 # url = "https://mcp.notion.com/mcp"
-# auth_token = "your-notion-integration-token"
+# auth_token = "your-notion-oauth-access-token"
+# refresh_token = "your-notion-oauth-refresh-token"
+# token_expires_at = 1234567890          # Unix timestamp; set by the wizard
+# token_endpoint = "https://api.notion.com/v1/oauth/token"
+# oauth_client_id = "your-notion-client-id"
+# oauth_client_secret = "your-notion-client-secret"  # omit for public clients
 
 # Example: Exa AI web search (https://mcp.exa.ai)
 # Get your API key at https://dashboard.exa.ai/api-keys

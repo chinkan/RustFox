@@ -81,9 +81,19 @@ async fn main() -> Result<()> {
         .context("Failed to initialize memory store")?;
     info!("  Database: {}", config.memory.database_path.display());
 
-    // Initialize MCP connections
+    // Refresh any expiring OAuth tokens before connecting to MCP servers
+    let http_client = reqwest::Client::new();
+    let mut mcp_server_configs = config.mcp_servers.clone();
+    let refreshed =
+        crate::mcp::refresh_expiring_tokens(&mut mcp_server_configs, &config_path, &http_client)
+            .await;
+    if refreshed > 0 {
+        info!("  Refreshed {refreshed} expiring MCP OAuth token(s) at startup");
+    }
+
+    // Initialize MCP connections (using possibly-refreshed configs)
     let mut mcp_manager = McpManager::new();
-    mcp_manager.connect_all(&config.mcp_servers).await;
+    mcp_manager.connect_all(&mcp_server_configs).await;
 
     // Load skills from markdown files
     let skills = load_skills_from_dir(&config.skills.directory).await?;
@@ -165,6 +175,34 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // Spawn background OAuth token refresh task: checks every 30 minutes.
+    // `cfgs` is kept across ticks so that updated token_expires_at values
+    // are remembered and a freshly-rotated refresh token isn't re-used.
+    {
+        let mut cfgs = mcp_server_configs.clone();
+        let refresh_config_path = config_path.clone();
+        let refresh_http_client = http_client.clone();
+        tokio::spawn(async move {
+            // 30-minute interval — tokens expiring within 5 min are always caught
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30 * 60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let refreshed = crate::mcp::refresh_expiring_tokens(
+                    &mut cfgs,
+                    &refresh_config_path,
+                    &refresh_http_client,
+                )
+                .await;
+                if refreshed > 0 {
+                    tracing::info!(
+                        "Background token refresh: updated {refreshed} MCP OAuth token(s)"
+                    );
+                }
+            }
+        });
+    }
 
     // Register built-in background tasks and start scheduler
     register_builtin_tasks(

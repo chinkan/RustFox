@@ -82,6 +82,24 @@ pub struct McpServerConfig {
     /// Used with `url`; ignored for stdio servers.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// OAuth 2.0 refresh token for long-lived connections.
+    /// When set, the bot will automatically exchange this for a new `auth_token`
+    /// before the current one expires and persist the updated token to `config.toml`.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Unix timestamp (seconds since epoch) at which the current `auth_token`
+    /// expires.  Derived from the `expires_in` field of the token response.
+    #[serde(default)]
+    pub token_expires_at: Option<i64>,
+    /// OAuth 2.0 token endpoint used for refresh-token exchanges.
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    /// OAuth 2.0 client ID used when authenticating refresh-token requests.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    /// OAuth 2.0 client secret (if applicable) used alongside `oauth_client_id`.
+    #[serde(default)]
+    pub oauth_client_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

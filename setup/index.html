@@ -744,11 +744,28 @@ function generateToml() {
     toml += '\n[[mcp_servers]]\n';
     toml += 'name = "' + name + '"\n';
     if (tool.url) {
-      // HTTP-based MCP server (url + optional auth_token)
+      // HTTP-based MCP server (url + optional auth_token + optional OAuth refresh fields)
       toml += 'url = "' + tool.url + '"\n';
       const token = tool.authTokenVar && sel.env && sel.env[tool.authTokenVar];
       if (token) {
         toml += 'auth_token = "' + esc(token) + '"\n';
+      }
+      if (sel.refresh_token) {
+        toml += 'refresh_token = "' + esc(sel.refresh_token) + '"\n';
+      }
+      if (sel.expires_in) {
+        // Compute absolute expiry timestamp (now + expires_in seconds)
+        const expiresAt = Math.floor(Date.now() / 1000) + sel.expires_in;
+        toml += 'token_expires_at = ' + expiresAt + '\n';
+      }
+      if (sel.token_endpoint) {
+        toml += 'token_endpoint = "' + esc(sel.token_endpoint) + '"\n';
+      }
+      if (sel.oauth_client_id) {
+        toml += 'oauth_client_id = "' + esc(sel.oauth_client_id) + '"\n';
+      }
+      if (sel.oauth_client_secret) {
+        toml += 'oauth_client_secret = "' + esc(sel.oauth_client_secret) + '"\n';
       }
     } else {
       // stdio-based MCP server (command + args + optional env)
@@ -1260,7 +1277,7 @@ async function connectOAuth(serverName, mcpUrl, authTokenVar) {
       try {
         const pollRes = await fetch('/api/oauth/token?state=' + encodeURIComponent(oauthState));
         if (!pollRes.ok) return;
-        const { ready, token } = await pollRes.json();
+        const { ready, token, refresh_token, expires_in, token_endpoint, oauth_client_id, oauth_client_secret } = await pollRes.json();
         if (ready && token) {
           cleanup();
           if (popup && !popup.closed) popup.close();
@@ -1274,6 +1291,13 @@ async function connectOAuth(serverName, mcpUrl, authTokenVar) {
           }
           state.mcp_selections[serverName].env[authTokenVar] = token;
           state.mcp_selections[serverName].selected = true;
+
+          // Store OAuth refresh metadata so the TOML generator can include it.
+          if (refresh_token) state.mcp_selections[serverName].refresh_token = refresh_token;
+          if (expires_in) state.mcp_selections[serverName].expires_in = expires_in;
+          if (token_endpoint) state.mcp_selections[serverName].token_endpoint = token_endpoint;
+          if (oauth_client_id) state.mcp_selections[serverName].oauth_client_id = oauth_client_id;
+          if (oauth_client_secret) state.mcp_selections[serverName].oauth_client_secret = oauth_client_secret;
 
           // Update the visible token input field.
           const input = document.getElementById('mcp-env-input-' + serverName + '-' + authTokenVar);
