@@ -447,13 +447,11 @@ async fn oauth_callback(
                 s.client_secret.clone(),
                 s.token_endpoint.clone(),
             ),
-            None => {
-                return Html(
-                    "<html><body><p>Unknown OAuth state. Please close this window and try again.</p>\
+            None => return Html(
+                "<html><body><p>Unknown OAuth state. Please close this window and try again.</p>\
                      <script>setTimeout(()=>window.close(),3000)</script></body></html>"
-                        .into(),
-                )
-            }
+                    .into(),
+            ),
         }
     }; // lock is released here
 
