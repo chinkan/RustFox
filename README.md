@@ -261,11 +261,11 @@ skills/
 - [x] RAG query rewriting (disambiguates follow-up questions before vector search)
 - [x] Nightly conversation summarization (LLM-based cron job)
 - [x] Verbose tool UI (`/verbose` command — live tool call progress in Telegram)
+- [x] Google integration tools (Calendar, Email, Drive)
 
 ### Planned
 
 - [ ] Image upload support
-- [ ] Google integration tools (Calendar, Email, Drive)
 - [ ] Event trigger framework (e.g., on email receive)
 - [ ] WhatsApp support
 - [ ] Webhook mode (in addition to polling)
