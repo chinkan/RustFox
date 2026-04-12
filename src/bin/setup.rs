@@ -435,16 +435,27 @@ async fn oauth_callback(
     State(st): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Html<String> {
-    let mut sessions = st.oauth_sessions.lock().await;
-    let session =
-        match sessions.get_mut(&params.state) {
-            Some(s) => s,
-            None => return Html(
-                "<html><body><p>Unknown OAuth state. Please close this window and try again.</p>\
-                 <script>setTimeout(()=>window.close(),3000)</script></body></html>"
-                    .into(),
+    // Clone the fields we need before dropping the lock so it is not held
+    // across the async HTTP token-exchange request below.
+    let (server_name, code_verifier, client_id, client_secret, token_endpoint) = {
+        let sessions = st.oauth_sessions.lock().await;
+        match sessions.get(&params.state) {
+            Some(s) => (
+                s.server_name.clone(),
+                s.code_verifier.clone(),
+                s.client_id.clone(),
+                s.client_secret.clone(),
+                s.token_endpoint.clone(),
             ),
-        };
+            None => {
+                return Html(
+                    "<html><body><p>Unknown OAuth state. Please close this window and try again.</p>\
+                     <script>setTimeout(()=>window.close(),3000)</script></body></html>"
+                        .into(),
+                )
+            }
+        }
+    }; // lock is released here
 
     // Exchange the authorization code for an access token.
     let redir = redirect_uri();
@@ -452,16 +463,16 @@ async fn oauth_callback(
         ("grant_type", "authorization_code".to_owned()),
         ("code", params.code.clone()),
         ("redirect_uri", redir),
-        ("client_id", session.client_id.clone()),
-        ("code_verifier", session.code_verifier.clone()),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
     ];
-    if let Some(secret) = &session.client_secret {
-        token_params.push(("client_secret", secret.clone()));
+    if let Some(secret) = client_secret {
+        token_params.push(("client_secret", secret));
     }
 
     let token_result = st
         .http_client
-        .post(&session.token_endpoint)
+        .post(&token_endpoint)
         .form(&token_params)
         .send()
         .await;
@@ -469,12 +480,14 @@ async fn oauth_callback(
     match token_result {
         Ok(resp) if resp.status().is_success() => match resp.json::<OAuthTokenResponse>().await {
             Ok(tok) => {
-                let server = session.server_name.clone();
-                session.access_token = Some(tok.access_token);
+                // Re-acquire the lock only to write back the access token.
+                if let Some(session) = st.oauth_sessions.lock().await.get_mut(&params.state) {
+                    session.access_token = Some(tok.access_token);
+                }
                 Html(format!(
                     "<html><head><title>Authorized</title></head><body>\
                          <p style=\"font-family:sans-serif;text-align:center;margin-top:4rem\">\
-                         ✅ {server} authorization successful! You can close this window.</p>\
+                         ✅ {server_name} authorization successful! You can close this window.</p>\
                          <script>window.close();</script>\
                          </body></html>"
                 ))
