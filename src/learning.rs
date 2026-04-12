@@ -592,12 +592,12 @@ fn strip_code_fences(s: &str) -> String {
 /// starts with `---` and contains a second `---` delimiter on its own line.
 fn has_valid_frontmatter(content: &str) -> bool {
     let trimmed = content.trim();
-    if !trimmed.starts_with("---") {
+    let mut lines = trimmed.lines();
+    // The very first line must be exactly "---".
+    if lines.next() != Some("---") {
         return false;
     }
-    // Skip the opening "---" line and look for a closing "---".
-    let mut lines = trimmed.lines();
-    lines.next(); // opening "---"
+    // Look for a closing "---" on its own line.
     for line in lines {
         if line.trim() == "---" {
             return true;
