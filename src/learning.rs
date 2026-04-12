@@ -6,9 +6,6 @@ use crate::llm::{ChatMessage, LlmClient};
 use crate::skills::loader::load_skills_from_dir;
 use crate::skills::SkillRegistry;
 
-/// Minimum number of tool calls in a conversation to trigger skill extraction.
-const MIN_TOOL_CALLS_FOR_EXTRACTION: u32 = 5;
-
 /// Minimum number of conversation messages needed before updating the user model.
 const MIN_MESSAGES_FOR_USER_MODEL: usize = 3;
 
@@ -17,7 +14,8 @@ const MIN_MESSAGES_FOR_USER_MODEL: usize = 3;
 /// Analyze a completed agentic loop and, if the conversation used enough tool
 /// calls and contains a reusable pattern, auto-generate a new skill in `skills/`.
 ///
-/// Runs in the background (via `tokio::spawn`) so it never blocks the user.
+/// This function performs the extraction work when awaited. Callers that want
+/// it to run in the background should spawn it explicitly with `tokio::spawn`.
 pub async fn post_task_skill_extractor(
     llm: &LlmClient,
     skills_dir: &Path,
@@ -25,10 +23,6 @@ pub async fn post_task_skill_extractor(
     messages: &[ChatMessage],
     tool_call_count: u32,
 ) {
-    if tool_call_count < MIN_TOOL_CALLS_FOR_EXTRACTION {
-        return;
-    }
-
     info!(
         "Skill extractor triggered: {} tool calls in conversation",
         tool_call_count
@@ -100,7 +94,10 @@ async fn extract_skill_from_conversation(
     }];
 
     let response = llm.chat(&analysis_messages, &[]).await?;
-    let content = response.content.unwrap_or_default();
+    let raw = response.content.unwrap_or_default();
+
+    // Strip outer code fences if the model wrapped its entire response.
+    let content = strip_code_fences(&raw);
 
     if content.trim() == "NO_SKILL" || !content.contains("SKILL_NAME:") {
         return Ok(None);
@@ -139,15 +136,26 @@ async fn extract_skill_from_conversation(
     }
 
     // Build SKILL.md content with frontmatter.
+    // YAML-single-quote description and tag values so characters like `:`, `#`,
+    // `]`, or commas don't break the simple frontmatter parser.
+    fn yaml_single_quoted(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
     let tags_yaml = if tags.is_empty() {
         "[]".to_string()
     } else {
-        format!("[{}]", tags.join(", "))
+        format!(
+            "[{}]",
+            tags.iter()
+                .map(|tag| yaml_single_quoted(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     let skill_content = format!(
         "---\nname: {name}\ndescription: {description}\ntags: {tags}\n---\n\n{body}\n",
         name = name,
-        description = description,
+        description = yaml_single_quoted(&description),
         tags = tags_yaml,
         body = body,
     );
@@ -189,7 +197,32 @@ pub async fn self_patch_skill(
     patch_content: &str,
     skills: &tokio::sync::RwLock<SkillRegistry>,
 ) -> Result<String> {
-    let skill_path = skills_dir.join(skill_name).join("SKILL.md");
+    // Validate skill_name to prevent path traversal (e.g. "../secret").
+    // Only allow safe directory-name characters.
+    if skill_name.is_empty()
+        || skill_name.contains('/')
+        || skill_name.contains('\\')
+        || skill_name.contains("..")
+        || skill_name.starts_with('.')
+    {
+        anyhow::bail!("Invalid skill name: '{}'", skill_name);
+    }
+
+    let skill_dir = skills_dir.join(skill_name);
+
+    // Canonicalize to verify the resolved path stays inside skills_dir.
+    // We canonicalize skills_dir first (it must exist), then check the prefix.
+    let canonical_skills_dir = tokio::fs::canonicalize(skills_dir)
+        .await
+        .with_context(|| format!("Cannot canonicalize skills dir: {}", skills_dir.display()))?;
+    let canonical_skill_dir = tokio::fs::canonicalize(&skill_dir).await.ok();
+    if let Some(ref resolved) = canonical_skill_dir {
+        if !resolved.starts_with(&canonical_skills_dir) {
+            anyhow::bail!("Skill path '{}' escapes the skills directory", skill_name);
+        }
+    }
+
+    let skill_path = skill_dir.join("SKILL.md");
 
     if !skill_path.exists() {
         anyhow::bail!("Skill '{}' does not exist", skill_name);
@@ -364,8 +397,10 @@ async fn update_user_model_inner(
     let response = llm.chat(&messages, &[]).await?;
     let new_content = response.content.unwrap_or_default();
 
-    // Basic validation: must contain frontmatter.
-    if !new_content.contains("---") || new_content.trim().is_empty() {
+    // Strict validation: must start with `---` and contain a closing `---`
+    // delimiter so we don't write malformed or injection-bearing content into
+    // USER.md (which is later injected into the system prompt).
+    if !has_valid_frontmatter(&new_content) || new_content.trim().is_empty() {
         warn!("User model update returned invalid content, skipping");
         return Ok(false);
     }
@@ -532,6 +567,43 @@ fn extract_body_after(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Strip outer code fences (```` ``` ```` or ```` ```rust ```` etc.) from a string.
+/// If the entire content is wrapped in a single fenced block, return just the
+/// inner text; otherwise return the trimmed original.
+fn strip_code_fences(s: &str) -> String {
+    let trimmed = s.trim();
+    if let Some(after_open) = trimmed.strip_prefix("```") {
+        // Skip optional language hint on the opening fence line.
+        let after_hint =
+            after_open.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-');
+        // The rest must start with a newline for this to be a real fence.
+        if let Some(inner) = after_hint.strip_prefix('\n') {
+            if let Some(close_pos) = inner.rfind("```") {
+                return inner[..close_pos].trim().to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Return `true` if `content` has a valid YAML frontmatter block, i.e. it
+/// starts with `---` and contains a second `---` delimiter on its own line.
+fn has_valid_frontmatter(content: &str) -> bool {
+    let trimmed = content.trim();
+    if !trimmed.starts_with("---") {
+        return false;
+    }
+    // Skip the opening "---" line and look for a closing "---".
+    let mut lines = trimmed.lines();
+    lines.next(); // opening "---"
+    for line in lines {
+        if line.trim() == "---" {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
