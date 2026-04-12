@@ -1809,6 +1809,7 @@ impl Agent {
                 let branch = arguments["branch"].as_str().unwrap_or("main").to_string();
 
                 // Validate branch name to prevent git flag injection and path traversal.
+                // A single chars() pass checks both the allowlist and the blocklist.
                 let is_valid_branch = !branch.is_empty()
                     && !branch.starts_with('-')
                     && !branch.starts_with('/')
@@ -1819,14 +1820,12 @@ impl Agent {
                     && !branch.contains("@{")
                     && !branch.contains("//")
                     && branch != "@"
-                    && !branch.chars().any(|c| {
-                        c.is_whitespace()
-                            || c.is_control()
-                            || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
-                    })
-                    && branch
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+                    && branch.chars().all(|c| {
+                        (c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+                            && !c.is_whitespace()
+                            && !c.is_control()
+                            && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+                    });
 
                 if !is_valid_branch {
                     return format!("Self-update failed: invalid branch name '{}'", branch);
