@@ -403,6 +403,118 @@ impl MemoryStore {
             .context("Failed to load active conversations")?;
         Ok(ids)
     }
+
+    /// Return all [SUMMARY] system messages for a conversation, ordered by created_at ASC.
+    pub async fn get_summary_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, content FROM messages
+             WHERE conversation_id = ?1
+               AND role = 'system'
+               AND content LIKE '[SUMMARY]%'
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load summary messages")?;
+        Ok(rows)
+    }
+
+    /// Delete all [SUMMARY] system messages for a conversation and their embeddings.
+    pub async fn delete_summary_messages(&self, conversation_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        // Delete embeddings first
+        conn.execute(
+            "DELETE FROM message_embeddings WHERE rowid IN (
+                SELECT rowid FROM messages
+                WHERE conversation_id = ?1
+                  AND role = 'system'
+                  AND content LIKE '[SUMMARY]%'
+            )",
+            rusqlite::params![conversation_id],
+        )?;
+        let deleted = conn.execute(
+            "DELETE FROM messages
+             WHERE conversation_id = ?1
+               AND role = 'system'
+               AND content LIKE '[SUMMARY]%'",
+            rusqlite::params![conversation_id],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Count total non-system messages in a conversation.
+    pub async fn count_conversation_messages(&self, conversation_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE conversation_id = ?1
+               AND role != 'system'",
+            rusqlite::params![conversation_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Load messages older than the most recent `keep_recent` non-summary messages.
+    /// Returns (message_id, role, content) tuples for messages eligible for compaction.
+    /// Excludes system messages with [SUMMARY] prefix and already-summarized messages.
+    pub async fn get_older_messages_for_compaction(
+        &self,
+        conversation_id: &str,
+        keep_recent: usize,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        let conn = self.conn.lock().await;
+
+        // Use rowid to identify the Nth most recent non-summary message as cutoff.
+        // This is more reliable than timestamp-based cutoff when messages share the
+        // same `created_at` value (e.g. rapid bursts or test fixtures).
+        let cutoff_rowid: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(rowid) FROM (
+                    SELECT rowid FROM messages
+                    WHERE conversation_id = ?1
+                      AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
+                    ORDER BY rowid DESC
+                    LIMIT ?2
+                )",
+                rusqlite::params![conversation_id, keep_recent as i64],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        let Some(cutoff_rowid) = cutoff_rowid else {
+            return Ok(vec![]);
+        };
+
+        // Get all non-summary, non-summarized messages with rowid < cutoff
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content FROM messages
+             WHERE conversation_id = ?1
+               AND rowid < ?2
+               AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
+               AND (is_summarized IS NULL OR is_summarized = 0)
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![conversation_id, cutoff_rowid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load older messages for compaction")?;
+        Ok(rows)
+    }
 }
 
 fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {

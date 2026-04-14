@@ -39,6 +39,14 @@ database_path = "rustfox.db"
 # Can also be toggled per-user at runtime via the /query-rewrite Telegram command.
 # query_rewriter_enabled = false
 
+# Auto-compaction settings for infinite chat history (optional; defaults apply)
+# When enabled, conversations are automatically compacted when the estimated
+# token count exceeds the threshold. Older messages are summarized into a
+# cumulative [SUMMARY] while the most recent N messages are kept verbatim.
+# auto_compact_enabled = true
+# auto_compact_recent_messages = 15    # Keep this many recent messages verbatim
+# auto_compact_token_threshold = 80000 # Trigger compaction above this token estimate
+
 [skills]
 # Directory containing skill markdown files
 # Skills are natural-language instructions loaded at startup

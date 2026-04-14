@@ -544,6 +544,58 @@ impl Agent {
                 }
             }
 
+            // --- Auto-compaction: check and compact if token threshold exceeded ---
+            if self.config.memory.auto_compact_enabled {
+                let recent_keep = self.config.memory.auto_compact_recent_messages;
+                let token_threshold = self.config.memory.auto_compact_token_threshold;
+
+                // Quick pre-check using the in-memory messages before spawning
+                if crate::memory::auto_compact::should_compact(&messages, token_threshold) {
+                    if let Some(agent) = self.self_weak.upgrade() {
+                        let conv_id = conversation_id.clone();
+                        tokio::spawn(async move {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                crate::memory::auto_compact::compact_conversation(
+                                    &agent.memory,
+                                    &agent.llm,
+                                    &conv_id,
+                                    recent_keep,
+                                    token_threshold,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(true)) => {
+                                    info!(
+                                        conversation_id = %conv_id,
+                                        "Background auto-compaction completed"
+                                    );
+                                }
+                                Ok(Ok(false)) => {
+                                    debug!(
+                                        conversation_id = %conv_id,
+                                        "Background auto-compaction skipped (not needed)"
+                                    );
+                                }
+                                Ok(Err(e)) => {
+                                    warn!(
+                                        conversation_id = %conv_id,
+                                        "Background auto-compaction failed: {:#}", e
+                                    );
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        conversation_id = %conv_id,
+                                        "Background auto-compaction timed out"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
             return Ok(final_content);
         }
 

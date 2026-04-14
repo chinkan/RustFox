@@ -1,3 +1,4 @@
+pub mod auto_compact;
 pub mod conversations;
 pub mod embeddings;
 pub mod knowledge;

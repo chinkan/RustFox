@@ -122,6 +122,15 @@ pub struct MemoryConfig {
     /// Can be toggled per-user at runtime via the `/query-rewrite` command.
     #[serde(default)]
     pub query_rewriter_enabled: bool,
+    /// Enable real-time auto-compaction of chat history when token count exceeds threshold.
+    #[serde(default = "default_true")]
+    pub auto_compact_enabled: bool,
+    /// Number of most recent messages to always keep verbatim in the prompt.
+    #[serde(default = "default_auto_compact_recent_messages")]
+    pub auto_compact_recent_messages: usize,
+    /// Estimated token threshold that triggers compaction (e.g. 80% of model context).
+    #[serde(default = "default_auto_compact_token_threshold")]
+    pub auto_compact_token_threshold: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -242,6 +251,14 @@ fn default_summarize_cron() -> String {
     "0 0 2 * * *".to_string()
 }
 
+fn default_auto_compact_recent_messages() -> usize {
+    15
+}
+
+fn default_auto_compact_token_threshold() -> usize {
+    80_000
+}
+
 fn default_skills_dir() -> PathBuf {
     PathBuf::from("skills")
 }
@@ -270,6 +287,9 @@ fn default_memory_config() -> MemoryConfig {
         summarize_threshold: default_summarize_threshold(),
         summarize_cron: default_summarize_cron(),
         query_rewriter_enabled: false,
+        auto_compact_enabled: true,
+        auto_compact_recent_messages: default_auto_compact_recent_messages(),
+        auto_compact_token_threshold: default_auto_compact_token_threshold(),
     }
 }
 
