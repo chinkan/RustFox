@@ -245,7 +245,7 @@ into a single cohesive summary.";
 
 /// Build the user prompt for compaction, merging existing summary with new messages.
 fn build_compaction_prompt(existing_summary: &str, conversation_text: &str) -> String {
-    let mut prompt = String::with_capacity(conversation_text.len() + existing_summary.len() + 512);
+    let mut prompt = String::with_capacity(conversation_text.len() + existing_summary.len() + 1024);
 
     prompt.push_str(
         "Summarize the conversation below into a concise, structured summary.\n\n\
