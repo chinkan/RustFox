@@ -475,12 +475,14 @@ impl MemoryStore {
         // Use rowid to identify the Nth most recent non-summary message as cutoff.
         // This is more reliable than timestamp-based cutoff when messages share the
         // same `created_at` value (e.g. rapid bursts or test fixtures).
+        // We exclude ALL system messages (including the original system prompt) from
+        // the window calculation — only user/assistant/tool turns are counted.
         let cutoff_rowid: Option<i64> = conn
             .query_row(
                 "SELECT MIN(rowid) FROM (
                     SELECT rowid FROM messages
                     WHERE conversation_id = ?1
-                      AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
+                      AND role != 'system'
                     ORDER BY rowid DESC
                     LIMIT ?2
                 )",
@@ -494,12 +496,15 @@ impl MemoryStore {
             return Ok(vec![]);
         };
 
-        // Get all non-summary, non-summarized messages with rowid < cutoff
+        // Get all non-system, non-summarized messages with rowid < cutoff.
+        // System messages (system prompt, [SUMMARY]) are never compacted: the
+        // system prompt should never be summarized away, and [SUMMARY] messages
+        // are managed exclusively by compact_conversation itself.
         let mut stmt = conn.prepare(
             "SELECT id, role, content FROM messages
              WHERE conversation_id = ?1
                AND rowid < ?2
-               AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
+               AND role != 'system'
                AND (is_summarized IS NULL OR is_summarized = 0)
              ORDER BY rowid ASC",
         )?;

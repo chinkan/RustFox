@@ -476,4 +476,152 @@ mod tests {
         let summaries = store.get_summary_messages(&conv).await.unwrap();
         assert!(summaries.is_empty());
     }
+
+    /// Regression test: `get_older_messages_for_compaction` must not include the
+    /// original system message (role='system') in the returned set.  Previously the
+    /// query used `NOT (role = 'system' AND content LIKE '[SUMMARY]%')` which
+    /// accidentally let the system prompt through; now it uses `role != 'system'`.
+    #[tokio::test]
+    async fn test_compaction_excludes_system_messages() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "exclude_system")
+            .await
+            .unwrap();
+
+        // Save a system prompt (simulates original conversation start)
+        let system_msg = ChatMessage {
+            role: "system".to_string(),
+            content: Some("You are RustFox. Be helpful.".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &system_msg).await.unwrap();
+
+        // Save enough user/assistant messages so that the system message
+        // falls outside the keep_recent window
+        for i in 0..20 {
+            let msg = ChatMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: Some(format!("turn {}", i)),
+                tool_calls: None,
+                tool_call_id: None,
+            };
+            store.save_message(&conv, &msg).await.unwrap();
+        }
+
+        // With keep_recent=10 the older 10 user/assistant messages are eligible.
+        // The system message must NOT appear in the result.
+        let older = store
+            .get_older_messages_for_compaction(&conv, 10)
+            .await
+            .unwrap();
+
+        // None of the returned messages should have role='system'
+        for (_, role, _) in &older {
+            assert_ne!(
+                role, "system",
+                "System message must not be included in compaction set"
+            );
+        }
+        // Should be exactly 10 user/assistant messages
+        assert_eq!(
+            older.len(),
+            10,
+            "Expected 10 older messages, got {}",
+            older.len()
+        );
+    }
+
+    /// Regression test: `load_messages_with_limit` returns [SUMMARY] messages
+    /// (role="system") before raw messages.  The system-prompt refresh logic in
+    /// agent.rs must not overwrite a [SUMMARY] message — it must skip [SUMMARY]
+    /// entries and find the real system prompt.  This test simulates the in-memory
+    /// transformation that agent.rs performs.
+    #[tokio::test]
+    async fn test_system_prompt_refresh_skips_summary_messages() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "summary_refresh")
+            .await
+            .unwrap();
+
+        // Save original system prompt
+        let system_msg = ChatMessage {
+            role: "system".to_string(),
+            content: Some("Original system prompt".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &system_msg).await.unwrap();
+
+        // Save a few user/assistant turns
+        for i in 0..5 {
+            let msg = ChatMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: Some(format!("message {}", i)),
+                tool_calls: None,
+                tool_call_id: None,
+            };
+            store.save_message(&conv, &msg).await.unwrap();
+        }
+
+        // Simulate auto-compact: add a [SUMMARY] message
+        let summary = ChatMessage {
+            role: "system".to_string(),
+            content: Some("[SUMMARY]\n• Key context bullet 1\n• Key context bullet 2".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &summary).await.unwrap();
+
+        // Load messages — [SUMMARY] comes first
+        let mut messages = store.load_messages_with_limit(&conv, 50).await.unwrap();
+
+        // Verify [SUMMARY] is present and comes before the original system prompt
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")),
+            "Expected [SUMMARY] message in loaded messages"
+        );
+
+        // Simulate the FIXED refresh logic from agent.rs:
+        // find the NON-[SUMMARY] system message to refresh
+        let new_prompt = "Updated system prompt with new skills".to_string();
+        let found = messages.iter_mut().find(|m| {
+            m.role == "system" && !m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")
+        });
+        if let Some(sys) = found {
+            sys.content = Some(new_prompt.clone());
+        }
+
+        // The [SUMMARY] must still be intact after the refresh
+        let summary_msg = messages
+            .iter()
+            .find(|m| m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]"));
+        assert!(
+            summary_msg.is_some(),
+            "[SUMMARY] must survive system prompt refresh"
+        );
+        assert!(
+            summary_msg
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("Key context bullet 1"),
+            "[SUMMARY] content must be unchanged"
+        );
+
+        // The system prompt must be updated
+        let sys_msg = messages.iter().find(|m| {
+            m.role == "system" && !m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")
+        });
+        assert_eq!(
+            sys_msg.unwrap().content.as_deref().unwrap(),
+            new_prompt,
+            "System prompt must be updated to new value"
+        );
+    }
 }

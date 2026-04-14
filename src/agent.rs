@@ -180,9 +180,38 @@ impl Agent {
         } else {
             // Refresh in-memory: new skills loaded by reload_skills take effect
             // on the very next message without restarting the bot.
-            // Find the system message by role (defensive: don't assume messages[0] is system).
-            if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
+            //
+            // IMPORTANT: after auto-compact runs, [SUMMARY] system messages appear
+            // first in the loaded array (they have role="system" too). We must skip
+            // [SUMMARY] messages and target only the original system prompt.
+            // If the original system prompt has scrolled out of the recent-messages
+            // window, no non-[SUMMARY] system message exists; in that case we
+            // prepend a fresh one so the LLM always receives a system prompt.
+            let found = messages.iter_mut().find(|m| {
+                m.role == "system" && !m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")
+            });
+            if let Some(system_msg) = found {
                 system_msg.content = Some(current_system_prompt);
+            } else {
+                // Original system message scrolled out of the recent window — insert
+                // a fresh one at position 0, after any leading [SUMMARY] messages,
+                // so the LLM still sees a proper system prompt before the history.
+                let insert_pos = messages
+                    .iter()
+                    .take_while(|m| {
+                        m.role == "system"
+                            && m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")
+                    })
+                    .count();
+                messages.insert(
+                    insert_pos,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: Some(current_system_prompt),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                );
             }
         }
 
@@ -227,7 +256,12 @@ impl Agent {
             )
             .await
             {
-                if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
+                // Inject into the non-[SUMMARY] system message so the RAG block
+                // doesn't accidentally overwrite the [SUMMARY] content.
+                if let Some(system_msg) = messages.iter_mut().find(|m| {
+                    m.role == "system"
+                        && !m.content.as_deref().unwrap_or("").starts_with("[SUMMARY]")
+                }) {
                     if let Some(ref mut content) = system_msg.content {
                         content.push_str("\n\n");
                         content.push_str(&rag_block);
