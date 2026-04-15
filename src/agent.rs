@@ -5,6 +5,8 @@ use tracing::{debug, error, info, warn};
 use teloxide::Bot;
 
 use crate::config::Config;
+use crate::evaluation::{EvaluationManager, TrajectoryEventKind, TrajectoryHook};
+use crate::hooks::{AgentHook, HookContext, HookManager};
 use crate::langsmith::LangSmithClient;
 use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, ToolDefinition};
 use crate::mcp::McpManager;
@@ -42,6 +44,10 @@ pub struct Agent {
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
     pub langsmith: Arc<LangSmithClient>,
+    /// Lifecycle hooks manager (L in ETCSLV).
+    pub hooks: Arc<HookManager>,
+    /// Evaluation manager (V in ETCSLV).
+    pub evaluation: Arc<EvaluationManager>,
 }
 
 /// Which registry/directory an agent invocation targets.
@@ -67,6 +73,8 @@ impl Agent {
         self_weak: Weak<Agent>,
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
         langsmith: Arc<LangSmithClient>,
+        hooks: Arc<HookManager>,
+        evaluation: Arc<EvaluationManager>,
     ) -> Self {
         let llm = LlmClient::new(config.openrouter.clone());
         Self {
@@ -82,6 +90,8 @@ impl Agent {
             self_weak,
             job_tx,
             langsmith,
+            hooks,
+            evaluation,
         }
     }
 
@@ -255,6 +265,20 @@ impl Agent {
         all_tools.extend(self.scheduling_tool_definitions());
         all_tools.extend(self.skill_tool_definitions());
 
+        // --- Lifecycle hooks & trajectory: initialise ---
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let trajectory_hook = Arc::new(TrajectoryHook::new(
+            &request_id,
+            user_id,
+            chat_id,
+        ));
+        let base_hook_ctx = HookContext::new(user_id, chat_id)
+            .with_message(&incoming.text);
+
+        // pre_process hook
+        self.hooks.run_pre_process(&base_hook_ctx).await;
+        trajectory_hook.pre_process(&base_hook_ctx).await.ok();
+
         // --- LangSmith: start root chain run ---
         let chain_run_id = uuid::Uuid::new_v4().to_string();
         let ls_project = self
@@ -291,6 +315,13 @@ impl Agent {
                 messages.len()
             );
 
+            // --- Lifecycle hook: pre_llm_call ---
+            {
+                let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                self.hooks.run_pre_llm_call(&hook_ctx).await;
+                trajectory_hook.pre_llm_call(&hook_ctx).await.ok();
+            }
+
             // --- LangSmith: start llm run (child of chain) ---
             let llm_run_id = uuid::Uuid::new_v4().to_string();
             let llm_start = Self::now_iso8601_static();
@@ -310,6 +341,15 @@ impl Agent {
             let response = match response {
                 Ok(r) => r,
                 Err(e) => {
+                    // --- Lifecycle hook: on_error ---
+                    {
+                        let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                        self.hooks.run_on_error(&hook_ctx, &format!("{:#}", e)).await;
+                        trajectory_hook
+                            .on_error(&hook_ctx, &format!("{:#}", e))
+                            .await
+                            .ok();
+                    }
                     self.langsmith.end_run(crate::langsmith::EndRunParams {
                         id: llm_run_id,
                         outputs: None,
@@ -325,6 +365,13 @@ impl Agent {
                     return Err(e);
                 }
             };
+
+            // --- Lifecycle hook: post_llm_call ---
+            {
+                let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                self.hooks.run_post_llm_call(&hook_ctx).await;
+                trajectory_hook.post_llm_call(&hook_ctx).await.ok();
+            }
 
             // --- LangSmith: end llm run ---
             self.langsmith.end_run(crate::langsmith::EndRunParams {
@@ -362,6 +409,17 @@ impl Agent {
                         let arguments: serde_json::Value =
                             serde_json::from_str(&tool_call.function.arguments)
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                        // --- Lifecycle hook: pre_tool_call ---
+                        {
+                            let hook_ctx = base_hook_ctx
+                                .clone()
+                                .with_tool_name(&tool_call.function.name)
+                                .with_tool_args(&arguments)
+                                .with_iteration(iteration);
+                            self.hooks.run_pre_tool_call(&hook_ctx).await;
+                            trajectory_hook.pre_tool_call(&hook_ctx).await.ok();
+                        }
 
                         // --- LangSmith: start tool run (child of chain) ---
                         let tool_run_id = uuid::Uuid::new_v4().to_string();
@@ -422,6 +480,18 @@ impl Agent {
                         );
                         debug!("Tool '{}' result: {}", tool_call.function.name, tool_result);
 
+                        // --- Lifecycle hook: post_tool_call ---
+                        {
+                            let hook_ctx = base_hook_ctx
+                                .clone()
+                                .with_tool_name(&tool_call.function.name)
+                                .with_tool_args(&arguments)
+                                .with_tool_result(&tool_result)
+                                .with_iteration(iteration);
+                            self.hooks.run_post_tool_call(&hook_ctx).await;
+                            trajectory_hook.post_tool_call(&hook_ctx).await.ok();
+                        }
+
                         // --- LangSmith: end tool run ---
                         self.langsmith.end_run(crate::langsmith::EndRunParams {
                             id: tool_run_id,
@@ -436,9 +506,19 @@ impl Agent {
                             tool_calls: None,
                             tool_call_id: Some(tool_call.id.clone()),
                         };
+                        // --- Lifecycle hook: pre_save_message ---
+                        {
+                            let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                            self.hooks.run_pre_save_message(&hook_ctx).await;
+                        }
                         self.memory
                             .save_message(&conversation_id, &tool_msg)
                             .await?;
+                        // --- Lifecycle hook: post_save_message ---
+                        {
+                            let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                            self.hooks.run_post_save_message(&hook_ctx).await;
+                        }
                         messages.push(tool_msg);
                     }
 
@@ -478,9 +558,58 @@ impl Agent {
                 tool_calls: response.tool_calls.clone(),
                 tool_call_id: response.tool_call_id.clone(),
             };
+            // --- Lifecycle hook: pre_save_message ---
+            {
+                let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                self.hooks.run_pre_save_message(&hook_ctx).await;
+            }
             self.memory
                 .save_message(&conversation_id, &save_msg)
                 .await?;
+            // --- Lifecycle hook: post_save_message ---
+            {
+                let hook_ctx = base_hook_ctx.clone().with_iteration(iteration);
+                self.hooks.run_post_save_message(&hook_ctx).await;
+            }
+
+            // --- Trajectory: record final response ---
+            trajectory_hook
+                .record(
+                    TrajectoryEventKind::FinalResponse,
+                    serde_json::json!({
+                        "response_length": final_content.len(),
+                        "iterations": iteration,
+                        "tool_calls": tool_call_count,
+                    }),
+                    iteration,
+                )
+                .await;
+
+            // --- Verification: run evaluators (background) ---
+            {
+                let trajectory = trajectory_hook.finalize().await;
+                let eval_mgr = Arc::clone(&self.evaluation);
+                tokio::spawn(async move {
+                    let results = eval_mgr.evaluate_all(&trajectory).await;
+                    for r in &results {
+                        if r.passed {
+                            debug!(
+                                evaluator = %r.evaluator_name,
+                                score = ?r.score,
+                                "Evaluation passed: {}",
+                                r.reason
+                            );
+                        } else {
+                            info!(
+                                evaluator = %r.evaluator_name,
+                                score = ?r.score,
+                                "Evaluation failed: {}",
+                                r.reason
+                            );
+                        }
+                    }
+                });
+            }
 
             // --- LangSmith: end chain run (success) ---
             self.langsmith.end_run(crate::langsmith::EndRunParams {
@@ -1571,14 +1700,32 @@ impl Agent {
                     skill, model_override
                 );
 
-                Box::pin(self.run_subagent(
+                // --- Lifecycle hook: pre_subagent ---
+                {
+                    let hook_ctx = HookContext::new(user_id, chat_id)
+                        .with_tool_name(&skill)
+                        .with_message(&prompt);
+                    self.hooks.run_pre_subagent(&hook_ctx).await;
+                }
+
+                let result = Box::pin(self.run_subagent(
                     &skill,
                     &prompt,
                     model_override.as_deref(),
                     tools_override,
                     AgentKind::Skill,
                 ))
-                .await
+                .await;
+
+                // --- Lifecycle hook: post_subagent ---
+                {
+                    let hook_ctx = HookContext::new(user_id, chat_id)
+                        .with_tool_name(&skill)
+                        .with_tool_result(&result);
+                    self.hooks.run_post_subagent(&hook_ctx).await;
+                }
+
+                result
             }
             "invoke_agent" => {
                 // Accepts `agent` parameter; falls back to `skill` for compat
@@ -1605,14 +1752,32 @@ impl Agent {
                     agent, model_override
                 );
 
-                Box::pin(self.run_subagent(
+                // --- Lifecycle hook: pre_subagent ---
+                {
+                    let hook_ctx = HookContext::new(user_id, chat_id)
+                        .with_tool_name(&agent)
+                        .with_message(&prompt);
+                    self.hooks.run_pre_subagent(&hook_ctx).await;
+                }
+
+                let result = Box::pin(self.run_subagent(
                     &agent,
                     &prompt,
                     model_override.as_deref(),
                     tools_override,
                     AgentKind::Agent,
                 ))
-                .await
+                .await;
+
+                // --- Lifecycle hook: post_subagent ---
+                {
+                    let hook_ctx = HookContext::new(user_id, chat_id)
+                        .with_tool_name(&agent)
+                        .with_tool_result(&result);
+                    self.hooks.run_post_subagent(&hook_ctx).await;
+                }
+
+                result
             }
             "read_agent_file" => {
                 let agent_name = match arguments["agent_name"].as_str() {

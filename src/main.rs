@@ -1,5 +1,7 @@
 mod agent;
 mod config;
+mod evaluation;
+mod hooks;
 mod langsmith;
 mod learning;
 mod llm;
@@ -20,6 +22,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::agent::Agent;
 use crate::config::Config;
+use crate::evaluation::{EvaluationManager, SuccessCriteriaEvaluator};
+use crate::hooks::{HookManager, LoggingHook};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::scheduler::tasks::register_builtin_tasks;
@@ -116,6 +120,18 @@ async fn main() -> Result<()> {
     let (job_tx, mut job_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::agent::ScheduledJobRequest>();
 
+    // --- Lifecycle Hooks (L in ETCSLV) ---
+    let mut hook_manager = HookManager::new();
+    hook_manager.register(Box::new(LoggingHook));
+    let hooks = Arc::new(hook_manager);
+
+    // --- Verification / Evaluation (V in ETCSLV) ---
+    let mut eval_manager = EvaluationManager::new();
+    eval_manager.register(Box::new(SuccessCriteriaEvaluator::new(
+        config.max_iterations(),
+    )));
+    let evaluation = Arc::new(eval_manager);
+
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
     let agent = Arc::new_cyclic(|weak| {
         Agent::new(
@@ -130,6 +146,8 @@ async fn main() -> Result<()> {
             weak.clone(),
             job_tx,
             Arc::clone(&langsmith),
+            Arc::clone(&hooks),
+            Arc::clone(&evaluation),
         )
     });
 
