@@ -90,9 +90,44 @@ impl HeuristicClassifier {
     }
 }
 
+pub struct LlmBackedClassifier {
+    inner_llm: Option<crate::llm::LlmClient>,
+    fallback: HeuristicClassifier,
+}
+
+impl LlmBackedClassifier {
+    pub fn new(llm: crate::llm::LlmClient) -> Self {
+        Self {
+            inner_llm: Some(llm),
+            fallback: HeuristicClassifier,
+        }
+    }
+    pub fn heuristic_only() -> Self {
+        Self {
+            inner_llm: None,
+            fallback: HeuristicClassifier,
+        }
+    }
+}
+
+impl Classifier for LlmBackedClassifier {
+    fn classify(&self, request: &str) -> ClassificationOutcome {
+        // M1: only the heuristic path is wired. The async LLM call is added in M3
+        // because it requires the agent loop. For now we always use the fallback.
+        <HeuristicClassifier as Classifier>::classify(&self.fallback, request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_classifier_falls_back_to_heuristic_when_disabled() {
+        let c = LlmBackedClassifier::heuristic_only();
+        let o = c.classify("summarize the readme");
+        assert_eq!(o.task_type, crate::supervisor::task::TaskType::GeneralAssistant);
+    }
 
     #[test]
     fn heuristic_classifies_obvious_cases() {
