@@ -79,10 +79,7 @@ impl Registry {
     }
 
     pub fn select_by_name(&self, name: &str) -> Option<Arc<dyn Backend>> {
-        self.backends
-            .iter()
-            .find(|b| b.name() == name)
-            .cloned()
+        self.backends.iter().find(|b| b.name() == name).cloned()
     }
 
     pub fn names(&self) -> Vec<&str> {

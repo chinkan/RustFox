@@ -6,9 +6,8 @@ use std::sync::Arc;
 use crate::supervisor::backend::{Backend, BackendCapabilities};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
 
-type ExecFn = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync,
->;
+type ExecFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
 
 pub struct ReasoningBackend {
     exec: ExecFn,
@@ -76,7 +75,10 @@ impl Backend for ReasoningBackend {
     fn can_handle(&self, jt: &JobType) -> bool {
         matches!(
             jt,
-            JobType::PlannerJob | JobType::ExecutorJob | JobType::ReviewerJob | JobType::DocumentJob
+            JobType::PlannerJob
+                | JobType::ExecutorJob
+                | JobType::ReviewerJob
+                | JobType::DocumentJob
         )
     }
     async fn run(&self, job: &mut Job) -> Result<JobOutput> {
@@ -109,9 +111,10 @@ mod tests {
 
     #[tokio::test]
     async fn reasoning_backend_advertises_capabilities() {
-        let b = ReasoningBackend::new_with_executor(|prompt| async move {
-            Ok(format!("echo:{prompt}"))
-        });
+        let b =
+            ReasoningBackend::new_with_executor(
+                |prompt| async move { Ok(format!("echo:{prompt}")) },
+            );
         let caps = b.capabilities();
         assert!(caps.reasoning);
         assert!(!caps.shell);
