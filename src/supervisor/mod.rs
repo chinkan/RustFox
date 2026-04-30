@@ -6,6 +6,7 @@ pub mod backend;
 pub mod classifier;
 pub mod intake;
 pub mod job;
+pub mod orchestrator;
 pub mod planner;
 pub mod policy;
 pub mod state;
