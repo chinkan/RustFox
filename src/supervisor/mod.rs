@@ -1,6 +1,7 @@
 //! Generic autonomous task supervisor.
 //! See `docs/plans/2026-04-30-autopilot-supervisor-design.md`.
 
+pub mod classifier;
 pub mod intake;
 pub mod job;
 pub mod state;
