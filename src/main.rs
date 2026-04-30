@@ -208,13 +208,28 @@ async fn main() -> Result<()> {
     agent.restore_scheduled_tasks().await;
     info!("  Scheduled tasks: restored from DB");
 
-    // Construct Supervisor. M3 ships with an empty backend Registry — backends
-    // are wired and the Telegram /supervise command is dispatched in M7.3.
-    // Held alive in main's scope so the binding isn't dead-code-eliminated.
+    // Construct Supervisor with a populated backend Registry so resume /
+    // future routing paths can resolve backends rather than failing with
+    // "backend not found". Held alive in main's scope so the binding isn't
+    // dead-code-eliminated.
+    let mut sup_registry = rustfox::supervisor::backend::Registry::new();
+    sup_registry.register(std::sync::Arc::new(
+        rustfox::supervisor::backend::reasoning::ReasoningBackend::from_agent(
+            Arc::clone(&agent),
+            "supervisor".to_string(),
+            "supervisor".to_string(),
+        ),
+    ));
+    sup_registry.register(std::sync::Arc::new(
+        rustfox::supervisor::backend::shell::ShellBackend::new(
+            config.sandbox.allowed_directory.clone(),
+        ),
+    ));
+
     let _supervisor = Arc::new(rustfox::supervisor::Supervisor::new(
         config.supervisor.artifacts_dir.clone(),
         memory.connection(),
-        rustfox::supervisor::backend::Registry::new(),
+        sup_registry,
         config.supervisor.risk.clone(),
     ));
     match _supervisor.resumable_task_ids().await {
@@ -222,7 +237,7 @@ async fn main() -> Result<()> {
             "  Supervisor: {} resumable task(s) found at startup",
             ids.len()
         ),
-        Ok(_) => info!("  Supervisor: ready (no backends wired yet, no resumable tasks)"),
+        Ok(_) => info!("  Supervisor: ready (registry has reasoning + shell backends)"),
         Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
     }
 
