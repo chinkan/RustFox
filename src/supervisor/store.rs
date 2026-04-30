@@ -72,12 +72,42 @@ impl TaskStore {
                 id: r.get(0)?,
                 title: r.get(1)?,
                 user_request: r.get(2)?,
-                task_type: serde_json::from_str::<TaskType>(&r.get::<_, String>(3)?).unwrap(),
+                task_type: serde_json::from_str::<TaskType>(&r.get::<_, String>(3)?).map_err(
+                    |e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    },
+                )?,
                 priority: r.get(4)?,
-                risk_level: serde_json::from_str::<RiskLevel>(&r.get::<_, String>(5)?).unwrap(),
+                risk_level: serde_json::from_str::<RiskLevel>(&r.get::<_, String>(5)?).map_err(
+                    |e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    },
+                )?,
                 execution_mode: serde_json::from_str::<ExecutionMode>(&r.get::<_, String>(6)?)
-                    .unwrap(),
-                status: serde_json::from_str::<TaskStatus>(&r.get::<_, String>(7)?).unwrap(),
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                status: serde_json::from_str::<TaskStatus>(&r.get::<_, String>(7)?).map_err(
+                    |e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    },
+                )?,
                 required_capabilities: vec![],
                 constraints: serde_json::Value::Null,
                 inputs: serde_json::Value::Null,
@@ -126,8 +156,20 @@ impl TaskStore {
         let rows = stmt
             .query_map([task_id], |r| {
                 Ok(TransitionRow {
-                    from: serde_json::from_str(&r.get::<_, String>(0)?).unwrap(),
-                    to: serde_json::from_str(&r.get::<_, String>(1)?).unwrap(),
+                    from: serde_json::from_str(&r.get::<_, String>(0)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    to: serde_json::from_str(&r.get::<_, String>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                     actor: r.get(2)?,
                     reason: r.get(3)?,
                     occurred_at: r.get(4)?,
