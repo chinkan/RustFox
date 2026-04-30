@@ -72,11 +72,10 @@ pub async fn run(
 
     // Publish the slash-command menu to Telegram so clients show suggestions.
     // Best-effort: a network failure here must not block the bot from running.
-    match bot.set_my_commands(supported_commands()).await {
-        Ok(_) => info!(
-            "Registered {} Telegram commands",
-            supported_commands().len()
-        ),
+    let commands = supported_commands();
+    let count = commands.len();
+    match bot.set_my_commands(commands).await {
+        Ok(_) => info!("Registered {} Telegram commands", count),
         Err(e) => warn!(error = %e, "Failed to register Telegram commands"),
     }
 
