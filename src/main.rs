@@ -8,6 +8,7 @@ mod memory;
 mod platform;
 mod scheduler;
 mod skills;
+mod supervisor;
 mod tools;
 mod utils;
 
