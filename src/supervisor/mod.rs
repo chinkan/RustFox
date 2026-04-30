@@ -15,6 +15,7 @@ pub mod store;
 pub mod task;
 pub mod verification;
 pub mod workflow;
+pub mod workspace;
 
 use anyhow::Result;
 use std::path::PathBuf;
