@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -34,6 +35,7 @@ impl Backend for ScriptBackend {
     }
     async fn run(&self, job: &mut Job) -> Result<JobOutput> {
         let prompt = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
+        let timeout_secs = job.timeout_secs;
         job.status = JobStatus::Running;
 
         let mut cmd = Command::new(&self.bin);
@@ -41,13 +43,30 @@ impl Backend for ScriptBackend {
             .current_dir(&self.workdir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
             stdin.shutdown().await?;
         }
-        let output = child.wait_with_output().await?;
+        let output =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+                .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    job.status = JobStatus::Failed;
+                    return Ok(JobOutput {
+                        status: JobStatus::Failed,
+                        summary: String::new(),
+                        evidence: vec![],
+                        errors: vec![format!("CLI timed out after {timeout_secs}s")],
+                        changed_files: vec![],
+                        next_step: None,
+                    });
+                }
+            };
         let exit = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

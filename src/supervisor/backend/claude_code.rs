@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -39,6 +40,7 @@ impl Backend for ClaudeCodeCliBackend {
     }
     async fn run(&self, job: &mut Job) -> Result<JobOutput> {
         let prompt = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
+        let timeout_secs = job.timeout_secs;
         job.status = JobStatus::Running;
 
         let mut cmd = Command::new(&self.bin);
@@ -46,13 +48,30 @@ impl Backend for ClaudeCodeCliBackend {
             .current_dir(&self.workdir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
             stdin.shutdown().await?;
         }
-        let output = child.wait_with_output().await?;
+        let output =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+                .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    job.status = JobStatus::Failed;
+                    return Ok(JobOutput {
+                        status: JobStatus::Failed,
+                        summary: String::new(),
+                        evidence: vec![],
+                        errors: vec![format!("CLI timed out after {timeout_secs}s")],
+                        changed_files: vec![],
+                        next_step: None,
+                    });
+                }
+            };
         let exit = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -111,5 +130,44 @@ mod tests {
             out.status,
             crate::supervisor::job::JobStatus::Succeeded
         ));
+    }
+
+    #[tokio::test]
+    async fn claude_code_backend_times_out_when_cli_hangs() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("hang-stub.sh");
+        tokio::fs::write(&stub, "#!/bin/sh\nsleep 30\n")
+            .await
+            .unwrap();
+        let mut perms = tokio::fs::metadata(&stub).await.unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        tokio::fs::set_permissions(&stub, perms).await.unwrap();
+
+        let b = ClaudeCodeCliBackend::new(
+            stub.to_string_lossy().into_owned(),
+            vec![],
+            dir.path().into(),
+        );
+        let mut job = crate::supervisor::job::Job::new(
+            "t",
+            crate::supervisor::job::JobType::ExecutorJob,
+            "claude_code_cli",
+            "x",
+        );
+        job.prompt = Some("x".into());
+        job.timeout_secs = 1;
+        let started = std::time::Instant::now();
+        let out = b.run(&mut job).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            out.status,
+            crate::supervisor::job::JobStatus::Failed
+        ));
+        assert!(out.errors.iter().any(|e| e.contains("timed out")));
+        assert!(
+            elapsed.as_secs() < 5,
+            "should have killed child within seconds"
+        );
     }
 }
