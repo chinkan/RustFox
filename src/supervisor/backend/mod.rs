@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 pub mod reasoning;
+pub mod shell;
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendCapabilities {
