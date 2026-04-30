@@ -3,6 +3,9 @@ use crate::supervisor::task::{ExecutionMode, Task};
 
 pub struct Plan {
     pub jobs: Vec<Job>,
+    /// Index groups whose jobs may execute concurrently. Indices not present
+    /// in any group execute sequentially in their natural order.
+    pub parallel_groups: Vec<Vec<usize>>,
 }
 
 #[derive(Default)]
@@ -45,7 +48,10 @@ impl Planner {
                 &format!("Review the executor result for: {}", t.title),
             ));
         }
-        Plan { jobs }
+        Plan {
+            jobs,
+            parallel_groups: vec![],
+        }
     }
 }
 
