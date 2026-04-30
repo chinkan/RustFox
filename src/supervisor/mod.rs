@@ -91,12 +91,13 @@ impl Supervisor {
         artifacts_root: PathBuf,
         conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
         registry: Registry,
+        thresholds: crate::config::RiskThresholdsConfig,
     ) -> Self {
         Self {
             store: TaskStore::new(conn.clone()),
             artifacts: Arc::new(ArtifactManager::new(artifacts_root, conn)),
             classifier: Box::new(HeuristicClassifier),
-            policy: PolicyEngine::default(),
+            policy: PolicyEngine::with_thresholds(thresholds),
             registry,
             workspace_mgr: None,
         }

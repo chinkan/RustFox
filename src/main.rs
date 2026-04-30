@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
         config.supervisor.artifacts_dir.clone(),
         memory.connection(),
         rustfox::supervisor::backend::Registry::new(),
+        config.supervisor.risk.clone(),
     ));
     match _supervisor.resumable_task_ids().await {
         Ok(ids) if !ids.is_empty() => info!(
