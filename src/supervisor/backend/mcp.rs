@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::mcp::McpManager;
-use crate::supervisor::backend::{Backend, BackendCapabilities};
+use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
 
 pub struct McpBackend {
@@ -30,7 +30,7 @@ impl Backend for McpBackend {
     fn can_handle(&self, jt: &JobType) -> bool {
         matches!(jt, JobType::ResearchJob | JobType::DocumentJob)
     }
-    async fn run(&self, job: &mut Job) -> Result<JobOutput> {
+    async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput> {
         // input_context = {"tool": "mcp_<server>_<tool>", "args": {...}}
         let tool_name = job
             .input_context

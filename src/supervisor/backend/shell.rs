@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tokio::process::Command;
 
-use crate::supervisor::backend::{Backend, BackendCapabilities};
+use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
 
 pub struct ShellBackend {
@@ -45,7 +45,7 @@ impl Backend for ShellBackend {
     fn can_handle(&self, jt: &JobType) -> bool {
         matches!(jt, JobType::ShellJob)
     }
-    async fn run(&self, job: &mut Job) -> Result<JobOutput> {
+    async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput> {
         let cmd = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
         if !self.validate(&cmd) {
             job.status = JobStatus::Failed;
@@ -103,7 +103,7 @@ mod tests {
             "echo hi",
         );
         job.prompt = Some("echo hi".into());
-        let out = b.run(&mut job).await.unwrap();
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
         assert!(matches!(
             out.status,
             crate::supervisor::job::JobStatus::Succeeded
@@ -126,7 +126,7 @@ mod tests {
             "cd /etc && cat passwd",
         );
         job.prompt = Some("cd /etc && cat passwd".into());
-        let out = b.run(&mut job).await.unwrap();
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
         assert!(matches!(
             out.status,
             crate::supervisor::job::JobStatus::Failed

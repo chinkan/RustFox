@@ -1,6 +1,7 @@
 use crate::supervisor::job::{Job, JobOutput, JobType};
 use anyhow::Result;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub mod claude_code;
 pub mod codex;
@@ -8,6 +9,35 @@ pub mod mcp;
 pub mod reasoning;
 pub mod script;
 pub mod shell;
+
+/// Per-job execution context handed to `Backend::run`. Today it carries an
+/// optional channel used by backends to spawn child jobs that the orchestrator
+/// will execute after the parent finishes.
+#[derive(Clone, Default)]
+pub struct RunContext {
+    subjob_tx: Option<UnboundedSender<Job>>,
+}
+
+impl RunContext {
+    pub fn new() -> Self {
+        Self { subjob_tx: None }
+    }
+
+    pub fn with_subjob_channel(tx: UnboundedSender<Job>) -> Self {
+        Self {
+            subjob_tx: Some(tx),
+        }
+    }
+
+    /// Queue a child job to run after the current job completes. If no channel
+    /// is wired (e.g. when the backend is invoked outside the orchestrator)
+    /// the call is a no-op.
+    pub fn spawn_subjob(&self, job: Job) {
+        if let Some(tx) = &self.subjob_tx {
+            let _ = tx.send(job);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendCapabilities {
@@ -29,7 +59,7 @@ pub trait Backend: Send + Sync {
     async fn prepare(&self, _job: &mut Job) -> Result<()> {
         Ok(())
     }
-    async fn run(&self, job: &mut Job) -> Result<JobOutput>;
+    async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput>;
     async fn collect_result(&self, _job: &Job) -> Result<Option<JobOutput>> {
         Ok(None)
     }
@@ -109,6 +139,7 @@ mod tests {
         async fn run(
             &self,
             _: &mut crate::supervisor::job::Job,
+            _: &RunContext,
         ) -> anyhow::Result<crate::supervisor::job::JobOutput> {
             Ok(crate::supervisor::job::JobOutput {
                 status: crate::supervisor::job::JobStatus::Succeeded,

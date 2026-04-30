@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::supervisor::backend::{Backend, BackendCapabilities};
+use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
 
 pub struct ScriptBackend {
@@ -33,7 +33,7 @@ impl Backend for ScriptBackend {
     fn can_handle(&self, jt: &JobType) -> bool {
         matches!(jt, JobType::ShellJob)
     }
-    async fn run(&self, job: &mut Job) -> Result<JobOutput> {
+    async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput> {
         let prompt = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
         let timeout_secs = job.timeout_secs;
         job.status = JobStatus::Running;
@@ -119,7 +119,7 @@ mod tests {
             "run script",
         );
         job.prompt = Some("input".into());
-        let out = b.run(&mut job).await.unwrap();
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
         assert!(out.summary.contains("script output"));
         assert!(matches!(
             out.status,

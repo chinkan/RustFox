@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::supervisor::backend::{Backend, BackendCapabilities};
+use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
 
 type ExecFn =
@@ -81,7 +81,7 @@ impl Backend for ReasoningBackend {
                 | JobType::DocumentJob
         )
     }
-    async fn run(&self, job: &mut Job) -> Result<JobOutput> {
+    async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput> {
         job.status = JobStatus::Running;
         let prompt = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
         let summary = (self.exec)(prompt).await?;
@@ -126,7 +126,7 @@ mod tests {
             "plan it",
         );
         job.prompt = Some("hello".into());
-        let out = b.run(&mut job).await.unwrap();
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
         assert!(out.summary.starts_with("echo:hello"));
     }
 }
