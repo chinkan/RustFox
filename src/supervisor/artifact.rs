@@ -31,19 +31,20 @@ impl ArtifactManager {
         filename: &str,
         content: &str,
     ) -> Result<String> {
+        let safe_content = crate::supervisor::redact::redact(content);
         let task_dir = self.root.join(task_id);
         tokio::fs::create_dir_all(&task_dir)
             .await
             .with_context(|| format!("create artifact dir {}", task_dir.display()))?;
         let path = task_dir.join(filename);
-        tokio::fs::write(&path, content)
+        tokio::fs::write(&path, &safe_content)
             .await
             .with_context(|| format!("write artifact {}", path.display()))?;
 
         let mut h = Sha256::new();
-        h.update(content.as_bytes());
+        h.update(safe_content.as_bytes());
         let sha = format!("{:x}", h.finalize());
-        let bytes = content.len() as i64;
+        let bytes = safe_content.len() as i64;
         let id = Uuid::new_v4().to_string();
         let rel = path
             .strip_prefix(&self.root)
@@ -102,5 +103,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].kind, "intake");
+    }
+
+    #[tokio::test]
+    async fn write_text_redacts_secrets_before_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let store = crate::supervisor::store::TaskStore::new(memory.connection());
+        let task = crate::supervisor::task::Task::new("T", "u");
+        store.create(&task, "telegram", "u", None).await.unwrap();
+
+        let am = ArtifactManager::new(dir.path().into(), memory.connection());
+        am.write_text(
+            &task.id,
+            None,
+            "log",
+            "leak.txt",
+            "creds: api_key=sk-supersecret-XYZ and Bearer leakytoken",
+        )
+        .await
+        .unwrap();
+
+        let on_disk = std::fs::read_to_string(dir.path().join(&task.id).join("leak.txt")).unwrap();
+        assert!(
+            !on_disk.contains("sk-supersecret-XYZ"),
+            "secret leaked to disk: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("leakytoken"),
+            "secret leaked to disk: {on_disk}"
+        );
+        assert!(on_disk.contains("api_key=***"));
+        assert!(on_disk.contains("Bearer ***"));
     }
 }

@@ -10,16 +10,9 @@ pub enum PolicyDecision {
     StopAndReport(String),
 }
 
+#[derive(Default)]
 pub struct PolicyEngine {
     thresholds: RiskThresholdsConfig,
-}
-
-impl Default for PolicyEngine {
-    fn default() -> Self {
-        Self {
-            thresholds: RiskThresholdsConfig::default(),
-        }
-    }
 }
 
 impl PolicyEngine {

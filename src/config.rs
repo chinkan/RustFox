@@ -53,7 +53,7 @@ impl Default for SupervisorConfig {
 ///
 /// Defaults preserve the M1–M6 behavior (Medium-risk tasks auto-execute);
 /// flip individual fields in `config.toml` to tighten the gate.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct RiskThresholdsConfig {
     #[serde(default)]
     pub require_approval_for_low: bool,
@@ -64,16 +64,6 @@ pub struct RiskThresholdsConfig {
     /// with the M1–M6 policy where Medium-risk tasks auto-execute.
     #[serde(default)]
     pub auto_execute_only_low: bool,
-}
-
-impl Default for RiskThresholdsConfig {
-    fn default() -> Self {
-        Self {
-            require_approval_for_low: false,
-            require_approval_for_medium: false,
-            auto_execute_only_low: false,
-        }
-    }
 }
 
 fn default_autonomy_mode() -> String {
