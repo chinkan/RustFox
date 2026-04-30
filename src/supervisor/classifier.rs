@@ -115,6 +115,39 @@ impl Classifier for LlmBackedClassifier {
     }
 }
 
+/// Wraps a base [`Classifier`] and consults a [`SkillRegistry`] to override the
+/// required-capabilities list when the request mentions a known supervisor skill pack.
+pub struct SkillAwareClassifier<C: Classifier> {
+    inner: C,
+    skills: crate::skills::SkillRegistry,
+}
+
+impl<C: Classifier> SkillAwareClassifier<C> {
+    pub fn new(inner: C, skills: crate::skills::SkillRegistry) -> Self {
+        Self { inner, skills }
+    }
+
+    pub fn classify(&self, request: &str) -> Task {
+        let mut base = HeuristicClassifier.classify(request);
+        let outcome = self.inner.classify(request);
+        base.task_type = outcome.task_type;
+        base.risk_level = outcome.risk_level;
+        base.execution_mode = outcome.execution_mode;
+        base.required_capabilities = outcome.required_capabilities;
+
+        // Match request against skill packs by simple keyword: name without "sup-" prefix.
+        let lower = request.to_lowercase();
+        for skill in self.skills.list() {
+            let key = skill.name.strip_prefix("sup-").unwrap_or(&skill.name);
+            if lower.contains(key) && skill.supervisor_workflow.is_some() {
+                base.required_capabilities = skill.supervisor_required_caps.clone();
+                break;
+            }
+        }
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +176,33 @@ mod tests {
 
         let t = c.classify("research best Rust async runtime 2026");
         assert_eq!(t.task_type, TaskType::Research);
+    }
+
+    #[tokio::test]
+    async fn skill_hint_overrides_default_workflow() {
+        let mut registry = crate::skills::SkillRegistry::new();
+        registry.register(crate::skills::Skill {
+            name: "sup-research".into(),
+            description: "research".into(),
+            content: "".into(),
+            tags: vec![],
+            model: None,
+            tools: vec![],
+            max_iterations: None,
+            supervisor_workflow: Some("research".into()),
+            supervisor_required_caps: vec!["research".into()],
+        });
+        let c = SkillAwareClassifier::new(HeuristicClassifier, registry);
+        // Request must contain the skill's keyword ("research", from "sup-research") for the
+        // hint to fire; the heuristic still classifies it as GeneralAssistant on the
+        // "answer " starts_with path, so the only way capabilities change is via the skill hint.
+        let t = c.classify("answer this question about research: foo");
+        // Heuristic alone returns GeneralAssistant (caps=["reasoning"]),
+        // but the skill hint elevates required_capabilities to ["research"].
+        assert_eq!(
+            t.task_type,
+            crate::supervisor::task::TaskType::GeneralAssistant
+        );
+        assert_eq!(t.required_capabilities, vec!["research"]);
     }
 }
