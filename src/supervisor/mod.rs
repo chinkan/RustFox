@@ -9,6 +9,7 @@ pub mod job;
 pub mod orchestrator;
 pub mod planner;
 pub mod policy;
+pub mod reporter;
 pub mod state;
 pub mod store;
 pub mod task;
