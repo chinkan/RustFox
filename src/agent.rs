@@ -2189,7 +2189,7 @@ mod tests {
 
     #[test]
     fn test_assemble_tokens_joins_correctly() {
-        let tokens = vec!["Hello", " ", "world", "!"];
+        let tokens = ["Hello", " ", "world", "!"];
         let assembled: String = tokens.concat();
         assert_eq!(assembled, "Hello world!");
     }
