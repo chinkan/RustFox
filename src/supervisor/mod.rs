@@ -67,7 +67,7 @@ impl Supervisor {
             store: TaskStore::new(conn.clone()),
             artifacts: Arc::new(ArtifactManager::new(artifacts_root, conn)),
             classifier: Box::new(HeuristicClassifier),
-            policy: PolicyEngine,
+            policy: PolicyEngine::default(),
             registry: Registry::new(),
             workspace_mgr: None,
         }
@@ -95,7 +95,7 @@ impl Supervisor {
             store: TaskStore::new(conn.clone()),
             artifacts: Arc::new(ArtifactManager::new(artifacts_root, conn)),
             classifier: Box::new(HeuristicClassifier),
-            policy: PolicyEngine,
+            policy: PolicyEngine::default(),
             registry,
             workspace_mgr: None,
         }

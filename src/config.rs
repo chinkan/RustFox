@@ -34,6 +34,8 @@ pub struct SupervisorConfig {
     pub default_autonomy_mode: String,
     #[serde(default = "default_artifacts_dir")]
     pub artifacts_dir: std::path::PathBuf,
+    #[serde(default)]
+    pub risk: RiskThresholdsConfig,
 }
 
 impl Default for SupervisorConfig {
@@ -41,6 +43,35 @@ impl Default for SupervisorConfig {
         Self {
             default_autonomy_mode: default_autonomy_mode(),
             artifacts_dir: default_artifacts_dir(),
+            risk: RiskThresholdsConfig::default(),
+        }
+    }
+}
+
+/// Risk-threshold gates that govern when the supervisor may auto-execute a
+/// task vs. require explicit user approval.
+///
+/// Defaults preserve the M1–M6 behavior (Medium-risk tasks auto-execute);
+/// flip individual fields in `config.toml` to tighten the gate.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RiskThresholdsConfig {
+    #[serde(default)]
+    pub require_approval_for_low: bool,
+    #[serde(default)]
+    pub require_approval_for_medium: bool,
+    /// When `true`, only Low-risk tasks may auto-execute; Medium escalates to
+    /// `RequireApproval`. Defaults to `false` to stay backward-compatible
+    /// with the M1–M6 policy where Medium-risk tasks auto-execute.
+    #[serde(default)]
+    pub auto_execute_only_low: bool,
+}
+
+impl Default for RiskThresholdsConfig {
+    fn default() -> Self {
+        Self {
+            require_approval_for_low: false,
+            require_approval_for_medium: false,
+            auto_execute_only_low: false,
         }
     }
 }
