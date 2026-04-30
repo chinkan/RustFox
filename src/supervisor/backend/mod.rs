@@ -2,6 +2,8 @@ use crate::supervisor::job::{Job, JobOutput, JobType};
 use anyhow::Result;
 use std::sync::Arc;
 
+pub mod reasoning;
+
 #[derive(Debug, Clone, Default)]
 pub struct BackendCapabilities {
     pub reasoning: bool,
