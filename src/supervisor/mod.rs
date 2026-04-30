@@ -10,6 +10,7 @@ pub mod policy;
 pub mod state;
 pub mod store;
 pub mod task;
+pub mod workflow;
 
 use anyhow::Result;
 use std::path::PathBuf;
