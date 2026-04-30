@@ -2,6 +2,7 @@
 //! See `docs/plans/2026-04-30-autopilot-supervisor-design.md`.
 
 pub mod job;
+pub mod state;
 pub mod task;
 
 #[allow(dead_code)]
