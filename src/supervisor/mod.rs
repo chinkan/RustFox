@@ -55,6 +55,7 @@ pub struct Supervisor {
     classifier: Box<dyn Classifier + Send + Sync>,
     policy: PolicyEngine,
     pub registry: Registry,
+    pub workspace_mgr: Option<Arc<crate::supervisor::workspace::WorkspaceManager>>,
 }
 
 impl Supervisor {
@@ -68,7 +69,20 @@ impl Supervisor {
             classifier: Box::new(HeuristicClassifier),
             policy: PolicyEngine,
             registry: Registry::new(),
+            workspace_mgr: None,
         }
+    }
+
+    pub fn new_for_test_with_repo(
+        artifacts_root: PathBuf,
+        repo_path: PathBuf,
+        conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    ) -> Self {
+        let mut sup = Self::new_for_test(artifacts_root, conn);
+        sup.workspace_mgr = Some(Arc::new(
+            crate::supervisor::workspace::WorkspaceManager::new(repo_path, false),
+        ));
+        sup
     }
 
     /// Production constructor. Registry should be pre-populated with backends.
@@ -83,6 +97,7 @@ impl Supervisor {
             classifier: Box::new(HeuristicClassifier),
             policy: PolicyEngine,
             registry,
+            workspace_mgr: None,
         }
     }
 
@@ -127,11 +142,51 @@ impl Supervisor {
             )
             .await?;
 
+        // PREPARE_WORKSPACE (only for code-modifying tasks when configured)
+        let needs_ws = matches!(
+            task.task_type,
+            crate::supervisor::task::TaskType::CodeChange
+                | crate::supervisor::task::TaskType::BugFix
+                | crate::supervisor::task::TaskType::Refactor
+        );
+        let workspace_active = needs_ws && self.workspace_mgr.is_some();
+        if workspace_active {
+            if let Some(wm) = &self.workspace_mgr {
+                self.store
+                    .record_transition(
+                        task_id,
+                        TaskStatus::Plan,
+                        TaskStatus::PrepareWorkspace,
+                        "supervisor",
+                        None,
+                    )
+                    .await?;
+                let ws = wm.prepare(task_id, &task.title).await?;
+                self.artifacts
+                    .write_text(
+                        task_id,
+                        None,
+                        "workspace",
+                        "workspace.json",
+                        &serde_json::to_string_pretty(&serde_json::json!({
+                            "branch": ws.branch,
+                            "path": ws.path.display().to_string(),
+                        }))?,
+                    )
+                    .await?;
+            }
+        }
+
         // EXECUTE
+        let pre_execute_state = if workspace_active {
+            TaskStatus::PrepareWorkspace
+        } else {
+            TaskStatus::Plan
+        };
         self.store
             .record_transition(
                 task_id,
-                TaskStatus::Plan,
+                pre_execute_state,
                 TaskStatus::Execute,
                 "supervisor",
                 None,
@@ -254,6 +309,7 @@ impl Supervisor {
         task.risk_level = outcome.risk_level.clone();
         task.execution_mode = outcome.execution_mode.clone();
         task.required_capabilities = outcome.required_capabilities.clone();
+        self.store.update_classification(&task).await?;
         self.artifacts
             .write_text(
                 &task.id,

@@ -121,6 +121,23 @@ impl TaskStore {
         })
     }
 
+    pub async fn update_classification(&self, t: &Task) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE sup_tasks
+             SET task_type=?1, risk_level=?2, execution_mode=?3, updated_at=datetime('now')
+             WHERE id=?4",
+            rusqlite::params![
+                serde_json::to_string(&t.task_type)?,
+                serde_json::to_string(&t.risk_level)?,
+                serde_json::to_string(&t.execution_mode)?,
+                t.id,
+            ],
+        )
+        .context("update sup_tasks classification")?;
+        Ok(())
+    }
+
     pub async fn record_transition(
         &self,
         task_id: &str,
