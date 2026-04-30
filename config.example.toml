@@ -14,6 +14,8 @@ api_key = "YOUR_OPENROUTER_API_KEY"
 model = "moonshotai/kimi-k2.5"
 # API base URL (usually no need to change)
 base_url = "https://openrouter.ai/api/v1"
+# Alternative using local ollama
+# base_url = "http://localhost:11434/v1"
 # Maximum tokens in response
 max_tokens = 4096
 # System prompt for the AI assistant
