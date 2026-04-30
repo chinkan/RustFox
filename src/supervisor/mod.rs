@@ -3,6 +3,7 @@
 
 pub mod job;
 pub mod state;
+pub mod store;
 pub mod task;
 
 #[allow(dead_code)]
