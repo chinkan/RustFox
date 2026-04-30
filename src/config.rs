@@ -24,6 +24,33 @@ pub struct Config {
     pub langsmith: Option<LangSmithConfig>,
     #[serde(default = "default_learning_config")]
     pub learning: LearningConfig,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SupervisorConfig {
+    #[serde(default = "default_autonomy_mode")]
+    pub default_autonomy_mode: String,
+    #[serde(default = "default_artifacts_dir")]
+    pub artifacts_dir: std::path::PathBuf,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            default_autonomy_mode: default_autonomy_mode(),
+            artifacts_dir: default_artifacts_dir(),
+        }
+    }
+}
+
+fn default_autonomy_mode() -> String {
+    "standard".to_string()
+}
+
+fn default_artifacts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("supervisor/artifacts")
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -503,6 +530,25 @@ mod tests {
         assert!(
             !cfg.memory.query_rewriter_enabled,
             "query_rewriter_enabled must default to false"
+        );
+    }
+
+    #[test]
+    fn supervisor_config_defaults_when_section_missing() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
+        assert_eq!(
+            cfg.supervisor.artifacts_dir,
+            std::path::PathBuf::from("supervisor/artifacts")
         );
     }
 
