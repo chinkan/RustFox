@@ -275,6 +275,36 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Returns IDs of tasks that look "resumable" — i.e. they're either
+    /// explicitly `Paused` or were left mid-pipeline (`Plan`, `PrepareWorkspace`,
+    /// `Execute`) when the supervisor was last shut down.
+    pub async fn list_resumable_task_ids(&self) -> Result<Vec<String>> {
+        use crate::supervisor::task::TaskStatus;
+        let conn = self.conn.lock().await;
+        let states = [
+            serde_json::to_string(&TaskStatus::Paused)?,
+            serde_json::to_string(&TaskStatus::Execute)?,
+            serde_json::to_string(&TaskStatus::Plan)?,
+            serde_json::to_string(&TaskStatus::PrepareWorkspace)?,
+        ];
+        let placeholders = states
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id FROM sup_tasks WHERE state IN ({placeholders}) ORDER BY updated_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            states.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let ids = stmt
+            .query_map(params.as_slice(), |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
     pub async fn transitions(&self, task_id: &str) -> Result<Vec<TransitionRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(

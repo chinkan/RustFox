@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use rustfox::agent::Agent;
@@ -216,7 +216,14 @@ async fn main() -> Result<()> {
         memory.connection(),
         rustfox::supervisor::backend::Registry::new(),
     ));
-    info!("  Supervisor: ready (no backends wired yet)");
+    match _supervisor.resumable_task_ids().await {
+        Ok(ids) if !ids.is_empty() => info!(
+            "  Supervisor: {} resumable task(s) found at startup",
+            ids.len()
+        ),
+        Ok(_) => info!("  Supervisor: ready (no backends wired yet, no resumable tasks)"),
+        Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
+    }
 
     // Run the Telegram platform
     info!("Bot is starting...");

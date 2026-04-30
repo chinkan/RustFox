@@ -262,6 +262,53 @@ impl Supervisor {
         }
     }
 
+    /// Mark a task as `Paused`. Records the transition unconditionally —
+    /// the strict transition-table check is deferred to a later milestone.
+    pub async fn pause(&self, task_id: &str) -> anyhow::Result<()> {
+        let task = self
+            .store
+            .get(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        self.store
+            .record_transition(
+                task_id,
+                task.status,
+                TaskStatus::Paused,
+                "user",
+                Some("paused"),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Resume a previously-paused task by re-entering `Execute` and running
+    /// the rest of the pipeline.
+    pub async fn resume(&self, task_id: &str) -> anyhow::Result<String> {
+        let task = self
+            .store
+            .get(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if task.status == TaskStatus::Paused {
+            self.store
+                .record_transition(
+                    task_id,
+                    TaskStatus::Paused,
+                    TaskStatus::Execute,
+                    "user",
+                    Some("resumed"),
+                )
+                .await?;
+        }
+        self.execute_now(task_id).await
+    }
+
+    /// IDs of tasks that look resumable on startup (paused or mid-pipeline).
+    pub async fn resumable_task_ids(&self) -> anyhow::Result<Vec<String>> {
+        self.store.list_resumable_task_ids().await
+    }
+
     pub async fn state(&self, task_id: &str) -> anyhow::Result<TaskStatus> {
         Ok(self
             .store
