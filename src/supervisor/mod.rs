@@ -24,7 +24,7 @@ use crate::supervisor::artifact::ArtifactManager;
 use crate::supervisor::backend::{reasoning::ReasoningBackend, Registry};
 use crate::supervisor::classifier::{Classifier, HeuristicClassifier};
 use crate::supervisor::intake::IntakeRouter;
-use crate::supervisor::orchestrator::{Orchestrator, OrchestratorOutcome};
+use crate::supervisor::orchestrator::Orchestrator;
 use crate::supervisor::planner::Planner;
 use crate::supervisor::policy::{PolicyDecision, PolicyEngine};
 use crate::supervisor::reporter::Reporter;
@@ -141,14 +141,13 @@ impl Supervisor {
         let jobs = self.store.jobs_for_task(task_id).await?;
 
         // VERIFY
+        // M3: regardless of orchestrator outcome we transition Execute->Verify
+        // and let VerificationEngine produce the final pass/fail.
+        let _ = res;
         self.store
             .record_transition(
                 task_id,
-                if matches!(res, OrchestratorOutcome::AllSucceeded) {
-                    TaskStatus::Execute
-                } else {
-                    TaskStatus::Execute
-                },
+                TaskStatus::Execute,
                 TaskStatus::Verify,
                 "supervisor",
                 None,
