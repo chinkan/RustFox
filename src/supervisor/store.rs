@@ -148,10 +148,16 @@ mod tests {
         let store = TaskStore::new(memory.connection());
         let mut t = crate::supervisor::task::Task::new("T", "do thing");
         t.task_type = crate::supervisor::task::TaskType::Research;
-        store.create(&t, "telegram", "u1", Some("c1")).await.unwrap();
+        store
+            .create(&t, "telegram", "u1", Some("c1"))
+            .await
+            .unwrap();
         let loaded = store.get(&t.id).await.unwrap().unwrap();
         assert_eq!(loaded.title, "T");
-        assert_eq!(loaded.task_type, crate::supervisor::task::TaskType::Research);
+        assert_eq!(
+            loaded.task_type,
+            crate::supervisor::task::TaskType::Research
+        );
     }
 
     #[tokio::test]

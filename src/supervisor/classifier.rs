@@ -53,11 +53,7 @@ impl Classifier for HeuristicClassifier {
                 vec!["shell".into()],
             )
         } else {
-            (
-                TaskType::Unknown,
-                RiskLevel::Low,
-                vec!["reasoning".into()],
-            )
+            (TaskType::Unknown, RiskLevel::Low, vec!["reasoning".into()])
         };
 
         let exec = match (&task_type, &risk) {
@@ -91,6 +87,7 @@ impl HeuristicClassifier {
 }
 
 pub struct LlmBackedClassifier {
+    #[allow(dead_code)]
     inner_llm: Option<crate::llm::LlmClient>,
     fallback: HeuristicClassifier,
 }
@@ -126,7 +123,10 @@ mod tests {
     fn llm_classifier_falls_back_to_heuristic_when_disabled() {
         let c = LlmBackedClassifier::heuristic_only();
         let o = c.classify("summarize the readme");
-        assert_eq!(o.task_type, crate::supervisor::task::TaskType::GeneralAssistant);
+        assert_eq!(
+            o.task_type,
+            crate::supervisor::task::TaskType::GeneralAssistant
+        );
     }
 
     #[test]
@@ -135,10 +135,7 @@ mod tests {
         let c = HeuristicClassifier;
         let t = c.classify("rename foo() to bar() in src/lib.rs");
         assert_eq!(t.task_type, TaskType::Refactor);
-        assert!(matches!(
-            t.risk_level,
-            RiskLevel::Medium | RiskLevel::High
-        ));
+        assert!(matches!(t.risk_level, RiskLevel::Medium | RiskLevel::High));
 
         let t = c.classify("summarize the file ./README.md");
         assert_eq!(t.task_type, TaskType::GeneralAssistant);

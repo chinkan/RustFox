@@ -25,12 +25,10 @@ pub struct Config {
     #[serde(default = "default_learning_config")]
     pub learning: LearningConfig,
     #[serde(default)]
-    #[allow(dead_code)]
     pub supervisor: SupervisorConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct SupervisorConfig {
     #[serde(default = "default_autonomy_mode")]
     pub default_autonomy_mode: String,
