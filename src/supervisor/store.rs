@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::supervisor::job::{Job, JobStatus, JobType};
 use crate::supervisor::task::{ExecutionMode, RiskLevel, Task, TaskStatus, TaskType};
 
 #[derive(Clone)]
@@ -147,6 +148,110 @@ impl TaskStore {
         Ok(())
     }
 
+    pub async fn create_job(&self, j: &Job) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO sup_jobs
+             (id, task_id, parent_job_id, job_type, backend, goal, prompt,
+              input_context, timeout_secs, retry_max, retry_count, allow_tools,
+              workspace, status)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            rusqlite::params![
+                j.id,
+                j.task_id,
+                j.parent_job_id,
+                serde_json::to_string(&j.job_type)?,
+                j.backend,
+                j.goal,
+                j.prompt,
+                j.input_context.to_string(),
+                j.timeout_secs as i64,
+                j.retry_max as i64,
+                j.retry_count as i64,
+                serde_json::to_string(&j.allow_tools)?,
+                j.workspace,
+                serde_json::to_string(&j.status)?,
+            ],
+        )
+        .context("insert sup_jobs")?;
+        Ok(())
+    }
+
+    pub async fn jobs_for_task(&self, task_id: &str) -> Result<Vec<Job>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, parent_job_id, job_type, backend, goal, prompt,
+                    input_context, timeout_secs, retry_max, retry_count, allow_tools,
+                    workspace, status, result_summary, error
+             FROM sup_jobs WHERE task_id=?1 ORDER BY rowid ASC",
+        )?;
+        let rows = stmt
+            .query_map([task_id], |r| {
+                Ok(Job {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    parent_job_id: r.get(2)?,
+                    job_type: serde_json::from_str::<JobType>(&r.get::<_, String>(3)?).map_err(
+                        |e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        },
+                    )?,
+                    backend: r.get(4)?,
+                    goal: r.get(5)?,
+                    prompt: r.get(6)?,
+                    input_context: serde_json::from_str(&r.get::<_, String>(7)?)
+                        .unwrap_or(serde_json::Value::Null),
+                    timeout_secs: r.get::<_, i64>(8)? as u64,
+                    retry_max: r.get::<_, i64>(9)? as u32,
+                    retry_count: r.get::<_, i64>(10)? as u32,
+                    allow_tools: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
+                    workspace: r.get(12)?,
+                    status: serde_json::from_str::<JobStatus>(&r.get::<_, String>(13)?).map_err(
+                        |e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                13,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        },
+                    )?,
+                    result: r.get::<_, Option<String>>(14)?.map(|_| {
+                        crate::supervisor::job::JobOutput {
+                            status: crate::supervisor::job::JobStatus::Succeeded,
+                            summary: String::new(),
+                            evidence: vec![],
+                            errors: vec![],
+                            changed_files: vec![],
+                            next_step: None,
+                        }
+                    }),
+                    error: r.get(15)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub async fn update_job_status(
+        &self,
+        id: &str,
+        status: JobStatus,
+        summary: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE sup_jobs SET status=?1, result_summary=?2, error=?3,
+                                 finished_at=datetime('now') WHERE id=?4",
+            rusqlite::params![serde_json::to_string(&status)?, summary, error, id],
+        )?;
+        Ok(())
+    }
+
     pub async fn transitions(&self, task_id: &str) -> Result<Vec<TransitionRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
@@ -200,6 +305,26 @@ mod tests {
             loaded.task_type,
             crate::supervisor::task::TaskType::Research
         );
+    }
+
+    #[tokio::test]
+    async fn save_and_load_jobs_for_task() {
+        let memory = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let store = TaskStore::new(memory.connection());
+        let task = crate::supervisor::task::Task::new("T", "u");
+        store.create(&task, "telegram", "u", None).await.unwrap();
+
+        let mut job = crate::supervisor::job::Job::new(
+            &task.id,
+            crate::supervisor::job::JobType::ExecutorJob,
+            "reasoning",
+            "do",
+        );
+        job.prompt = Some("do it".into());
+        store.create_job(&job).await.unwrap();
+        let jobs = store.jobs_for_task(&task.id).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, job.id);
     }
 
     #[tokio::test]
