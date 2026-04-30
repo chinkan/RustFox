@@ -34,7 +34,7 @@ mod tests {
         let mut t = Task::new("ok", "ok");
         t.task_type = TaskType::GeneralAssistant;
         t.risk_level = RiskLevel::Low;
-        let d = PolicyEngine::default().decide(&t);
+        let d = PolicyEngine.decide(&t);
         assert_eq!(d, PolicyDecision::AutoExecute);
     }
 
@@ -43,7 +43,7 @@ mod tests {
         use crate::supervisor::task::*;
         let mut t = Task::new("rm -rf /", "delete prod");
         t.risk_level = RiskLevel::High;
-        let d = PolicyEngine::default().decide(&t);
+        let d = PolicyEngine.decide(&t);
         assert_eq!(d, PolicyDecision::RequireApproval);
     }
 
@@ -53,7 +53,7 @@ mod tests {
         let mut t = Task::new("do the thing", "do the thing");
         t.task_type = TaskType::Unknown;
         t.risk_level = RiskLevel::Low;
-        let d = PolicyEngine::default().decide(&t);
+        let d = PolicyEngine.decide(&t);
         assert_eq!(d, PolicyDecision::Clarify);
     }
 }
