@@ -21,11 +21,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::supervisor::artifact::ArtifactManager;
+use crate::supervisor::backend::{reasoning::ReasoningBackend, Registry};
 use crate::supervisor::classifier::{Classifier, HeuristicClassifier};
 use crate::supervisor::intake::IntakeRouter;
+use crate::supervisor::orchestrator::{Orchestrator, OrchestratorOutcome};
+use crate::supervisor::planner::Planner;
 use crate::supervisor::policy::{PolicyDecision, PolicyEngine};
+use crate::supervisor::reporter::Reporter;
 use crate::supervisor::store::TaskStore;
 use crate::supervisor::task::TaskStatus;
+use crate::supervisor::verification::{VerificationEngine, VerificationOutcome};
 
 pub enum SubmitOutcome {
     AutoExecutePlanned { task_id: String },
@@ -48,6 +53,7 @@ pub struct Supervisor {
     artifacts: Arc<ArtifactManager>,
     classifier: Box<dyn Classifier + Send + Sync>,
     policy: PolicyEngine,
+    pub registry: Registry,
 }
 
 impl Supervisor {
@@ -60,7 +66,154 @@ impl Supervisor {
             artifacts: Arc::new(ArtifactManager::new(artifacts_root, conn)),
             classifier: Box::new(HeuristicClassifier),
             policy: PolicyEngine,
+            registry: Registry::new(),
         }
+    }
+
+    /// Production constructor. Registry should be pre-populated with backends.
+    pub fn new(
+        artifacts_root: PathBuf,
+        conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+        registry: Registry,
+    ) -> Self {
+        Self {
+            store: TaskStore::new(conn.clone()),
+            artifacts: Arc::new(ArtifactManager::new(artifacts_root, conn)),
+            classifier: Box::new(HeuristicClassifier),
+            policy: PolicyEngine,
+            registry,
+        }
+    }
+
+    pub fn register_test_reasoning_backend<F, Fut>(&mut self, f: F)
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+    {
+        self.registry
+            .register(Arc::new(ReasoningBackend::new_with_executor(f)));
+    }
+
+    pub async fn execute_now(&self, task_id: &str) -> anyhow::Result<String> {
+        let task = self
+            .store
+            .get(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+
+        // PLAN
+        self.store
+            .record_transition(
+                task_id,
+                TaskStatus::Route,
+                TaskStatus::Plan,
+                "supervisor",
+                None,
+            )
+            .await?;
+        let plan = Planner::new().plan(&task);
+        self.artifacts
+            .write_text(
+                task_id,
+                None,
+                "plan",
+                "plan.json",
+                &serde_json::to_string_pretty(&serde_json::json!({
+                    "jobs": plan.jobs.iter().map(|j| serde_json::json!({
+                        "type": j.job_type, "backend": j.backend, "goal": j.goal,
+                    })).collect::<Vec<_>>()
+                }))?,
+            )
+            .await?;
+
+        // EXECUTE
+        self.store
+            .record_transition(
+                task_id,
+                TaskStatus::Plan,
+                TaskStatus::Execute,
+                "supervisor",
+                None,
+            )
+            .await?;
+        let orch = Orchestrator::new(self.registry.clone(), self.store.clone());
+        let res = orch.execute_plan(&task, plan).await?;
+        let jobs = self.store.jobs_for_task(task_id).await?;
+
+        // VERIFY
+        self.store
+            .record_transition(
+                task_id,
+                if matches!(res, OrchestratorOutcome::AllSucceeded) {
+                    TaskStatus::Execute
+                } else {
+                    TaskStatus::Execute
+                },
+                TaskStatus::Verify,
+                "supervisor",
+                None,
+            )
+            .await?;
+        let v = VerificationEngine.verify(&jobs);
+
+        // REPORT + ARCHIVE
+        let report = Reporter::render(&jobs);
+        self.artifacts
+            .write_text(task_id, None, "result", "report.md", &report)
+            .await?;
+        match v {
+            VerificationOutcome::Passed => {
+                self.store
+                    .record_transition(
+                        task_id,
+                        TaskStatus::Verify,
+                        TaskStatus::Report,
+                        "supervisor",
+                        None,
+                    )
+                    .await?;
+                self.store
+                    .record_transition(
+                        task_id,
+                        TaskStatus::Report,
+                        TaskStatus::Archive,
+                        "supervisor",
+                        None,
+                    )
+                    .await?;
+                self.store
+                    .record_transition(
+                        task_id,
+                        TaskStatus::Archive,
+                        TaskStatus::Done,
+                        "supervisor",
+                        None,
+                    )
+                    .await?;
+                Ok(report)
+            }
+            VerificationOutcome::Failed(reason) => {
+                self.store
+                    .record_transition(
+                        task_id,
+                        TaskStatus::Verify,
+                        TaskStatus::Failed,
+                        "verifier",
+                        Some(&reason),
+                    )
+                    .await?;
+                Ok(format!("VERIFICATION FAILED: {reason}\n\n{report}"))
+            }
+        }
+    }
+
+    pub async fn state(&self, task_id: &str) -> anyhow::Result<TaskStatus> {
+        Ok(self
+            .store
+            .get(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task missing"))?
+            .status)
     }
 
     pub fn artifacts(&self) -> &ArtifactManager {
