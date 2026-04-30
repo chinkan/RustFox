@@ -2,6 +2,7 @@ use crate::supervisor::job::{Job, JobOutput, JobType};
 use anyhow::Result;
 use std::sync::Arc;
 
+pub mod mcp;
 pub mod reasoning;
 pub mod shell;
 
