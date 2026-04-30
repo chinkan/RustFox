@@ -208,6 +208,16 @@ async fn main() -> Result<()> {
     agent.restore_scheduled_tasks().await;
     info!("  Scheduled tasks: restored from DB");
 
+    // Construct Supervisor. M3 ships with an empty backend Registry — backends
+    // are wired and the Telegram /supervise command is dispatched in M7.3.
+    // Held alive in main's scope so the binding isn't dead-code-eliminated.
+    let _supervisor = Arc::new(rustfox::supervisor::Supervisor::new(
+        config.supervisor.artifacts_dir.clone(),
+        memory.connection(),
+        rustfox::supervisor::backend::Registry::new(),
+    ));
+    info!("  Supervisor: ready (no backends wired yet)");
+
     // Run the Telegram platform
     info!("Bot is starting...");
     platform::telegram::run(

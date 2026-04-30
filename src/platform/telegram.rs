@@ -43,6 +43,27 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Parse a Telegram-style slash command into `(command, argument)`.
+///
+/// Returns `None` if the input does not start with `/`. The command is the
+/// token immediately after the slash; the argument is the remainder of the
+/// line (trimmed of surrounding whitespace).
+///
+/// Currently exercised only by tests; full Telegram dispatch of `/supervise`
+/// is wired in M7.3.
+#[allow(dead_code)]
+pub(crate) fn parse_command(s: &str) -> Option<(String, String)> {
+    let s = s.trim_start();
+    if !s.starts_with('/') {
+        return None;
+    }
+    let rest = &s[1..];
+    let mut it = rest.splitn(2, char::is_whitespace);
+    let cmd = it.next()?.to_string();
+    let arg = it.next().unwrap_or("").trim().to_string();
+    Some((cmd, arg))
+}
+
 /// Run the Telegram bot platform
 pub async fn run(
     agent: Arc<Agent>,
@@ -444,6 +465,28 @@ mod tests {
         assert!(is_verbose_enabled(Some("true")));
         assert!(!is_verbose_enabled(Some("false")));
         assert!(!is_verbose_enabled(None));
+    }
+
+    #[test]
+    fn parse_supervise_command_extracts_request_text() {
+        let parsed = super::parse_command("/supervise summarize the readme");
+        assert_eq!(
+            parsed,
+            Some(("supervise".into(), "summarize the readme".into()))
+        );
+    }
+
+    #[test]
+    fn parse_command_returns_none_for_non_slash_input() {
+        assert!(super::parse_command("hello world").is_none());
+    }
+
+    #[test]
+    fn parse_command_handles_command_without_argument() {
+        assert_eq!(
+            super::parse_command("/start"),
+            Some(("start".into(), "".into()))
+        );
     }
 
     #[test]
