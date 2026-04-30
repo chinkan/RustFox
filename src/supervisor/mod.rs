@@ -202,15 +202,39 @@ impl Supervisor {
         // M3: regardless of orchestrator outcome we transition Execute->Verify
         // and let VerificationEngine produce the final pass/fail.
         let _ = res;
-        self.store
-            .record_transition(
-                task_id,
-                TaskStatus::Execute,
-                TaskStatus::Verify,
-                "supervisor",
-                None,
-            )
-            .await?;
+        if matches!(
+            task.execution_mode,
+            crate::supervisor::task::ExecutionMode::Rigorous
+        ) {
+            self.store
+                .record_transition(
+                    task_id,
+                    TaskStatus::Execute,
+                    TaskStatus::Review,
+                    "supervisor",
+                    None,
+                )
+                .await?;
+            self.store
+                .record_transition(
+                    task_id,
+                    TaskStatus::Review,
+                    TaskStatus::Verify,
+                    "supervisor",
+                    None,
+                )
+                .await?;
+        } else {
+            self.store
+                .record_transition(
+                    task_id,
+                    TaskStatus::Execute,
+                    TaskStatus::Verify,
+                    "supervisor",
+                    None,
+                )
+                .await?;
+        }
         let v = VerificationEngine.verify(&jobs);
 
         // REPORT + ARCHIVE
