@@ -14,6 +14,11 @@ impl ShellBackend {
         Self { sandbox }
     }
 
+    // TODO(security, M2.5): naive validation — only catches obvious `cd /…`,
+    // `cd ..`, and `../` patterns. Determined callers can still escape via
+    // `bash -c`, command substitution `$(...)`, or `pushd`. Replace with full
+    // path canonicalization (see `validate_sandbox_path` in src/tools.rs) before
+    // exposing ShellBackend through any user-facing entrypoint.
     fn validate(&self, cmd: &str) -> bool {
         let lower = cmd.trim_start();
         if lower.starts_with("cd /") || lower.contains("cd ..") {
