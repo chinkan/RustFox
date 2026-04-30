@@ -38,12 +38,7 @@ impl Orchestrator {
             match out {
                 Ok(out) if matches!(out.status, JobStatus::Succeeded) => {
                     self.store
-                        .update_job_status(
-                            &job.id,
-                            JobStatus::Succeeded,
-                            Some(&out.summary),
-                            None,
-                        )
+                        .update_job_status(&job.id, JobStatus::Succeeded, Some(&out.summary), None)
                         .await?;
                 }
                 Ok(out) => {

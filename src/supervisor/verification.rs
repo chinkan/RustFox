@@ -15,10 +15,7 @@ impl VerificationEngine {
             }
             let ev_count = j.result.as_ref().map(|r| r.evidence.len()).unwrap_or(0);
             if ev_count == 0 {
-                return VerificationOutcome::Failed(format!(
-                    "job {} produced no evidence",
-                    j.id
-                ));
+                return VerificationOutcome::Failed(format!("job {} produced no evidence", j.id));
             }
         }
         VerificationOutcome::Passed
