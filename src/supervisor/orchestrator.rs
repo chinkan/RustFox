@@ -41,23 +41,26 @@ impl Orchestrator {
     }
 
     pub async fn execute_plan(&self, _task: &Task, plan: Plan) -> Result<OrchestratorOutcome> {
-        let mut grouped: std::collections::HashSet<usize> = Default::default();
-        for g in &plan.parallel_groups {
-            for i in g {
-                grouped.insert(*i);
-            }
-        }
+        let mut processed: std::collections::HashSet<usize> = Default::default();
 
-        let mut idx = 0;
-        while idx < plan.jobs.len() {
+        for idx in 0..plan.jobs.len() {
+            if processed.contains(&idx) {
+                continue;
+            }
             if let Some(group) = plan.parallel_groups.iter().find(|g| g.contains(&idx)) {
-                let futs = group.iter().map(|&gi| {
-                    let job = plan.jobs[gi].clone();
-                    let store = self.store.clone();
-                    let reg = self.reg.clone();
-                    let fb = self.fallbacks.clone();
-                    async move { Self::execute_one_job_with_subjobs(&reg, &store, &fb, job).await }
-                });
+                let futs: Vec<_> =
+                    group
+                        .iter()
+                        .map(|&gi| {
+                            let job = plan.jobs[gi].clone();
+                            let store = self.store.clone();
+                            let reg = self.reg.clone();
+                            let fb = self.fallbacks.clone();
+                            async move {
+                                Self::execute_one_job_with_subjobs(&reg, &store, &fb, job).await
+                            }
+                        })
+                        .collect();
                 let results = futures::future::join_all(futs).await;
                 for r in results {
                     match r? {
@@ -65,10 +68,9 @@ impl Orchestrator {
                         JobOutcome::Succeeded => {}
                     }
                 }
-                idx = group.iter().max().copied().unwrap() + 1;
-            } else if grouped.contains(&idx) {
-                // Already processed by an earlier group iteration; skip.
-                idx += 1;
+                for &gi in group {
+                    processed.insert(gi);
+                }
             } else {
                 let job = plan.jobs[idx].clone();
                 match Self::execute_one_job_with_subjobs(
@@ -82,7 +84,7 @@ impl Orchestrator {
                     JobOutcome::Failed(id) => return Ok(OrchestratorOutcome::FailedAt(id)),
                     JobOutcome::Succeeded => {}
                 }
-                idx += 1;
+                processed.insert(idx);
             }
         }
         Ok(OrchestratorOutcome::AllSucceeded)
@@ -251,6 +253,52 @@ mod tests {
             "expected concurrent execution, took {}ms",
             elapsed.as_millis()
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_runs_non_contiguous_parallel_group_without_skipping_serial_jobs() {
+        let memory = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let store = crate::supervisor::store::TaskStore::new(memory.connection());
+        let task = crate::supervisor::task::Task::new("T", "x");
+        store.create(&task, "telegram", "u", None).await.unwrap();
+
+        let mut reg = crate::supervisor::backend::Registry::new();
+        reg.register(std::sync::Arc::new(
+            crate::supervisor::backend::reasoning::ReasoningBackend::new_with_executor(
+                |p| async move { Ok(format!("ran:{p}")) },
+            ),
+        ));
+
+        // 4 jobs: indices 0 and 3 in parallel; 1 and 2 sequential.
+        let mut plan = crate::supervisor::planner::Plan {
+            jobs: vec![],
+            parallel_groups: vec![vec![0, 3]],
+        };
+        for i in 0..4 {
+            let mut j = crate::supervisor::job::Job::new(
+                &task.id,
+                crate::supervisor::job::JobType::ExecutorJob,
+                "reasoning",
+                &format!("g{i}"),
+            );
+            j.prompt = Some(format!("p{i}"));
+            plan.jobs.push(j);
+        }
+
+        let orch = crate::supervisor::orchestrator::Orchestrator::new(reg, store.clone());
+        orch.execute_plan(&task, plan).await.unwrap();
+
+        let jobs = store.jobs_for_task(&task.id).await.unwrap();
+        assert_eq!(jobs.len(), 4, "all four jobs must be persisted");
+        for j in &jobs {
+            assert_eq!(
+                j.status,
+                crate::supervisor::job::JobStatus::Succeeded,
+                "job {} should have run, got {:?}",
+                j.id,
+                j.status
+            );
+        }
     }
 
     struct FailoverEcho;
