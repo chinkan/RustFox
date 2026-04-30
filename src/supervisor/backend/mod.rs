@@ -2,8 +2,11 @@ use crate::supervisor::job::{Job, JobOutput, JobType};
 use anyhow::Result;
 use std::sync::Arc;
 
+pub mod claude_code;
+pub mod codex;
 pub mod mcp;
 pub mod reasoning;
+pub mod script;
 pub mod shell;
 
 #[derive(Debug, Clone, Default)]
