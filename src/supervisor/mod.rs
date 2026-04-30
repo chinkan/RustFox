@@ -1,6 +1,8 @@
 //! Generic autonomous task supervisor.
 //! See `docs/plans/2026-04-30-autopilot-supervisor-design.md`.
 
+pub mod task;
+
 #[allow(dead_code)]
 pub struct Supervisor;
 
