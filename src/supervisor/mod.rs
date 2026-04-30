@@ -4,6 +4,7 @@
 pub mod classifier;
 pub mod intake;
 pub mod job;
+pub mod policy;
 pub mod state;
 pub mod store;
 pub mod task;
