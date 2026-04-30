@@ -490,6 +490,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_all_supervisor_commands() {
+        for c in [
+            "/tasks",
+            "/resume abc",
+            "/cancel abc",
+            "/approve abc",
+            "/clarify abc some text",
+        ] {
+            assert!(super::parse_command(c).is_some(), "failed: {c}");
+        }
+    }
+
+    #[test]
     fn test_split_message_empty_response_produces_no_chunks() {
         let chunks = split_message("", 4000);
         assert!(chunks.len() <= 1);
