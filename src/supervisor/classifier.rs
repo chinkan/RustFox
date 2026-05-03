@@ -75,7 +75,7 @@ impl Classifier for HeuristicClassifier {
 }
 
 impl HeuristicClassifier {
-    pub fn classify(&self, request: &str) -> Task {
+    pub fn classify_as_task(&self, request: &str) -> Task {
         let mut t = Task::new(request.lines().next().unwrap_or(request), request);
         let o = <Self as Classifier>::classify(self, request);
         t.task_type = o.task_type;
@@ -128,7 +128,7 @@ impl<C: Classifier> SkillAwareClassifier<C> {
     }
 
     pub fn classify(&self, request: &str) -> Task {
-        let mut base = HeuristicClassifier.classify(request);
+        let mut base = HeuristicClassifier.classify_as_task(request);
         let outcome = self.inner.classify(request);
         base.task_type = outcome.task_type;
         base.risk_level = outcome.risk_level;
@@ -166,15 +166,15 @@ mod tests {
     fn heuristic_classifies_obvious_cases() {
         use crate::supervisor::task::{RiskLevel, TaskType};
         let c = HeuristicClassifier;
-        let t = c.classify("rename foo() to bar() in src/lib.rs");
+        let t = c.classify_as_task("rename foo() to bar() in src/lib.rs");
         assert_eq!(t.task_type, TaskType::Refactor);
         assert!(matches!(t.risk_level, RiskLevel::Medium | RiskLevel::High));
 
-        let t = c.classify("summarize the file ./README.md");
+        let t = c.classify_as_task("summarize the file ./README.md");
         assert_eq!(t.task_type, TaskType::GeneralAssistant);
         assert_eq!(t.risk_level, RiskLevel::Low);
 
-        let t = c.classify("research best Rust async runtime 2026");
+        let t = c.classify_as_task("research best Rust async runtime 2026");
         assert_eq!(t.task_type, TaskType::Research);
     }
 

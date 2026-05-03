@@ -37,7 +37,7 @@ mod tests {
         j.result = Some(JobOutput {
             status: JobStatus::Succeeded,
             summary: "All good.".into(),
-            evidence: vec![Evidence::ExitCode(0)],
+            evidence: vec![Evidence::ExitCode { code: 0 }],
             errors: vec![],
             changed_files: vec!["src/foo.rs".into()],
             next_step: None,

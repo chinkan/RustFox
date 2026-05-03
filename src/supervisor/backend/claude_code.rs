@@ -1,11 +1,8 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
-use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
-use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
+use crate::supervisor::backend::{run_cli_process, Backend, BackendCapabilities, RunContext};
+use crate::supervisor::job::{Job, JobOutput, JobType};
 
 pub struct ClaudeCodeCliBackend {
     bin: String,
@@ -39,60 +36,7 @@ impl Backend for ClaudeCodeCliBackend {
         )
     }
     async fn run(&self, job: &mut Job, _ctx: &RunContext) -> Result<JobOutput> {
-        let prompt = job.prompt.clone().unwrap_or_else(|| job.goal.clone());
-        let timeout_secs = job.timeout_secs;
-        job.status = JobStatus::Running;
-
-        let mut cmd = Command::new(&self.bin);
-        cmd.args(&self.args)
-            .current_dir(&self.workdir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(prompt.as_bytes()).await?;
-            stdin.shutdown().await?;
-        }
-        let output =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-                .await
-            {
-                Ok(res) => res?,
-                Err(_) => {
-                    job.status = JobStatus::Failed;
-                    return Ok(JobOutput {
-                        status: JobStatus::Failed,
-                        summary: String::new(),
-                        evidence: vec![],
-                        errors: vec![format!("CLI timed out after {timeout_secs}s")],
-                        changed_files: vec![],
-                        next_step: None,
-                    });
-                }
-            };
-        let exit = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let status = if output.status.success() {
-            JobStatus::Succeeded
-        } else {
-            JobStatus::Failed
-        };
-        job.status = status.clone();
-        Ok(JobOutput {
-            status,
-            summary: stdout.trim().into(),
-            evidence: vec![Evidence::ExitCode(exit)],
-            errors: if stderr.is_empty() {
-                vec![]
-            } else {
-                vec![stderr]
-            },
-            changed_files: vec![],
-            next_step: None,
-        })
+        run_cli_process(job, &self.bin, &self.args, &self.workdir).await
     }
 }
 

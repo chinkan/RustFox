@@ -76,7 +76,7 @@ impl Backend for ShellBackend {
         Ok(JobOutput {
             status,
             summary: stdout.trim().to_string(),
-            evidence: vec![Evidence::ExitCode(exit)],
+            evidence: vec![Evidence::ExitCode { code: exit }],
             errors: if stderr.is_empty() {
                 vec![]
             } else {
@@ -111,7 +111,7 @@ mod tests {
         assert!(out.summary.contains("hi"));
         assert!(matches!(
             out.evidence[0],
-            crate::supervisor::job::Evidence::ExitCode(0)
+            crate::supervisor::job::Evidence::ExitCode { code: 0 }
         ));
     }
 

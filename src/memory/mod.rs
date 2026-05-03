@@ -222,6 +222,7 @@ impl MemoryStore {
                 execution_mode  TEXT NOT NULL,
                 workflow        TEXT NOT NULL,
                 state           TEXT NOT NULL,
+                required_capabilities TEXT NOT NULL DEFAULT '[]',
                 inputs          TEXT,
                 constraints     TEXT,
                 expected_outputs TEXT,

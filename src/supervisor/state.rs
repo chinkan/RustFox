@@ -14,13 +14,17 @@ pub fn transition_allowed(from: SupervisorState, to: SupervisorState) -> bool {
             | (Clarify, Cancelled)
             | (Plan, PrepareWorkspace)
             | (Plan, Execute)
+            | (Plan, Cancelled)
             | (PrepareWorkspace, Execute)
+            | (PrepareWorkspace, Cancelled)
             | (Execute, Review)
             | (Execute, Verify)
             | (Execute, Failed)
             | (Execute, Paused)
+            | (Execute, Cancelled)
             | (Review, Verify)
             | (Review, Execute)
+            | (Review, Cancelled)
             | (Verify, Report)
             | (Verify, Execute)
             | (Verify, Failed)
@@ -28,7 +32,11 @@ pub fn transition_allowed(from: SupervisorState, to: SupervisorState) -> bool {
             | (Archive, Done)
             | (Paused, Execute)
             | (Paused, Cancelled)
-            | (_, Cancelled)
+            | (Route, Cancelled)
+            | (Route, Paused)
+            | (Plan, Paused)
+            | (PrepareWorkspace, Paused)
+            | (Intake, Cancelled)
     )
 }
 
@@ -46,5 +54,8 @@ mod tests {
         assert!(transition_allowed(Execute, Failed));
         assert!(!transition_allowed(Intake, Done));
         assert!(!transition_allowed(Done, Execute));
+        // Terminal states must not transition to Cancelled
+        assert!(!transition_allowed(Done, Cancelled));
+        assert!(!transition_allowed(Failed, Cancelled));
     }
 }

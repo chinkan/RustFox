@@ -27,7 +27,9 @@ pub enum JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Evidence {
-    ExitCode(i32),
+    ExitCode {
+        code: i32,
+    },
     FileCreated {
         path: String,
         sha256: Option<String>,
@@ -105,7 +107,7 @@ mod tests {
         let out = JobOutput {
             status: JobStatus::Succeeded,
             summary: "ok".into(),
-            evidence: vec![Evidence::ExitCode(0)],
+            evidence: vec![Evidence::ExitCode { code: 0 }],
             errors: vec![],
             changed_files: vec![],
             next_step: None,

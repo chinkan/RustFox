@@ -130,6 +130,10 @@ impl Supervisor {
             )
             .await?;
         let plan = Planner::new().plan(&task);
+        // Track the IDs of jobs planned for this execution so that, on resume,
+        // orphan rows from a previous aborted run are excluded from verification.
+        let current_job_ids: std::collections::HashSet<String> =
+            plan.jobs.iter().map(|j| j.id.clone()).collect();
         self.artifacts
             .write_text(
                 task_id,
@@ -196,7 +200,12 @@ impl Supervisor {
             .await?;
         let orch = Orchestrator::new(self.registry.clone(), self.store.clone());
         let res = orch.execute_plan(&task, plan).await?;
-        let jobs = self.store.jobs_for_task(task_id).await?;
+        // Only verify jobs from the current execution cycle (not orphans from prior runs).
+        let all_jobs = self.store.jobs_for_task(task_id).await?;
+        let jobs: Vec<_> = all_jobs
+            .into_iter()
+            .filter(|j| current_job_ids.contains(&j.id))
+            .collect();
 
         // VERIFY
         // M3: regardless of orchestrator outcome we transition Execute->Verify

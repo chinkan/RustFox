@@ -31,9 +31,17 @@ impl WorkspaceManager {
         let branch = format!("supervisor/{safe_slug}-{}", &task_id[..8]);
 
         if self.use_worktree {
+            let repo_name = self
+                .repo
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let path = self
                 .repo
-                .with_extension(format!("worktree-{}", &task_id[..8]));
+                .parent()
+                .unwrap_or(&self.repo)
+                .join(format!("{repo_name}-worktree-{}", &task_id[..8]));
             run(
                 &self.repo,
                 &["worktree", "add", "-b", &branch, path.to_str().unwrap()],

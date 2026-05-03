@@ -51,7 +51,10 @@ mod tests {
     #[test]
     fn verifies_when_all_jobs_succeeded_with_evidence() {
         use crate::supervisor::job::*;
-        let jobs = vec![done_job(JobStatus::Succeeded, vec![Evidence::ExitCode(0)])];
+        let jobs = vec![done_job(
+            JobStatus::Succeeded,
+            vec![Evidence::ExitCode { code: 0 }],
+        )];
         assert!(matches!(
             VerificationEngine.verify(&jobs),
             VerificationOutcome::Passed

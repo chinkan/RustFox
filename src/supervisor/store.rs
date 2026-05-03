@@ -36,9 +36,9 @@ impl TaskStore {
         conn.execute(
             "INSERT INTO sup_tasks
              (id, title, user_request, task_type, priority, risk_level, execution_mode,
-              workflow, state, inputs, constraints, expected_outputs, approval_policy,
-              platform, user_id, chat_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+              workflow, state, required_capabilities, inputs, constraints, expected_outputs,
+              approval_policy, platform, user_id, chat_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             rusqlite::params![
                 t.id,
                 t.title,
@@ -49,6 +49,7 @@ impl TaskStore {
                 serde_json::to_string(&t.execution_mode)?,
                 "general",
                 serde_json::to_string(&t.status)?,
+                serde_json::to_string(&t.required_capabilities)?,
                 serde_json::to_string(&t.inputs)?,
                 serde_json::to_string(&t.constraints)?,
                 serde_json::to_string(&t.expected_outputs)?,
@@ -65,7 +66,8 @@ impl TaskStore {
     pub async fn get(&self, id: &str) -> Result<Option<Task>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id,title,user_request,task_type,priority,risk_level,execution_mode,state
+            "SELECT id,title,user_request,task_type,priority,risk_level,execution_mode,state,
+                    required_capabilities
              FROM sup_tasks WHERE id=?1",
         )?;
         let mut rows = stmt.query_map([id], |r| {
@@ -109,7 +111,14 @@ impl TaskStore {
                         )
                     },
                 )?,
-                required_capabilities: vec![],
+                required_capabilities: serde_json::from_str::<Vec<String>>(&r.get::<_, String>(8)?)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                 constraints: serde_json::Value::Null,
                 inputs: serde_json::Value::Null,
                 expected_outputs: serde_json::Value::Null,
@@ -125,12 +134,14 @@ impl TaskStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE sup_tasks
-             SET task_type=?1, risk_level=?2, execution_mode=?3, updated_at=datetime('now')
-             WHERE id=?4",
+             SET task_type=?1, risk_level=?2, execution_mode=?3,
+                 required_capabilities=?4, updated_at=datetime('now')
+             WHERE id=?5",
             rusqlite::params![
                 serde_json::to_string(&t.task_type)?,
                 serde_json::to_string(&t.risk_level)?,
                 serde_json::to_string(&t.execution_mode)?,
+                serde_json::to_string(&t.required_capabilities)?,
                 t.id,
             ],
         )
@@ -146,6 +157,12 @@ impl TaskStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<()> {
+        debug_assert!(
+            crate::supervisor::state::transition_allowed(from.clone(), to.clone()),
+            "illegal state transition {:?} → {:?}",
+            from,
+            to
+        );
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO sup_transitions (task_id, from_state, to_state, reason, actor)
@@ -220,12 +237,23 @@ impl TaskStore {
                     backend: r.get(4)?,
                     goal: r.get(5)?,
                     prompt: r.get(6)?,
-                    input_context: serde_json::from_str(&r.get::<_, String>(7)?)
-                        .unwrap_or(serde_json::Value::Null),
+                    input_context: serde_json::from_str(&r.get::<_, String>(7)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                     timeout_secs: r.get::<_, i64>(8)? as u64,
                     retry_max: r.get::<_, i64>(9)? as u32,
                     retry_count: r.get::<_, i64>(10)? as u32,
-                    allow_tools: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
+                    allow_tools: serde_json::from_str(&r.get::<_, String>(11)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                     workspace: r.get(12)?,
                     status: serde_json::from_str::<JobStatus>(&r.get::<_, String>(13)?).map_err(
                         |e| {
