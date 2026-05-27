@@ -119,11 +119,12 @@ impl Supervisor {
             .await?
             .ok_or_else(|| anyhow::anyhow!("task not found"))?;
 
-        // PLAN
+        // PLAN — transition from the task's actual persisted status so that
+        // resumed/mid-pipeline tasks produce a correct audit trail.
         self.store
             .record_transition(
                 task_id,
-                TaskStatus::Route,
+                task.status.clone(),
                 TaskStatus::Plan,
                 "supervisor",
                 None,
@@ -448,10 +449,29 @@ impl Supervisor {
                     question: "I'm not sure what you want me to do — can you clarify?".into(),
                 }
             }
-            PolicyDecision::RequireApproval => SubmitOutcome::NeedsApproval {
-                task_id: task.id,
-                reason: "high-risk task".into(),
-            },
+            PolicyDecision::RequireApproval => {
+                let reason = match task.risk_level {
+                    crate::supervisor::task::RiskLevel::High => {
+                        "high-risk task requires approval".to_string()
+                    }
+                    crate::supervisor::task::RiskLevel::Medium => {
+                        if self.policy.thresholds().require_approval_for_medium {
+                            "medium-risk task requires approval (threshold config)".to_string()
+                        } else if self.policy.thresholds().auto_execute_only_low {
+                            "medium-risk task requires approval (auto_execute_only_low)".to_string()
+                        } else {
+                            "medium-risk task requires approval".to_string()
+                        }
+                    }
+                    crate::supervisor::task::RiskLevel::Low => {
+                        "low-risk task requires approval (threshold config)".to_string()
+                    }
+                };
+                SubmitOutcome::NeedsApproval {
+                    task_id: task.id,
+                    reason,
+                }
+            }
             other => SubmitOutcome::NeedsApproval {
                 task_id: task.id,
                 reason: format!("{other:?}"),

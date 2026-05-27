@@ -43,6 +43,32 @@ pub struct FunctionDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Completion wrapper that preserves metadata alongside the assistant message.
+#[derive(Debug, Clone)]
+pub struct ChatCompletion {
+    pub message: ChatMessage,
+    pub finish_reason: Option<String>,
+    pub model: String,
+}
+
+/// Classifier that detects empty assistant responses (no content and no tool calls).
+///
+/// Returns `true` when the assistant message has neither meaningful text content
+/// nor any tool calls, indicating a potentially problematic response that may
+/// warrant retry logic.
+pub fn is_empty_assistant_response(message: &ChatMessage) -> bool {
+    let has_tool_calls = message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty());
+    let has_content = message
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty());
+
+    !has_tool_calls && !has_content
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
@@ -274,13 +300,17 @@ impl LlmClient {
         }
     }
 
-    /// Chat with an explicit model string (used by subagents to override the default).
-    pub async fn chat_with_model(
+    /// Core chat method returning full completion metadata (message, finish_reason, model).
+    ///
+    /// This is the lowest-level method that performs the HTTP request and returns
+    /// all available metadata from the LLM response. All other chat methods delegate
+    /// to this one.
+    pub async fn chat_completion_with_model(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
         model: &str,
-    ) -> Result<ChatMessage> {
+    ) -> Result<ChatCompletion> {
         let tools_param = if tools.is_empty() {
             None
         } else {
@@ -385,17 +415,43 @@ impl LlmClient {
             }
         }
 
-        Ok(choice.message)
+        Ok(ChatCompletion {
+            message: choice.message,
+            finish_reason: choice.finish_reason,
+            model: model.to_string(),
+        })
     }
 
-    /// Chat using the model configured in config.toml (delegates to chat_with_model).
+    /// Compatibility wrapper returning only the message (delegates to chat_completion_with_model).
+    pub async fn chat_with_model(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+    ) -> Result<ChatMessage> {
+        Ok(self
+            .chat_completion_with_model(messages, tools, model)
+            .await?
+            .message)
+    }
+
+    /// Chat using an explicit model, returning full completion metadata.
+    pub async fn chat_completion(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<ChatCompletion> {
+        self.chat_completion_with_model(messages, tools, &self.config.model)
+            .await
+    }
+
+    /// Chat using the model configured in config.toml (delegates to chat_completion).
     pub async fn chat(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<ChatMessage> {
-        self.chat_with_model(messages, tools, &self.config.model)
-            .await
+        Ok(self.chat_completion(messages, tools).await?.message)
     }
 
     /// Stream an already-complete `content` string through a token channel in small chunks.
@@ -726,5 +782,140 @@ mod tests {
         assert_eq!(required.len(), 1);
         assert_eq!(required[0], "x");
         assert!(val.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_empty_assistant_response_detects_null_content_no_tools() {
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        assert!(is_empty_assistant_response(&message));
+    }
+
+    #[test]
+    fn test_empty_assistant_response_detects_whitespace_content_no_tools() {
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some("  \n\t  ".to_string()),
+            tool_calls: Some(vec![]),
+            tool_call_id: None,
+        };
+        assert!(is_empty_assistant_response(&message));
+    }
+
+    #[test]
+    fn test_empty_assistant_response_false_when_tool_calls_present() {
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "plan_view".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        assert!(!is_empty_assistant_response(&message));
+    }
+
+    #[test]
+    fn test_empty_assistant_response_false_when_content_present() {
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some("Done".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        assert!(!is_empty_assistant_response(&message));
+    }
+
+    #[test]
+    fn test_chat_completion_preserves_finish_reason() {
+        let json = r#"{
+            "choices": [{
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        let choice = resp.choices.into_iter().next().unwrap();
+        let completion = ChatCompletion {
+            message: choice.message,
+            finish_reason: choice.finish_reason,
+            model: "test-model".to_string(),
+        };
+        assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(completion.message.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_kimi_fallback_preserves_chat_completion_metadata() {
+        // Simulates the Kimi fallback integration path in chat_completion_with_model.
+        // When Kimi leaks native tool-call syntax into content, we parse it, clear
+        // content, populate tool_calls, and set finish_reason to "tool_calls".
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<|tool_calls_section_begin|> <|tool_call_begin|> functions.read_skill_file:0 <|tool_call_argument_begin|> {\"skill_name\": \"reddit-fetcher\", \"relative_path\": \"SKILL.md\"} <|tool_call_end|> <|tool_calls_section_end|>"
+                },
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        let mut choice = resp.choices.into_iter().next().unwrap();
+
+        // Apply the same Kimi parsing logic used in chat_completion_with_model
+        let has_tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|t| !t.is_empty());
+        if !has_tool_calls {
+            if let Some(ref content) = choice.message.content.clone() {
+                if let Some(parsed) = parse_kimi_tool_calls(content) {
+                    choice.message.tool_calls = Some(parsed);
+                    choice.message.content = None;
+                    choice.finish_reason = Some("tool_calls".to_string());
+                }
+            }
+        }
+
+        // Construct ChatCompletion as chat_completion_with_model does
+        let completion = ChatCompletion {
+            message: choice.message,
+            finish_reason: choice.finish_reason,
+            model: "moonshotai/kimi-k2.5".to_string(),
+        };
+
+        // Assert metadata is correctly preserved
+        assert_eq!(
+            completion.finish_reason.as_deref(),
+            Some("tool_calls"),
+            "finish_reason must be set to 'tool_calls'"
+        );
+        assert!(
+            completion.message.content.is_none(),
+            "content must be cleared when Kimi tool calls are parsed"
+        );
+        assert!(
+            completion.message.tool_calls.is_some(),
+            "tool_calls must be populated"
+        );
+        let tool_calls = completion.message.tool_calls.as_ref().unwrap();
+        assert!(
+            !tool_calls.is_empty(),
+            "tool_calls must contain at least one entry"
+        );
+        assert_eq!(
+            tool_calls[0].function.name, "read_skill_file",
+            "parsed tool name must match the Kimi content"
+        );
     }
 }

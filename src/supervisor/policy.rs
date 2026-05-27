@@ -20,6 +20,10 @@ impl PolicyEngine {
         Self { thresholds }
     }
 
+    pub fn thresholds(&self) -> &RiskThresholdsConfig {
+        &self.thresholds
+    }
+
     pub fn decide(&self, t: &Task) -> PolicyDecision {
         if t.risk_level == RiskLevel::High {
             return PolicyDecision::RequireApproval;

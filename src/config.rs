@@ -195,6 +195,8 @@ pub struct GeneralConfig {
 pub struct AgentConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    #[serde(default = "default_empty_response_retry_limit")]
+    pub empty_response_retry_limit: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -337,9 +339,14 @@ fn default_max_iterations() -> u32 {
     25
 }
 
+fn default_empty_response_retry_limit() -> u32 {
+    3
+}
+
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         max_iterations: default_max_iterations(),
+        empty_response_retry_limit: default_empty_response_retry_limit(),
     }
 }
 
@@ -390,6 +397,11 @@ impl Config {
     /// Maximum agent loop iterations (from [agent] max_iterations, default 25).
     pub fn max_iterations(&self) -> u32 {
         self.agent.max_iterations
+    }
+
+    /// Empty response retry limit (from [agent] empty_response_retry_limit, default 3).
+    pub fn empty_response_retry_limit(&self) -> u32 {
+        self.agent.empty_response_retry_limit
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -591,5 +603,39 @@ mod tests {
             cfg.memory.query_rewriter_enabled,
             "query_rewriter_enabled should be true when set"
         );
+    }
+
+    #[test]
+    fn test_agent_empty_response_retry_limit_defaults_to_three() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.empty_response_retry_limit, 3);
+        assert_eq!(cfg.empty_response_retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_agent_empty_response_retry_limit_can_be_configured_to_zero() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent]
+            empty_response_retry_limit = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.empty_response_retry_limit, 0);
+        assert_eq!(cfg.empty_response_retry_limit(), 0);
     }
 }

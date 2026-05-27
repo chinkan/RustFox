@@ -53,7 +53,8 @@ directory = "skills"
 
 # Agent loop (optional; defaults apply if section omitted)
 # [agent]
-# max_iterations = 25   # Agent loop cap (default 25)
+# max_iterations = 25              # Agent loop cap (default 25)
+# empty_response_retry_limit = 3   # Recovery attempts for empty model responses (default 3; 0 = fail immediately)
 
 # LangSmith observability (optional)
 # Traces every LLM call and tool execution for debugging in the LangSmith UI.

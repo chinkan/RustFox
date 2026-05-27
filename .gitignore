@@ -4,3 +4,7 @@ config.toml
 *.swo
 .env
 rustbot.db*
+.worktrees/
+
+# Playwright config and cache
+.playwright/

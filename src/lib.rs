@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_prompt;
 pub mod config;
 pub mod langsmith;
 pub mod learning;
