@@ -13,6 +13,14 @@ const TOOL_RESULT_COMPACT_THRESHOLD: usize = 2_000;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1_000;
 const PRESERVED_TOOL_GROUPS: usize = 2;
 
+/// Truncate a string to at most `max_chars` characters at a safe character boundary.
+///
+/// Returns a new string containing up to `max_chars` characters from `value`.
+/// If the string is longer, it is truncated at a character boundary (not mid-codepoint).
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Statistics about prompt preparation and compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptStats {
@@ -61,9 +69,9 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
     let previous_is_tool = messages.last().is_some_and(|msg| msg.role == "tool");
 
     let content = if previous_is_tool {
-        "Please provide a response to the tool result above.".to_string()
+        "Continue from the tool result above. Either call the next required tool or provide a concise user-visible final answer.".to_string()
     } else {
-        "Please provide a response to the user's request above.".to_string()
+        "Continue from the user's request above. Either call the next required tool or provide a concise user-visible final answer.".to_string()
     };
 
     ChatMessage {
@@ -202,8 +210,8 @@ fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
         for call in tool_calls.iter_mut() {
             let args_len = call.function.arguments.len();
             if args_len > TOOL_ARGUMENT_COMPACT_THRESHOLD {
-                let preview = if call.function.arguments.len() > 200 {
-                    format!("{}...", &call.function.arguments[..200])
+                let preview = if call.function.arguments.chars().count() > 200 {
+                    format!("{}...", truncate_chars(&call.function.arguments, 200))
                 } else {
                     call.function.arguments.clone()
                 };
@@ -230,8 +238,7 @@ fn compact_tool_result(msg: &ChatMessage) -> ChatMessage {
 
     if let Some(content) = &compacted.content {
         if content.len() > TOOL_RESULT_COMPACT_THRESHOLD {
-            let preview_end = content.len().min(TOOL_RESULT_PREVIEW_CHARS);
-            let preview = &content[..preview_end];
+            let preview = truncate_chars(content, TOOL_RESULT_PREVIEW_CHARS);
             compacted.content = Some(format!(
                 "[rustfox compacted tool result: {} chars]\n{}...",
                 content.len(),
@@ -543,5 +550,236 @@ mod tests {
 
         // Check message count is unchanged
         assert_eq!(messages.len(), compacted.len());
+    }
+
+    #[test]
+    fn truncate_chars_handles_unicode_safely() {
+        // ASCII text
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+        assert_eq!(truncate_chars("hello", 10), "hello");
+
+        // Emoji (multi-byte UTF-8)
+        let emoji_text = "Hello 👋 World 🌍";
+        let truncated = truncate_chars(emoji_text, 8);
+        assert_eq!(truncated, "Hello 👋 ");
+        assert_eq!(truncated.chars().count(), 8);
+
+        // CJK characters
+        let cjk_text = "你好世界";
+        let truncated = truncate_chars(cjk_text, 2);
+        assert_eq!(truncated, "你好");
+        assert_eq!(truncated.chars().count(), 2);
+
+        // Mixed: emoji + CJK + ASCII
+        let mixed = "Test 测试 🎉 emoji 表情";
+        let truncated = truncate_chars(mixed, 11);
+        assert_eq!(truncated, "Test 测试 🎉 e");
+        assert_eq!(truncated.chars().count(), 11);
+    }
+
+    #[test]
+    fn compaction_handles_unicode_tool_arguments_safely() {
+        // Create a long tool argument with emoji and CJK that would panic with byte slicing
+        // This string has multi-byte UTF-8 characters; byte index 200 could fall mid-character
+        let long_args_with_unicode = format!(
+            "{{\"message\": \"{}测试🎉{}\"}}",
+            "x".repeat(900),
+            "y".repeat(200)
+        );
+        assert!(long_args_with_unicode.len() > TOOL_ARGUMENT_COMPACT_THRESHOLD);
+
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "unicode_tool".to_string(),
+                    arguments: long_args_with_unicode.clone(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+
+        // This should not panic
+        let compacted = compact_assistant_tool_calls(&message);
+        let compacted_args = &compacted.tool_calls.as_ref().unwrap()[0].function.arguments;
+
+        // Verify it's been compacted
+        assert!(compacted_args.contains("_rustfox_compacted_arguments"));
+        assert!(compacted_args.contains("unicode_tool"));
+        assert!(compacted_args.contains("original_char_count"));
+        assert!(compacted_args.contains("preview"));
+
+        // Parse and verify the preview is valid UTF-8 and shorter than original
+        let parsed: serde_json::Value = serde_json::from_str(compacted_args).unwrap();
+        let preview = parsed["preview"].as_str().unwrap();
+        assert!(preview.len() < long_args_with_unicode.len());
+        assert!(preview.chars().count() <= 203); // 200 chars + "..."
+    }
+
+    #[test]
+    fn compaction_handles_unicode_tool_results_safely() {
+        // Create a long tool result with emoji and CJK that would panic with byte slicing
+        let long_result_with_unicode =
+            format!("Result: {}🌟测试{}💯", "a".repeat(1000), "b".repeat(1500));
+        assert!(long_result_with_unicode.len() > TOOL_RESULT_COMPACT_THRESHOLD);
+
+        let message = ChatMessage {
+            role: "tool".to_string(),
+            content: Some(long_result_with_unicode.clone()),
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+        };
+
+        // This should not panic
+        let compacted = compact_tool_result(&message);
+        let compacted_content = compacted.content.as_ref().unwrap();
+
+        // Verify it's been compacted
+        assert!(compacted_content.contains("rustfox compacted tool result"));
+        assert!(compacted_content.len() < long_result_with_unicode.len());
+
+        // Verify the preview portion is valid UTF-8 and respects character boundaries
+        // The format is: "[rustfox compacted tool result: N chars]\n{preview}..."
+        let lines: Vec<&str> = compacted_content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let preview_line = lines[1];
+        assert!(preview_line.ends_with("..."));
+
+        // Verify we can count characters without panicking (proves valid UTF-8)
+        let preview_without_ellipsis = preview_line.trim_end_matches("...");
+        let char_count = preview_without_ellipsis.chars().count();
+        assert!(char_count <= TOOL_RESULT_PREVIEW_CHARS);
+    }
+
+    #[test]
+    fn compaction_with_unicode_preserves_structure() {
+        // Test full compaction flow with Unicode content
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some("System prompt 系统提示".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some("User request with emoji 🚀".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        // Add an OLD tool group with Unicode content (this should be compacted)
+        let unicode_args = format!(
+            "{{\"data\": \"{}中文{}🎨{}\"}}",
+            "x".repeat(800),
+            "y".repeat(200),
+            "z".repeat(100)
+        );
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "old_call".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "unicode_tool".to_string(),
+                    arguments: unicode_args,
+                },
+            }]),
+            tool_call_id: None,
+        });
+
+        let unicode_result = format!("Result 结果: {}🌈{}", "a".repeat(1500), "b".repeat(1200));
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(unicode_result),
+            tool_calls: None,
+            tool_call_id: Some("old_call".to_string()),
+        });
+
+        // Add recent tool group 1 (should be preserved)
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "recent_call_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "recent_tool_1".to_string(),
+                    arguments: "x".repeat(1500),
+                },
+            }]),
+            tool_call_id: None,
+        });
+
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some("y".repeat(2500)),
+            tool_calls: None,
+            tool_call_id: Some("recent_call_1".to_string()),
+        });
+
+        // Add recent tool group 2 (should be preserved)
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "recent_call_2".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "recent_tool_2".to_string(),
+                    arguments: "z".repeat(1500),
+                },
+            }]),
+            tool_call_id: None,
+        });
+
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some("w".repeat(2500)),
+            tool_calls: None,
+            tool_call_id: Some("recent_call_2".to_string()),
+        });
+
+        // Compact and verify no panics
+        let compacted = compact_tool_heavy_history(&messages);
+
+        // Verify structure is preserved
+        assert_eq!(compacted.len(), messages.len());
+        assert_eq!(compacted[0].role, "system");
+        assert_eq!(compacted[1].role, "user");
+        assert_eq!(compacted[2].role, "assistant");
+        assert_eq!(compacted[3].role, "tool");
+
+        // Verify OLD tool group was compacted
+        let compacted_args = &compacted[2].tool_calls.as_ref().unwrap()[0]
+            .function
+            .arguments;
+        assert!(compacted_args.contains("_rustfox_compacted_arguments"));
+
+        let compacted_result = compacted[3].content.as_ref().unwrap();
+        assert!(compacted_result.contains("rustfox compacted tool result"));
+
+        // Verify recent groups are preserved unchanged
+        assert_eq!(
+            compacted[4].tool_calls.as_ref().unwrap()[0]
+                .function
+                .arguments
+                .len(),
+            1500
+        );
+        assert_eq!(compacted[5].content.as_ref().unwrap().len(), 2500);
+        assert_eq!(
+            compacted[6].tool_calls.as_ref().unwrap()[0]
+                .function
+                .arguments
+                .len(),
+            1500
+        );
+        assert_eq!(compacted[7].content.as_ref().unwrap().len(), 2500);
     }
 }
