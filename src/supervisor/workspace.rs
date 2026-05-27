@@ -52,13 +52,9 @@ impl WorkspaceManager {
                 .parent()
                 .unwrap_or(&self.repo)
                 .join(format!("{repo_name}-worktree-{suffix}"));
-            run_with_path(
-                &self.repo,
-                &["worktree", "add", "-b", &branch],
-                &path,
-            )
-            .await
-            .context("git worktree add")?;
+            run_with_path(&self.repo, &["worktree", "add", "-b", &branch], &path)
+                .await
+                .context("git worktree add")?;
             Ok(Workspace { path, branch })
         } else {
             run(&self.repo, &["checkout", "-b", &branch])
@@ -73,13 +69,9 @@ impl WorkspaceManager {
 
     pub async fn cleanup(&self, ws: &Workspace, keep_branch: bool) -> Result<()> {
         if self.use_worktree {
-            run_with_path(
-                &self.repo,
-                &["worktree", "remove"],
-                &ws.path,
-            )
-            .await
-            .or_else(|_| Ok::<_, anyhow::Error>(String::new()))?;
+            run_with_path(&self.repo, &["worktree", "remove"], &ws.path)
+                .await
+                .or_else(|_| Ok::<_, anyhow::Error>(String::new()))?;
         }
         if !keep_branch {
             run(&self.repo, &["branch", "-D", &ws.branch]).await.ok();
