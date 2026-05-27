@@ -12,6 +12,15 @@ pub struct WorkspaceManager {
     use_worktree: bool,
 }
 
+/// Safely truncate a task_id to at most `n` characters, respecting UTF-8
+/// boundaries. Returns the full string if it is shorter than `n`.
+fn safe_prefix(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 impl WorkspaceManager {
     pub fn new(repo: PathBuf, use_worktree: bool) -> Self {
         Self { repo, use_worktree }
@@ -28,7 +37,8 @@ impl WorkspaceManager {
                 }
             })
             .collect();
-        let branch = format!("supervisor/{safe_slug}-{}", &task_id[..8]);
+        let suffix = safe_prefix(task_id, 8);
+        let branch = format!("supervisor/{safe_slug}-{suffix}");
 
         if self.use_worktree {
             let repo_name = self
@@ -41,10 +51,11 @@ impl WorkspaceManager {
                 .repo
                 .parent()
                 .unwrap_or(&self.repo)
-                .join(format!("{repo_name}-worktree-{}", &task_id[..8]));
-            run(
+                .join(format!("{repo_name}-worktree-{suffix}"));
+            run_with_path(
                 &self.repo,
-                &["worktree", "add", "-b", &branch, path.to_str().unwrap()],
+                &["worktree", "add", "-b", &branch],
+                &path,
             )
             .await
             .context("git worktree add")?;
@@ -62,11 +73,13 @@ impl WorkspaceManager {
 
     pub async fn cleanup(&self, ws: &Workspace, keep_branch: bool) -> Result<()> {
         if self.use_worktree {
-            run(
+            run_with_path(
                 &self.repo,
-                &["worktree", "remove", ws.path.to_str().unwrap(), "--force"],
+                &["worktree", "remove"],
+                &ws.path,
             )
-            .await?;
+            .await
+            .or_else(|_| Ok::<_, anyhow::Error>(String::new()))?;
         }
         if !keep_branch {
             run(&self.repo, &["branch", "-D", &ws.branch]).await.ok();
@@ -85,6 +98,26 @@ async fn run(cwd: &Path, args: &[&str]) -> Result<String> {
         anyhow::bail!(
             "git {} failed: {}",
             args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Like `run` but appends a `Path` argument (as `OsStr`) instead of requiring
+/// the caller to convert to `&str`, avoiding panics on non-UTF-8 paths.
+async fn run_with_path(cwd: &Path, args: &[&str], path_arg: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(args)
+        .arg(path_arg.as_os_str())
+        .current_dir(cwd)
+        .output()
+        .await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {} {} failed: {}",
+            args.join(" "),
+            path_arg.display(),
             String::from_utf8_lossy(&out.stderr)
         );
     }

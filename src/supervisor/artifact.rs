@@ -31,6 +31,20 @@ impl ArtifactManager {
         filename: &str,
         content: &str,
     ) -> Result<String> {
+        // Validate task_id: reject path separators and traversal segments.
+        anyhow::ensure!(
+            !task_id.contains('/') && !task_id.contains('\\') && !task_id.contains(".."),
+            "invalid task_id: must not contain path separators or '..' segments"
+        );
+        // Validate filename: reject absolute paths, separators, and '..' segments.
+        anyhow::ensure!(
+            !filename.contains('/')
+                && !filename.contains('\\')
+                && !filename.contains("..")
+                && !std::path::Path::new(filename).is_absolute(),
+            "invalid filename: must be a simple file name without path separators or '..' segments"
+        );
+
         let safe_content = crate::supervisor::redact::redact(content);
         let task_dir = self.root.join(task_id);
         tokio::fs::create_dir_all(&task_dir)

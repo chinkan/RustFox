@@ -121,6 +121,9 @@ impl Orchestrator {
             };
             match backend.run(&mut job, ctx).await {
                 Ok(out) if matches!(out.status, JobStatus::Succeeded) => {
+                    // Record the backend that actually executed the job so
+                    // persisted state and reports reflect reality.
+                    job.backend = name.clone();
                     store
                         .update_job_status(&job.id, JobStatus::Succeeded, Some(&out.summary), None)
                         .await?;
@@ -166,10 +169,12 @@ impl Orchestrator {
         let ctx = RunContext::with_subjob_channel(tx);
         let parent_id = job.id.clone();
         let outcome = Self::execute_one_job(reg, store, fallbacks, job, &ctx).await?;
-        // Dropping `ctx` closes the sender so try_recv won't block forever
-        // even if a backend cloned the channel internally.
+        // Drop the context to close our sender. Any clones held by the backend
+        // will keep the channel alive until they are also dropped.
         drop(ctx);
-        while let Ok(mut subjob) = rx.try_recv() {
+        // Drain all subjobs using `recv().await` which will return `None` only
+        // once all senders (including clones) are dropped.
+        while let Some(mut subjob) = rx.recv().await {
             subjob.parent_job_id = Some(parent_id.clone());
             let _ =
                 Self::execute_one_job(reg, store, fallbacks, subjob, &RunContext::new()).await?;
