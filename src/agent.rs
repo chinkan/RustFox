@@ -4,9 +4,14 @@ use tracing::{debug, error, info, warn};
 
 use teloxide::Bot;
 
+use crate::agent_prompt::{
+    estimate_prompt_chars, prepare_messages_for_llm, recovery_nudge_for, PreparedPrompt,
+};
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
-use crate::llm::{ChatMessage, FunctionDefinition, LlmClient, ToolDefinition};
+use crate::llm::{
+    is_empty_assistant_response, ChatMessage, FunctionDefinition, LlmClient, ToolDefinition,
+};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
@@ -137,6 +142,39 @@ impl Agent {
     /// Process an incoming message and return the response text
     pub(crate) fn now_iso8601_static() -> String {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    /// Build LangSmith outputs for an LLM run, including completion metadata and prompt stats.
+    fn llm_run_outputs(
+        completion: Option<&crate::llm::ChatCompletion>,
+        prompt: &PreparedPrompt,
+        retry_count: u32,
+    ) -> serde_json::Value {
+        let finish_reason = completion.and_then(|c| c.finish_reason.clone());
+        let model = completion
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = completion.map(|c| &c.message);
+
+        serde_json::json!({
+            "choices": [{
+                "finish_reason": finish_reason,
+                "message": message.map(|message| serde_json::json!({
+                    "role": message.role,
+                    "content": message.content,
+                    "tool_calls": message.tool_calls,
+                }))
+            }],
+            "metadata": {
+                "model": model,
+                "message_count": prompt.stats.prepared_message_count,
+                "original_message_count": prompt.stats.original_message_count,
+                "prompt_chars": prompt.stats.prepared_prompt_chars,
+                "original_prompt_chars": prompt.stats.original_prompt_chars,
+                "prompt_compaction_applied": prompt.stats.compaction_applied,
+                "empty_response_retry_count": retry_count,
+            }
+        })
     }
 
     pub async fn process_message(
@@ -277,6 +315,7 @@ impl Agent {
 
         // Agentic loop — keep calling LLM until we get a non-tool response
         let max_iterations = self.config.max_iterations();
+        let empty_response_retry_limit = self.config.empty_response_retry_limit();
         let mut iteration_count = 0u32;
         let mut tool_call_count = 0u32;
 
@@ -291,56 +330,158 @@ impl Agent {
                 messages.len()
             );
 
-            // --- LangSmith: start llm run (child of chain) ---
-            let llm_run_id = uuid::Uuid::new_v4().to_string();
-            let llm_start = Self::now_iso8601_static();
-            self.langsmith.start_run(crate::langsmith::RunParams {
-                id: llm_run_id.clone(),
-                name: "llm_call".to_string(),
-                run_type: crate::langsmith::RunType::Llm,
-                parent_run_id: Some(chain_run_id.clone()),
-                inputs: serde_json::json!({ "messages": messages }),
-                session_name: ls_project.clone(),
-                start_time: llm_start,
-            });
+            // --- Empty response recovery: retry loop ---
+            let mut retry_count = 0u32;
+            let response: ChatMessage;
 
-            let response = self.llm.chat(&messages, &all_tools).await;
+            loop {
+                // Prepare prompt with optional compaction
+                let mut prompt = prepare_messages_for_llm(&messages);
 
-            // Handle LLM errors
-            let response = match response {
-                Ok(r) => r,
-                Err(e) => {
+                // On retry, append recovery nudge to in-memory prompt only
+                if retry_count > 0 {
+                    let nudge = recovery_nudge_for(&messages);
+                    prompt.messages.push(nudge);
+                    // Recompute stats after adding nudge
+                    prompt.stats.prepared_message_count = prompt.messages.len();
+                    prompt.stats.prepared_prompt_chars = estimate_prompt_chars(&prompt.messages);
+                }
+
+                // Log prompt compaction if applied
+                if prompt.stats.compaction_applied {
+                    info!(
+                        original_message_count = prompt.stats.original_message_count,
+                        prepared_message_count = prompt.stats.prepared_message_count,
+                        original_prompt_chars = prompt.stats.original_prompt_chars,
+                        prepared_prompt_chars = prompt.stats.prepared_prompt_chars,
+                        "Prompt compaction applied"
+                    );
+                }
+
+                // --- LangSmith: start llm run (child of chain) ---
+                let llm_run_id = uuid::Uuid::new_v4().to_string();
+                let llm_start = Self::now_iso8601_static();
+                self.langsmith.start_run(crate::langsmith::RunParams {
+                    id: llm_run_id.clone(),
+                    name: "llm_call".to_string(),
+                    run_type: crate::langsmith::RunType::Llm,
+                    parent_run_id: Some(chain_run_id.clone()),
+                    inputs: serde_json::json!({
+                        "messages": prompt.messages,
+                        "metadata": {
+                            "retry_count": retry_count,
+                            "message_count": prompt.stats.prepared_message_count,
+                            "prompt_chars": prompt.stats.prepared_prompt_chars,
+                        }
+                    }),
+                    session_name: ls_project.clone(),
+                    start_time: llm_start,
+                });
+
+                // Call LLM with prepared prompt
+                let completion_result =
+                    self.llm.chat_completion(&prompt.messages, &all_tools).await;
+
+                // Handle LLM transport/API errors
+                let completion = match completion_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.langsmith.end_run(crate::langsmith::EndRunParams {
+                            id: llm_run_id,
+                            outputs: None,
+                            error: Some(format!("{:#}", e)),
+                            end_time: Self::now_iso8601_static(),
+                        });
+                        self.langsmith.end_run(crate::langsmith::EndRunParams {
+                            id: chain_run_id,
+                            outputs: None,
+                            error: Some(format!("{:#}", e)),
+                            end_time: Self::now_iso8601_static(),
+                        });
+                        return Err(e);
+                    }
+                };
+
+                // Check if response is empty (no content and no tool calls)
+                if is_empty_assistant_response(&completion.message) {
+                    warn!(
+                        user_id = %user_id,
+                        iteration,
+                        retry_count,
+                        "LLM returned empty content with no tool calls"
+                    );
+
+                    // End LLM run with error and diagnostic outputs
                     self.langsmith.end_run(crate::langsmith::EndRunParams {
                         id: llm_run_id,
-                        outputs: None,
-                        error: Some(format!("{:#}", e)),
+                        outputs: Some(Self::llm_run_outputs(
+                            Some(&completion),
+                            &prompt,
+                            retry_count,
+                        )),
+                        error: Some(
+                            "Empty assistant response (no content and no tool calls)".to_string(),
+                        ),
                         end_time: Self::now_iso8601_static(),
                     });
-                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                        id: chain_run_id,
-                        outputs: None,
-                        error: Some(format!("{:#}", e)),
-                        end_time: Self::now_iso8601_static(),
-                    });
-                    return Err(e);
-                }
-            };
 
-            // --- LangSmith: end llm run ---
-            self.langsmith.end_run(crate::langsmith::EndRunParams {
-                id: llm_run_id,
-                outputs: Some(serde_json::json!({
-                    "choices": [{
-                        "message": {
-                            "role": response.role,
-                            "content": response.content,
-                            "tool_calls": response.tool_calls,
-                        }
-                    }]
-                })),
-                error: None,
-                end_time: Self::now_iso8601_static(),
-            });
+                    // Check retry limit
+                    if retry_count >= empty_response_retry_limit {
+                        warn!(
+                            user_id = %user_id,
+                            retry_count,
+                            limit = empty_response_retry_limit,
+                            "Exhausted empty response retry limit"
+                        );
+
+                        // End chain run with error
+                        self.langsmith.end_run(crate::langsmith::EndRunParams {
+                            id: chain_run_id,
+                            outputs: None,
+                            error: Some(format!(
+                                "Unable to get valid response after {} attempts",
+                                retry_count + 1
+                            )),
+                            end_time: Self::now_iso8601_static(),
+                        });
+
+                        return Err(anyhow::anyhow!(
+                            "Unable to get a valid response from the AI model after {} attempts. \
+                             Your conversation history has been saved. Please try rephrasing your \
+                             request or continue from where we left off.",
+                            retry_count + 1
+                        ));
+                    }
+
+                    // Retry
+                    retry_count += 1;
+                    continue;
+                }
+
+                // Valid response received
+                if retry_count > 0 {
+                    info!(
+                        user_id = %user_id,
+                        retry_count,
+                        "Recovered from empty response after retry"
+                    );
+                }
+
+                // --- LangSmith: end llm run (success) ---
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: llm_run_id,
+                    outputs: Some(Self::llm_run_outputs(
+                        Some(&completion),
+                        &prompt,
+                        retry_count,
+                    )),
+                    error: None,
+                    end_time: Self::now_iso8601_static(),
+                });
+
+                response = completion.message;
+                break;
+            }
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
@@ -449,14 +590,6 @@ impl Agent {
 
             // Final response — no tool calls
             let content = response.content.clone().unwrap_or_default();
-
-            if content.is_empty() {
-                warn!(
-                    user_id = %user_id,
-                    iteration = iteration,
-                    "LLM returned empty content with no tool calls — bot will send nothing"
-                );
-            }
 
             // Stream the final response directly from the already-complete content.
             // Previously this made a second chat_stream() API call, which could return
@@ -1142,21 +1275,88 @@ impl Agent {
         ];
 
         // Mini agentic loop (isolated — no memory, no scheduling)
+        let empty_response_retry_limit = self.config.empty_response_retry_limit();
+
         for iteration in 0..max_iter {
-            let response = match self
-                .llm
-                .chat_with_model(&messages, &subagent_tools, &resolved_model)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    error!(
-                        "Agent '{}' API call failed (model: '{}'): {}",
-                        skill_name, resolved_model, e
-                    );
-                    return format!("Agent '{}' error: {}", skill_name, e);
+            // --- Empty response recovery: retry loop ---
+            let mut retry_count = 0u32;
+            let response: ChatMessage;
+
+            loop {
+                // Prepare prompt with optional compaction
+                let mut prompt_prepared = prepare_messages_for_llm(&messages);
+
+                // On retry, append recovery nudge to in-memory prompt only
+                if retry_count > 0 {
+                    let nudge = recovery_nudge_for(&messages);
+                    prompt_prepared.messages.push(nudge);
                 }
-            };
+
+                // Call LLM with prepared prompt
+                let completion_result = self
+                    .llm
+                    .chat_completion_with_model(
+                        &prompt_prepared.messages,
+                        &subagent_tools,
+                        &resolved_model,
+                    )
+                    .await;
+
+                // Handle LLM transport/API errors
+                let completion = match completion_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!(
+                            "Agent '{}' API call failed (model: '{}'): {}",
+                            skill_name, resolved_model, e
+                        );
+                        return format!("Agent '{}' error: {}", skill_name, e);
+                    }
+                };
+
+                // Check if response is empty (no content and no tool calls)
+                if is_empty_assistant_response(&completion.message) {
+                    warn!(
+                        agent = %skill_name,
+                        iteration,
+                        retry_count,
+                        finish_reason = ?completion.finish_reason,
+                        "Subagent returned empty content with no tool calls"
+                    );
+
+                    // Check retry limit
+                    if retry_count >= empty_response_retry_limit {
+                        warn!(
+                            agent = %skill_name,
+                            retry_count,
+                            limit = empty_response_retry_limit,
+                            "Subagent exhausted empty response retry limit"
+                        );
+
+                        return format!(
+                            "Error: Subagent '{}' returned an empty response after {} attempts.",
+                            skill_name,
+                            retry_count + 1
+                        );
+                    }
+
+                    // Retry
+                    retry_count += 1;
+                    continue;
+                }
+
+                // Valid response received
+                if retry_count > 0 {
+                    info!(
+                        agent = %skill_name,
+                        retry_count,
+                        "Subagent recovered from empty response after retry"
+                    );
+                }
+
+                response = completion.message;
+                break;
+            }
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
@@ -2189,7 +2389,7 @@ mod tests {
 
     #[test]
     fn test_assemble_tokens_joins_correctly() {
-        let tokens = vec!["Hello", " ", "world", "!"];
+        let tokens = ["Hello", " ", "world", "!"];
         let assembled: String = tokens.concat();
         assert_eq!(assembled, "Hello world!");
     }

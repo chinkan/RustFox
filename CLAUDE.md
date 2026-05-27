@@ -189,3 +189,157 @@ All skills are represented in the system prompt by **metadata only** (name + des
 - `config.toml` - Contains API keys and tokens
 - `.env` - Environment variables
 - `/target/` - Build artifacts
+
+## Supervisor (Autopilot v2)
+
+The supervisor is a generic autonomous task runner that lives alongside the
+existing chat agent. It accepts a free-form request, classifies it, picks a
+plan, dispatches work to one or more **backends** (reasoning, shell, MCP,
+Claude Code CLI, Codex CLI, scripts), verifies the result, and persists
+artifacts + audit transitions to SQLite.
+
+### Module tree (`src/supervisor/`)
+
+```
+src/supervisor/
+ mod.rs              — Supervisor facade: submit / execute_now / pause / resume / state / artifacts
+ task.rs             — Task, TaskType, RiskLevel, ExecutionMode, TaskStatus enums
+ job.rs              — Job, JobType, JobStatus, JobOutput, Evidence
+ state.rs            — transition_allowed() — single source of truth for the state machine
+ store.rs            — TaskStore: CRUD over sup_tasks / sup_jobs / sup_transitions
+ intake.rs           — IntakeRouter::normalize() → Task from raw text
+ classifier.rs       — Classifier trait + HeuristicClassifier / LlmBackedClassifier / SkillAwareClassifier
+ policy.rs           — PolicyEngine: AutoExecute | Clarify | RequireApproval | UseFallbackBackend | StopAndReport
+ planner.rs          — Planner: Task → Plan { jobs, parallel_groups }
+ workflow.rs         — Fast / Standard / Rigorous workflow stage templates
+ orchestrator.rs     — Orchestrator: executes Plan with fallback + parallel groups + subjob spawning
+ verification.rs     — VerificationEngine: ≥1 evidence per job gate
+ artifact.rs         — ArtifactManager: write_text() (redacts) + list()
+ workspace.rs        — WorkspaceManager: per-task git branch / optional worktree
+ reporter.rs         — Human-readable per-job summary
+ redact.rs           — Secret scrubber for api_key / password / secret / token / bearer values
+ backend/
+  mod.rs            — Backend trait + BackendCapabilities + Registry + RunContext
+  reasoning.rs      — Wraps the chat Agent
+  shell.rs          — Sandboxed shell commands
+  mcp.rs            — Calls tools on a connected MCP server
+  claude_code.rs    — Spawns the `claude` CLI as a backend
+  codex.rs          — Spawns the `codex` CLI as a backend
+  script.rs         — Runs a script file from the sandbox
+```
+
+### Lifecycle
+
+```
+INTAKE → CLASSIFY → ROUTE
+              ↓
+       (CLARIFY) | (PREPARE_WORKSPACE)? → PLAN → EXECUTE
+              ↓                                    ↓
+              (Paused ⇄ Execute)         REVIEW (rigorous mode)
+                                                   ↓
+                                              VERIFY
+                                                   ↓
+                              REPORT → ARCHIVE → DONE
+                                  ↘ Failed   ↘ Cancelled
+```
+
+`state.rs::transition_allowed(from, to)` enumerates every legal edge. Add a
+new arm there before introducing a new state — the rest of the supervisor
+treats unknown transitions as bugs.
+
+### Backend trait + adding a new backend
+
+Every backend implements `Backend` from `src/supervisor/backend/mod.rs`. The
+defaults from spec §10 (`prepare`, `collect_result`, `verify_result`,
+`cancel`, `resume`) are already provided; most backends only override
+`name`, `capabilities`, `can_handle`, and `run`. Register an `Arc<MyBackend>`
+into the `Registry` at startup.
+
+```rust
+struct EchoBackend;
+#[async_trait::async_trait]
+impl rustfox::supervisor::backend::Backend for EchoBackend {
+    fn name(&self) -> &str { "echo" }
+    fn capabilities(&self) -> rustfox::supervisor::backend::BackendCapabilities {
+        rustfox::supervisor::backend::BackendCapabilities { reasoning: true, ..Default::default() }
+    }
+    fn can_handle(&self, _: &rustfox::supervisor::job::JobType) -> bool { true }
+    async fn run(&self, job: &mut rustfox::supervisor::job::Job, _: &rustfox::supervisor::backend::RunContext)
+        -> anyhow::Result<rustfox::supervisor::job::JobOutput> { /* ... */ todo!() }
+}
+let mut reg = rustfox::supervisor::backend::Registry::new();
+reg.register(std::sync::Arc::new(EchoBackend));
+```
+
+### Adding a workflow skill pack
+
+Drop a `skills/sup-<name>/SKILL.md` with frontmatter:
+
+```yaml
+---
+name: sup-<name>
+description: One-line summary
+supervisor:
+  workflow: research          # or: writing | refactor | research | ops | review
+  required_capabilities: [research, reasoning]
+---
+```
+
+Skill packs are auto-loaded by the existing `SkillRegistry` at startup; the
+`SkillAwareClassifier` consults them and overrides the default
+`required_capabilities` when the request keyword matches the skill name
+(prefix `sup-` is stripped before matching).
+
+### TOML config keys
+
+```toml
+[supervisor]
+default_autonomy_mode = "standard"   # "fast" | "standard" | "rigorous"
+artifacts_dir         = "supervisor/artifacts"
+
+[supervisor.risk]
+require_approval_for_low    = false
+require_approval_for_medium = false
+auto_execute_only_low       = false   # when true, Medium escalates to RequireApproval
+```
+
+Defaults preserve M1–M6 behavior (Medium-risk auto-executes). Flip individual
+fields to tighten the gate.
+
+### Bot commands
+
+| Command | Behaviour |
+|---------|-----------|
+| `/supervise <text>` | Submit a new supervisor task |
+| `/tasks`            | List active / recent tasks |
+| `/resume <id>`      | Resume a paused task |
+| `/cancel <id>`      | Cancel a task |
+| `/approve <id>`     | Approve a task that hit `RequireApproval` |
+| `/clarify <id> <text>` | Reply to a `Clarify` prompt |
+
+The command **parser** is wired and emits a startup log line in `main.rs`;
+routing user commands into supervisor handlers in the live Telegram dispatcher
+is a minimum-viable integration (M3.8 / M7.3) and the full handler surface is
+a follow-up task.
+
+### Artifacts
+
+Per-task artifacts are written to `<supervisor.artifacts_dir>/<task_id>/<filename>`
+and indexed in `sup_artifacts` (`kind`, `path`, `sha256`, `bytes`). Every
+artifact write goes through `redact::redact()`, which scrubs values that
+follow `api_key`, `password`, `secret`, `token`, or `bearer` (case-insensitive)
+and replaces them with `***` while preserving the key + separator so the
+file stays human-readable. Standard kinds emitted by the pipeline: `intake`,
+`classification`, `policy`, `plan`, `workspace` (when workspace prepared),
+and `result` (Reporter Markdown summary).
+
+### Database tables added
+
+| Table | Purpose |
+|-------|---------|
+| `sup_tasks`       | One row per submitted task — title, user_request, classification (`task_type` / `risk_level` / `execution_mode`), current `state`, platform / user / chat origin |
+| `sup_jobs`        | One row per job dispatched within a task — backend, goal, prompt, status, result_summary, error, optional `parent_job_id` for spawned subjobs |
+| `sup_transitions` | Append-only audit log of every state change (`from_state`, `to_state`, `actor`, `reason`, `occurred_at`) |
+| `sup_artifacts`   | Index of files written under `artifacts_dir` (`task_id`, `job_id`, `kind`, `path`, `sha256`, `bytes`) |
+
+All four tables are created idempotently in `MemoryStore` at startup.

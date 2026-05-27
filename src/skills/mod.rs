@@ -21,12 +21,22 @@ pub struct Skill {
     pub tools: Vec<String>,
     /// Max loop iterations for the subagent (None = use global config default)
     pub max_iterations: Option<u32>,
+    /// Optional supervisor workflow hint (e.g. "coding", "research", "writing")
+    pub supervisor_workflow: Option<String>,
+    /// Optional list of capabilities the supervisor should require for this skill's workflow
+    pub supervisor_required_caps: Vec<String>,
 }
 
 /// Registry of all loaded skills
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
+}
+
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SkillRegistry {
@@ -147,6 +157,8 @@ mod tests {
             model: model.map(str::to_string),
             tools: vec![],
             max_iterations: None,
+            supervisor_workflow: None,
+            supervisor_required_caps: vec![],
         }
     }
 

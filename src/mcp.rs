@@ -237,6 +237,12 @@ pub struct McpManager {
     connections: HashMap<String, McpConnection>,
 }
 
+impl Default for McpManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpManager {
     pub fn new() -> Self {
         Self {

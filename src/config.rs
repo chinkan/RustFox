@@ -24,6 +24,54 @@ pub struct Config {
     pub langsmith: Option<LangSmithConfig>,
     #[serde(default = "default_learning_config")]
     pub learning: LearningConfig,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SupervisorConfig {
+    #[serde(default = "default_autonomy_mode")]
+    pub default_autonomy_mode: String,
+    #[serde(default = "default_artifacts_dir")]
+    pub artifacts_dir: std::path::PathBuf,
+    #[serde(default)]
+    pub risk: RiskThresholdsConfig,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            default_autonomy_mode: default_autonomy_mode(),
+            artifacts_dir: default_artifacts_dir(),
+            risk: RiskThresholdsConfig::default(),
+        }
+    }
+}
+
+/// Risk-threshold gates that govern when the supervisor may auto-execute a
+/// task vs. require explicit user approval.
+///
+/// Defaults preserve the M1–M6 behavior (Medium-risk tasks auto-execute);
+/// flip individual fields in `config.toml` to tighten the gate.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct RiskThresholdsConfig {
+    #[serde(default)]
+    pub require_approval_for_low: bool,
+    #[serde(default)]
+    pub require_approval_for_medium: bool,
+    /// When `true`, only Low-risk tasks may auto-execute; Medium escalates to
+    /// `RequireApproval`. Defaults to `false` to stay backward-compatible
+    /// with the M1–M6 policy where Medium-risk tasks auto-execute.
+    #[serde(default)]
+    pub auto_execute_only_low: bool,
+}
+
+fn default_autonomy_mode() -> String {
+    "standard".to_string()
+}
+
+fn default_artifacts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("supervisor/artifacts")
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -147,6 +195,8 @@ pub struct GeneralConfig {
 pub struct AgentConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    #[serde(default = "default_empty_response_retry_limit")]
+    pub empty_response_retry_limit: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -289,9 +339,14 @@ fn default_max_iterations() -> u32 {
     25
 }
 
+fn default_empty_response_retry_limit() -> u32 {
+    3
+}
+
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         max_iterations: default_max_iterations(),
+        empty_response_retry_limit: default_empty_response_retry_limit(),
     }
 }
 
@@ -342,6 +397,11 @@ impl Config {
     /// Maximum agent loop iterations (from [agent] max_iterations, default 25).
     pub fn max_iterations(&self) -> u32 {
         self.agent.max_iterations
+    }
+
+    /// Empty response retry limit (from [agent] empty_response_retry_limit, default 3).
+    pub fn empty_response_retry_limit(&self) -> u32 {
+        self.agent.empty_response_retry_limit
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -507,6 +567,25 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_config_defaults_when_section_missing() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
+        assert_eq!(
+            cfg.supervisor.artifacts_dir,
+            std::path::PathBuf::from("supervisor/artifacts")
+        );
+    }
+
+    #[test]
     fn test_query_rewriter_can_be_enabled() {
         let toml = r#"
             [telegram]
@@ -524,5 +603,39 @@ mod tests {
             cfg.memory.query_rewriter_enabled,
             "query_rewriter_enabled should be true when set"
         );
+    }
+
+    #[test]
+    fn test_agent_empty_response_retry_limit_defaults_to_three() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.empty_response_retry_limit, 3);
+        assert_eq!(cfg.empty_response_retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_agent_empty_response_retry_limit_can_be_configured_to_zero() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent]
+            empty_response_retry_limit = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.empty_response_retry_limit, 0);
+        assert_eq!(cfg.empty_response_retry_limit(), 0);
     }
 }

@@ -419,7 +419,6 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::llm::ChatMessage;
 
     fn make_msg(role: &str, content: &str) -> ChatMessage {

@@ -210,6 +210,82 @@ impl MemoryStore {
 
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
                 ON scheduled_tasks(user_id, status);
+
+            -- Supervisor: tasks
+            CREATE TABLE IF NOT EXISTS sup_tasks (
+                id              TEXT PRIMARY KEY,
+                title           TEXT NOT NULL,
+                user_request    TEXT NOT NULL,
+                task_type       TEXT NOT NULL,
+                priority        INTEGER NOT NULL DEFAULT 5,
+                risk_level      TEXT NOT NULL,
+                execution_mode  TEXT NOT NULL,
+                workflow        TEXT NOT NULL,
+                state           TEXT NOT NULL,
+                required_capabilities TEXT NOT NULL DEFAULT '[]',
+                inputs          TEXT,
+                constraints     TEXT,
+                expected_outputs TEXT,
+                approval_policy TEXT,
+                platform        TEXT NOT NULL,
+                user_id         TEXT NOT NULL,
+                chat_id         TEXT,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_sup_tasks_state ON sup_tasks(state, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_sup_tasks_user  ON sup_tasks(user_id, state);
+
+            -- Supervisor: jobs
+            CREATE TABLE IF NOT EXISTS sup_jobs (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL,
+                parent_job_id   TEXT,
+                job_type        TEXT NOT NULL,
+                backend         TEXT NOT NULL,
+                goal            TEXT NOT NULL,
+                prompt          TEXT,
+                input_context   TEXT,
+                timeout_secs    INTEGER NOT NULL,
+                retry_max       INTEGER NOT NULL DEFAULT 0,
+                retry_count     INTEGER NOT NULL DEFAULT 0,
+                allow_tools     TEXT,
+                workspace       TEXT,
+                status          TEXT NOT NULL,
+                result_summary  TEXT,
+                result_evidence TEXT,
+                error           TEXT,
+                started_at      TEXT,
+                finished_at     TEXT,
+                FOREIGN KEY (task_id) REFERENCES sup_tasks(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sup_jobs_task ON sup_jobs(task_id, status);
+
+            -- Supervisor: state transitions
+            CREATE TABLE IF NOT EXISTS sup_transitions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id     TEXT NOT NULL,
+                from_state  TEXT NOT NULL,
+                to_state    TEXT NOT NULL,
+                reason      TEXT,
+                actor       TEXT NOT NULL,
+                occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES sup_tasks(id)
+            );
+
+            -- Supervisor: artifacts
+            CREATE TABLE IF NOT EXISTS sup_artifacts (
+                id          TEXT PRIMARY KEY,
+                task_id     TEXT NOT NULL,
+                job_id      TEXT,
+                kind        TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                sha256      TEXT,
+                bytes       INTEGER,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES sup_tasks(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sup_artifacts_task ON sup_artifacts(task_id, kind);
             ",
         )?;
 
@@ -315,6 +391,23 @@ mod tests {
             )
             .unwrap();
         assert!(exists);
+    }
+
+    #[test]
+    fn sup_tables_exist_after_migration() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let conn = memory.connection();
+        let conn = conn.blocking_lock();
+        for tbl in ["sup_tasks", "sup_jobs", "sup_transitions", "sup_artifacts"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT count(*)>0 FROM sqlite_master WHERE type='table' AND name=?1",
+                    [tbl],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "table {tbl} missing");
+        }
     }
 
     #[test]
