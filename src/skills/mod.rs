@@ -75,7 +75,12 @@ impl SkillRegistry {
         let mut subagent_section = String::new();
 
         for skill in self.skills.values() {
-            if skill.model.is_some() {
+            // A skill is treated as a subagent if it has a model explicitly set
+            // OR if it declares a tools whitelist (meaning it needs sandboxed execution).
+            // In both cases the LLM invokes it via invoke_agent(); the model used is
+            // the explicitly set one, or the global default from config when absent.
+            let is_subagent = skill.model.is_some() || !skill.tools.is_empty();
+            if is_subagent {
                 // Subagent skill — metadata only
                 subagent_section.push_str(&format!(
                     "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`\n",

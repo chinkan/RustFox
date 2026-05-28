@@ -264,7 +264,7 @@ fn default_system_prompt() -> String {
      You have skills. For every user request:\n\
      - Check if a relevant skill exists (listed in your system context)\n\
      - If yes: load and follow it via read_skill_file before responding\n\
-     - If no matching skill: reason directly, or use code-interpreter for computation/scripting tasks\n\
+     - If no matching skill: reason directly, or load the code-interpreter skill via read_skill_file for computation/scripting tasks\n\
      - For complex multi-step problems: invoke the problem-solver subagent\n\
      \n\
      ## Sandbox\n\
