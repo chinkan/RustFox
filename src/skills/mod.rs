@@ -1,4 +1,5 @@
 pub mod loader;
+pub mod seed;
 
 use std::collections::HashMap;
 use tracing::info;
