@@ -88,6 +88,7 @@ pub async fn update_skills(
         if !dst.exists() {
             copy_dir_recursive_pub(&src, &dst).await?;
             lock.skills.insert(name.clone(), bundled_hash);
+            tracing::info!("Added skill '{name}' from bundle");
             report.updated.push(name);
             continue;
         }
@@ -120,15 +121,18 @@ pub async fn update_skills(
                 }
             }
             lock.skills.insert(name.clone(), bundled_hash);
+            tracing::info!("Updated locally-modified skill '{name}' (backup saved as *.bak)");
             report.backed_up.push(name);
         } else {
             let _ = tokio::fs::remove_dir_all(&dst).await;
             copy_dir_recursive_pub(&src, &dst).await?;
             lock.skills.insert(name.clone(), bundled_hash);
+            tracing::info!("Updated skill '{name}' from bundle");
             report.updated.push(name);
         }
     }
 
+    tracing::info!("{}", report.summary());
     write_lock(lock_path, &lock)?;
     Ok(report)
 }
