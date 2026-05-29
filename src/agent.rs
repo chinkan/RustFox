@@ -139,6 +139,23 @@ impl Agent {
         prompt
     }
 
+    /// Reload both skill and agent registries from their directories.
+    /// Returns `(skills_count, agents_count)`.
+    pub async fn reload_skills_and_agents(&self) -> (usize, usize) {
+        use crate::skills::loader::load_skills_from_dir;
+        let mut s_count = 0;
+        let mut a_count = 0;
+        if let Ok(reg) = load_skills_from_dir(&self.config.skills.directory).await {
+            s_count = reg.len();
+            *self.skills.write().await = reg;
+        }
+        if let Ok(reg) = load_skills_from_dir(&self.config.agents.directory).await {
+            a_count = reg.len();
+            *self.agents.write().await = reg;
+        }
+        (s_count, a_count)
+    }
+
     /// Process an incoming message and return the response text
     pub(crate) fn now_iso8601_static() -> String {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
