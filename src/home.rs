@@ -28,6 +28,18 @@ pub fn resolve_home(
     Ok(home.join(".rustfox"))
 }
 
+/// The home root used purely for *config-file discovery*, before the config is
+/// loaded. Uses only `RUSTFOX_HOME` (if absolute) or `<os_home>/.rustfox`.
+pub fn default_home(env_home: Option<&str>, os_home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(env) = env_home {
+        let p = Path::new(env);
+        if p.is_absolute() {
+            return Some(p.to_path_buf());
+        }
+    }
+    os_home.map(|h| h.join(".rustfox"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathOrigin {
     Default,
@@ -167,6 +179,22 @@ mod tests {
     fn errors_when_no_os_home_and_no_overrides() {
         let got = resolve_home(None, None, None);
         assert!(got.is_err());
+    }
+
+    #[test]
+    fn default_home_prefers_absolute_env() {
+        assert_eq!(
+            default_home(Some("/srv/rfx"), Some(Path::new("/home/u"))),
+            Some(PathBuf::from("/srv/rfx"))
+        );
+        assert_eq!(
+            default_home(None, Some(Path::new("/home/u"))),
+            Some(PathBuf::from("/home/u/.rustfox"))
+        );
+        assert_eq!(
+            default_home(Some("rel"), Some(Path::new("/home/u"))),
+            Some(PathBuf::from("/home/u/.rustfox"))
+        );
     }
 
     #[test]

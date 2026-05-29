@@ -29,7 +29,22 @@ async fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+        .unwrap_or_else(|| {
+            let cwd = PathBuf::from("config.toml");
+            if cwd.exists() {
+                return cwd;
+            }
+            let env_home = std::env::var("RUSTFOX_HOME").ok();
+            if let Some(home) =
+                rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
+            {
+                let candidate = home.join("config.toml");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+            cwd
+        });
 
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
@@ -38,6 +53,9 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully");
     info!("  Model: {}", config.openrouter.model);
     info!("  Sandbox: {}", config.sandbox.allowed_directory.display());
+    if let Some(home) = &config.resolved_home {
+        info!("  Home: {}", home.display());
+    }
     info!("  Allowed users: {:?}", config.telegram.allowed_user_ids);
     info!("  MCP servers: {}", config.mcp_servers.len());
     let langsmith = std::sync::Arc::new(rustfox::langsmith::LangSmithClient::new(
