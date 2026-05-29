@@ -319,10 +319,6 @@ impl Agent {
         let mut iteration_count = 0u32;
         let mut tool_call_count = 0u32;
 
-        // Clone the stream sender so tool status can be pushed into the same Telegram
-        // message during tool execution, before the final response starts streaming.
-        let stream_status_tx = stream_token_tx.clone();
-
         for iteration in 0..max_iterations {
             debug!(
                 "Trying iteration {}: messages length: {}",
@@ -525,21 +521,8 @@ impl Agent {
                                 tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
                                     name: tool_call.function.name.clone(),
                                     args_preview: args_preview.clone(),
+                                    arguments_json: tool_call.function.arguments.clone(),
                                 });
-                        }
-
-                        // Stream tool status into the Telegram message only when
-                        // tool-progress notifications are enabled, to avoid
-                        // prepending status lines to otherwise silent/final output.
-                        if tool_event_tx.is_some() {
-                            if let Some(ref tx) = stream_status_tx {
-                                let status =
-                                    crate::platform::tool_notifier::format_tool_status_line(
-                                        &tool_call.function.name,
-                                        &args_preview,
-                                    );
-                                tx.try_send(status).ok();
-                            }
                         }
 
                         let tool_result = self
@@ -2233,6 +2216,22 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tool_status_is_not_streamed_to_answer_channel() {
+        let source = include_str!("agent.rs");
+        let status_line_call = ["format_tool_status", "_line("].concat();
+        let stream_status_var = ["stream", "_status_tx"].concat();
+
+        assert!(
+            !source.contains(&status_line_call),
+            "agent.rs must not format tool-status lines for the assistant answer stream"
+        );
+        assert!(
+            !source.contains(&stream_status_var),
+            "agent.rs must not clone a separate stream-status sender for tool progress"
+        );
+    }
 
     #[test]
     fn test_now_iso8601_is_valid_rfc3339() {

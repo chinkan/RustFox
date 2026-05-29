@@ -307,10 +307,22 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             let mut notifier =
                 crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id);
             notifier.start().await;
+            let mut handled_finished = false;
             while let Some(event) = rx.recv().await {
-                notifier.handle_event(event).await;
+                match event {
+                    crate::platform::tool_notifier::ToolEvent::Finished { success } => {
+                        notifier.finish(success).await;
+                        handled_finished = true;
+                        break;
+                    }
+                    other => notifier.handle_event(other).await,
+                }
             }
-            notifier.finish().await;
+            // If the channel closed without an explicit Finished event, preserve
+            // previous behaviour and treat it as a successful finish.
+            if !handled_finished {
+                notifier.finish(true).await;
+            }
         }))
     } else {
         None
@@ -450,6 +462,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
+    // Keep an owned clone of the tool_event_tx so we can send a terminal
+    // Finished event after processing completes.
+    let agent_tool_event_tx = tool_event_tx.clone();
     let process_result = match agent
         .process_message(&incoming, tool_event_tx, Some(stream_token_tx))
         .await
@@ -460,6 +475,15 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             Err(e)
         }
     };
+
+    let process_success = process_result.is_ok();
+    if let Some(tx) = agent_tool_event_tx {
+        let _ = tx
+            .send(crate::platform::tool_notifier::ToolEvent::Finished {
+                success: process_success,
+            })
+            .await;
+    }
 
     // Drop the sender to signal the notifier to stop, then await cleanup.
     // tool_event_tx is already moved into process_message — it's dropped when process_message returns.
