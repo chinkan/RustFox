@@ -89,6 +89,37 @@ pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
     Ok(())
 }
 
+/// An actionable warning emitted when a path is relative (CWD-resolved) or when
+/// legacy data is detected in the launch directory while the path is unset.
+#[derive(Debug, Clone)]
+pub struct LegacyPathWarning {
+    /// Config field label, e.g. "memory.database_path".
+    pub label: String,
+    /// The path currently in effect (CWD-resolved legacy location).
+    pub current: PathBuf,
+    /// Where this path would live under the home root.
+    pub home_default: PathBuf,
+}
+
+impl LegacyPathWarning {
+    /// Multi-line, copy-pasteable migration hint.
+    pub fn render(&self) -> String {
+        // `cp -rT` merges the source into the already-created destination
+        // directory instead of nesting it (e.g. avoids <home>/skills/skills).
+        format!(
+            "Legacy path in use for `{label}`:\n  \
+             current : {current}\n  \
+             new home default : {home_default}\n  \
+             To migrate this path into the home directory:\n    \
+             cp -rT {current} {home_default}\n  \
+             To keep the current location, pin it in config.toml under its section.",
+            label = self.label,
+            current = self.current.display(),
+            home_default = self.home_default.display(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +211,19 @@ mod tests {
         // db + user_model are files, but their parent dirs must exist
         assert!(paths.database.parent().unwrap().is_dir());
         assert!(paths.user_model.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn warning_render_includes_paths_and_commands() {
+        let w = LegacyPathWarning {
+            label: "memory.database_path".to_string(),
+            current: PathBuf::from("/work/rustfox.db"),
+            home_default: PathBuf::from("/h/.rustfox/rustfox.db"),
+        };
+        let s = w.render();
+        assert!(s.contains("memory.database_path"));
+        assert!(s.contains("/work/rustfox.db"));
+        assert!(s.contains("/h/.rustfox/rustfox.db"));
+        assert!(s.contains("cp -rT"));
     }
 }
