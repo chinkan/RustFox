@@ -168,6 +168,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
              /skills - List loaded skills\n\
+             /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
              /verbose - Toggle tool call progress display\n\
              /queryrewrite - Toggle query rewriting for memory search",
         );
@@ -208,6 +209,47 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
         }
+        return Ok(());
+    }
+
+    if text == "/updateskills" || text == "/update-skills" {
+        let bundled_skills = std::path::PathBuf::from("skills");
+        let bundled_agents = std::path::PathBuf::from("agents");
+        let lock_path = agent
+            .config
+            .resolved_home
+            .clone()
+            .map(|h| h.join("skills-lock.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("skills-lock.json"));
+
+        let mut lines = Vec::new();
+        match crate::skills::update::update_skills(
+            &bundled_skills,
+            &agent.config.skills.directory,
+            &lock_path,
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Skills — {}", r.summary())),
+            Err(e) => lines.push(format!("Skills update failed: {e}")),
+        }
+        match crate::skills::update::update_skills(
+            &bundled_agents,
+            &agent.config.agents.directory,
+            &lock_path,
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Agents — {}", r.summary())),
+            Err(e) => lines.push(format!("Agents update failed: {e}")),
+        }
+
+        let (s, a) = agent.reload_skills_and_agents().await;
+        lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
+
+        bot.send_message(msg.chat.id, escape_text(&lines.join("\n")))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
