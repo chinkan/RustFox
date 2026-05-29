@@ -75,9 +75,8 @@ pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
     for file in [&paths.database, &paths.user_model] {
         if let Some(parent) = file.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create directory: {}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
             }
         }
     }
@@ -149,7 +148,12 @@ mod tests {
 
     #[test]
     fn relative_config_is_ignored_falls_to_default() {
-        let got = resolve_home(None, Some(Path::new("rel/cfg")), Some(Path::new("/os/home"))).unwrap();
+        let got = resolve_home(
+            None,
+            Some(Path::new("rel/cfg")),
+            Some(Path::new("/os/home")),
+        )
+        .unwrap();
         assert_eq!(got, PathBuf::from("/os/home/.rustfox"));
     }
 
@@ -175,16 +179,22 @@ mod tests {
 
     #[test]
     fn absolute_path_used_verbatim() {
-        let (path, origin) =
-            resolve_data_path(Path::new("/data/rustfox.db"), Path::new("/h/.rustfox"), "rustfox.db");
+        let (path, origin) = resolve_data_path(
+            Path::new("/data/rustfox.db"),
+            Path::new("/h/.rustfox"),
+            "rustfox.db",
+        );
         assert_eq!(path, PathBuf::from("/data/rustfox.db"));
         assert_eq!(origin, PathOrigin::Absolute);
     }
 
     #[test]
     fn relative_path_is_legacy() {
-        let (path, origin) =
-            resolve_data_path(Path::new("rustfox.db"), Path::new("/h/.rustfox"), "rustfox.db");
+        let (path, origin) = resolve_data_path(
+            Path::new("rustfox.db"),
+            Path::new("/h/.rustfox"),
+            "rustfox.db",
+        );
         assert_eq!(path, PathBuf::from("rustfox.db"));
         assert_eq!(origin, PathOrigin::RelativeLegacy);
     }
