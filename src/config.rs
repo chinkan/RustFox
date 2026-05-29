@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub telegram: TelegramConfig,
     pub openrouter: OpenRouterConfig,
+    #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -107,7 +108,7 @@ pub struct OpenRouterConfig {
     pub system_prompt: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct SandboxConfig {
     #[serde(default)]
     pub allowed_directory: PathBuf,
@@ -395,6 +396,77 @@ impl Config {
         self.agent.empty_response_retry_limit
     }
 
+    /// Resolve the home root and every data path, create directories, and write
+    /// the resolved absolute paths back into the config fields. Returns any
+    /// legacy-path warnings (relative overrides) for the caller to log.
+    pub fn resolve(&mut self) -> Result<Vec<crate::home::LegacyPathWarning>> {
+        use crate::home::{
+            ensure_dirs, resolve_data_path, resolve_home, PathOrigin, ResolvedPaths,
+        };
+
+        let env_home = std::env::var("RUSTFOX_HOME").ok();
+        let config_home = self.general.as_ref().and_then(|g| g.home.as_deref());
+        let os_home = dirs::home_dir();
+        let home = resolve_home(env_home.as_deref(), config_home, os_home.as_deref())?;
+
+        let mut warnings = Vec::new();
+        let mut resolve_one = |label: &str, field: &Path, subpath: &str| -> PathBuf {
+            let (path, origin) = resolve_data_path(field, &home, subpath);
+            if origin == PathOrigin::RelativeLegacy {
+                warnings.push(crate::home::LegacyPathWarning {
+                    label: label.to_string(),
+                    current: path.clone(),
+                    home_default: home.join(subpath),
+                });
+            }
+            path
+        };
+
+        let workspace = resolve_one(
+            "sandbox.allowed_directory",
+            &self.sandbox.allowed_directory,
+            "workspace",
+        );
+        let database = resolve_one(
+            "memory.database_path",
+            &self.memory.database_path,
+            "rustfox.db",
+        );
+        let skills = resolve_one("skills.directory", &self.skills.directory, "skills");
+        let agents = resolve_one("agents.directory", &self.agents.directory, "agents");
+        let artifacts = resolve_one(
+            "supervisor.artifacts_dir",
+            &self.supervisor.artifacts_dir,
+            "artifacts",
+        );
+        let user_model = resolve_one(
+            "learning.user_model_path",
+            &self.learning.user_model_path,
+            "user_model.md",
+        );
+
+        let paths = ResolvedPaths {
+            home: home.clone(),
+            workspace: workspace.clone(),
+            database: database.clone(),
+            skills: skills.clone(),
+            agents: agents.clone(),
+            artifacts: artifacts.clone(),
+            user_model: user_model.clone(),
+        };
+        ensure_dirs(&paths)?;
+
+        self.sandbox.allowed_directory = workspace;
+        self.memory.database_path = database;
+        self.skills.directory = skills;
+        self.agents.directory = agents;
+        self.supervisor.artifacts_dir = artifacts;
+        self.learning.user_model_path = user_model;
+        self.resolved_home = Some(home);
+
+        Ok(warnings)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -418,6 +490,70 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_toml() -> &'static str {
+        r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+        "#
+    }
+
+    #[test]
+    fn resolve_fills_unset_paths_under_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.resolved_home.as_ref().unwrap(), &home);
+        assert_eq!(cfg.sandbox.allowed_directory, home.join("workspace"));
+        assert_eq!(cfg.memory.database_path, home.join("rustfox.db"));
+        assert_eq!(cfg.skills.directory, home.join("skills"));
+        assert_eq!(cfg.agents.directory, home.join("agents"));
+        assert_eq!(cfg.supervisor.artifacts_dir, home.join("artifacts"));
+        assert_eq!(cfg.learning.user_model_path, home.join("user_model.md"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_keeps_absolute_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        // Use an absolute path under the (writable) tempdir so ensure_dirs can
+        // create its parent; the intent is to verify an absolute override is
+        // preserved verbatim and emits no legacy warning.
+        let custom_db = tmp.path().join("custom.db");
+        cfg.memory.database_path = custom_db.clone();
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.memory.database_path, custom_db);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_warns_on_relative_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home),
+        });
+        cfg.skills.directory = std::path::PathBuf::from("my-skills");
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.skills.directory, std::path::PathBuf::from("my-skills"));
+        assert!(warnings.iter().any(|w| w.label == "skills.directory"));
+    }
 
     #[test]
     fn test_langsmith_config_optional() {
