@@ -452,7 +452,7 @@ Test inside `mod tests`:
         assert!(s.contains("memory.database_path"));
         assert!(s.contains("/work/rustfox.db"));
         assert!(s.contains("/h/.rustfox/rustfox.db"));
-        assert!(s.contains("cp"));
+        assert!(s.contains("cp -rT"));
     }
 ```
 
@@ -467,12 +467,14 @@ Replace the `todo!()`:
 
 ```rust
     pub fn render(&self) -> String {
+        // `cp -rT` merges the source into the already-created destination
+        // directory instead of nesting it (e.g. avoids <home>/skills/skills).
         format!(
             "Legacy path in use for `{label}`:\n  \
              current : {current}\n  \
              new home default : {home_default}\n  \
-             To migrate your data into the home directory:\n    \
-             cp -r {current} {home_default}\n  \
+             To migrate this path into the home directory:\n    \
+             cp -rT {current} {home_default}\n  \
              To keep the current location, pin it in config.toml under its section.",
             label = self.label,
             current = self.current.display(),
@@ -1851,15 +1853,20 @@ If you previously ran RustFox from a project directory (with `./rustfox.db`,
 `./skills`, etc.), RustFox will **not** move your files automatically. On
 startup it prints an actionable warning for each legacy path. To migrate:
 
+RustFox auto-creates the home subdirectories on startup, so use `cp -rT`
+(merge into the existing destination directory) rather than plain `cp -r`,
+which would nest (e.g. `~/.rustfox/skills/skills`). Each command copies only
+that one path — never your whole project.
+
 ```bash
 mkdir -p ~/.rustfox
-cp    ./rustfox.db        ~/.rustfox/rustfox.db
-cp -r ./skills            ~/.rustfox/skills
-cp -r ./agents            ~/.rustfox/agents
-cp -r ./supervisor/artifacts ~/.rustfox/artifacts   # if you used the supervisor
-cp    ./memory/USER.md    ~/.rustfox/user_model.md   # if present
+cp     ./rustfox.db            ~/.rustfox/rustfox.db
+cp -rT ./skills               ~/.rustfox/skills
+cp -rT ./agents               ~/.rustfox/agents
+cp -rT ./supervisor/artifacts ~/.rustfox/artifacts   # if you used the supervisor
+cp     ./memory/USER.md        ~/.rustfox/user_model.md   # if present
 # Move your old sandbox contents into the new persistent workspace:
-cp -r /tmp/rustfox-sandbox/. ~/.rustfox/workspace/   # adjust to your old sandbox
+cp -rT /tmp/rustfox-sandbox    ~/.rustfox/workspace   # adjust to your old sandbox
 ```
 
 Then remove any path overrides from `config.toml` so RustFox uses the home
