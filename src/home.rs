@@ -28,6 +28,27 @@ pub fn resolve_home(
     Ok(home.join(".rustfox"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathOrigin {
+    Default,
+    Absolute,
+    RelativeLegacy,
+}
+
+pub fn resolve_data_path(
+    configured: &Path,
+    home: &Path,
+    default_subpath: &str,
+) -> (PathBuf, PathOrigin) {
+    if configured.as_os_str().is_empty() {
+        (home.join(default_subpath), PathOrigin::Default)
+    } else if configured.is_absolute() {
+        (configured.to_path_buf(), PathOrigin::Absolute)
+    } else {
+        (configured.to_path_buf(), PathOrigin::RelativeLegacy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +92,29 @@ mod tests {
     fn errors_when_no_os_home_and_no_overrides() {
         let got = resolve_home(None, None, None);
         assert!(got.is_err());
+    }
+
+    #[test]
+    fn unset_path_resolves_under_home() {
+        let (path, origin) =
+            resolve_data_path(Path::new(""), Path::new("/h/.rustfox"), "rustfox.db");
+        assert_eq!(path, PathBuf::from("/h/.rustfox/rustfox.db"));
+        assert_eq!(origin, PathOrigin::Default);
+    }
+
+    #[test]
+    fn absolute_path_used_verbatim() {
+        let (path, origin) =
+            resolve_data_path(Path::new("/data/rustfox.db"), Path::new("/h/.rustfox"), "rustfox.db");
+        assert_eq!(path, PathBuf::from("/data/rustfox.db"));
+        assert_eq!(origin, PathOrigin::Absolute);
+    }
+
+    #[test]
+    fn relative_path_is_legacy() {
+        let (path, origin) =
+            resolve_data_path(Path::new("rustfox.db"), Path::new("/h/.rustfox"), "rustfox.db");
+        assert_eq!(path, PathBuf::from("rustfox.db"));
+        assert_eq!(origin, PathOrigin::RelativeLegacy);
     }
 }
