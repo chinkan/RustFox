@@ -62,6 +62,11 @@ pub async fn seed_dir_if_empty(bundled: &Path, instance: &Path) -> Result<usize>
     Ok(copied)
 }
 
+/// Public re-export wrapper so the update engine can reuse recursive copy.
+pub async fn copy_dir_recursive_pub(src: &Path, dst: &Path) -> Result<()> {
+    copy_dir_recursive(src, dst).await
+}
+
 /// Recursively copy `src` directory to `dst`.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     tokio::fs::create_dir_all(dst).await?;
