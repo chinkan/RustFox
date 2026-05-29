@@ -26,13 +26,16 @@ pub struct Config {
     pub learning: LearningConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Absolute home root resolved at load time (not read from TOML).
+    #[serde(skip)]
+    pub resolved_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SupervisorConfig {
     #[serde(default = "default_autonomy_mode")]
     pub default_autonomy_mode: String,
-    #[serde(default = "default_artifacts_dir")]
+    #[serde(default)]
     pub artifacts_dir: std::path::PathBuf,
     #[serde(default)]
     pub risk: RiskThresholdsConfig,
@@ -71,7 +74,7 @@ fn default_autonomy_mode() -> String {
 }
 
 fn default_artifacts_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("supervisor/artifacts")
+    std::path::PathBuf::new()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -106,6 +109,7 @@ pub struct OpenRouterConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SandboxConfig {
+    #[serde(default)]
     pub allowed_directory: PathBuf,
 }
 
@@ -152,7 +156,7 @@ pub struct McpServerConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
-    #[serde(default = "default_db_path")]
+    #[serde(default)]
     pub database_path: PathBuf,
     #[serde(default = "default_rag_limit")]
     pub rag_limit: usize,
@@ -174,13 +178,13 @@ pub struct MemoryConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SkillsConfig {
-    #[serde(default = "default_skills_dir")]
+    #[serde(default)]
     pub directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentsConfig {
-    #[serde(default = "default_agents_dir")]
+    #[serde(default)]
     pub directory: PathBuf,
 }
 
@@ -189,6 +193,9 @@ pub struct GeneralConfig {
     /// Optional location string injected into the system prompt (e.g. "Tokyo, Japan")
     #[serde(default)]
     pub location: Option<String>,
+    /// Optional absolute path overriding the default `~/.rustfox` home root.
+    #[serde(default)]
+    pub home: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -211,7 +218,7 @@ pub struct LangSmithConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LearningConfig {
     /// Path to the user model file (Honcho-style USER.md).
-    #[serde(default = "default_user_model_path")]
+    #[serde(default)]
     pub user_model_path: PathBuf,
     /// Whether post-task skill extraction is enabled.
     #[serde(default = "default_true")]
@@ -272,10 +279,6 @@ fn default_system_prompt() -> String {
         .to_string()
 }
 
-fn default_db_path() -> PathBuf {
-    PathBuf::from("rustfox.db")
-}
-
 fn default_rag_limit() -> usize {
     5
 }
@@ -292,14 +295,6 @@ fn default_summarize_cron() -> String {
     "0 0 2 * * *".to_string()
 }
 
-fn default_skills_dir() -> PathBuf {
-    PathBuf::from("skills")
-}
-
-fn default_agents_dir() -> PathBuf {
-    PathBuf::from("agents")
-}
-
 fn default_embedding_base_url() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
@@ -314,7 +309,7 @@ fn default_embedding_dimensions() -> usize {
 
 fn default_memory_config() -> MemoryConfig {
     MemoryConfig {
-        database_path: default_db_path(),
+        database_path: PathBuf::new(),
         rag_limit: default_rag_limit(),
         max_raw_messages: default_max_raw_messages(),
         summarize_threshold: default_summarize_threshold(),
@@ -325,13 +320,13 @@ fn default_memory_config() -> MemoryConfig {
 
 fn default_skills_config() -> SkillsConfig {
     SkillsConfig {
-        directory: default_skills_dir(),
+        directory: PathBuf::new(),
     }
 }
 
 fn default_agents_config() -> AgentsConfig {
     AgentsConfig {
-        directory: default_agents_dir(),
+        directory: PathBuf::new(),
     }
 }
 
@@ -358,10 +353,6 @@ fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
 }
 
-fn default_user_model_path() -> PathBuf {
-    PathBuf::from("memory/USER.md")
-}
-
 fn default_true() -> bool {
     true
 }
@@ -380,7 +371,7 @@ fn default_user_model_cron() -> String {
 
 fn default_learning_config() -> LearningConfig {
     LearningConfig {
-        user_model_path: default_user_model_path(),
+        user_model_path: PathBuf::new(),
         skill_extraction_enabled: true,
         skill_extraction_threshold: default_skill_extraction_threshold(),
         user_model_update_interval: default_user_model_update_interval(),
@@ -579,10 +570,9 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
-        assert_eq!(
-            cfg.supervisor.artifacts_dir,
-            std::path::PathBuf::from("supervisor/artifacts")
-        );
+        // artifacts_dir now defaults to the empty "unset" sentinel; it is
+        // materialized to an absolute path only by Config::resolve().
+        assert_eq!(cfg.supervisor.artifacts_dir, std::path::PathBuf::new());
     }
 
     #[test]
