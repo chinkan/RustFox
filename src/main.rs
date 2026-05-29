@@ -101,6 +101,34 @@ async fn main() -> Result<()> {
     let mut mcp_manager = McpManager::new();
     mcp_manager.connect_all(&mcp_server_configs).await;
 
+    // Seed bundled skills/agents into the instance home on first run.
+    let bundled_skills = PathBuf::from("skills");
+    let bundled_agents = PathBuf::from("agents");
+    if let Err(e) =
+        rustfox::skills::seed::seed_dir_if_empty(&bundled_skills, &config.skills.directory).await
+    {
+        warn!("Skill seeding failed: {e}");
+    }
+    if let Err(e) =
+        rustfox::skills::seed::seed_dir_if_empty(&bundled_agents, &config.agents.directory).await
+    {
+        warn!("Agent seeding failed: {e}");
+    }
+    // Write the home-side lock so /update-skills can diff later (only when seeded
+    // into the home and a lock does not already exist).
+    if let Some(home) = &config.resolved_home {
+        let lock_path = home.join("skills-lock.json");
+        if !lock_path.exists() {
+            let lock = rustfox::skills::update::SkillLock {
+                version: 1,
+                skills: rustfox::skills::seed::lock_map_for(&config.skills.directory),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&lock) {
+                let _ = std::fs::write(&lock_path, json);
+            }
+        }
+    }
+
     // Load skills from markdown files
     let skills = load_skills_from_dir(&config.skills.directory).await?;
     info!("  Skills: {}", skills.len());
