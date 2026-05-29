@@ -276,7 +276,8 @@ fn default_system_prompt() -> String {
      - For complex multi-step problems: invoke the problem-solver subagent\n\
      \n\
      ## Sandbox\n\
-     File and command tools operate only within the allowed sandbox directory."
+     File and command tools operate only within your persistent workspace directory.\n\
+     The workspace survives restarts — use it to keep reusable scripts, programs, and notes for the long term."
         .to_string()
 }
 
