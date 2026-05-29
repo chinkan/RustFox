@@ -470,17 +470,14 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
-        // Validate sandbox directory exists
-        if !config.sandbox.allowed_directory.exists() {
-            std::fs::create_dir_all(&config.sandbox.allowed_directory).with_context(|| {
-                format!(
-                    "Failed to create sandbox directory: {}",
-                    config.sandbox.allowed_directory.display()
-                )
-            })?;
+        let warnings = config
+            .resolve()
+            .with_context(|| "Failed to resolve home directory paths")?;
+        for w in &warnings {
+            tracing::warn!("{}", w.render());
         }
 
         Ok(config)
@@ -553,6 +550,30 @@ mod tests {
         let warnings = cfg.resolve().unwrap();
         assert_eq!(cfg.skills.directory, std::path::PathBuf::from("my-skills"));
         assert!(warnings.iter().any(|w| w.label == "skills.directory"));
+    }
+
+    #[test]
+    fn load_resolves_paths_to_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let cfg_path = tmp.path().join("config.toml");
+        let toml = format!(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [general]
+            home = "{}"
+            "#,
+            home.display()
+        );
+        std::fs::write(&cfg_path, toml).unwrap();
+        let cfg = Config::load(&cfg_path).unwrap();
+        assert_eq!(cfg.sandbox.allowed_directory, home.join("workspace"));
+        assert!(cfg.sandbox.allowed_directory.is_dir());
+        assert_eq!(cfg.resolved_home.unwrap(), home);
     }
 
     #[test]
