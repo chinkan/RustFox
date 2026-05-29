@@ -49,6 +49,46 @@ pub fn resolve_data_path(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedPaths {
+    pub home: PathBuf,
+    pub workspace: PathBuf,
+    pub database: PathBuf,
+    pub skills: PathBuf,
+    pub agents: PathBuf,
+    pub artifacts: PathBuf,
+    pub user_model: PathBuf,
+}
+
+pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
+    use anyhow::Context;
+    for dir in [
+        &paths.home,
+        &paths.workspace,
+        &paths.skills,
+        &paths.agents,
+        &paths.artifacts,
+    ] {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
+    }
+    for file in [&paths.database, &paths.user_model] {
+        if let Some(parent) = file.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create directory: {}", parent.display())
+                })?;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&paths.home, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +156,29 @@ mod tests {
             resolve_data_path(Path::new("rustfox.db"), Path::new("/h/.rustfox"), "rustfox.db");
         assert_eq!(path, PathBuf::from("rustfox.db"));
         assert_eq!(origin, PathOrigin::RelativeLegacy);
+    }
+
+    #[test]
+    fn ensure_dirs_creates_full_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let paths = ResolvedPaths {
+            home: home.clone(),
+            workspace: home.join("workspace"),
+            database: home.join("rustfox.db"),
+            skills: home.join("skills"),
+            agents: home.join("agents"),
+            artifacts: home.join("artifacts"),
+            user_model: home.join("user_model.md"),
+        };
+        ensure_dirs(&paths).unwrap();
+        assert!(paths.home.is_dir());
+        assert!(paths.workspace.is_dir());
+        assert!(paths.skills.is_dir());
+        assert!(paths.agents.is_dir());
+        assert!(paths.artifacts.is_dir());
+        // db + user_model are files, but their parent dirs must exist
+        assert!(paths.database.parent().unwrap().is_dir());
+        assert!(paths.user_model.parent().unwrap().is_dir());
     }
 }
