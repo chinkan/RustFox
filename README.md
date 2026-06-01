@@ -69,6 +69,11 @@ cargo run --bin rustfox -- /path/to/config.toml
 
 ## Configuration
 
+> **Persistent home:** RustFox keeps all state under `~/.rustfox` by default
+> (config, database, skills, agents, and a durable `workspace/` sandbox).
+> Override with the `RUSTFOX_HOME` environment variable or `[general].home`.
+> See [docs/persistent-home-directory.md](docs/persistent-home-directory.md).
+
 See [`config.example.toml`](config.example.toml) for all options.
 
 ### Key Settings
