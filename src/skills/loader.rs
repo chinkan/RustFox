@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-use super::{Skill, SkillRegistry};
+use super::{Skill, SkillRegistry, SkillSource};
 
 /// Load all markdown skill files from a directory.
 ///
@@ -19,7 +19,11 @@ use super::{Skill, SkillRegistry};
 /// ---
 /// # Instructions here...
 /// ```
-pub async fn load_skills_from_dir(dir: &Path) -> Result<SkillRegistry> {
+pub async fn load_skills_from_dir(
+    dir: &Path,
+    source: SkillSource,
+    base_dir: PathBuf,
+) -> Result<SkillRegistry> {
     let mut registry = SkillRegistry::new();
 
     if !dir.exists() {
@@ -52,7 +56,7 @@ pub async fn load_skills_from_dir(dir: &Path) -> Result<SkillRegistry> {
         };
 
         match load_skill_file(&skill_path).await {
-            Ok(skill) => registry.register(skill),
+            Ok(skill) => registry.register(skill, source, base_dir.clone()),
             Err(e) => warn!("Failed to load skill from {}: {}", skill_path.display(), e),
         }
     }
@@ -303,7 +307,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let skills = load_skills_from_dir(dir.path()).await.unwrap();
+        let skills =
+            load_skills_from_dir(dir.path(), SkillSource::Instance, dir.path().to_path_buf())
+                .await
+                .unwrap();
         let s = skills.get("research-pack").unwrap();
         assert_eq!(s.supervisor_workflow.as_deref(), Some("research"));
         assert_eq!(s.supervisor_required_caps, vec!["research".to_string()]);

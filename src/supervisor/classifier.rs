@@ -181,17 +181,21 @@ mod tests {
     #[tokio::test]
     async fn skill_hint_overrides_default_workflow() {
         let mut registry = crate::skills::SkillRegistry::new();
-        registry.register(crate::skills::Skill {
-            name: "sup-research".into(),
-            description: "research".into(),
-            content: "".into(),
-            tags: vec![],
-            model: None,
-            tools: vec![],
-            max_iterations: None,
-            supervisor_workflow: Some("research".into()),
-            supervisor_required_caps: vec!["research".into()],
-        });
+        registry.register(
+            crate::skills::Skill {
+                name: "sup-research".into(),
+                description: "research".into(),
+                content: "".into(),
+                tags: vec![],
+                model: None,
+                tools: vec![],
+                max_iterations: None,
+                supervisor_workflow: Some("research".into()),
+                supervisor_required_caps: vec!["research".into()],
+            },
+            crate::skills::SkillSource::Instance,
+            std::path::PathBuf::from("/tmp/test"),
+        );
         let c = SkillAwareClassifier::new(HeuristicClassifier, registry);
         // Request must contain the skill's keyword ("research", from "sup-research") for the
         // hint to fire; the heuristic still classifies it as GeneralAssistant on the

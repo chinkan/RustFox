@@ -12,7 +12,7 @@ use rustfox::memory::MemoryStore;
 use rustfox::platform;
 use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
-use rustfox::skills::loader::load_skills_from_dir;
+use rustfox::skills::{loader::load_skills_from_dir, SkillSource};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -133,12 +133,48 @@ async fn main() -> Result<()> {
         seed_lock("agents-lock.json", &config.agents.directory);
     }
 
-    // Load skills from markdown files
-    let skills = load_skills_from_dir(&config.skills.directory).await?;
+    // Load skills from instance and bundled directories (instance shadows bundled)
+    let mut skills = load_skills_from_dir(
+        &config.skills.directory,
+        SkillSource::Instance,
+        config.skills.directory.clone(),
+    )
+    .await?;
+    let bundled_skills = load_skills_from_dir(
+        &config.skills.bundled_directory,
+        SkillSource::Bundled,
+        config.skills.bundled_directory.clone(),
+    )
+    .await?;
+    for skill in bundled_skills.list() {
+        skills.register(
+            skill.clone(),
+            SkillSource::Bundled,
+            config.skills.bundled_directory.clone(),
+        );
+    }
     info!("  Skills: {}", skills.len());
 
-    // Load agents from the agents directory
-    let agents = load_skills_from_dir(&config.agents.directory).await?;
+    // Load agents from instance and bundled directories (instance shadows bundled)
+    let mut agents = load_skills_from_dir(
+        &config.agents.directory,
+        SkillSource::Instance,
+        config.agents.directory.clone(),
+    )
+    .await?;
+    let bundled_agents = load_skills_from_dir(
+        &config.agents.bundled_directory,
+        SkillSource::Bundled,
+        config.agents.bundled_directory.clone(),
+    )
+    .await?;
+    for agent in bundled_agents.list() {
+        agents.register(
+            agent.clone(),
+            SkillSource::Bundled,
+            config.agents.bundled_directory.clone(),
+        );
+    }
     info!("  Agents: {}", agents.len());
 
     // Create ScheduledTaskStore sharing the existing SQLite connection

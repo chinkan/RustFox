@@ -181,12 +181,18 @@ pub struct MemoryConfig {
 pub struct SkillsConfig {
     #[serde(default)]
     pub directory: PathBuf,
+    /// Bundled skills directory (read-only templates, default CWD-relative `./skills/`).
+    #[serde(default = "default_bundled_skills_dir")]
+    pub bundled_directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentsConfig {
     #[serde(default)]
     pub directory: PathBuf,
+    /// Bundled agents directory (read-only templates, default CWD-relative `./agents/`).
+    #[serde(default = "default_bundled_agents_dir")]
+    pub bundled_directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -323,12 +329,14 @@ fn default_memory_config() -> MemoryConfig {
 fn default_skills_config() -> SkillsConfig {
     SkillsConfig {
         directory: PathBuf::new(),
+        bundled_directory: default_bundled_skills_dir(),
     }
 }
 
 fn default_agents_config() -> AgentsConfig {
     AgentsConfig {
         directory: PathBuf::new(),
+        bundled_directory: default_bundled_agents_dir(),
     }
 }
 
@@ -353,6 +361,14 @@ fn default_langsmith_project() -> String {
 
 fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
+}
+
+fn default_bundled_skills_dir() -> PathBuf {
+    PathBuf::from("skills")
+}
+
+fn default_bundled_agents_dir() -> PathBuf {
+    PathBuf::from("agents")
 }
 
 fn default_true() -> bool {
@@ -459,6 +475,16 @@ impl Config {
             user_model: user_model.clone(),
         };
         ensure_dirs(&paths)?;
+
+        // Resolve bundled directories relative to CWD (not home) since they
+        // ship alongside the binary / project root.
+        let cwd = std::env::current_dir()?;
+        if !self.skills.bundled_directory.is_absolute() {
+            self.skills.bundled_directory = cwd.join(&self.skills.bundled_directory);
+        }
+        if !self.agents.bundled_directory.is_absolute() {
+            self.agents.bundled_directory = cwd.join(&self.agents.bundled_directory);
+        }
 
         self.sandbox.allowed_directory = workspace;
         self.memory.database_path = database;

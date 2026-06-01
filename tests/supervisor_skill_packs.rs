@@ -1,8 +1,12 @@
 #[tokio::test]
 async fn ships_five_supervisor_skill_packs() {
-    let skills = rustfox::skills::loader::load_skills_from_dir(std::path::Path::new("skills"))
-        .await
-        .unwrap();
+    let skills = rustfox::skills::loader::load_skills_from_dir(
+        std::path::Path::new("skills"),
+        rustfox::skills::SkillSource::Bundled,
+        std::path::PathBuf::from("skills"),
+    )
+    .await
+    .unwrap();
     for n in [
         "sup-coding",
         "sup-research",
