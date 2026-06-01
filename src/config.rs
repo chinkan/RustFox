@@ -398,8 +398,11 @@ impl Config {
     }
 
     /// Resolve the home root and every data path, create directories, and write
-    /// the resolved absolute paths back into the config fields. Returns any
-    /// legacy-path warnings (relative overrides) for the caller to log.
+    /// the resolved paths back into the config fields. Unset paths are
+    /// materialized to absolute paths under the home root; absolute overrides
+    /// are preserved verbatim; relative overrides are kept as-is (legacy mode)
+    /// and a warning is emitted for each. Returns any legacy-path warnings for
+    /// the caller to log.
     pub fn resolve(&mut self) -> Result<Vec<crate::home::LegacyPathWarning>> {
         use crate::home::{
             ensure_dirs, resolve_data_path, resolve_home, PathOrigin, ResolvedPaths,

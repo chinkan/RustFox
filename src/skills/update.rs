@@ -24,7 +24,7 @@ pub struct UpdateReport {
 impl UpdateReport {
     pub fn summary(&self) -> String {
         format!(
-            "Skill update: {} updated, {} backed-up, {} unchanged.",
+            "Update: {} updated, {} backed-up, {} unchanged.",
             self.updated.len(),
             self.backed_up.len(),
             self.skipped.len()
@@ -68,7 +68,9 @@ pub async fn update_skills(
         anyhow::bail!("No bundled skills found at {}", bundled.display());
     }
     let mut lock = read_lock(lock_path);
-    tokio::fs::create_dir_all(instance).await.ok();
+    tokio::fs::create_dir_all(instance)
+        .await
+        .with_context(|| format!("Failed to create instance directory {}", instance.display()))?;
 
     let mut entries = tokio::fs::read_dir(bundled).await?;
     while let Some(entry) = entries.next_entry().await? {

@@ -117,16 +117,20 @@ async fn main() -> Result<()> {
     // Write the home-side lock so /update-skills can diff later (only when seeded
     // into the home and a lock does not already exist).
     if let Some(home) = &config.resolved_home {
-        let lock_path = home.join("skills-lock.json");
-        if !lock_path.exists() {
-            let lock = rustfox::skills::update::SkillLock {
-                version: 1,
-                skills: rustfox::skills::seed::lock_map_for(&config.skills.directory),
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&lock) {
-                let _ = std::fs::write(&lock_path, json);
+        let seed_lock = |lock_name: &str, dir: &std::path::Path| {
+            let lock_path = home.join(lock_name);
+            if !lock_path.exists() {
+                let lock = rustfox::skills::update::SkillLock {
+                    version: 1,
+                    skills: rustfox::skills::seed::lock_map_for(dir),
+                };
+                if let Ok(json) = serde_json::to_string_pretty(&lock) {
+                    let _ = std::fs::write(&lock_path, json);
+                }
             }
-        }
+        };
+        seed_lock("skills-lock.json", &config.skills.directory);
+        seed_lock("agents-lock.json", &config.agents.directory);
     }
 
     // Load skills from markdown files

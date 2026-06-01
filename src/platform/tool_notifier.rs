@@ -170,6 +170,7 @@ impl ToolDisplayState {
         self.format("⏳ Working on your request")
     }
 
+    #[allow(dead_code)]
     fn format_completed(&self) -> String {
         // Default successful header and result. Caller may adjust based on overall
         // request success vs failure when rendering the final card.
@@ -556,19 +557,21 @@ impl ToolCallNotifier {
 
     fn final_status_text(&self, success: bool) -> Option<String> {
         self.display_state.has_activity().then(|| {
-            // Choose header/result text based on overall success
-            let mut text = if success {
-                self.display_state.format_completed()
+            let header = if success {
+                "✅ Completed"
             } else {
-                self.display_state.format("⛔ Stopped")
+                "⛔ Stopped"
             };
+            let mut text = self.display_state.format(header);
 
             if success {
                 text.push_str("\n\nResult\nFinal answer sent below.");
             } else {
                 text.push_str("\n\nResult\nRequest ended with an error response below.");
             }
-            text
+
+            // Clamp AFTER appending the Result section to stay within Telegram's limit
+            crate::utils::strings::truncate_chars(&text, MAX_STATUS_TEXT_CHARS)
         })
     }
 

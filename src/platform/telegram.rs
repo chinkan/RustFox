@@ -215,18 +215,18 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     if text == "/updateskills" || text == "/update-skills" {
         let bundled_skills = std::path::PathBuf::from("skills");
         let bundled_agents = std::path::PathBuf::from("agents");
-        let lock_path = agent
-            .config
-            .resolved_home
-            .clone()
-            .map(|h| h.join("skills-lock.json"))
-            .unwrap_or_else(|| std::path::PathBuf::from("skills-lock.json"));
+        let home = agent.config.resolved_home.clone();
+        let lock_for = |name: &str| -> std::path::PathBuf {
+            home.clone()
+                .map(|h| h.join(name))
+                .unwrap_or_else(|| std::path::PathBuf::from(name))
+        };
 
         let mut lines = Vec::new();
         match crate::skills::update::update_skills(
             &bundled_skills,
             &agent.config.skills.directory,
-            &lock_path,
+            &lock_for("skills-lock.json"),
         )
         .await
         {
@@ -236,7 +236,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         match crate::skills::update::update_skills(
             &bundled_agents,
             &agent.config.agents.directory,
-            &lock_path,
+            &lock_for("agents-lock.json"),
         )
         .await
         {
