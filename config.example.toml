@@ -24,15 +24,26 @@ Use the available tools to help the user with their tasks. \
 When using file or terminal tools, operate only within the allowed sandbox directory. \
 Be concise and helpful."""
 
+# ── Home directory & paths ──────────────────────────────────────────────
+# By default RustFox stores everything under ~/.rustfox:
+#   ~/.rustfox/config.toml, rustfox.db, skills/, agents/, workspace/, artifacts/
+# Override the home root with the RUSTFOX_HOME env var (absolute path) or
+# [general].home below. Run a second isolated instance with:
+#   RUSTFOX_HOME="$HOME/.rustfox-work" cargo run
+#
+# [general]
+# home = "/absolute/path/to/home"   # optional; overrides ~/.rustfox
+
 [sandbox]
-# The directory where file operations and command execution are allowed
-# The bot cannot access files outside this directory
-allowed_directory = "/tmp/rustfox-sandbox"
+# The LLM's persistent workspace (file/command tools are confined here).
+# Leave unset to use <home>/workspace. Set an absolute path to override.
+# allowed_directory = "/absolute/path/to/workspace"
 
 [memory]
 # Path to the SQLite database file for persistent memory
 # Stores conversations, knowledge base, and vector embeddings
-database_path = "rustfox.db"
+# Leave unset to use <home>/rustfox.db. Set an absolute path to override.
+# database_path = "/absolute/path/to/rustfox.db"
 
 # Query rewriting for memory search (optional; default: false)
 # When enabled, ambiguous follow-up questions are rewritten into self-contained
@@ -44,7 +55,8 @@ database_path = "rustfox.db"
 [skills]
 # Directory containing skill markdown files
 # Skills are natural-language instructions loaded at startup
-directory = "skills"
+# Leave unset to use <home>/skills (seeded from the bundled skills on first run).
+# directory = "/absolute/path/to/skills"
 
 [general]
 # Your location, injected into the system prompt so the AI knows your timezone/region
