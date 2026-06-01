@@ -28,11 +28,9 @@ Be concise and helpful."""
 # By default RustFox stores everything under ~/.rustfox:
 #   ~/.rustfox/config.toml, rustfox.db, skills/, agents/, workspace/, artifacts/
 # Override the home root with the RUSTFOX_HOME env var (absolute path) or
-# [general].home below. Run a second isolated instance with:
+# [general].home (see the [general] section below). Run a second isolated
+# instance with:
 #   RUSTFOX_HOME="$HOME/.rustfox-work" cargo run
-#
-# [general]
-# home = "/absolute/path/to/home"   # optional; overrides ~/.rustfox
 
 [sandbox]
 # The LLM's persistent workspace (file/command tools are confined here).
@@ -59,6 +57,10 @@ Be concise and helpful."""
 # directory = "/absolute/path/to/skills"
 
 [general]
+# Home directory root for all RustFox state (optional; overrides ~/.rustfox).
+# Must be an absolute path. The RUSTFOX_HOME env var takes precedence over this.
+# home = "/absolute/path/to/home"
+
 # Your location, injected into the system prompt so the AI knows your timezone/region
 # Uncomment and set to your city/region (e.g. "Tokyo, Japan")
 # location = "Tokyo, Japan"
