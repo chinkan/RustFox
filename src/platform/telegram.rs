@@ -213,8 +213,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     }
 
     if text == "/updateskills" || text == "/update-skills" {
-        let bundled_skills = std::path::PathBuf::from("skills");
-        let bundled_agents = std::path::PathBuf::from("agents");
+        let bundled_skills = agent.config.skills.bundled_directory.clone();
+        let bundled_agents = agent.config.agents.bundled_directory.clone();
         let home = agent.config.resolved_home.clone();
         let lock_for = |name: &str| -> std::path::PathBuf {
             home.clone()
