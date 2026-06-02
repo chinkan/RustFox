@@ -102,15 +102,20 @@ async fn main() -> Result<()> {
     mcp_manager.connect_all(&mcp_server_configs).await;
 
     // Seed bundled skills/agents into the instance home on first run.
-    let bundled_skills = PathBuf::from("skills");
-    let bundled_agents = PathBuf::from("agents");
-    if let Err(e) =
-        rustfox::skills::seed::seed_dir_if_empty(&bundled_skills, &config.skills.directory).await
+    // Seed bundled skills/agents into the instance home on first run.
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.skills.bundled_directory,
+        &config.skills.directory,
+    )
+    .await
     {
         warn!("Skill seeding failed: {e}");
     }
-    if let Err(e) =
-        rustfox::skills::seed::seed_dir_if_empty(&bundled_agents, &config.agents.directory).await
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.agents.bundled_directory,
+        &config.agents.directory,
+    )
+    .await
     {
         warn!("Agent seeding failed: {e}");
     }
