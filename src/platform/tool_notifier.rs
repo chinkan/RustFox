@@ -461,7 +461,7 @@ pub fn format_args_preview(args_json: &str) -> String {
         return String::new();
     }
     let joined = parts.join(", ");
-    crate::utils::strings::truncate_chars(&joined, MAX_DISPLAY_FIELD_CHARS)
+    crate::utils::strings::truncate_chars(&joined, MAX_STATUS_TEXT_CHARS)
 }
 
 /// Build the one-line tool status string streamed into the Telegram message
@@ -1026,6 +1026,15 @@ mod tests {
         let preview = format_args_preview(args);
         assert!(!preview.is_empty());
         assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_format_args_preview_multi_arg_keeps_multiple_safe_keys() {
+        let long_query = "q".repeat(60);
+        let args = format!(r#"{{"query":"{}","path":"/tmp/example/path"}} "#, long_query);
+        let preview = format_args_preview(&args);
+        assert!(preview.contains("query:"), "query key missing: {preview}");
+        assert!(preview.contains("path:"), "path key missing: {preview}");
     }
 
     // --- friendly_tool_name ---

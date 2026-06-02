@@ -97,6 +97,7 @@ pub async fn update_skills(
 
         let instance_hash = hash_skill_dir(&dst);
         if instance_hash.as_deref() == Some(bundled_hash.as_str()) {
+            lock.skills.entry(name.clone()).or_insert(bundled_hash);
             report.skipped.push(name);
             continue;
         }
@@ -222,6 +223,25 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(instance.join("mine/SKILL.md")).unwrap(),
             "private"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_skill_without_lock_entry_seeds_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundled = tmp.path().join("bundled");
+        let instance = tmp.path().join("instance");
+        let lock = tmp.path().join("skills-lock.json");
+        write_skill(&bundled, "alpha", "v1");
+        write_skill(&instance, "alpha", "v1");
+
+        let report = update_skills(&bundled, &instance, &lock).await.unwrap();
+        assert_eq!(report.skipped, vec!["alpha".to_string()]);
+
+        let seeded = read_lock(&lock);
+        assert!(
+            seeded.skills.contains_key("alpha"),
+            "skip path should seed missing lock entry"
         );
     }
 }

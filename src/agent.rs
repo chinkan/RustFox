@@ -171,23 +171,27 @@ impl Agent {
         .await;
         let s_bundled =
             load_skills_from_dir(&s_bundled_dir, SkillSource::Bundled, s_bundled_dir.clone()).await;
+        let s_instance_ok = s_instance.is_ok();
+        let s_bundled_ok = s_bundled.is_ok();
 
         {
             let mut skills = self.skills.write().await;
+            let mut new_base_dirs = std::collections::BTreeMap::new();
             if let Ok(reg) = s_instance {
                 skills.instance_skills = reg.instance_skills;
-                for (k, v) in &reg.skill_base_dirs {
-                    skills.skill_base_dirs.insert(k.clone(), v.clone());
+                for (k, v) in reg.skill_base_dirs {
+                    new_base_dirs.insert(k, v);
                 }
             }
             if let Ok(reg) = s_bundled {
                 skills.bundled_skills = reg.bundled_skills;
-                for (k, v) in &reg.skill_base_dirs {
-                    skills
-                        .skill_base_dirs
-                        .entry(k.clone())
-                        .or_insert_with(|| v.clone());
+                for (k, v) in reg.skill_base_dirs {
+                    new_base_dirs.entry(k).or_insert(v);
                 }
+            }
+            if s_instance_ok || s_bundled_ok {
+                skills.skill_base_dirs.clear();
+                skills.skill_base_dirs.extend(new_base_dirs);
             }
         }
         let s_count = self.skills.read().await.len();
@@ -203,23 +207,27 @@ impl Agent {
         .await;
         let a_bundled =
             load_skills_from_dir(&a_bundled_dir, SkillSource::Bundled, a_bundled_dir.clone()).await;
+        let a_instance_ok = a_instance.is_ok();
+        let a_bundled_ok = a_bundled.is_ok();
 
         {
             let mut agents = self.agents.write().await;
+            let mut new_base_dirs = std::collections::BTreeMap::new();
             if let Ok(reg) = a_instance {
                 agents.instance_skills = reg.instance_skills;
-                for (k, v) in &reg.skill_base_dirs {
-                    agents.skill_base_dirs.insert(k.clone(), v.clone());
+                for (k, v) in reg.skill_base_dirs {
+                    new_base_dirs.insert(k, v);
                 }
             }
             if let Ok(reg) = a_bundled {
                 agents.bundled_skills = reg.bundled_skills;
-                for (k, v) in &reg.skill_base_dirs {
-                    agents
-                        .skill_base_dirs
-                        .entry(k.clone())
-                        .or_insert_with(|| v.clone());
+                for (k, v) in reg.skill_base_dirs {
+                    new_base_dirs.entry(k).or_insert(v);
                 }
+            }
+            if a_instance_ok || a_bundled_ok {
+                agents.skill_base_dirs.clear();
+                agents.skill_base_dirs.extend(new_base_dirs);
             }
         }
         let a_count = self.agents.read().await.len();
@@ -1816,10 +1824,19 @@ impl Agent {
                         )
                         .await
                         {
+                            let bundled_dir = self.config.skills.bundled_directory.clone();
                             let mut skills = self.skills.write().await;
                             skills.instance_skills = new_instance.instance_skills;
-                            for (k, v) in &new_instance.skill_base_dirs {
-                                skills.skill_base_dirs.insert(k.clone(), v.clone());
+                            skills.skill_base_dirs.clear();
+                            let bundled_names =
+                                skills.bundled_skills.keys().cloned().collect::<Vec<_>>();
+                            for name in bundled_names {
+                                skills
+                                    .skill_base_dirs
+                                    .insert(name.clone(), bundled_dir.clone());
+                            }
+                            for (k, v) in new_instance.skill_base_dirs {
+                                skills.skill_base_dirs.insert(k, v);
                             }
                         }
 
@@ -1844,22 +1861,26 @@ impl Agent {
                 let bundled_reg =
                     load_skills_from_dir(&bundled_dir, SkillSource::Bundled, bundled_dir.clone())
                         .await;
+                let instance_ok = instance_reg.is_ok();
+                let bundled_ok = bundled_reg.is_ok();
 
                 let mut skills = self.skills.write().await;
+                let mut new_base_dirs = std::collections::BTreeMap::new();
                 if let Ok(reg) = instance_reg {
                     skills.instance_skills = reg.instance_skills;
-                    for (k, v) in &reg.skill_base_dirs {
-                        skills.skill_base_dirs.insert(k.clone(), v.clone());
+                    for (k, v) in reg.skill_base_dirs {
+                        new_base_dirs.insert(k, v);
                     }
                 }
                 if let Ok(reg) = bundled_reg {
                     skills.bundled_skills = reg.bundled_skills;
-                    for (k, v) in &reg.skill_base_dirs {
-                        skills
-                            .skill_base_dirs
-                            .entry(k.clone())
-                            .or_insert_with(|| v.clone());
+                    for (k, v) in reg.skill_base_dirs {
+                        new_base_dirs.entry(k).or_insert(v);
                     }
+                }
+                if instance_ok || bundled_ok {
+                    skills.skill_base_dirs.clear();
+                    skills.skill_base_dirs.extend(new_base_dirs);
                 }
 
                 let count = skills.len();
@@ -2030,10 +2051,19 @@ impl Agent {
                         )
                         .await
                         {
+                            let bundled_dir = self.config.agents.bundled_directory.clone();
                             let mut agents = self.agents.write().await;
                             agents.instance_skills = new_instance.instance_skills;
-                            for (k, v) in &new_instance.skill_base_dirs {
-                                agents.skill_base_dirs.insert(k.clone(), v.clone());
+                            agents.skill_base_dirs.clear();
+                            let bundled_names =
+                                agents.bundled_skills.keys().cloned().collect::<Vec<_>>();
+                            for name in bundled_names {
+                                agents
+                                    .skill_base_dirs
+                                    .insert(name.clone(), bundled_dir.clone());
+                            }
+                            for (k, v) in new_instance.skill_base_dirs {
+                                agents.skill_base_dirs.insert(k, v);
                             }
                         }
 
@@ -2058,22 +2088,26 @@ impl Agent {
                 let bundled_reg =
                     load_skills_from_dir(&bundled_dir, SkillSource::Bundled, bundled_dir.clone())
                         .await;
+                let instance_ok = instance_reg.is_ok();
+                let bundled_ok = bundled_reg.is_ok();
 
                 let mut agents = self.agents.write().await;
+                let mut new_base_dirs = std::collections::BTreeMap::new();
                 if let Ok(reg) = instance_reg {
                     agents.instance_skills = reg.instance_skills;
-                    for (k, v) in &reg.skill_base_dirs {
-                        agents.skill_base_dirs.insert(k.clone(), v.clone());
+                    for (k, v) in reg.skill_base_dirs {
+                        new_base_dirs.insert(k, v);
                     }
                 }
                 if let Ok(reg) = bundled_reg {
                     agents.bundled_skills = reg.bundled_skills;
-                    for (k, v) in &reg.skill_base_dirs {
-                        agents
-                            .skill_base_dirs
-                            .entry(k.clone())
-                            .or_insert_with(|| v.clone());
+                    for (k, v) in reg.skill_base_dirs {
+                        new_base_dirs.entry(k).or_insert(v);
                     }
+                }
+                if instance_ok || bundled_ok {
+                    agents.skill_base_dirs.clear();
+                    agents.skill_base_dirs.extend(new_base_dirs);
                 }
 
                 let count = agents.len();
@@ -2423,6 +2457,21 @@ mod tests {
         assert!(
             !source.contains(&stream_status_var),
             "agent.rs must not clone a separate stream-status sender for tool progress"
+        );
+    }
+
+    #[test]
+    fn test_reloads_clear_base_dir_maps_before_repopulation() {
+        let source = include_str!("agent.rs");
+        let skills_clear_count = source.matches("skills.skill_base_dirs.clear();").count();
+        let agents_clear_count = source.matches("agents.skill_base_dirs.clear();").count();
+        assert!(
+            skills_clear_count >= 3,
+            "skills base-dir map must be cleared in all reload/write paths"
+        );
+        assert!(
+            agents_clear_count >= 3,
+            "agents base-dir map must be cleared in all reload/write paths"
         );
     }
 

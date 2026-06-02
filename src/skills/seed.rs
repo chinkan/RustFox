@@ -1,19 +1,42 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// SHA-256 (hex) of a skill/agent directory's primary markdown file
-/// (`SKILL.md`, else `AGENT.md`). Returns `None` if neither exists.
+/// SHA-256 (hex) of a skill/agent directory tree.
+/// Requires a primary markdown (`SKILL.md` or `AGENT.md`) to exist.
 pub fn hash_skill_dir(dir: &Path) -> Option<String> {
-    let primary = ["SKILL.md", "AGENT.md"]
+    ["SKILL.md", "AGENT.md"]
         .into_iter()
         .map(|f| dir.join(f))
         .find(|p| p.is_file())?;
-    let bytes = std::fs::read(&primary).ok()?;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_files(dir, &mut files).ok()?;
+    files.sort();
+
     let mut h = Sha256::new();
-    h.update(&bytes);
+    for file in files {
+        let rel = file.strip_prefix(dir).ok()?;
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        h.update(rel.as_bytes());
+        h.update([0]);
+        h.update(std::fs::read(&file).ok()?);
+    }
     Some(format!("{:x}", h.finalize()))
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Copy every skill subdirectory from `bundled` into `instance` when `instance`
@@ -148,5 +171,23 @@ mod tests {
         let map = lock_map_for(tmp.path());
         assert_eq!(map.len(), 2);
         assert_ne!(map["alpha"], map["beta"]);
+    }
+
+    #[test]
+    fn hash_skill_dir_changes_when_auxiliary_file_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("alpha");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "content-a").unwrap();
+        std::fs::write(skill_dir.join("guide.md"), "v1").unwrap();
+        let before = hash_skill_dir(&skill_dir).expect("hash should exist");
+
+        std::fs::write(skill_dir.join("guide.md"), "v2").unwrap();
+        let after = hash_skill_dir(&skill_dir).expect("hash should exist");
+
+        assert_ne!(
+            before, after,
+            "auxiliary file edits must affect directory hash"
+        );
     }
 }
