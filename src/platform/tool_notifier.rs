@@ -1031,7 +1031,10 @@ mod tests {
     #[test]
     fn test_format_args_preview_multi_arg_keeps_multiple_safe_keys() {
         let long_query = "q".repeat(60);
-        let args = format!(r#"{{"query":"{}","path":"/tmp/example/path"}} "#, long_query);
+        let args = format!(
+            r#"{{"query":"{}","path":"/tmp/example/path"}} "#,
+            long_query
+        );
         let preview = format_args_preview(&args);
         assert!(preview.contains("query:"), "query key missing: {preview}");
         assert!(preview.contains("path:"), "path key missing: {preview}");

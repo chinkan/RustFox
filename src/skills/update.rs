@@ -244,4 +244,29 @@ mod tests {
             "skip path should seed missing lock entry"
         );
     }
+
+    #[tokio::test]
+    async fn unchanged_skill_preserves_existing_lock_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundled = tmp.path().join("bundled");
+        let instance = tmp.path().join("instance");
+        let lock = tmp.path().join("skills-lock.json");
+        write_skill(&bundled, "alpha", "v1");
+        write_skill(&instance, "alpha", "v1");
+
+        write_lock(
+            &lock,
+            &SkillLock {
+                version: 1,
+                skills: BTreeMap::from([("alpha".to_string(), "old-hash".to_string())]),
+            },
+        )
+        .unwrap();
+
+        let report = update_skills(&bundled, &instance, &lock).await.unwrap();
+        assert_eq!(report.skipped, vec!["alpha".to_string()]);
+
+        let seeded = read_lock(&lock);
+        assert_eq!(seeded.skills.get("alpha"), Some(&"old-hash".to_string()));
+    }
 }
