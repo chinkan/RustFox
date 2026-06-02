@@ -242,7 +242,7 @@ pub struct LearningConfig {
 }
 
 fn default_model() -> String {
-    "moonshotai/kimi-k2.5".to_string()
+    "moonshotai/kimi-k2.6".to_string()
 }
 
 fn default_base_url() -> String {
