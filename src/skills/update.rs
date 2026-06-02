@@ -55,7 +55,8 @@ fn write_lock(lock_path: &Path, lock: &SkillLock) -> Result<()> {
 /// - missing in instance → copy in (updated)
 /// - present, instance hash == bundled hash → unchanged (skipped)
 /// - present, instance hash == lock hash (and != bundled) → overwrite (updated)
-/// - present, instance hash differs from both → back up `*.bak`, overwrite (backed_up)
+/// - present, instance hash differs from both → rename entire instance dir to
+///   `<name>.bak` (preserving all files), then copy bundled dir in (backed_up)
 ///
 /// Instance-only skills (absent from `bundled`) are never touched.
 pub async fn update_skills(
@@ -106,25 +107,21 @@ pub async fn update_skills(
         let unmodified = lock_hash.is_some() && lock_hash.as_deref() == instance_hash.as_deref();
 
         if !unmodified {
-            // Back up the primary file to a sibling path OUTSIDE the dir being replaced.
-            for f in ["SKILL.md", "AGENT.md"] {
-                let p = dst.join(f);
-                if p.is_file() {
-                    let bak = instance.join(format!("{name}.{f}.bak.tmp"));
-                    let _ = tokio::fs::copy(&p, &bak).await;
-                }
-            }
-            let _ = tokio::fs::remove_dir_all(&dst).await;
+            // Rename the entire instance directory to <name>.bak, preserving all
+            // user-added or user-modified files (not just SKILL.md/AGENT.md).
+            let dst_bak = instance.join(format!("{name}.bak"));
+            let _ = tokio::fs::remove_dir_all(&dst_bak).await;
+            tokio::fs::rename(&dst, &dst_bak)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to back up '{name}' to {}",
+                        dst_bak.display()
+                    )
+                })?;
             copy_dir_recursive_pub(&src, &dst).await?;
-            // Move the temp backups into the freshly-copied dir as <file>.bak
-            for f in ["SKILL.md", "AGENT.md"] {
-                let bak = instance.join(format!("{name}.{f}.bak.tmp"));
-                if bak.is_file() {
-                    let _ = tokio::fs::rename(&bak, dst.join(format!("{f}.bak"))).await;
-                }
-            }
             lock.skills.insert(name.clone(), bundled_hash);
-            tracing::info!("Updated locally-modified skill '{name}' (backup saved as *.bak)");
+            tracing::info!("Updated locally-modified skill '{name}' (backup saved as {name}.bak)");
             report.backed_up.push(name);
         } else {
             let _ = tokio::fs::remove_dir_all(&dst).await;
@@ -200,7 +197,7 @@ mod tests {
             "v2"
         );
         assert_eq!(
-            std::fs::read_to_string(instance.join("alpha/SKILL.md.bak")).unwrap(),
+            std::fs::read_to_string(instance.join("alpha.bak/SKILL.md")).unwrap(),
             "user-edit"
         );
     }
