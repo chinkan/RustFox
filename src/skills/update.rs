@@ -113,12 +113,7 @@ pub async fn update_skills(
             let _ = tokio::fs::remove_dir_all(&dst_bak).await;
             tokio::fs::rename(&dst, &dst_bak)
                 .await
-                .with_context(|| {
-                    format!(
-                        "Failed to back up '{name}' to {}",
-                        dst_bak.display()
-                    )
-                })?;
+                .with_context(|| format!("Failed to back up '{name}' to {}", dst_bak.display()))?;
             copy_dir_recursive_pub(&src, &dst).await?;
             lock.skills.insert(name.clone(), bundled_hash);
             tracing::info!("Updated locally-modified skill '{name}' (backup saved as {name}.bak)");
