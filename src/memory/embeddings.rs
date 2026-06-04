@@ -22,6 +22,8 @@ pub struct EmbeddingConfig {
 struct EmbeddingRequest {
     model: String,
     input: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +76,7 @@ impl EmbeddingEngine {
         let request = EmbeddingRequest {
             model: config.model.clone(),
             input: vec![text.to_string()],
+            dimensions: Some(config.dimensions),
         };
 
         let response = self
@@ -97,11 +100,21 @@ impl EmbeddingEngine {
             .await
             .context("Failed to parse embedding response")?;
 
-        resp.data
+        let embedding = resp.data
             .into_iter()
             .next()
             .map(|d| d.embedding)
-            .context("No embedding returned from API")
+            .context("No embedding returned from API")?;
+
+        if embedding.len() != config.dimensions {
+            anyhow::bail!(
+                "Embedding dimension mismatch: model '{}' returned {} dimensions but config expects {}. \
+                 Update [embedding].dimensions in config.toml to {}.",
+                config.model, embedding.len(), config.dimensions, embedding.len()
+            );
+        }
+
+        Ok(embedding)
     }
 
     /// Try to generate an embedding, returning None if not available or on error
