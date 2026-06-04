@@ -293,6 +293,11 @@ impl MemoryStore {
         conn.execute_batch("ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;")
             .ok(); // ok() because ALTER TABLE fails if column already exists — that's intentional
 
+        conn.execute_batch(
+            "ALTER TABLE conversations ADD COLUMN is_archived INTEGER DEFAULT 0;",
+        )
+        .ok(); // safe no-op: ALTER TABLE fails with "duplicate column" on re-run
+
         // Stored embedding dimension (None if legacy DB without schema_meta row)
         let raw: Option<String> = conn
             .query_row(
