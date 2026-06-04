@@ -100,7 +100,8 @@ impl EmbeddingEngine {
             .await
             .context("Failed to parse embedding response")?;
 
-        let embedding = resp.data
+        let embedding = resp
+            .data
             .into_iter()
             .next()
             .map(|d| d.embedding)
