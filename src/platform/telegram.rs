@@ -75,7 +75,7 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
     use teloxide::types::BotCommand;
     vec![
         BotCommand::new("start", "Show the welcome message and command help"),
-        BotCommand::new("clear", "Clear the current conversation history"),
+        BotCommand::new("clear", "Archive the current conversation, keeping past messages searchable"),
         BotCommand::new("tools", "List available built-in and MCP tools"),
         BotCommand::new("skills", "List loaded skills"),
         BotCommand::new("verbose", "Toggle tool-call progress display"),
@@ -208,7 +208,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(msg.chat.id, escape_text("Conversation cleared."))
+        bot.send_message(msg.chat.id, escape_text("Conversation archived. Past messages remain searchable."))
             .parse_mode(ParseMode::MarkdownV2)
             .await?;
         return Ok(());
