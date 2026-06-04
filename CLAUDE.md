@@ -38,6 +38,19 @@ Copy `config.example.toml` to `config.toml` and fill in credentials. The `config
 - `openrouter.api_key` - OpenRouter API key
 - `sandbox.allowed_directory` - Directory for sandboxed file/command operations
 
+### Home directory
+
+RustFox stores all state under a single home directory (default `~/.rustfox`),
+resolved as: `RUSTFOX_HOME` env (absolute) → `[general].home` config → `~/.rustfox`.
+Layout: `config.toml`, `rustfox.db`, `skills/`, `agents/`, `workspace/` (the
+sandbox), `artifacts/`, `user_model.md`. Each path can be pinned to an absolute
+location in `config.toml`; unset paths fall back to the home default. Run
+isolated instances with `RUSTFOX_HOME=...`. See
+`docs/persistent-home-directory.md`. Path resolution lives in `src/home.rs`
+(`Config::resolve` writes the resolved absolute paths back into the config).
+Bundled skills/agents are seed-copied on first run; `/update-skills` re-syncs
+them using `<home>/skills-lock.json`.
+
 ## Architecture
 
 ```

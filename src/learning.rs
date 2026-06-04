@@ -4,7 +4,7 @@ use tracing::{info, warn};
 
 use crate::llm::{ChatMessage, LlmClient};
 use crate::skills::loader::load_skills_from_dir;
-use crate::skills::SkillRegistry;
+use crate::skills::{SkillRegistry, SkillSource};
 
 /// Minimum number of conversation messages needed before updating the user model.
 const MIN_MESSAGES_FOR_USER_MODEL: usize = 3;
@@ -174,7 +174,7 @@ async fn extract_skill_from_conversation(
     info!("Written auto-generated skill: {}", skill_path.display());
 
     // Hot-reload skills.
-    match load_skills_from_dir(skills_dir).await {
+    match load_skills_from_dir(skills_dir, SkillSource::Instance, skills_dir.to_path_buf()).await {
         Ok(new_registry) => {
             let count = new_registry.len();
             let mut reg = skills.write().await;
@@ -268,7 +268,7 @@ pub async fn self_patch_skill(
     );
 
     // Hot-reload skills.
-    match load_skills_from_dir(skills_dir).await {
+    match load_skills_from_dir(skills_dir, SkillSource::Instance, skills_dir.to_path_buf()).await {
         Ok(new_registry) => {
             let count = new_registry.len();
             let mut reg = skills.write().await;

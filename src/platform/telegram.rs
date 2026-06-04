@@ -168,6 +168,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
              /skills - List loaded skills\n\
+             /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
              /verbose - Toggle tool call progress display\n\
              /queryrewrite - Toggle query rewriting for memory search",
         );
@@ -208,6 +209,47 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
         }
+        return Ok(());
+    }
+
+    if text == "/updateskills" || text == "/update-skills" {
+        let bundled_skills = agent.config.skills.bundled_directory.clone();
+        let bundled_agents = agent.config.agents.bundled_directory.clone();
+        let home = agent.config.resolved_home.clone();
+        let lock_for = |name: &str| -> std::path::PathBuf {
+            home.clone()
+                .map(|h| h.join(name))
+                .unwrap_or_else(|| std::path::PathBuf::from(name))
+        };
+
+        let mut lines = Vec::new();
+        match crate::skills::update::update_skills(
+            &bundled_skills,
+            &agent.config.skills.directory,
+            &lock_for("skills-lock.json"),
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Skills — {}", r.summary())),
+            Err(e) => lines.push(format!("Skills update failed: {e}")),
+        }
+        match crate::skills::update::update_skills(
+            &bundled_agents,
+            &agent.config.agents.directory,
+            &lock_for("agents-lock.json"),
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Agents — {}", r.summary())),
+            Err(e) => lines.push(format!("Agents update failed: {e}")),
+        }
+
+        let (s, a) = agent.reload_skills_and_agents().await;
+        lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
+
+        bot.send_message(msg.chat.id, escape_text(&lines.join("\n")))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -307,10 +349,22 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             let mut notifier =
                 crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id);
             notifier.start().await;
+            let mut handled_finished = false;
             while let Some(event) = rx.recv().await {
-                notifier.handle_event(event).await;
+                match event {
+                    crate::platform::tool_notifier::ToolEvent::Finished { success } => {
+                        notifier.finish(success).await;
+                        handled_finished = true;
+                        break;
+                    }
+                    other => notifier.handle_event(other).await,
+                }
             }
-            notifier.finish().await;
+            // If the channel closed without an explicit Finished event, preserve
+            // previous behaviour and treat it as a successful finish.
+            if !handled_finished {
+                notifier.finish(true).await;
+            }
         }))
     } else {
         None
@@ -450,6 +504,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
+    // Keep an owned clone of the tool_event_tx so we can send a terminal
+    // Finished event after processing completes.
+    let agent_tool_event_tx = tool_event_tx.clone();
     let process_result = match agent
         .process_message(&incoming, tool_event_tx, Some(stream_token_tx))
         .await
@@ -460,6 +517,15 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             Err(e)
         }
     };
+
+    let process_success = process_result.is_ok();
+    if let Some(tx) = agent_tool_event_tx {
+        let _ = tx
+            .send(crate::platform::tool_notifier::ToolEvent::Finished {
+                success: process_success,
+            })
+            .await;
+    }
 
     // Drop the sender to signal the notifier to stop, then await cleanup.
     // tool_event_tx is already moved into process_message — it's dropped when process_message returns.

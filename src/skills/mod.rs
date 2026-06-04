@@ -1,7 +1,17 @@
 pub mod loader;
+pub mod seed;
+pub mod update;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tracing::info;
+
+/// Whether a skill was loaded from the instance (custom/writable) or bundled (read-only) directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSource {
+    Instance,
+    Bundled,
+}
 
 /// A loaded skill from a markdown file
 #[derive(Debug, Clone)]
@@ -27,10 +37,18 @@ pub struct Skill {
     pub supervisor_required_caps: Vec<String>,
 }
 
-/// Registry of all loaded skills
+/// Registry of all loaded skills.
+///
+/// Maintains two layers — instance (custom/writable) and bundled (read-only templates) —
+/// with instance names shadowing bundled names on collision. A `skill_base_dirs` map
+/// tracks the base directory for each skill so tools like `read_skill_file` can resolve
+/// the correct filesystem path.
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    pub instance_skills: HashMap<String, Skill>,
+    pub bundled_skills: HashMap<String, Skill>,
+    /// Maps skill name → absolute base directory for read_skill_file path resolution.
+    pub skill_base_dirs: HashMap<String, PathBuf>,
 }
 
 impl Default for SkillRegistry {
@@ -42,39 +60,66 @@ impl Default for SkillRegistry {
 impl SkillRegistry {
     pub fn new() -> Self {
         Self {
-            skills: HashMap::new(),
+            instance_skills: HashMap::new(),
+            bundled_skills: HashMap::new(),
+            skill_base_dirs: HashMap::new(),
         }
     }
 
-    /// Register a skill
-    pub fn register(&mut self, skill: Skill) {
-        info!("Registered skill: {} — {}", skill.name, skill.description);
-        self.skills.insert(skill.name.clone(), skill);
+    /// Register a skill with its source and base directory.
+    pub fn register(&mut self, skill: Skill, source: SkillSource, base_dir: PathBuf) {
+        let name = skill.name.clone();
+        match source {
+            SkillSource::Instance => {
+                self.instance_skills.insert(name.clone(), skill);
+                self.skill_base_dirs.insert(name.clone(), base_dir);
+            }
+            SkillSource::Bundled => {
+                self.bundled_skills.insert(name.clone(), skill);
+                // Bundled path does NOT overwrite an existing instance path
+                self.skill_base_dirs.entry(name.clone()).or_insert(base_dir);
+            }
+        }
+        info!("Registered skill: {} — {:?}", name, source);
     }
 
-    /// Get a skill by name
+    /// Get a skill by name. Instance shadows bundled.
     #[allow(dead_code)]
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+        self.instance_skills
+            .get(name)
+            .or_else(|| self.bundled_skills.get(name))
     }
 
-    /// List all registered skills
+    /// Returns the base directory for a skill, used by read_skill_file for path resolution.
+    pub fn base_dir(&self, name: &str) -> Option<&Path> {
+        self.skill_base_dirs.get(name).map(|p| p.as_path())
+    }
+
+    /// List all unique skills (instance names shadow bundled).
     pub fn list(&self) -> Vec<&Skill> {
-        self.skills.values().collect()
+        let mut all: Vec<&Skill> = self.instance_skills.values().collect();
+        for skill in self.bundled_skills.values() {
+            if !self.instance_skills.contains_key(&skill.name) {
+                all.push(skill);
+            }
+        }
+        all
     }
 
     /// Build context string for the system prompt (skills directory).
     /// Instruction skills (no model field) are loaded via `read_skill_file` when relevant.
     /// Subagent skills (model field set) are invoked via `invoke_agent`.
     pub fn build_context(&self) -> String {
-        if self.skills.is_empty() {
+        let unique_skills = self.list();
+        if unique_skills.is_empty() {
             return String::new();
         }
 
         let mut instruction_lines = Vec::new();
         let mut subagent_section = String::new();
 
-        for skill in self.skills.values() {
+        for skill in &unique_skills {
             // A skill is treated as a subagent if it has a model explicitly set
             // OR if it declares a tools whitelist (meaning it needs sandboxed execution).
             // In both cases the LLM invokes it via invoke_agent(); the model used is
@@ -120,12 +165,13 @@ impl SkillRegistry {
     /// Build context string for the agents directory (agents with their own model/tools).
     /// All agents are invoked via `invoke_agent`.
     pub fn build_agents_context(&self) -> String {
-        if self.skills.is_empty() {
+        let unique_agents = self.list();
+        if unique_agents.is_empty() {
             return String::new();
         }
 
         let mut lines = Vec::new();
-        for agent in self.skills.values() {
+        for agent in &unique_agents {
             lines.push(format!(
                 "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
                 agent.name, agent.description, agent.name
@@ -140,18 +186,26 @@ impl SkillRegistry {
     }
 
     pub fn len(&self) -> usize {
-        self.skills.len()
+        let mut names = std::collections::HashSet::new();
+        for name in self.instance_skills.keys() {
+            names.insert(name);
+        }
+        for name in self.bundled_skills.keys() {
+            names.insert(name);
+        }
+        names.len()
     }
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
+        self.instance_skills.is_empty() && self.bundled_skills.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn make_skill(name: &str, description: &str, content: &str, model: Option<&str>) -> Skill {
         Skill {
@@ -168,15 +222,86 @@ mod tests {
     }
 
     #[test]
+    fn test_instance_shadows_bundled() {
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            make_skill("duplicate", "Instance version", "instance content", None),
+            SkillSource::Instance,
+            PathBuf::from("/instance"),
+        );
+        registry.register(
+            make_skill("duplicate", "Bundled version", "bundled content", None),
+            SkillSource::Bundled,
+            PathBuf::from("/bundled"),
+        );
+
+        // get() should return instance version
+        let skill = registry.get("duplicate").unwrap();
+        assert_eq!(skill.content, "instance content");
+        assert_eq!(skill.description, "Instance version");
+
+        // base_dir should return instance path
+        assert_eq!(
+            registry.base_dir("duplicate").unwrap(),
+            Path::new("/instance")
+        );
+
+        // list() should only include the instance version (not duplicate)
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["duplicate"]);
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_unique_skills_from_both_layers() {
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            make_skill("alpha", "Instance only", "", None),
+            SkillSource::Instance,
+            PathBuf::from("/instance"),
+        );
+        registry.register(
+            make_skill("beta", "Bundled only", "", None),
+            SkillSource::Bundled,
+            PathBuf::from("/bundled"),
+        );
+
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn test_base_dir_bundled_only() {
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            make_skill("bundled-only", "Bundled", "", None),
+            SkillSource::Bundled,
+            PathBuf::from("/bundled/path"),
+        );
+
+        assert_eq!(
+            registry.base_dir("bundled-only").unwrap(),
+            Path::new("/bundled/path")
+        );
+        assert!(registry.get("bundled-only").is_some());
+    }
+
+    #[test]
     fn test_build_context_instruction_skill_metadata_only() {
         // Instruction skills (no model): metadata only in system prompt; agent loads full content via read_skill_file.
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "my-skill",
-            "Does things",
-            "# Instructions\nDo this and that.",
-            None, // no model = instruction skill
-        ));
+        registry.register(
+            make_skill(
+                "my-skill",
+                "Does things",
+                "# Instructions\nDo this and that.",
+                None, // no model = instruction skill
+            ),
+            SkillSource::Instance,
+            PathBuf::from("/tmp/test"),
+        );
         let ctx = registry.build_context();
         assert!(ctx.contains("my-skill"));
         assert!(ctx.contains("Does things"));
@@ -191,12 +316,16 @@ mod tests {
     fn test_build_context_subagent_skill_injects_metadata_only() {
         // Skills with a model field get only name + description + invoke hint
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "thread-writer",
-            "Use when writing Thread posts.",
-            "# Super Secret Instructions\nLong style guide...",
-            Some("anthropic/claude-sonnet-4-6"),
-        ));
+        registry.register(
+            make_skill(
+                "thread-writer",
+                "Use when writing Thread posts.",
+                "# Super Secret Instructions\nLong style guide...",
+                Some("anthropic/claude-sonnet-4-6"),
+            ),
+            SkillSource::Instance,
+            PathBuf::from("/tmp/test"),
+        );
         let ctx = registry.build_context();
         // Metadata present
         assert!(ctx.contains("thread-writer"));
@@ -217,18 +346,26 @@ mod tests {
     fn test_build_context_mixed_skills() {
         // Instruction skill: metadata + read_skill_file hint only (no body). Subagent: metadata only (no body).
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "instruction-skill",
-            "An instruction skill",
-            "Follow these instructions.",
-            None,
-        ));
-        registry.register(make_skill(
-            "subagent-skill",
-            "A subagent skill",
-            "Secret subagent body.",
-            Some("some/model"),
-        ));
+        registry.register(
+            make_skill(
+                "instruction-skill",
+                "An instruction skill",
+                "Follow these instructions.",
+                None,
+            ),
+            SkillSource::Instance,
+            PathBuf::from("/tmp/test"),
+        );
+        registry.register(
+            make_skill(
+                "subagent-skill",
+                "A subagent skill",
+                "Secret subagent body.",
+                Some("some/model"),
+            ),
+            SkillSource::Instance,
+            PathBuf::from("/tmp/test"),
+        );
         let ctx = registry.build_context();
         assert!(ctx.contains("You have the following skills available"));
         assert!(ctx.contains("Available Subagent Skills"));

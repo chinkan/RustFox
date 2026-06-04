@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub telegram: TelegramConfig,
     pub openrouter: OpenRouterConfig,
+    #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -26,13 +27,16 @@ pub struct Config {
     pub learning: LearningConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Absolute home root resolved at load time (not read from TOML).
+    #[serde(skip)]
+    pub resolved_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SupervisorConfig {
     #[serde(default = "default_autonomy_mode")]
     pub default_autonomy_mode: String,
-    #[serde(default = "default_artifacts_dir")]
+    #[serde(default)]
     pub artifacts_dir: std::path::PathBuf,
     #[serde(default)]
     pub risk: RiskThresholdsConfig,
@@ -71,7 +75,7 @@ fn default_autonomy_mode() -> String {
 }
 
 fn default_artifacts_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("supervisor/artifacts")
+    std::path::PathBuf::new()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -104,8 +108,9 @@ pub struct OpenRouterConfig {
     pub system_prompt: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct SandboxConfig {
+    #[serde(default)]
     pub allowed_directory: PathBuf,
 }
 
@@ -152,7 +157,7 @@ pub struct McpServerConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
-    #[serde(default = "default_db_path")]
+    #[serde(default)]
     pub database_path: PathBuf,
     #[serde(default = "default_rag_limit")]
     pub rag_limit: usize,
@@ -174,14 +179,20 @@ pub struct MemoryConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SkillsConfig {
-    #[serde(default = "default_skills_dir")]
+    #[serde(default)]
     pub directory: PathBuf,
+    /// Bundled skills directory (read-only templates, default CWD-relative `./skills/`).
+    #[serde(default = "default_bundled_skills_dir")]
+    pub bundled_directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentsConfig {
-    #[serde(default = "default_agents_dir")]
+    #[serde(default)]
     pub directory: PathBuf,
+    /// Bundled agents directory (read-only templates, default CWD-relative `./agents/`).
+    #[serde(default = "default_bundled_agents_dir")]
+    pub bundled_directory: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -189,6 +200,9 @@ pub struct GeneralConfig {
     /// Optional location string injected into the system prompt (e.g. "Tokyo, Japan")
     #[serde(default)]
     pub location: Option<String>,
+    /// Optional absolute path overriding the default `~/.rustfox` home root.
+    #[serde(default)]
+    pub home: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -211,7 +225,7 @@ pub struct LangSmithConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LearningConfig {
     /// Path to the user model file (Honcho-style USER.md).
-    #[serde(default = "default_user_model_path")]
+    #[serde(default)]
     pub user_model_path: PathBuf,
     /// Whether post-task skill extraction is enabled.
     #[serde(default = "default_true")]
@@ -228,7 +242,7 @@ pub struct LearningConfig {
 }
 
 fn default_model() -> String {
-    "moonshotai/kimi-k2.5".to_string()
+    "moonshotai/kimi-k2.6".to_string()
 }
 
 fn default_base_url() -> String {
@@ -268,12 +282,9 @@ fn default_system_prompt() -> String {
      - For complex multi-step problems: invoke the problem-solver subagent\n\
      \n\
      ## Sandbox\n\
-     File and command tools operate only within the allowed sandbox directory."
+     File and command tools operate only within your persistent workspace directory.\n\
+     The workspace survives restarts — use it to keep reusable scripts, programs, and notes for the long term."
         .to_string()
-}
-
-fn default_db_path() -> PathBuf {
-    PathBuf::from("rustfox.db")
 }
 
 fn default_rag_limit() -> usize {
@@ -292,14 +303,6 @@ fn default_summarize_cron() -> String {
     "0 0 2 * * *".to_string()
 }
 
-fn default_skills_dir() -> PathBuf {
-    PathBuf::from("skills")
-}
-
-fn default_agents_dir() -> PathBuf {
-    PathBuf::from("agents")
-}
-
 fn default_embedding_base_url() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
@@ -314,7 +317,7 @@ fn default_embedding_dimensions() -> usize {
 
 fn default_memory_config() -> MemoryConfig {
     MemoryConfig {
-        database_path: default_db_path(),
+        database_path: PathBuf::new(),
         rag_limit: default_rag_limit(),
         max_raw_messages: default_max_raw_messages(),
         summarize_threshold: default_summarize_threshold(),
@@ -325,13 +328,15 @@ fn default_memory_config() -> MemoryConfig {
 
 fn default_skills_config() -> SkillsConfig {
     SkillsConfig {
-        directory: default_skills_dir(),
+        directory: PathBuf::new(),
+        bundled_directory: default_bundled_skills_dir(),
     }
 }
 
 fn default_agents_config() -> AgentsConfig {
     AgentsConfig {
-        directory: default_agents_dir(),
+        directory: PathBuf::new(),
+        bundled_directory: default_bundled_agents_dir(),
     }
 }
 
@@ -358,8 +363,12 @@ fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
 }
 
-fn default_user_model_path() -> PathBuf {
-    PathBuf::from("memory/USER.md")
+fn default_bundled_skills_dir() -> PathBuf {
+    PathBuf::from("skills")
+}
+
+fn default_bundled_agents_dir() -> PathBuf {
+    PathBuf::from("agents")
 }
 
 fn default_true() -> bool {
@@ -380,7 +389,7 @@ fn default_user_model_cron() -> String {
 
 fn default_learning_config() -> LearningConfig {
     LearningConfig {
-        user_model_path: default_user_model_path(),
+        user_model_path: PathBuf::new(),
         skill_extraction_enabled: true,
         skill_extraction_threshold: default_skill_extraction_threshold(),
         user_model_update_interval: default_user_model_update_interval(),
@@ -404,20 +413,101 @@ impl Config {
         self.agent.empty_response_retry_limit
     }
 
+    /// Resolve the home root and every data path, create directories, and write
+    /// the resolved paths back into the config fields. Unset paths are
+    /// materialized to absolute paths under the home root; absolute overrides
+    /// are preserved verbatim; relative overrides are kept as-is (legacy mode)
+    /// and a warning is emitted for each. Returns any legacy-path warnings for
+    /// the caller to log.
+    pub fn resolve(&mut self) -> Result<Vec<crate::home::LegacyPathWarning>> {
+        use crate::home::{
+            ensure_dirs, resolve_data_path, resolve_home, PathOrigin, ResolvedPaths,
+        };
+
+        let env_home = std::env::var("RUSTFOX_HOME").ok();
+        let config_home = self.general.as_ref().and_then(|g| g.home.as_deref());
+        let os_home = dirs::home_dir();
+        let home = resolve_home(env_home.as_deref(), config_home, os_home.as_deref())?;
+
+        let mut warnings = Vec::new();
+        let mut resolve_one = |label: &str, field: &Path, subpath: &str| -> PathBuf {
+            let (path, origin) = resolve_data_path(field, &home, subpath);
+            if origin == PathOrigin::RelativeLegacy {
+                warnings.push(crate::home::LegacyPathWarning {
+                    label: label.to_string(),
+                    current: path.clone(),
+                    home_default: home.join(subpath),
+                });
+            }
+            path
+        };
+
+        let workspace = resolve_one(
+            "sandbox.allowed_directory",
+            &self.sandbox.allowed_directory,
+            "workspace",
+        );
+        let database = resolve_one(
+            "memory.database_path",
+            &self.memory.database_path,
+            "rustfox.db",
+        );
+        let skills = resolve_one("skills.directory", &self.skills.directory, "skills");
+        let agents = resolve_one("agents.directory", &self.agents.directory, "agents");
+        let artifacts = resolve_one(
+            "supervisor.artifacts_dir",
+            &self.supervisor.artifacts_dir,
+            "artifacts",
+        );
+        let user_model = resolve_one(
+            "learning.user_model_path",
+            &self.learning.user_model_path,
+            "user_model.md",
+        );
+
+        let paths = ResolvedPaths {
+            home: home.clone(),
+            workspace: workspace.clone(),
+            database: database.clone(),
+            skills: skills.clone(),
+            agents: agents.clone(),
+            artifacts: artifacts.clone(),
+            user_model: user_model.clone(),
+        };
+        ensure_dirs(&paths)?;
+
+        // Resolve bundled directories relative to CWD (not home) since they
+        // ship alongside the binary / project root.
+        let cwd = std::env::current_dir()?;
+        if !self.skills.bundled_directory.is_absolute() {
+            self.skills.bundled_directory = cwd.join(&self.skills.bundled_directory);
+        }
+        if !self.agents.bundled_directory.is_absolute() {
+            self.agents.bundled_directory = cwd.join(&self.agents.bundled_directory);
+        }
+
+        self.sandbox.allowed_directory = workspace;
+        self.memory.database_path = database;
+        self.skills.directory = skills;
+        self.agents.directory = agents;
+        self.supervisor.artifacts_dir = artifacts;
+        self.learning.user_model_path = user_model;
+        self.resolved_home = Some(home);
+
+        Ok(warnings)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
-        // Validate sandbox directory exists
-        if !config.sandbox.allowed_directory.exists() {
-            std::fs::create_dir_all(&config.sandbox.allowed_directory).with_context(|| {
-                format!(
-                    "Failed to create sandbox directory: {}",
-                    config.sandbox.allowed_directory.display()
-                )
-            })?;
+        let warnings = config
+            .resolve()
+            .with_context(|| "Failed to resolve home directory paths")?;
+        for w in &warnings {
+            tracing::warn!("{}", w.render());
         }
 
         Ok(config)
@@ -427,6 +517,94 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_toml() -> &'static str {
+        r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+        "#
+    }
+
+    #[test]
+    fn resolve_fills_unset_paths_under_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.resolved_home.as_ref().unwrap(), &home);
+        assert_eq!(cfg.sandbox.allowed_directory, home.join("workspace"));
+        assert_eq!(cfg.memory.database_path, home.join("rustfox.db"));
+        assert_eq!(cfg.skills.directory, home.join("skills"));
+        assert_eq!(cfg.agents.directory, home.join("agents"));
+        assert_eq!(cfg.supervisor.artifacts_dir, home.join("artifacts"));
+        assert_eq!(cfg.learning.user_model_path, home.join("user_model.md"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_keeps_absolute_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        // Use an absolute path under the (writable) tempdir so ensure_dirs can
+        // create its parent; the intent is to verify an absolute override is
+        // preserved verbatim and emits no legacy warning.
+        let custom_db = tmp.path().join("custom.db");
+        cfg.memory.database_path = custom_db.clone();
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.memory.database_path, custom_db);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_warns_on_relative_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home),
+        });
+        cfg.skills.directory = std::path::PathBuf::from("my-skills");
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(cfg.skills.directory, std::path::PathBuf::from("my-skills"));
+        assert!(warnings.iter().any(|w| w.label == "skills.directory"));
+    }
+
+    #[test]
+    fn load_resolves_paths_to_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let cfg_path = tmp.path().join("config.toml");
+        let toml = format!(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [general]
+            home = "{}"
+            "#,
+            home.display()
+        );
+        std::fs::write(&cfg_path, toml).unwrap();
+        let cfg = Config::load(&cfg_path).unwrap();
+        assert_eq!(cfg.sandbox.allowed_directory, home.join("workspace"));
+        assert!(cfg.sandbox.allowed_directory.is_dir());
+        assert_eq!(cfg.resolved_home.unwrap(), home);
+    }
 
     #[test]
     fn test_langsmith_config_optional() {
@@ -579,10 +757,9 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
-        assert_eq!(
-            cfg.supervisor.artifacts_dir,
-            std::path::PathBuf::from("supervisor/artifacts")
-        );
+        // artifacts_dir now defaults to the empty "unset" sentinel; it is
+        // materialized to an absolute path only by Config::resolve().
+        assert_eq!(cfg.supervisor.artifacts_dir, std::path::PathBuf::new());
     }
 
     #[test]

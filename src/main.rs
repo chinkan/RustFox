@@ -12,7 +12,7 @@ use rustfox::memory::MemoryStore;
 use rustfox::platform;
 use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
-use rustfox::skills::loader::load_skills_from_dir;
+use rustfox::skills::{loader::load_skills_from_dir, SkillSource};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,7 +29,22 @@ async fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+        .unwrap_or_else(|| {
+            let cwd = PathBuf::from("config.toml");
+            if cwd.exists() {
+                return cwd;
+            }
+            let env_home = std::env::var("RUSTFOX_HOME").ok();
+            if let Some(home) =
+                rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
+            {
+                let candidate = home.join("config.toml");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+            cwd
+        });
 
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
@@ -38,6 +53,9 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully");
     info!("  Model: {}", config.openrouter.model);
     info!("  Sandbox: {}", config.sandbox.allowed_directory.display());
+    if let Some(home) = &config.resolved_home {
+        info!("  Home: {}", home.display());
+    }
     info!("  Allowed users: {:?}", config.telegram.allowed_user_ids);
     info!("  MCP servers: {}", config.mcp_servers.len());
     let langsmith = std::sync::Arc::new(rustfox::langsmith::LangSmithClient::new(
@@ -83,12 +101,85 @@ async fn main() -> Result<()> {
     let mut mcp_manager = McpManager::new();
     mcp_manager.connect_all(&mcp_server_configs).await;
 
-    // Load skills from markdown files
-    let skills = load_skills_from_dir(&config.skills.directory).await?;
+    // Seed bundled skills/agents into the instance home on first run.
+    // Seed bundled skills/agents into the instance home on first run.
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.skills.bundled_directory,
+        &config.skills.directory,
+    )
+    .await
+    {
+        warn!("Skill seeding failed: {e}");
+    }
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.agents.bundled_directory,
+        &config.agents.directory,
+    )
+    .await
+    {
+        warn!("Agent seeding failed: {e}");
+    }
+    // Write the home-side lock so /update-skills can diff later (only when seeded
+    // into the home and a lock does not already exist).
+    if let Some(home) = &config.resolved_home {
+        let seed_lock = |lock_name: &str, dir: &std::path::Path| {
+            let lock_path = home.join(lock_name);
+            if !lock_path.exists() {
+                let lock = rustfox::skills::update::SkillLock {
+                    version: 1,
+                    skills: rustfox::skills::seed::lock_map_for(dir),
+                };
+                if let Ok(json) = serde_json::to_string_pretty(&lock) {
+                    let _ = std::fs::write(&lock_path, json);
+                }
+            }
+        };
+        seed_lock("skills-lock.json", &config.skills.directory);
+        seed_lock("agents-lock.json", &config.agents.directory);
+    }
+
+    // Load skills from instance and bundled directories (instance shadows bundled)
+    let mut skills = load_skills_from_dir(
+        &config.skills.directory,
+        SkillSource::Instance,
+        config.skills.directory.clone(),
+    )
+    .await?;
+    let bundled_skills = load_skills_from_dir(
+        &config.skills.bundled_directory,
+        SkillSource::Bundled,
+        config.skills.bundled_directory.clone(),
+    )
+    .await?;
+    for skill in bundled_skills.list() {
+        skills.register(
+            skill.clone(),
+            SkillSource::Bundled,
+            config.skills.bundled_directory.clone(),
+        );
+    }
     info!("  Skills: {}", skills.len());
 
-    // Load agents from the agents directory
-    let agents = load_skills_from_dir(&config.agents.directory).await?;
+    // Load agents from instance and bundled directories (instance shadows bundled)
+    let mut agents = load_skills_from_dir(
+        &config.agents.directory,
+        SkillSource::Instance,
+        config.agents.directory.clone(),
+    )
+    .await?;
+    let bundled_agents = load_skills_from_dir(
+        &config.agents.bundled_directory,
+        SkillSource::Bundled,
+        config.agents.bundled_directory.clone(),
+    )
+    .await?;
+    for agent in bundled_agents.list() {
+        agents.register(
+            agent.clone(),
+            SkillSource::Bundled,
+            config.agents.bundled_directory.clone(),
+        );
+    }
     info!("  Agents: {}", agents.len());
 
     // Create ScheduledTaskStore sharing the existing SQLite connection

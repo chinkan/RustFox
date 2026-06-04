@@ -66,5 +66,8 @@ base64 = "0.22"
 # Secret-redaction filter (M7.4)
 regex = "1"
 
+# OS home-directory resolution for the persistent home dir (~/.rustfox)
+dirs = "5"
+
 [dev-dependencies]
 tempfile = "3"
