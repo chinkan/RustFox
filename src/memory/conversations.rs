@@ -110,29 +110,13 @@ impl MemoryStore {
         Ok(id)
     }
 
-    /// Clear a conversation (delete all its messages and embeddings)
+    /// Clear a conversation (soft archive: mark as archived, don't delete messages)
     pub async fn clear_conversation(&self, platform: &str, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 
-        // Delete embeddings for messages in this conversation
         conn.execute(
-            "DELETE FROM message_embeddings WHERE rowid IN (
-                SELECT m.rowid FROM messages m
-                JOIN conversations c ON m.conversation_id = c.id
-                WHERE c.platform = ?1 AND c.user_id = ?2
-            )",
-            rusqlite::params![platform, user_id],
-        )?;
-
-        conn.execute(
-            "DELETE FROM messages WHERE conversation_id IN (
-                SELECT id FROM conversations WHERE platform = ?1 AND user_id = ?2
-            )",
-            rusqlite::params![platform, user_id],
-        )?;
-
-        conn.execute(
-            "DELETE FROM conversations WHERE platform = ?1 AND user_id = ?2",
+            "UPDATE conversations SET is_archived = 1, updated_at = datetime('now')
+             WHERE platform = ?1 AND user_id = ?2",
             rusqlite::params![platform, user_id],
         )?;
 
@@ -489,6 +473,50 @@ mod tests {
             "Expected ≤50 messages, got {}",
             messages.len()
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_archives_instead_of_deleting() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_u2")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text("hello world")),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Clear
+        store.clear_conversation("test", "archive_u2").await.unwrap();
+
+        // Messages should still exist in DB
+        let conn = store.conn.lock().await;
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                rusqlite::params![&conv],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(msg_count > 0, "Messages must persist after archive");
+
+        // Conversation should be marked archived
+        let conn2 = store.conn.lock().await;
+        let archived: Option<i64> = conn2
+            .query_row(
+                "SELECT is_archived FROM conversations WHERE id = ?1",
+                rusqlite::params![&conv],
+                |row| row.get(0),
+            )
+            .ok();
+        drop(conn2);
+        assert_eq!(archived, Some(1), "Conversation must be marked archived");
     }
 
     #[tokio::test]
