@@ -140,12 +140,14 @@ impl MemoryStore {
 
         // Load all [SUMMARY] system messages ordered by created_at ASC
         let mut summary_stmt = conn.prepare(
-            "SELECT role, content, tool_calls, tool_call_id
-             FROM messages
-             WHERE conversation_id = ?1
-               AND role = 'system'
-               AND content LIKE '[SUMMARY]%'
-             ORDER BY created_at ASC",
+            "SELECT m.role, m.content, m.tool_calls, m.tool_call_id
+             FROM messages m
+             JOIN conversations c ON m.conversation_id = c.id
+             WHERE m.conversation_id = ?1
+               AND m.role = 'system'
+               AND m.content LIKE '[SUMMARY]%'
+               AND (c.is_archived IS NULL OR c.is_archived = 0)
+             ORDER BY m.created_at ASC",
         )?;
         let summaries = summary_stmt
             .query_map(rusqlite::params![conversation_id], |row| {
@@ -157,11 +159,13 @@ impl MemoryStore {
         // Load the most recent raw_limit non-summary messages, re-ordered ASC
         let mut raw_stmt = conn.prepare(
             "SELECT role, content, tool_calls, tool_call_id FROM (
-                SELECT role, content, tool_calls, tool_call_id, created_at
-                FROM messages
-                WHERE conversation_id = ?1
-                  AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
-                ORDER BY created_at DESC
+                SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.created_at
+                FROM messages m
+                JOIN conversations c ON m.conversation_id = c.id
+                WHERE m.conversation_id = ?1
+                  AND NOT (m.role = 'system' AND m.content LIKE '[SUMMARY]%')
+                  AND (c.is_archived IS NULL OR c.is_archived = 0)
+                ORDER BY m.created_at DESC
                 LIMIT ?2
             ) ORDER BY created_at ASC",
         )?;
@@ -557,5 +561,32 @@ mod tests {
             .unwrap();
         drop(conn2);
         assert_eq!(archived, 0, "New conversation must not be archived");
+    }
+
+    #[tokio::test]
+    async fn test_load_messages_excludes_archived() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_u3")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text("test")),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Archive
+        store.clear_conversation("test", "archive_u3").await.unwrap();
+
+        // load_messages should return empty for an archived conversation
+        let messages = store.load_messages(&conv).await.unwrap();
+        assert!(
+            messages.is_empty(),
+            "Archived conversation should return no messages via load_messages"
+        );
     }
 }
