@@ -15,7 +15,8 @@ pub(crate) fn f32_vec_to_bytes(floats: &[f32]) -> Vec<u8> {
 }
 
 impl MemoryStore {
-    /// Get or create a conversation for a platform user
+    /// Get or create an active (non-archived) conversation for a platform user.
+    /// If all existing conversations for the user are archived, a new one is created.
     pub async fn get_or_create_conversation(
         &self,
         platform: &str,
@@ -27,7 +28,7 @@ impl MemoryStore {
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM conversations
-                 WHERE platform = ?1 AND user_id = ?2
+                 WHERE platform = ?1 AND user_id = ?2 AND (is_archived IS NULL OR is_archived = 0)
                  ORDER BY updated_at DESC LIMIT 1",
                 rusqlite::params![platform, user_id],
                 |row| row.get(0),
@@ -488,5 +489,45 @@ mod tests {
             "Expected ≤50 messages, got {}",
             messages.len()
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_skips_archived() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        // Create a conversation
+        let conv = store
+            .get_or_create_conversation("test", "archive_u1")
+            .await
+            .unwrap();
+
+        // Manually archive it (simulating what clear_conversation will do)
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations SET is_archived = 1 WHERE id = ?1",
+            rusqlite::params![&conv],
+        )
+        .unwrap();
+        drop(conn);
+
+        // get_or_create_conversation should return a NEW conversation
+        let conv2 = store
+            .get_or_create_conversation("test", "archive_u1")
+            .await
+            .unwrap();
+
+        assert_ne!(conv, conv2, "Must create a new conversation when previous is archived");
+
+        // The new conversation must not be archived
+        let conn2 = store.conn.lock().await;
+        let archived: i64 = conn2
+            .query_row(
+                "SELECT is_archived FROM conversations WHERE id = ?1",
+                rusqlite::params![&conv2],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn2);
+        assert_eq!(archived, 0, "New conversation must not be archived");
     }
 }
