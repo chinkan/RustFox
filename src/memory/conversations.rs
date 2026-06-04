@@ -564,6 +564,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_messages_finds_archived_content() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_search_u1")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text(
+                "I love Rust programming and async runtimes",
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Archive
+        store.clear_conversation("test", "archive_search_u1").await.unwrap();
+
+        // search_messages should still find the content from archived conversations
+        let results = store.search_messages("Rust", 5).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "search_messages must find content in archived conversations"
+        );
+        assert!(
+            results.iter().any(|m| m.content.as_ref().map_or(false, |c| c.as_text().contains("Rust"))),
+            "Archived message content must be searchable"
+        );
+    }
+
+    #[tokio::test]
     async fn test_load_messages_excludes_archived() {
         let store = crate::memory::MemoryStore::open_in_memory().unwrap();
 
