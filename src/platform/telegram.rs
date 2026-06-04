@@ -83,6 +83,59 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
     ]
 }
 
+/// Send startup notification to all allowed users.
+/// Best-effort: logs failures, never blocks startup.
+pub async fn notify_startup(
+    bot: &teloxide::Bot,
+    allowed_user_ids: &[u64],
+    model: &str,
+    mcp_count: usize,
+    skills_count: usize,
+    embedding_enabled: bool,
+) {
+    let memory_status = if embedding_enabled {
+        "embedding enabled"
+    } else {
+        "FTS5 only"
+    };
+
+    let msg = format!(
+        "RustFox is online 🦊\nModel: {model}\nMCP: {mcp} server(s) connected\nSkills: {skills} loaded\nMemory: {memory}",
+        model = model, mcp = mcp_count, skills = skills_count, memory = memory_status,
+    );
+
+    for &user_id in allowed_user_ids {
+        let chat_id = teloxide::types::ChatId(user_id as i64);
+        if let Err(e) = bot.send_message(chat_id, &msg).await {
+            warn!(
+                "Failed to send startup notification to user {}: {}",
+                user_id,
+                e
+            );
+        }
+    }
+}
+
+/// Send shutdown notification to all allowed users.
+/// Best-effort: logs failures, never blocks shutdown.
+pub async fn notify_shutdown(
+    bot: &teloxide::Bot,
+    allowed_user_ids: &[u64],
+) {
+    let msg = "RustFox is going offline. Goodbye!";
+
+    for &user_id in allowed_user_ids {
+        let chat_id = teloxide::types::ChatId(user_id as i64);
+        if let Err(e) = bot.send_message(chat_id, msg).await {
+            warn!(
+                "Failed to send shutdown notification to user {}: {}",
+                user_id,
+                e
+            );
+        }
+    }
+}
+
 /// Run the Telegram bot platform
 pub async fn run(
     agent: Arc<Agent>,
@@ -92,6 +145,17 @@ pub async fn run(
     let bot = (*bot).clone();
 
     info!("Starting Telegram platform...");
+
+    // Send startup notifications (best-effort) — before agent is moved into dptree
+    notify_startup(
+        &bot,
+        &allowed_user_ids,
+        &agent.config.openrouter.model,
+        agent.mcp.server_count(),
+        agent.skills.read().await.len(),
+        agent.memory.embeddings.is_available(),
+    )
+    .await;
 
     // Publish the slash-command menu to Telegram so clients show suggestions.
     // Best-effort: a network failure here must not block the bot from running.
