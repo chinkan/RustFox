@@ -459,7 +459,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].content.as_ref().map(|c| c.as_text()).unwrap().contains("love"));
+        assert!(results[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap()
+            .contains("love"));
     }
 
     #[tokio::test]

@@ -10,7 +10,10 @@ use crate::agent_prompt::{
 };
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
-use crate::llm::{is_empty_assistant_response, ChatMessage, ContentPart, FunctionDefinition, LlmClient, MessageContent, ToolDefinition};
+use crate::llm::{
+    is_empty_assistant_response, ChatMessage, ContentPart, FunctionDefinition, LlmClient,
+    MessageContent, ToolDefinition,
+};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
@@ -421,9 +424,7 @@ impl Agent {
             tool_calls: None,
             tool_call_id: None,
         };
-        self.memory
-            .save_message(&conversation_id, &db_msg)
-            .await?;
+        self.memory.save_message(&conversation_id, &db_msg).await?;
 
         // Push the full message (with image parts if any) to in-memory context
         let user_msg = ChatMessage {
@@ -720,7 +721,11 @@ impl Agent {
             }
 
             // Final response — no tool calls
-            let content = response.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+            let content = response
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .unwrap_or_default();
 
             // Stream the final response directly from the already-complete content.
             // Previously this made a second chat_stream() API call, which could return
@@ -738,7 +743,7 @@ impl Agent {
             // Save the delivered content to persistent memory
             let save_msg = crate::llm::ChatMessage {
                 role: response.role.clone(),
-                content: Some(final_content.clone()),
+                content: Some(crate::llm::MessageContent::Text(final_content.clone())),
                 tool_calls: response.tool_calls.clone(),
                 tool_call_id: response.tool_call_id.clone(),
             };

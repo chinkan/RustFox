@@ -3,7 +3,7 @@ config.toml
 *.swp
 *.swo
 .env
-rustbot.db*
+rustfox.db*
 .worktrees/
 
 # Playwright config and cache

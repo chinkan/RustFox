@@ -4,7 +4,7 @@
 //! including automatic compaction of tool-heavy conversations to stay within context
 //! limits while preserving recent and relevant information.
 
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, MessageContent};
 
 const COMPACTION_MESSAGE_COUNT_THRESHOLD: usize = 10;
 const COMPACTION_PROMPT_CHAR_THRESHOLD: usize = 20_000;
@@ -45,7 +45,7 @@ pub fn estimate_prompt_chars(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|msg| {
-            let content_chars = msg.content.as_deref().map(|c| c.len()).unwrap_or(0);
+            let content_chars = msg.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0);
             let tool_args_chars = msg
                 .tool_calls
                 .as_ref()
@@ -76,7 +76,7 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
 
     ChatMessage {
         role: "system".to_string(),
-        content: Some(content),
+        content: Some(MessageContent::Text(content)),
         tool_calls: None,
         tool_call_id: None,
     }
@@ -237,13 +237,14 @@ fn compact_tool_result(msg: &ChatMessage) -> ChatMessage {
     let mut compacted = msg.clone();
 
     if let Some(content) = &compacted.content {
-        if content.len() > TOOL_RESULT_COMPACT_THRESHOLD {
-            let preview = truncate_chars(content, TOOL_RESULT_PREVIEW_CHARS);
-            compacted.content = Some(format!(
+        let text = content.as_text();
+        let text_len = text.len();
+        if text_len > TOOL_RESULT_COMPACT_THRESHOLD {
+            let preview = truncate_chars(&text, TOOL_RESULT_PREVIEW_CHARS);
+            compacted.content = Some(MessageContent::Text(format!(
                 "[rustfox compacted tool result: {} chars]\n{}...",
-                content.len(),
-                preview
-            ));
+                text_len, preview
+            )));
         }
     }
 
@@ -253,20 +254,20 @@ fn compact_tool_result(msg: &ChatMessage) -> ChatMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{FunctionCall, ToolCall};
+    use crate::llm::{FunctionCall, MessageContent, ToolCall};
 
     #[test]
     fn estimate_prompt_chars_counts_content_and_tool_arguments() {
         let messages = vec![
             ChatMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()), // 5 chars
+                content: Some(MessageContent::Text("Hello".to_string())), // 5 chars
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: Some("Hi".to_string()), // 2 chars
+                content: Some(MessageContent::Text("Hi".to_string())), // 2 chars
                 tool_calls: Some(vec![ToolCall {
                     id: "call_1".to_string(),
                     call_type: "function".to_string(),
@@ -279,7 +280,7 @@ mod tests {
             },
             ChatMessage {
                 role: "tool".to_string(),
-                content: Some("result".to_string()), // 6 chars
+                content: Some(MessageContent::Text("result".to_string())), // 6 chars
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
             },
@@ -294,13 +295,13 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
-                content: Some("result".to_string()),
+                content: Some(MessageContent::Text("result".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
             },
@@ -312,6 +313,7 @@ mod tests {
             .content
             .as_ref()
             .unwrap()
+            .as_text()
             .contains("tool result above"));
     }
 
@@ -319,7 +321,7 @@ mod tests {
     fn recovery_nudge_mentions_user_request_when_previous_message_is_user() {
         let messages = vec![ChatMessage {
             role: "user".to_string(),
-            content: Some("Hello".to_string()),
+            content: Some(MessageContent::Text("Hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
         }];
@@ -330,6 +332,7 @@ mod tests {
             .content
             .as_ref()
             .unwrap()
+            .as_text()
             .contains("user's request above"));
     }
 
@@ -339,7 +342,7 @@ mod tests {
         let messages: Vec<ChatMessage> = (0..5)
             .map(|i| ChatMessage {
                 role: "user".to_string(),
-                content: Some(format!("message {}", i)),
+                content: Some(MessageContent::Text(format!("message {}", i))),
                 tool_calls: None,
                 tool_call_id: None,
             })
@@ -353,7 +356,7 @@ mod tests {
         let short_messages: Vec<ChatMessage> = (0..15)
             .map(|i| ChatMessage {
                 role: "user".to_string(),
-                content: Some(format!("msg{}", i)), // Very short
+                content: Some(MessageContent::Text(format!("msg{}", i))), // Very short
                 tool_calls: None,
                 tool_call_id: None,
             })
@@ -371,7 +374,9 @@ mod tests {
         // System message
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: Some("You are a helpful assistant.".to_string()),
+            content: Some(MessageContent::Text(
+                "You are a helpful assistant.".to_string(),
+            )),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -379,7 +384,7 @@ mod tests {
         // User message
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: Some("Do task 1".to_string()),
+            content: Some(MessageContent::Text("Do task 1".to_string())),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -403,7 +408,7 @@ mod tests {
         let long_result = "y".repeat(2500);
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some(long_result.clone()),
+            content: Some(MessageContent::Text(long_result.clone())),
             tool_calls: None,
             tool_call_id: Some("old_call_1".to_string()),
         });
@@ -425,7 +430,7 @@ mod tests {
 
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some("y".repeat(2500)),
+            content: Some(MessageContent::Text("y".repeat(2500))),
             tool_calls: None,
             tool_call_id: Some("recent_call_1".to_string()),
         });
@@ -447,7 +452,7 @@ mod tests {
 
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some("w".repeat(2500)),
+            content: Some(MessageContent::Text("w".repeat(2500))),
             tool_calls: None,
             tool_call_id: Some("recent_call_2".to_string()),
         });
@@ -470,8 +475,10 @@ mod tests {
         let old_tool = &compacted[3];
         assert_eq!(old_tool.role, "tool");
         let old_content = old_tool.content.as_ref().unwrap();
-        assert!(old_content.contains("rustfox compacted tool result"));
-        assert!(old_content.len() < long_result.len());
+        assert!(old_content
+            .as_text()
+            .contains("rustfox compacted tool result"));
+        assert!(old_content.as_text().len() < long_result.len());
 
         // Recent tool groups should be preserved unchanged
         let recent1_assistant = &compacted[4];
@@ -484,7 +491,7 @@ mod tests {
         );
 
         let recent1_tool = &compacted[5];
-        assert_eq!(recent1_tool.content.as_ref().unwrap().len(), 2500);
+        assert_eq!(recent1_tool.content.as_ref().unwrap().as_text().len(), 2500);
 
         let recent2_assistant = &compacted[6];
         assert_eq!(
@@ -496,7 +503,7 @@ mod tests {
         );
 
         let recent2_tool = &compacted[7];
-        assert_eq!(recent2_tool.content.as_ref().unwrap().len(), 2500);
+        assert_eq!(recent2_tool.content.as_ref().unwrap().as_text().len(), 2500);
     }
 
     #[test]
@@ -504,13 +511,13 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: Some("System".to_string()),
+                content: Some(MessageContent::Text("System".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: Some("User 1".to_string()),
+                content: Some(MessageContent::Text("User 1".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -529,13 +536,13 @@ mod tests {
             },
             ChatMessage {
                 role: "tool".to_string(),
-                content: Some("y".repeat(2500)),
+                content: Some(MessageContent::Text("y".repeat(2500))),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: Some("Final response".to_string()),
+                content: Some(MessageContent::Text("Final response".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -628,7 +635,7 @@ mod tests {
 
         let message = ChatMessage {
             role: "tool".to_string(),
-            content: Some(long_result_with_unicode.clone()),
+            content: Some(MessageContent::Text(long_result_with_unicode.clone())),
             tool_calls: None,
             tool_call_id: Some("call_1".to_string()),
         };
@@ -638,12 +645,15 @@ mod tests {
         let compacted_content = compacted.content.as_ref().unwrap();
 
         // Verify it's been compacted
-        assert!(compacted_content.contains("rustfox compacted tool result"));
-        assert!(compacted_content.len() < long_result_with_unicode.len());
+        assert!(compacted_content
+            .as_text()
+            .contains("rustfox compacted tool result"));
+        assert!(compacted_content.as_text().len() < long_result_with_unicode.len());
 
         // Verify the preview portion is valid UTF-8 and respects character boundaries
         // The format is: "[rustfox compacted tool result: N chars]\n{preview}..."
-        let lines: Vec<&str> = compacted_content.lines().collect();
+        let text = compacted_content.as_text();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         let preview_line = lines[1];
         assert!(preview_line.ends_with("..."));
@@ -660,13 +670,15 @@ mod tests {
         let mut messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: Some("System prompt 系统提示".to_string()),
+                content: Some(MessageContent::Text("System prompt 系统提示".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: Some("User request with emoji 🚀".to_string()),
+                content: Some(MessageContent::Text(
+                    "User request with emoji 🚀".to_string(),
+                )),
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -696,7 +708,7 @@ mod tests {
         let unicode_result = format!("Result 结果: {}🌈{}", "a".repeat(1500), "b".repeat(1200));
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some(unicode_result),
+            content: Some(MessageContent::Text(unicode_result)),
             tool_calls: None,
             tool_call_id: Some("old_call".to_string()),
         });
@@ -718,7 +730,7 @@ mod tests {
 
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some("y".repeat(2500)),
+            content: Some(MessageContent::Text("y".repeat(2500))),
             tool_calls: None,
             tool_call_id: Some("recent_call_1".to_string()),
         });
@@ -740,7 +752,7 @@ mod tests {
 
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some("w".repeat(2500)),
+            content: Some(MessageContent::Text("w".repeat(2500))),
             tool_calls: None,
             tool_call_id: Some("recent_call_2".to_string()),
         });
@@ -762,7 +774,9 @@ mod tests {
         assert!(compacted_args.contains("_rustfox_compacted_arguments"));
 
         let compacted_result = compacted[3].content.as_ref().unwrap();
-        assert!(compacted_result.contains("rustfox compacted tool result"));
+        assert!(compacted_result
+            .as_text()
+            .contains("rustfox compacted tool result"));
 
         // Verify recent groups are preserved unchanged
         assert_eq!(
@@ -772,7 +786,7 @@ mod tests {
                 .len(),
             1500
         );
-        assert_eq!(compacted[5].content.as_ref().unwrap().len(), 2500);
+        assert_eq!(compacted[5].content.as_ref().unwrap().as_text().len(), 2500);
         assert_eq!(
             compacted[6].tool_calls.as_ref().unwrap()[0]
                 .function
@@ -780,6 +794,6 @@ mod tests {
                 .len(),
             1500
         );
-        assert_eq!(compacted[7].content.as_ref().unwrap().len(), 2500);
+        assert_eq!(compacted[7].content.as_ref().unwrap().as_text().len(), 2500);
     }
 }

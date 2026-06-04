@@ -140,7 +140,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     let user_name = user.first_name.clone();
 
     // For media messages, use caption as text; for text messages, use msg.text()
-    let text = msg.text().or_else(|| msg.caption()).unwrap_or("").to_string();
+    let text = msg
+        .text()
+        .or_else(|| msg.caption())
+        .unwrap_or("")
+        .to_string();
 
     // Temp dir for file downloads — created lazily by download_telegram_file
     let temp_dir = std::env::temp_dir().join(format!("rustfox_{}", uuid::Uuid::new_v4()));
@@ -814,12 +818,18 @@ mod tests {
 
     #[test]
     fn test_classify_attachment_kind_image_jpeg() {
-        assert_eq!(classify_attachment_kind("image/jpeg", None), AttachmentKind::Image);
+        assert_eq!(
+            classify_attachment_kind("image/jpeg", None),
+            AttachmentKind::Image
+        );
     }
 
     #[test]
     fn test_classify_attachment_kind_pdf() {
-        assert_eq!(classify_attachment_kind("application/pdf", None), AttachmentKind::Pdf);
+        assert_eq!(
+            classify_attachment_kind("application/pdf", None),
+            AttachmentKind::Pdf
+        );
     }
 
     #[test]

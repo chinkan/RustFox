@@ -68,7 +68,10 @@ pub async fn summarize_conversation(
 
     let summary_msg = ChatMessage {
         role: "system".to_string(),
-        content: Some(MessageContent::from_text(format!("[SUMMARY]\n{}", summary_text.trim()))),
+        content: Some(MessageContent::from_text(format!(
+            "[SUMMARY]\n{}",
+            summary_text.trim()
+        ))),
         tool_calls: None,
         tool_call_id: None,
     };

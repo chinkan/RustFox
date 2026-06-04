@@ -166,7 +166,9 @@ mod tests {
 
         let msg = crate::llm::ChatMessage {
             role: "user".to_string(),
-            content: Some(crate::llm::MessageContent::from_text("I prefer TypeScript for frontend work")),
+            content: Some(crate::llm::MessageContent::from_text(
+                "I prefer TypeScript for frontend work",
+            )),
             tool_calls: None,
             tool_call_id: None,
         };

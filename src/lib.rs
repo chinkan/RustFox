@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_prompt;
 pub mod config;
+pub mod file_processor;
 pub mod home;
 pub mod langsmith;
 pub mod learning;

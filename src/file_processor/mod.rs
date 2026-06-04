@@ -11,8 +11,6 @@ const LONG_CONTEXT_THRESHOLD: usize = 6000;
 const CHUNK_SIZE: usize = 1000;
 const CHUNK_OVERLAP: usize = 100;
 
-
-
 /// Returned by `process_image` to indicate whether we got a vision part or OCR text.
 pub enum ImageResult {
     VisionPart(ContentPart),
@@ -56,14 +54,10 @@ pub async fn process_attachments(
                 }
             }
             AttachmentKind::Pdf => {
-                let fname = attachment
-                    .file_name
-                    .as_deref()
-                    .unwrap_or("document.pdf");
+                let fname = attachment.file_name.as_deref().unwrap_or("document.pdf");
                 match extract_pdf_text(&attachment.path) {
                     Ok(text) => {
-                        let ctx =
-                            handle_context_length(&text, fname, user_query, memory).await;
+                        let ctx = handle_context_length(&text, fname, user_query, memory).await;
                         text_parts.push(ctx);
                     }
                     Err(e) => {
@@ -73,14 +67,10 @@ pub async fn process_attachments(
                 }
             }
             AttachmentKind::Docx => {
-                let fname = attachment
-                    .file_name
-                    .as_deref()
-                    .unwrap_or("document.docx");
+                let fname = attachment.file_name.as_deref().unwrap_or("document.docx");
                 match extract_docx_text(&attachment.path) {
                     Ok(text) => {
-                        let ctx =
-                            handle_context_length(&text, fname, user_query, memory).await;
+                        let ctx = handle_context_length(&text, fname, user_query, memory).await;
                         text_parts.push(ctx);
                     }
                     Err(e) => {
@@ -129,10 +119,10 @@ async fn ocr_image(path: &Path, model_dir: &Path) -> Result<String> {
     let path_owned = path.to_path_buf();
 
     tokio::task::spawn_blocking(move || -> Result<String> {
-        let detection_model = rten::Model::load_file(&det_path)
-            .context("Failed to load OCR detection model")?;
-        let recognition_model = rten::Model::load_file(&rec_path)
-            .context("Failed to load OCR recognition model")?;
+        let detection_model =
+            rten::Model::load_file(&det_path).context("Failed to load OCR detection model")?;
+        let recognition_model =
+            rten::Model::load_file(&rec_path).context("Failed to load OCR recognition model")?;
 
         let engine = ocrs::OcrEngine::new(ocrs::OcrEngineParams {
             detection_model: Some(detection_model),
@@ -159,10 +149,8 @@ async fn ensure_ocr_models(model_dir: &Path) -> Result<()> {
     let det = model_dir.join("text-detection.rten");
     let rec = model_dir.join("text-recognition.rten");
 
-    const DET_URL: &str =
-        "https://ocrs-models.s3.us-east-1.amazonaws.com/text-detection.rten";
-    const REC_URL: &str =
-        "https://ocrs-models.s3.us-east-1.amazonaws.com/text-recognition.rten";
+    const DET_URL: &str = "https://ocrs-models.s3.us-east-1.amazonaws.com/text-detection.rten";
+    const REC_URL: &str = "https://ocrs-models.s3.us-east-1.amazonaws.com/text-recognition.rten";
 
     if !det.exists() {
         tracing::info!("Downloading OCR detection model to {}", det.display());
@@ -176,7 +164,9 @@ async fn ensure_ocr_models(model_dir: &Path) -> Result<()> {
 }
 
 async fn download_model(url: &str, dest: &Path) -> Result<()> {
-    let response = reqwest::get(url).await.context("Failed to fetch OCR model")?;
+    let response = reqwest::get(url)
+        .await
+        .context("Failed to fetch OCR model")?;
     let bytes = response
         .bytes()
         .await
@@ -199,8 +189,8 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
 /// Extract text content from a DOCX file.
 fn extract_docx_text(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).context("Failed to read DOCX")?;
-    let docx = docx_rs::read_docx(&bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to parse DOCX: {:?}", e))?;
+    let docx =
+        docx_rs::read_docx(&bytes).map_err(|e| anyhow::anyhow!("Failed to parse DOCX: {:?}", e))?;
 
     let mut text = String::new();
     for child in docx.document.children {
