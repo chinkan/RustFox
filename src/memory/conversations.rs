@@ -496,7 +496,10 @@ mod tests {
         store.save_message(&conv, &msg).await.unwrap();
 
         // Clear
-        store.clear_conversation("test", "archive_u2").await.unwrap();
+        store
+            .clear_conversation("test", "archive_u2")
+            .await
+            .unwrap();
 
         // Messages should still exist in DB
         let conn = store.conn.lock().await;
@@ -548,7 +551,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(conv, conv2, "Must create a new conversation when previous is archived");
+        assert_ne!(
+            conv, conv2,
+            "Must create a new conversation when previous is archived"
+        );
 
         // The new conversation must not be archived
         let conn2 = store.conn.lock().await;
@@ -582,7 +588,10 @@ mod tests {
         store.save_message(&conv, &msg).await.unwrap();
 
         // Archive
-        store.clear_conversation("test", "archive_search_u1").await.unwrap();
+        store
+            .clear_conversation("test", "archive_search_u1")
+            .await
+            .unwrap();
 
         // search_messages should still find the content from archived conversations
         let results = store.search_messages("Rust", 5).await.unwrap();
@@ -591,7 +600,10 @@ mod tests {
             "search_messages must find content in archived conversations"
         );
         assert!(
-            results.iter().any(|m| m.content.as_ref().map_or(false, |c| c.as_text().contains("Rust"))),
+            results.iter().any(|m| m
+                .content
+                .as_ref()
+                .map_or(false, |c| c.as_text().contains("Rust"))),
             "Archived message content must be searchable"
         );
     }
@@ -613,7 +625,10 @@ mod tests {
         store.save_message(&conv, &msg).await.unwrap();
 
         // Archive
-        store.clear_conversation("test", "archive_u3").await.unwrap();
+        store
+            .clear_conversation("test", "archive_u3")
+            .await
+            .unwrap();
 
         // load_messages should return empty for an archived conversation
         let messages = store.load_messages(&conv).await.unwrap();

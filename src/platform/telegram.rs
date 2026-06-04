@@ -75,7 +75,10 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
     use teloxide::types::BotCommand;
     vec![
         BotCommand::new("start", "Show the welcome message and command help"),
-        BotCommand::new("clear", "Archive the current conversation, keeping past messages searchable"),
+        BotCommand::new(
+            "clear",
+            "Archive the current conversation, keeping past messages searchable",
+        ),
         BotCommand::new("tools", "List available built-in and MCP tools"),
         BotCommand::new("skills", "List loaded skills"),
         BotCommand::new("verbose", "Toggle tool-call progress display"),
@@ -109,8 +112,7 @@ pub async fn notify_startup(
         if let Err(e) = bot.send_message(chat_id, &msg).await {
             warn!(
                 "Failed to send startup notification to user {}: {}",
-                user_id,
-                e
+                user_id, e
             );
         }
     }
@@ -118,10 +120,7 @@ pub async fn notify_startup(
 
 /// Send shutdown notification to all allowed users.
 /// Best-effort: logs failures, never blocks shutdown.
-pub async fn notify_shutdown(
-    bot: &teloxide::Bot,
-    allowed_user_ids: &[u64],
-) {
+pub async fn notify_shutdown(bot: &teloxide::Bot, allowed_user_ids: &[u64]) {
     let msg = "RustFox is going offline. Goodbye!";
 
     for &user_id in allowed_user_ids {
@@ -129,8 +128,7 @@ pub async fn notify_shutdown(
         if let Err(e) = bot.send_message(chat_id, msg).await {
             warn!(
                 "Failed to send shutdown notification to user {}: {}",
-                user_id,
-                e
+                user_id, e
             );
         }
     }
@@ -272,9 +270,12 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(msg.chat.id, escape_text("Conversation archived. Past messages remain searchable."))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            escape_text("Conversation archived. Past messages remain searchable."),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
         return Ok(());
     }
 

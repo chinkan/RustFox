@@ -345,10 +345,8 @@ async fn main() -> Result<()> {
 
     // Set up signal handlers (SIGINT via ctrl_c for portability, SIGTERM via unix signal)
     #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )
-    .expect("failed to create SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to create SIGTERM handler");
 
     #[cfg(unix)]
     let terminate = sigterm.recv();
