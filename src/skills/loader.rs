@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-use super::{Skill, SkillRegistry};
+use super::{Skill, SkillRegistry, SkillSource};
 
 /// Load all markdown skill files from a directory.
 ///
@@ -19,7 +19,11 @@ use super::{Skill, SkillRegistry};
 /// ---
 /// # Instructions here...
 /// ```
-pub async fn load_skills_from_dir(dir: &Path) -> Result<SkillRegistry> {
+pub async fn load_skills_from_dir(
+    dir: &Path,
+    source: SkillSource,
+    base_dir: PathBuf,
+) -> Result<SkillRegistry> {
     let mut registry = SkillRegistry::new();
 
     if !dir.exists() {
@@ -52,7 +56,7 @@ pub async fn load_skills_from_dir(dir: &Path) -> Result<SkillRegistry> {
         };
 
         match load_skill_file(&skill_path).await {
-            Ok(skill) => registry.register(skill),
+            Ok(skill) => registry.register(skill, source, base_dir.clone()),
             Err(e) => warn!("Failed to load skill from {}: {}", skill_path.display(), e),
         }
     }
@@ -86,6 +90,12 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
                 model: extract_field(frontmatter, "model"),
                 tools: extract_list_field(frontmatter, "tools"),
                 max_iterations: extract_u32_field(frontmatter, "max_iterations"),
+                supervisor_workflow: extract_nested_field(frontmatter, "supervisor", "workflow"),
+                supervisor_required_caps: extract_nested_list(
+                    frontmatter,
+                    "supervisor",
+                    "required_capabilities",
+                ),
             });
         }
     }
@@ -102,6 +112,8 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
         model: None,
         tools: vec![],
         max_iterations: None,
+        supervisor_workflow: None,
+        supervisor_required_caps: vec![],
     })
 }
 
@@ -142,6 +154,54 @@ fn extract_list_field(frontmatter: &str, key: &str) -> Vec<String> {
 /// Extract a `key: N` unsigned integer field from YAML-like frontmatter
 fn extract_u32_field(frontmatter: &str, key: &str) -> Option<u32> {
     extract_field(frontmatter, key)?.parse().ok()
+}
+
+/// Extract `parent.subkey: value` from a YAML-like block where the parent has its
+/// own line followed by 2-space-indented sub-keys.
+fn extract_nested_field(frontmatter: &str, parent: &str, subkey: &str) -> Option<String> {
+    let parent_prefix = format!("{}:", parent);
+    let sub_prefix = format!("{}:", subkey);
+    let mut in_block = false;
+    for line in frontmatter.lines() {
+        let stripped = line.trim_start();
+        if stripped == parent_prefix.as_str()
+            || stripped.starts_with(&format!("{} ", parent_prefix))
+        {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if !line.starts_with(' ') && !line.starts_with('\t') && !line.is_empty() {
+                in_block = false;
+                continue;
+            }
+            let inner = line.trim_start();
+            if let Some(rest) = inner.strip_prefix(&sub_prefix) {
+                let value = rest.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_nested_list(frontmatter: &str, parent: &str, subkey: &str) -> Vec<String> {
+    let raw = match extract_nested_field(frontmatter, parent, subkey) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let raw = raw.trim();
+    if raw.starts_with('[') && raw.ends_with(']') {
+        raw[1..raw.len() - 1]
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Derive skill/agent name from file path
@@ -220,5 +280,39 @@ mod tests {
         assert_eq!(extract_field(frontmatter, "model"), None);
         assert!(extract_list_field(frontmatter, "tools").is_empty());
         assert_eq!(extract_u32_field(frontmatter, "max_iterations"), None);
+    }
+
+    #[test]
+    fn extract_nested_field_finds_subkey() {
+        let fm = "name: x\nsupervisor:\n  workflow: research\n  required_capabilities: [a, b]\n";
+        assert_eq!(
+            extract_nested_field(fm, "supervisor", "workflow").as_deref(),
+            Some("research")
+        );
+        assert_eq!(
+            extract_nested_list(fm, "supervisor", "required_capabilities"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_with_supervisor_block_loads_workflow_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("research-pack");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: research-pack\ndescription: research workflow\n\
+             supervisor:\n  workflow: research\n  required_capabilities: [research]\n---\nbody",
+        )
+        .await
+        .unwrap();
+        let skills =
+            load_skills_from_dir(dir.path(), SkillSource::Instance, dir.path().to_path_buf())
+                .await
+                .unwrap();
+        let s = skills.get("research-pack").unwrap();
+        assert_eq!(s.supervisor_workflow.as_deref(), Some("research"));
+        assert_eq!(s.supervisor_required_caps, vec!["research".to_string()]);
     }
 }

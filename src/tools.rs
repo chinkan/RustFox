@@ -182,6 +182,70 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "try_new_tech".to_string(),
+                description: "Run a sandboxed experiment with a new technology or approach. Creates a temp project in sandbox/experiments/, writes the code, runs cargo check/test (Rust) or node (JS), and returns results. On success, may auto-generate a skill.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "technology": {
+                            "type": "string",
+                            "description": "Name/description of the technology being tested (e.g. 'serde flatten', 'tokio select')"
+                        },
+                        "experiment_code": {
+                            "type": "string",
+                            "description": "The source code for the experiment"
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["rust", "javascript"],
+                            "description": "Programming language for the experiment (default: rust)"
+                        }
+                    },
+                    "required": ["technology", "experiment_code"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "self_update_to_branch".to_string(),
+                description: "Update the bot to a specific git branch and rebuild. Runs: git fetch, git checkout <branch>, git pull, cargo build --release. Use for development without manual SSH. The bot should be restarted after a successful build.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "branch": {
+                            "type": "string",
+                            "description": "Git branch to update to (default: 'main')"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "patch_skill".to_string(),
+                description: "Patch an existing skill's SKILL.md by appending content or replacing it entirely. Creates a .bak backup. If the patch starts with '---' (frontmatter), it replaces the whole file; otherwise it appends to the existing content. Reloads skills after patching.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": {
+                            "type": "string",
+                            "description": "Name of the skill to patch (e.g. 'code-interpreter')"
+                        },
+                        "patch_content": {
+                            "type": "string",
+                            "description": "Content to append (or full replacement if it starts with ---)"
+                        }
+                    },
+                    "required": ["skill_name", "patch_content"]
+                }),
+            },
+        },
     ]
 }
 

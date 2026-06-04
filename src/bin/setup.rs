@@ -6,16 +6,29 @@
 //! project root and then shuts the server down.
 //!
 //! With `--cli`: runs an interactive terminal wizard instead.
+//!
+//! OAuth 2.0 routes (generic MCP HTTP server support):
+//!   GET /api/oauth/start?server=<name>&url=<mcp-url>
+//!       Discovers auth endpoints via .well-known, performs Dynamic Client
+//!       Registration, generates PKCE, returns { state, auth_url }.
+//!   GET /oauth/callback?code=<code>&state=<state>
+//!       Exchanges code+code_verifier for an access token, stores it, renders
+//!       a self-closing HTML page.
+//!   GET /api/oauth/token?state=<state>
+//!       Polling endpoint — returns { ready, token? } once callback completes.
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -26,6 +39,32 @@ use tokio::sync::{oneshot, Mutex};
 // The wizard SPA is embedded at compile time — no runtime file needed.
 const INDEX_HTML: &str = include_str!("../../setup/index.html");
 
+/// Port the setup wizard listens on.
+const SETUP_PORT: u16 = 8719;
+
+/// OAuth redirect URI — must match what was registered with the authorization server.
+fn redirect_uri() -> String {
+    format!("http://localhost:{SETUP_PORT}/oauth/callback")
+}
+
+// ── OAuth session state ────────────────────────────────────────────────────────
+
+/// In-flight OAuth session created by /api/oauth/start and resolved in /oauth/callback.
+#[derive(Clone)]
+struct OAuthSession {
+    server_name: String,
+    code_verifier: String,
+    client_id: String,
+    client_secret: Option<String>,
+    token_endpoint: String,
+    /// Populated once /oauth/callback completes the token exchange.
+    access_token: Option<String>,
+    /// Refresh token returned by the authorization server (if any).
+    refresh_token: Option<String>,
+    /// Lifetime in seconds of the access token (e.g. 3600).
+    expires_in: Option<u64>,
+}
+
 // ── Shared state ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -33,6 +72,11 @@ struct AppState {
     config_path: PathBuf,
     /// Consumed once when the browser POSTs a saved config.
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// Keyed by random state string; entries are created by /api/oauth/start
+    /// and updated by /oauth/callback.
+    oauth_sessions: Arc<Mutex<HashMap<String, OAuthSession>>>,
+    /// Shared HTTP client for OAuth discovery / registration / token exchange.
+    http_client: reqwest::Client,
 }
 
 // ── Request / response types ───────────────────────────────────────────────────
@@ -124,6 +168,141 @@ struct RawMcpServer {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    // `url` and `auth_token` are parsed but not used by the setup wizard;
+    // they are accepted so configs with HTTP MCP servers load without error.
+    #[serde(default)]
+    #[allow(dead_code)]
+    url: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    auth_token: Option<String>,
+}
+
+// ── OAuth API types ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct OAuthStartQuery {
+    server: String,
+    url: String,
+}
+
+#[derive(Serialize)]
+struct OAuthStartResponse {
+    state: String,
+    auth_url: String,
+}
+
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: String,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct OAuthTokenQuery {
+    state: String,
+}
+
+#[derive(Serialize)]
+struct OAuthTokenPollResponse {
+    ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+    /// Refresh token from the authorization server — include in config.toml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    /// Lifetime of the access token in seconds (e.g. 3600).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in: Option<u64>,
+    /// Token endpoint needed for refresh-token exchanges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_endpoint: Option<String>,
+    /// OAuth client ID used for refresh-token requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_client_id: Option<String>,
+    /// OAuth client secret (if any) for refresh-token requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_client_secret: Option<String>,
+}
+
+/// Minimal shape of `.well-known/oauth-authorization-server` or
+/// `.well-known/openid-configuration` that we need.
+#[derive(Deserialize)]
+struct OAuthDiscovery {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ClientRegistrationRequest {
+    client_name: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+}
+
+#[derive(Deserialize)]
+struct ClientRegistrationResponse {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+    /// Refresh token for obtaining new access tokens after expiry.
+    #[serde(default)]
+    refresh_token: Option<String>,
+    /// Lifetime of the access token in seconds (e.g. 3600).
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+// ── OAuth helpers ──────────────────────────────────────────────────────────────
+
+/// Try `{origin}/.well-known/oauth-authorization-server` (MCP spec / RFC 8414),
+/// then fall back to `{origin}/.well-known/openid-configuration` (OIDC).
+async fn discover_oauth_endpoints(
+    client: &reqwest::Client,
+    origin: &str,
+) -> anyhow::Result<OAuthDiscovery> {
+    let urls = [
+        format!("{origin}/.well-known/oauth-authorization-server"),
+        format!("{origin}/.well-known/openid-configuration"),
+    ];
+    for url in &urls {
+        let resp = client.get(url).send().await?;
+        if resp.status().is_success() {
+            return resp
+                .json::<OAuthDiscovery>()
+                .await
+                .with_context(|| format!("Failed to parse OAuth discovery from {url}"));
+        }
+    }
+    anyhow::bail!("No OAuth discovery document found at {origin}")
+}
+
+/// Generate a PKCE code_verifier (32 random bytes, base64url-encoded).
+fn pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Compute PKCE code_challenge = BASE64URL(SHA-256(ASCII(code_verifier))).
+fn pkce_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+/// Generate a random hex state string (16 bytes → 32 hex chars).
+fn random_state() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────────
@@ -161,6 +340,224 @@ async fn load_config(State(state): State<AppState>) -> Json<ExistingConfig> {
         Ok(content) => Json(parse_existing_config(&content)),
         Err(_) => Json(ExistingConfig::default()), // file absent or unreadable
     }
+}
+
+/// GET /api/oauth/start?server=<name>&url=<mcp-url>
+///
+/// 1. Discovers OAuth endpoints from the MCP server's .well-known document.
+/// 2. Performs Dynamic Client Registration (RFC 7591).
+/// 3. Generates a PKCE code_verifier + code_challenge.
+/// 4. Stores an in-flight session keyed by a random state value.
+/// 5. Returns `{ state, auth_url }` — the frontend opens auth_url in a popup.
+async fn oauth_start(
+    State(st): State<AppState>,
+    Query(params): Query<OAuthStartQuery>,
+) -> Result<Json<OAuthStartResponse>, (StatusCode, String)> {
+    let err = |status: StatusCode, msg: String| (status, msg);
+
+    // Derive origin (scheme + host + optional port) from the MCP URL.
+    let parsed = reqwest::Url::parse(&params.url)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid MCP URL: {e}")))?;
+    let mut origin = format!(
+        "{}://{}",
+        parsed.scheme(),
+        parsed.host_str().unwrap_or_default()
+    );
+    if let Some(port) = parsed.port() {
+        origin = format!("{origin}:{port}");
+    }
+
+    // Discover authorization + token + registration endpoints.
+    let discovery = discover_oauth_endpoints(&st.http_client, &origin)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let reg_endpoint = discovery.registration_endpoint.ok_or_else(|| {
+        err(
+            StatusCode::NOT_IMPLEMENTED,
+            "MCP server does not advertise a Dynamic Client Registration endpoint".into(),
+        )
+    })?;
+
+    // Register this client dynamically (RFC 7591) as a public client with PKCE.
+    let redir = redirect_uri();
+    let reg_body = ClientRegistrationRequest {
+        client_name: "RustFox Setup".into(),
+        redirect_uris: vec![redir.clone()],
+        grant_types: vec!["authorization_code".into()],
+        response_types: vec!["code".into()],
+        // Public client — PKCE provides the security; no client_secret needed.
+        token_endpoint_auth_method: "none".into(),
+    };
+
+    let reg_resp: ClientRegistrationResponse = st
+        .http_client
+        .post(&reg_endpoint)
+        .json(&reg_body)
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Registration request failed: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Registration response parse failed: {e}"),
+            )
+        })?;
+
+    // Generate PKCE pair and opaque state.
+    let code_verifier = pkce_verifier();
+    let code_challenge = pkce_challenge(&code_verifier);
+    let oauth_state = random_state();
+
+    // Build the authorization URL with all required parameters.
+    let mut auth_url = reqwest::Url::parse(&discovery.authorization_endpoint).map_err(|e| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid authorization_endpoint: {e}"),
+        )
+    })?;
+    auth_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &reg_resp.client_id)
+        .append_pair("redirect_uri", &redir)
+        .append_pair("state", &oauth_state)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256");
+
+    // Persist the session so /oauth/callback can complete the exchange.
+    st.oauth_sessions.lock().await.insert(
+        oauth_state.clone(),
+        OAuthSession {
+            server_name: params.server.clone(),
+            code_verifier,
+            client_id: reg_resp.client_id,
+            client_secret: reg_resp.client_secret,
+            token_endpoint: discovery.token_endpoint,
+            access_token: None,
+            refresh_token: None,
+            expires_in: None,
+        },
+    );
+
+    Ok(Json(OAuthStartResponse {
+        state: oauth_state,
+        auth_url: auth_url.to_string(),
+    }))
+}
+
+/// GET /oauth/callback?code=<code>&state=<state>
+///
+/// Receives the authorization code redirect, exchanges it for an access token,
+/// stores the token in the session map, and returns a self-closing HTML page so
+/// the popup window closes automatically.
+async fn oauth_callback(
+    State(st): State<AppState>,
+    Query(params): Query<OAuthCallbackQuery>,
+) -> Html<String> {
+    // Clone the fields we need before dropping the lock so it is not held
+    // across the async HTTP token-exchange request below.
+    let (server_name, code_verifier, client_id, client_secret, token_endpoint) = {
+        let sessions = st.oauth_sessions.lock().await;
+        match sessions.get(&params.state) {
+            Some(s) => (
+                s.server_name.clone(),
+                s.code_verifier.clone(),
+                s.client_id.clone(),
+                s.client_secret.clone(),
+                s.token_endpoint.clone(),
+            ),
+            None => return Html(
+                "<html><body><p>Unknown OAuth state. Please close this window and try again.</p>\
+                     <script>setTimeout(()=>window.close(),3000)</script></body></html>"
+                    .into(),
+            ),
+        }
+    }; // lock is released here
+
+    // Exchange the authorization code for an access token.
+    let redir = redirect_uri();
+    let mut token_params = vec![
+        ("grant_type", "authorization_code".to_owned()),
+        ("code", params.code.clone()),
+        ("redirect_uri", redir),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+    if let Some(secret) = client_secret {
+        token_params.push(("client_secret", secret));
+    }
+
+    let token_result = st
+        .http_client
+        .post(&token_endpoint)
+        .form(&token_params)
+        .send()
+        .await;
+
+    match token_result {
+        Ok(resp) if resp.status().is_success() => match resp.json::<OAuthTokenResponse>().await {
+            Ok(tok) => {
+                // Re-acquire the lock only to write back the access token.
+                if let Some(session) = st.oauth_sessions.lock().await.get_mut(&params.state) {
+                    session.access_token = Some(tok.access_token);
+                    session.refresh_token = tok.refresh_token;
+                    session.expires_in = tok.expires_in;
+                }
+                Html(format!(
+                    "<html><head><title>Authorized</title></head><body>\
+                         <p style=\"font-family:sans-serif;text-align:center;margin-top:4rem\">\
+                         ✅ {server_name} authorization successful! You can close this window.</p>\
+                         <script>window.close();</script>\
+                         </body></html>"
+                ))
+            }
+            Err(e) => Html(format!(
+                "<html><body><p>Failed to parse token response: {e}</p>\
+                     <script>setTimeout(()=>window.close(),5000)</script></body></html>"
+            )),
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Html(format!(
+                "<html><body><p>Token exchange failed ({status}): {body}</p>\
+                 <script>setTimeout(()=>window.close(),5000)</script></body></html>"
+            ))
+        }
+        Err(e) => Html(format!(
+            "<html><body><p>Token request error: {e}</p>\
+             <script>setTimeout(()=>window.close(),5000)</script></body></html>"
+        )),
+    }
+}
+
+/// GET /api/oauth/token?state=<state>
+///
+/// Polling endpoint — returns `{ ready: true, token }` once the callback has
+/// completed, or `{ ready: false }` while still waiting.
+async fn oauth_token_poll(
+    State(st): State<AppState>,
+    Query(params): Query<OAuthTokenQuery>,
+) -> Result<Json<OAuthTokenPollResponse>, StatusCode> {
+    let sessions = st.oauth_sessions.lock().await;
+    let session = sessions.get(&params.state).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(OAuthTokenPollResponse {
+        ready: session.access_token.is_some(),
+        token: session.access_token.clone(),
+        refresh_token: session.refresh_token.clone(),
+        expires_in: session.expires_in,
+        token_endpoint: Some(session.token_endpoint.clone()),
+        oauth_client_id: Some(session.client_id.clone()),
+        oauth_client_secret: session.client_secret.clone(),
+    }))
 }
 
 // ── Config formatting ──────────────────────────────────────────────────────────
@@ -301,33 +698,37 @@ async fn main() -> Result<()> {
     }
 
     // ── Web mode ──────────────────────────────────────────────────────────────
-    let port: u16 = 8719;
     let config_path = project_root.join("config.toml");
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = AppState {
         config_path,
         shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+        oauth_sessions: Arc::new(Mutex::new(HashMap::new())),
+        http_client: reqwest::Client::new(),
     };
 
     let app = Router::new()
         .route("/", get(serve_index))
         .route("/api/load-config", get(load_config))
         .route("/api/save-config", post(save_config))
+        .route("/api/oauth/start", get(oauth_start))
+        .route("/oauth/callback", get(oauth_callback))
+        .route("/api/oauth/token", get(oauth_token_poll))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("127.0.0.1:{SETUP_PORT}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("Failed to bind to {addr}"))?;
 
-    println!("RustFox setup wizard → http://localhost:{port}");
+    println!("RustFox setup wizard → http://localhost:{SETUP_PORT}");
     println!("Press Ctrl-C to exit without saving.\n");
 
     // Open the browser after a short delay.
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-        let url = format!("http://localhost:{port}");
+        let url = format!("http://localhost:{SETUP_PORT}");
         // Try xdg-open (Linux), then open (macOS) — ignore errors.
         let _ = std::process::Command::new("xdg-open").arg(&url).status();
         let _ = std::process::Command::new("open").arg(&url).status();
@@ -612,5 +1013,33 @@ allowed_directory = "/tmp"
         let out = cfg("t", "1", "k", "m", "/tmp", "db.db", "");
         assert!(out.contains("[skills]"));
         assert!(out.contains(r#"directory = "skills""#));
+    }
+
+    #[test]
+    fn test_pkce_verifier_length() {
+        let v = pkce_verifier();
+        // 32 bytes → 43 base64url chars (no padding)
+        assert_eq!(v.len(), 43);
+        assert!(v
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_pkce_challenge_is_base64url() {
+        let verifier = pkce_verifier();
+        let challenge = pkce_challenge(&verifier);
+        // SHA-256 → 32 bytes → 43 base64url chars
+        assert_eq!(challenge.len(), 43);
+        assert!(challenge
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_random_state_is_32_hex_chars() {
+        let s = random_state();
+        assert_eq!(s.len(), 32);
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

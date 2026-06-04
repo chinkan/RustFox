@@ -4,10 +4,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use teloxide::net::Download;
 use teloxide::prelude::*;
+use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
 use crate::agent::Agent;
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
+use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
+use crate::utils::telegram_markdown::escape_text;
 
 /// Split long messages for Telegram's 4096 char limit
 #[cfg(test)]
@@ -42,6 +45,44 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Parse a Telegram-style slash command into `(command, argument)`.
+///
+/// Returns `None` if the input does not start with `/`. The command is the
+/// token immediately after the slash; the argument is the remainder of the
+/// line (trimmed of surrounding whitespace).
+///
+/// Currently exercised only by tests; full Telegram dispatch of `/supervise`
+/// is wired in M7.3.
+#[allow(dead_code)]
+pub(crate) fn parse_command(s: &str) -> Option<(String, String)> {
+    let s = s.trim_start();
+    if !s.starts_with('/') {
+        return None;
+    }
+    let rest = &s[1..];
+    let mut it = rest.splitn(2, char::is_whitespace);
+    let cmd = it.next()?.to_string();
+    let arg = it.next().unwrap_or("").trim().to_string();
+    Some((cmd, arg))
+}
+
+/// Build the static list of slash commands shown in Telegram's "/" menu.
+///
+/// The descriptions surface to the user via the BotFather command menu.
+/// Routing for these commands lives in `handle_message`; this function only
+/// publishes their existence to the Telegram client.
+pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
+    use teloxide::types::BotCommand;
+    vec![
+        BotCommand::new("start", "Show the welcome message and command help"),
+        BotCommand::new("clear", "Clear the current conversation history"),
+        BotCommand::new("tools", "List available built-in and MCP tools"),
+        BotCommand::new("skills", "List loaded skills"),
+        BotCommand::new("verbose", "Toggle tool-call progress display"),
+        BotCommand::new("queryrewrite", "Toggle query rewriting for memory search"),
+    ]
+}
+
 /// Run the Telegram bot platform
 pub async fn run(
     agent: Arc<Agent>,
@@ -51,6 +92,15 @@ pub async fn run(
     let bot = (*bot).clone();
 
     info!("Starting Telegram platform...");
+
+    // Publish the slash-command menu to Telegram so clients show suggestions.
+    // Best-effort: a network failure here must not block the bot from running.
+    let commands = supported_commands();
+    let count = commands.len();
+    match bot.set_my_commands(commands).await {
+        Ok(_) => info!("Registered {} Telegram commands", count),
+        Err(e) => warn!(error = %e, "Failed to register Telegram commands"),
+    }
 
     let handler = Update::filter_message()
         .filter_map(move |msg: Message| {
@@ -154,22 +204,26 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(msg.chat.id, "Conversation cleared.")
+        bot.send_message(msg.chat.id, escape_text("Conversation cleared."))
+            .parse_mode(ParseMode::MarkdownV2)
             .await?;
         return Ok(());
     }
 
     if text == "/start" {
-        bot.send_message(
-            msg.chat.id,
+        let help = escape_text(
             "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
              Commands:\n\
              /clear - Clear conversation history\n\
              /tools - List available tools\n\
              /skills - List loaded skills\n\
-             /verbose - Toggle tool call progress display",
-        )
-        .await?;
+             /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
+             /verbose - Toggle tool call progress display\n\
+             /queryrewrite - Toggle query rewriting for memory search",
+        );
+        bot.send_message(msg.chat.id, help)
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -182,7 +236,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 tool.function.name, tool.function.description
             ));
         }
-        bot.send_message(msg.chat.id, tool_list).await?;
+        bot.send_message(msg.chat.id, escape_text(&tool_list))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -190,14 +246,59 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let skills_guard = agent.skills.read().await;
         let skills = skills_guard.list();
         if skills.is_empty() {
-            bot.send_message(msg.chat.id, "No skills loaded.").await?;
+            bot.send_message(msg.chat.id, escape_text("No skills loaded."))
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
         } else {
             let mut skill_list = String::from("Loaded skills:\n\n");
             for skill in &skills {
                 skill_list.push_str(&format!("  - {}: {}\n", skill.name, skill.description));
             }
-            bot.send_message(msg.chat.id, skill_list).await?;
+            bot.send_message(msg.chat.id, escape_text(&skill_list))
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
         }
+        return Ok(());
+    }
+
+    if text == "/updateskills" || text == "/update-skills" {
+        let bundled_skills = agent.config.skills.bundled_directory.clone();
+        let bundled_agents = agent.config.agents.bundled_directory.clone();
+        let home = agent.config.resolved_home.clone();
+        let lock_for = |name: &str| -> std::path::PathBuf {
+            home.clone()
+                .map(|h| h.join(name))
+                .unwrap_or_else(|| std::path::PathBuf::from(name))
+        };
+
+        let mut lines = Vec::new();
+        match crate::skills::update::update_skills(
+            &bundled_skills,
+            &agent.config.skills.directory,
+            &lock_for("skills-lock.json"),
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Skills — {}", r.summary())),
+            Err(e) => lines.push(format!("Skills update failed: {e}")),
+        }
+        match crate::skills::update::update_skills(
+            &bundled_agents,
+            &agent.config.agents.directory,
+            &lock_for("agents-lock.json"),
+        )
+        .await
+        {
+            Ok(r) => lines.push(format!("Agents — {}", r.summary())),
+            Err(e) => lines.push(format!("Agents update failed: {e}")),
+        }
+
+        let (s, a) = agent.reload_skills_and_agents().await;
+        lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
+
+        bot.send_message(msg.chat.id, escape_text(&lines.join("\n")))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -224,7 +325,46 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         } else {
             "🔇 Tool call UI disabled. I'll respond silently."
         };
-        bot.send_message(msg.chat.id, reply).await?;
+        bot.send_message(msg.chat.id, escape_text(reply))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        return Ok(());
+    }
+
+    // Accept both the canonical `/queryrewrite` (registered with Telegram —
+    // Bot API command names cannot contain hyphens) and the legacy
+    // `/query-rewrite` form for users with existing muscle memory.
+    if text == "/queryrewrite" || text == "/query-rewrite" {
+        let current = agent
+            .memory
+            .recall("settings", &format!("query_rewrite_enabled_{}", user_id))
+            .await
+            .unwrap_or(None);
+        // When no per-user setting exists, fall back to the global config default.
+        let currently_on = match current.as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => agent.config.memory.query_rewriter_enabled,
+        };
+        let new_value = if currently_on { "false" } else { "true" };
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("query_rewrite_enabled_{}", user_id),
+                new_value,
+                None,
+            )
+            .await
+            .ok();
+        let reply = if new_value == "true" {
+            "🔍 Query rewriting enabled. Follow-up questions will be rewritten before memory search."
+        } else {
+            "🔍 Query rewriting disabled. Messages will be searched as-is."
+        };
+        bot.send_message(msg.chat.id, escape_text(reply))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -258,11 +398,42 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             let mut notifier =
                 crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id);
             notifier.start().await;
+            let mut handled_finished = false;
             while let Some(event) = rx.recv().await {
-                notifier.handle_event(event).await;
+                match event {
+                    crate::platform::tool_notifier::ToolEvent::Finished { success } => {
+                        notifier.finish(success).await;
+                        handled_finished = true;
+                        break;
+                    }
+                    other => notifier.handle_event(other).await,
+                }
             }
-            notifier.finish().await;
+            // If the channel closed without an explicit Finished event, preserve
+            // previous behaviour and treat it as a successful finish.
+            if !handled_finished {
+                notifier.finish(true).await;
+            }
         }))
+    } else {
+        None
+    };
+
+    // When verbose is OFF, send a transient "Thinking..." placeholder so the user
+    // knows the bot is processing. The placeholder is **independent** of the
+    // streaming output — when the first token arrives it is delivered as a NEW
+    // message, and the placeholder is deleted by `handle_message` after the
+    // stream completes (success or error). This keeps the placeholder a
+    // standalone progress signal rather than a doomed attempt to morph into the
+    // final answer.
+    let placeholder_msg_id: Option<teloxide::types::MessageId> = if !verbose_enabled {
+        match bot.send_message(msg.chat.id, "⏳ Thinking...").await {
+            Ok(sent) => Some(sent.id),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to send thinking placeholder");
+                None
+            }
+        }
     } else {
         None
     };
@@ -279,6 +450,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         use std::time::{Duration, Instant};
 
         let mut buffer = String::new();
+        // The first token always starts a fresh message — the placeholder
+        // (if any) is owned and deleted by `handle_message` after streaming.
         let mut current_msg_id: Option<teloxide::types::MessageId> = None;
         let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
@@ -286,18 +459,29 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         while let Some(token) = rx.recv().await {
             buffer.push_str(&token);
 
-            // When buffer exceeds split threshold, send a NEW message and reset
+            // When buffer exceeds split threshold, finalize the current message
+            // and reset so subsequent tokens start a new message.
+            //
+            // Previous logic sent the full buffer as a NEW message, then cleared
+            // the buffer.  This caused the new message to visually shrink on the
+            // next edit (which only contained the small post-split tokens).
+            //
+            // Fix: edit/send the current message with its accumulated content
+            // (finalizing it), then clear the buffer AND current_msg_id so the
+            // next batch of tokens creates a fresh message.
             if buffer.len() > TELEGRAM_STREAM_SPLIT {
-                match stream_bot.send_message(stream_chat_id, &buffer).await {
-                    Ok(new_msg) => {
-                        current_msg_id = Some(new_msg.id);
-                        buffer.clear();
+                if let Some(msg_id) = current_msg_id {
+                    if let Err(e) = stream_bot
+                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "stream_handle: edit failed at split");
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "stream_handle: send_message failed at split");
-                        break;
-                    }
+                } else if let Err(e) = stream_bot.send_message(stream_chat_id, &buffer).await {
+                    tracing::warn!(error = %e, "stream_handle: send failed at split");
                 }
+                buffer.clear();
+                current_msg_id = None;
                 last_action = Instant::now();
                 continue;
             }
@@ -319,18 +503,44 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             }
         }
 
-        // Final: flush whatever is left in the buffer
+        // Final: flush whatever is left in the buffer.
+        // Use the entity-based approach: convert completed Markdown to (plain_text, entities).
+        // This is robust for LLM output — no escaping needed, no risk of Telegram 400 errors.
+        // Intermediate streaming edits remain plain text (partial markdown is fragile).
         if !buffer.is_empty() {
-            if let Some(msg_id) = current_msg_id {
-                stream_bot
-                    .edit_message_text(stream_chat_id, msg_id, &buffer)
-                    .await
-                    .ok();
-            } else {
-                // No intermediate message was sent — deliver the complete response now
-                stream_bot.send_message(stream_chat_id, &buffer).await.ok();
+            const MAX_UTF16: usize = 4090;
+            let (plain_text, entities) = markdown_to_entities(&buffer);
+            let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+
+            for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
+                if i == 0 {
+                    // First chunk: edit or replace the existing in-progress message
+                    if let Some(msg_id) = current_msg_id {
+                        stream_bot
+                            .edit_message_text(stream_chat_id, msg_id, chunk_text)
+                            .entities(chunk_entities.clone())
+                            .await
+                            .ok();
+                    } else {
+                        stream_bot
+                            .send_message(stream_chat_id, chunk_text)
+                            .entities(chunk_entities.clone())
+                            .await
+                            .ok();
+                    }
+                } else {
+                    // Subsequent chunks: send as new messages
+                    stream_bot
+                        .send_message(stream_chat_id, chunk_text)
+                        .entities(chunk_entities.clone())
+                        .await
+                        .ok();
+                }
             }
         }
+        // If `buffer` was empty and `current_msg_id` is None, nothing was
+        // streamed — the placeholder owned by `handle_message` will be cleaned
+        // up after this task completes.
     });
 
     // Build platform-agnostic message
@@ -344,6 +554,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
+    // Keep an owned clone of the tool_event_tx so we can send a terminal
+    // Finished event after processing completes.
+    let agent_tool_event_tx = tool_event_tx.clone();
     let process_result = match agent
         .process_message(&incoming, tool_event_tx, Some(stream_token_tx))
         .await
@@ -354,6 +567,15 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             Err(e)
         }
     };
+
+    let process_success = process_result.is_ok();
+    if let Some(tx) = agent_tool_event_tx {
+        let _ = tx
+            .send(crate::platform::tool_notifier::ToolEvent::Finished {
+                success: process_success,
+            })
+            .await;
+    }
 
     // Drop the sender to signal the notifier to stop, then await cleanup.
     // tool_event_tx is already moved into process_message — it's dropped when process_message returns.
@@ -369,9 +591,19 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         tokio::fs::remove_dir_all(&temp_dir).await.ok();
     }
 
+    // Delete the "Thinking..." placeholder now that the response (or error
+    // reply below) has been delivered. Best-effort: ignore failures so a
+    // stale placeholder never blocks reporting the actual outcome.
+    if let Some(placeholder_id) = placeholder_msg_id {
+        if let Err(e) = bot.delete_message(msg.chat.id, placeholder_id).await {
+            tracing::warn!(error = %e, "Failed to delete thinking placeholder");
+        }
+    }
+
     if let Err(e) = process_result {
         warn!(error = %e, "Agent processing failed");
-        bot.send_message(msg.chat.id, format!("Error: {:#}", e))
+        bot.send_message(msg.chat.id, escape_text(&format!("Error: {:#}", e)))
+            .parse_mode(ParseMode::MarkdownV2)
             .await?;
     }
     // Success: response already delivered via streaming
@@ -482,6 +714,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_supervise_command_extracts_request_text() {
+        let parsed = super::parse_command("/supervise summarize the readme");
+        assert_eq!(
+            parsed,
+            Some(("supervise".into(), "summarize the readme".into()))
+        );
+    }
+
+    #[test]
+    fn parse_command_returns_none_for_non_slash_input() {
+        assert!(super::parse_command("hello world").is_none());
+    }
+
+    #[test]
+    fn parse_command_handles_command_without_argument() {
+        assert_eq!(
+            super::parse_command("/start"),
+            Some(("start".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn parses_all_supervisor_commands() {
+        for c in [
+            "/tasks",
+            "/resume abc",
+            "/cancel abc",
+            "/approve abc",
+            "/clarify abc some text",
+        ] {
+            assert!(super::parse_command(c).is_some(), "failed: {c}");
+        }
+    }
+
+    #[test]
     fn test_split_message_empty_response_produces_no_chunks() {
         let chunks = split_message("", 4000);
         assert!(chunks.len() <= 1);
@@ -501,6 +768,32 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 4000);
         }
+    }
+
+    #[test]
+    fn test_final_flush_uses_entity_based_conversion() {
+        // The final flush must call markdown_to_entities (entity-based approach) instead of
+        // MarkdownV2 parse_mode. This is a source inspection test.
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("markdown_to_entities"),
+            "Final flush must call markdown_to_entities for robust formatting"
+        );
+        assert!(
+            source.contains("split_entities"),
+            "Final flush must call split_entities for long message handling"
+        );
+    }
+
+    #[test]
+    fn test_command_responses_use_escape_text() {
+        // All non-streaming command responses must escape plain text and use MarkdownV2
+        // so that special chars like `.`, `-`, `!`, `_`, `(`, `)` don't break the parser.
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("escape_text"),
+            "Command responses must call escape_text() before sending with MarkdownV2"
+        );
     }
 
     #[test]
@@ -539,6 +832,35 @@ mod tests {
             AttachmentKind::Docx
         );
     }
+    #[test]
+    fn test_first_token_does_not_inherit_placeholder_msg_id() {
+        // The streaming task must seed `current_msg_id` to `None` so the first
+        // token is delivered as a NEW message rather than editing the
+        // "Thinking..." placeholder. Source-inspection guard against future
+        // refactors that re-introduce the seeding behavior.
+        //
+        // Construct the bad-pattern needle at runtime from pieces so the test
+        // body itself never contains the contiguous substring being searched
+        // for (otherwise the `contains` check would always trip on this very
+        // test's source).
+        let source = include_str!("telegram.rs");
+        let bad_needle = format!(
+            "current_msg_id: Option<teloxide::types::MessageId> = {}",
+            "placeholder_msg_id"
+        );
+        assert!(
+            !source.contains(&bad_needle),
+            "stream_handle must NOT seed current_msg_id with the placeholder id; first token must be a new message"
+        );
+        let good_needle = format!(
+            "let mut current_msg_id: Option<teloxide::types::MessageId> = {};",
+            "None"
+        );
+        assert!(
+            source.contains(&good_needle),
+            "stream_handle must initialize current_msg_id to None"
+        );
+    }
 
     #[test]
     fn test_classify_attachment_kind_fallback_to_extension() {
@@ -557,10 +879,61 @@ mod tests {
     }
 
     #[test]
+    fn test_placeholder_is_deleted_after_streaming() {
+        // The Thinking placeholder must be cleaned up in `handle_message` after
+        // `stream_handle.await`, regardless of success/error outcome.
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("Failed to delete thinking placeholder"),
+            "handle_message must delete the Thinking placeholder after streaming completes"
+        );
+    }
+
+    #[test]
     fn test_classify_attachment_kind_unknown() {
         assert_eq!(
             classify_attachment_kind("application/zip", Some("archive.zip")),
             AttachmentKind::Other
         );
+    }
+
+    #[test]
+    fn test_supported_commands_lists_user_visible_commands() {
+        let cmds = supported_commands();
+        let names: Vec<&str> = cmds.iter().map(|c| c.command.as_str()).collect();
+        for required in &[
+            "start",
+            "clear",
+            "tools",
+            "skills",
+            "verbose",
+            "queryrewrite",
+        ] {
+            assert!(
+                names.contains(required),
+                "supported_commands missing /{required}: got {names:?}"
+            );
+        }
+        // Telegram BotCommand names must match `[a-z0-9_]{1,32}`.
+        for c in &cmds {
+            assert!(
+                c.command
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
+                "command '{}' contains invalid characters for Telegram BotCommand",
+                c.command
+            );
+            assert!(
+                (1..=32).contains(&c.command.len()),
+                "command '{}' has invalid length {}",
+                c.command,
+                c.command.len()
+            );
+            assert!(
+                !c.description.is_empty(),
+                "command '{}' is missing a description",
+                c.command
+            );
+        }
     }
 }

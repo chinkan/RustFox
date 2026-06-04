@@ -164,6 +164,36 @@
     transition: background 0.15s, color 0.15s;
   }
   .btn-guide:hover { background: #f6851b; color: #fff; opacity: 1; }
+  /* OAuth connect button + row */
+  .oauth-connect-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: 1.75rem;
+    margin-top: 0.55rem;
+    flex-wrap: wrap;
+  }
+  .btn-oauth-connect {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    border: none;
+    background: #2b6cb0;
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .btn-oauth-connect:hover { background: #2c5282; }
+  .btn-oauth-connect:disabled { opacity: 0.55; cursor: not-allowed; }
+  .oauth-connect-status {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: #718096;
+  }
   /* Modal overlay */
   .modal-overlay {
     display: none;
@@ -486,6 +516,58 @@
   </div>
 </div>
 
+<!-- Notion MCP Setup Modal -->
+<div class="modal-overlay" id="notion-modal" onclick="closeNotionModal(event)">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="notion-modal-title">
+    <button class="modal-close" onclick="closeNotionModal()" aria-label="Close">&#x2715;</button>
+    <h3 id="notion-modal-title">Notion — OAuth 2.0 Setup</h3>
+    <p class="modal-subtitle">
+      Notion's official MCP server at <code>https://mcp.notion.com/mcp</code> requires an
+      <strong>OAuth 2.0 access token</strong>, not a static integration token.
+      Click <strong>Connect with Notion</strong> below to authorize automatically —
+      no manual token copying needed.
+    </p>
+    <ol class="oauth-steps">
+      <li class="oauth-step">
+        <div class="oauth-step-num">1</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Click "Connect with Notion"</div>
+          <div class="oauth-step-desc">
+            In the MCP Tools step, enable the <strong>notion</strong> server, then click the
+            <strong>🔐 Connect with Notion</strong> button that appears below it.
+          </div>
+        </div>
+      </li>
+      <li class="oauth-step">
+        <div class="oauth-step-num">2</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Authorize in the popup</div>
+          <div class="oauth-step-desc">
+            A Notion authorization page opens in a popup window.<br>
+            Sign in with your Notion account and click <strong>Allow access</strong>.
+          </div>
+        </div>
+      </li>
+      <li class="oauth-step">
+        <div class="oauth-step-num">3</div>
+        <div class="oauth-step-body">
+          <div class="oauth-step-title">Token is filled automatically</div>
+          <div class="oauth-step-desc">
+            The popup closes and the <code>NOTION_TOKEN</code> field is populated with your
+            OAuth access token.  Save the config and you're done.
+          </div>
+        </div>
+      </li>
+    </ol>
+    <div class="oauth-warning">
+      <strong>HTTP transport — no local server needed.</strong>
+      RustFox passes the OAuth token as a <code>Bearer</code> header to
+      <code>https://mcp.notion.com/mcp</code>.
+      The old <code>@notionhq/notion-mcp-server</code> npm package is deprecated.
+    </div>
+  </div>
+</div>
+
 <script>
 // ── MCP Catalog ────────────────────────────────────────────────────────────────
 const MCP_CATALOG = [
@@ -494,7 +576,7 @@ const MCP_CATALOG = [
   { name:'firecrawl',        category:'Browser & Web',      desc:'URL to clean Markdown scraping',               runner:'npx', args:['-y','firecrawl-mcp'],                            envVars:['FIRECRAWL_API_KEY'],                        link:'https://www.npmjs.com/package/firecrawl-mcp' },
   { name:'fetch',            category:'Browser & Web',      desc:'Lightweight page fetching',                    runner:'uvx', args:['mcp-server-fetch'],                              envVars:[],                                           link:'https://pypi.org/project/mcp-server-fetch' },
   { name:'google-workspace', category:'Productivity',       desc:'Gmail, Calendar, Drive, Docs',                 runner:'uvx', args:['--from','google-workspace-mcp','google-workspace-worker'], envVars:['GOOGLE_WORKSPACE_CLIENT_ID','GOOGLE_WORKSPACE_CLIENT_SECRET','GOOGLE_WORKSPACE_REFRESH_TOKEN','GOOGLE_WORKSPACE_ENABLED_CAPABILITIES'], envDefaults:{'GOOGLE_WORKSPACE_ENABLED_CAPABILITIES':'["drive","docs","gmail","calendar","sheets","slides"]'}, setupGuide:'__OAUTH_GUIDE_BUTTON__', link:'https://pypi.org/project/google-workspace-mcp' },
-  { name:'notion',           category:'Productivity',       desc:'Read/write Notion workspace',                  runner:'npx', args:['-y','@notionhq/notion-mcp-server'],              envVars:['NOTION_API_KEY'],                           link:'https://www.npmjs.com/package/@notionhq/notion-mcp-server' },
+  { name:'notion',           category:'Productivity',       desc:'Read/write Notion workspace (official HTTP MCP)', url:'https://mcp.notion.com/mcp', authTokenVar:'NOTION_TOKEN', setupGuide:'__NOTION_OAUTH_BUTTON__', link:'https://developers.notion.com/guides/mcp/mcp' },
   { name:'obsidian',         category:'Productivity',       desc:'Local Obsidian vault access',                  runner:'npx', args:['-y','obsidian-mcp'],                             envVars:[],                                           link:'https://www.npmjs.com/package/obsidian-mcp' },
   { name:'slack',            category:'Communication',      desc:'Read channels, post Slack messages',           runner:'npx', args:['-y','@modelcontextprotocol/server-slack'],         envVars:['SLACK_BOT_TOKEN'],                          link:'https://www.npmjs.com/package/@modelcontextprotocol/server-slack' },
   { name:'discord',          category:'Communication',      desc:'Send and read Discord messages',               runner:'npx', args:['-y','discord-mcp'],                              envVars:['DISCORD_TOKEN'],                            link:'https://www.npmjs.com/package/discord-mcp' },
@@ -659,15 +741,43 @@ function generateToml() {
     if (!sel.selected) continue;
     const tool = MCP_CATALOG.find(t => t.name === name);
     if (!tool) continue;
-    const args = tool.args.map(a => '"' + esc(a) + '"').join(', ');
     toml += '\n[[mcp_servers]]\n';
     toml += 'name = "' + name + '"\n';
-    toml += 'command = "' + tool.runner + '"\n';
-    toml += 'args = [' + args + ']\n';
-    if (tool.envVars.length > 0) {
-      toml += '[mcp_servers.env]\n';
-      for (const k of tool.envVars) {
-        toml += k + ' = "' + esc((sel.env && sel.env[k]) || (tool.envDefaults && tool.envDefaults[k]) || '') + '"\n';
+    if (tool.url) {
+      // HTTP-based MCP server (url + optional auth_token + optional OAuth refresh fields)
+      toml += 'url = "' + tool.url + '"\n';
+      const token = tool.authTokenVar && sel.env && sel.env[tool.authTokenVar];
+      if (token) {
+        toml += 'auth_token = "' + esc(token) + '"\n';
+      }
+      if (sel.refresh_token) {
+        toml += 'refresh_token = "' + esc(sel.refresh_token) + '"\n';
+      }
+      if (sel.expires_in) {
+        // Compute absolute expiry timestamp (now + expires_in seconds)
+        const expiresAt = Math.floor(Date.now() / 1000) + sel.expires_in;
+        toml += 'token_expires_at = ' + expiresAt + '\n';
+      }
+      if (sel.token_endpoint) {
+        toml += 'token_endpoint = "' + esc(sel.token_endpoint) + '"\n';
+      }
+      if (sel.oauth_client_id) {
+        toml += 'oauth_client_id = "' + esc(sel.oauth_client_id) + '"\n';
+      }
+      if (sel.oauth_client_secret) {
+        toml += 'oauth_client_secret = "' + esc(sel.oauth_client_secret) + '"\n';
+      }
+    } else {
+      // stdio-based MCP server (command + args + optional env)
+      const args = tool.args.map(a => '"' + esc(a) + '"').join(', ');
+      toml += 'command = "' + tool.runner + '"\n';
+      toml += 'args = [' + args + ']\n';
+      const envVars = tool.envVars || [];
+      if (envVars.length > 0) {
+        toml += '[mcp_servers.env]\n';
+        for (const k of envVars) {
+          toml += k + ' = "' + esc((sel.env && sel.env[k]) || (tool.envDefaults && tool.envDefaults[k]) || '') + '"\n';
+        }
       }
     }
   }
@@ -766,7 +876,12 @@ async function loadExistingConfig() {
     for (const s of (cfg.mcp_servers || [])) {
       const inCatalog = MCP_CATALOG.find(c => c.name === s.name);
       if (inCatalog) {
-        state.mcp_selections[s.name] = { selected: true, env: s.env || {} };
+        const env = s.env || {};
+        // For HTTP catalog entries, map auth_token back to the authTokenVar key
+        if (inCatalog.authTokenVar && s.auth_token) {
+          env[inCatalog.authTokenVar] = s.auth_token;
+        }
+        state.mcp_selections[s.name] = { selected: true, env };
       } else {
         state.custom_mcp_servers.push({
           name: s.name,
@@ -942,12 +1057,20 @@ function buildSteps() {
   for (const cat of categories) {
     html5 += `<div class="mcp-category"><h3>${cat}</h3>`;
     for (const tool of MCP_CATALOG.filter(t => t.category === cat)) {
-      const cmd = tool.runner + ' ' + tool.args.join(' ');
-      const envHtml = tool.envVars.map(k => {
+      // Display line: HTTP servers show the URL; stdio servers show runner + args
+      const cmd = tool.url
+        ? 'HTTP · ' + tool.url
+        : (tool.runner + ' ' + (tool.args || []).join(' '));
+      // Env fields: HTTP servers show their authTokenVar; stdio servers show envVars
+      const envVars = tool.url
+        ? (tool.authTokenVar ? [tool.authTokenVar] : [])
+        : (tool.envVars || []);
+      const envHtml = envVars.map(k => {
         const existingVal = state.mcp_selections[tool.name]?.env?.[k] || (tool.envDefaults && tool.envDefaults[k]) || '';
+        const placeholder = tool.url ? 'access token (autofilled after OAuth or paste manually)' : k;
         return `<div class="env-row" onclick="event.stopPropagation()">
           <div class="mcp-env-label">${k}</div>
-          <input type="text" placeholder="${k}" value="${escHtml(existingVal)}"
+          <input type="text" id="mcp-env-input-${tool.name}-${k}" placeholder="${placeholder}" value="${escHtml(existingVal)}"
                  oninput="setEnv('${tool.name}','${k}',this.value)">
         </div>`;
       }).join('');
@@ -956,10 +1079,21 @@ function buildSteps() {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openOAuthModal()" type="button">&#9432; OAuth Setup Guide</button>`;
       } else if (tool.setupGuide === '__THREADS_GUIDE_BUTTON__') {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openThreadsModal()" type="button">&#9432; Threads Setup Guide</button>`;
+      } else if (tool.setupGuide === '__NOTION_GUIDE_BUTTON__') {
+        guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openNotionModal()" type="button">&#9432; Notion Setup Guide</button>`;
+      } else if (tool.setupGuide === '__NOTION_OAUTH_BUTTON__') {
+        guideHtml = `<div class="oauth-connect-row" onclick="event.stopPropagation()">
+          <button class="btn-oauth-connect" id="oauth-btn-${tool.name}" type="button"
+                  onclick="connectOAuth('${tool.name}','${tool.url}','${tool.authTokenVar}')">
+            🔐 Connect with Notion
+          </button>
+          <span class="oauth-connect-status" id="oauth-status-${tool.name}"></span>
+          <button class="btn-guide" onclick="openNotionModal()" type="button" style="margin-left:auto">&#9432; How it works</button>
+        </div>`;
       } else if (tool.setupGuide) {
         guideHtml = `<div class="mcp-setup-guide" onclick="event.stopPropagation()">${tool.setupGuide}</div>`;
       }
-      const hasExtras = tool.envVars.length || tool.setupGuide;
+      const hasExtras = envVars.length || tool.setupGuide;
       const linkHtml = tool.link
         ? `<a class="mcp-tool-link" href="${tool.link}" target="_blank" rel="noopener" onclick="event.stopPropagation()">docs ↗</a>`
         : '';
@@ -1073,13 +1207,132 @@ function closeThreadsModal(event) {
   document.body.style.overflow = '';
 }
 
+function openNotionModal() {
+  document.getElementById('notion-modal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeNotionModal(event) {
+  if (event && event.target !== document.getElementById('notion-modal')) return;
+  document.getElementById('notion-modal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     document.getElementById('oauth-modal').classList.remove('open');
     document.getElementById('threads-modal').classList.remove('open');
+    document.getElementById('notion-modal').classList.remove('open');
     document.body.style.overflow = '';
   }
 });
+
+// ── Generic MCP OAuth 2.0 connect ──────────────────────────────────────────────
+// Launches the authorization popup, polls for the token, then auto-fills the
+// env field and marks the tool as selected.
+async function connectOAuth(serverName, mcpUrl, authTokenVar) {
+  const btn    = document.getElementById('oauth-btn-' + serverName);
+  const status = document.getElementById('oauth-status-' + serverName);
+
+  btn.disabled = true;
+  status.textContent = '⏳ Starting authorization…';
+  status.style.color = '#718096';
+
+  let oauthState = null;
+  let pollTimer  = null;
+  let timeoutTimer = null;
+
+  function cleanup() {
+    if (pollTimer)    clearInterval(pollTimer);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    btn.disabled = false;
+  }
+
+  try {
+    // Step 1: Discover + register + get auth URL from the Rust server.
+    const startRes = await fetch(
+      '/api/oauth/start?server=' + encodeURIComponent(serverName) +
+      '&url='    + encodeURIComponent(mcpUrl)
+    );
+    if (!startRes.ok) {
+      const msg = await startRes.text();
+      throw new Error(msg || 'oauth/start failed (' + startRes.status + ')');
+    }
+    const { state: oauthSt, auth_url } = await startRes.json();
+    oauthState = oauthSt;
+
+    // Step 2: Open the authorization URL in a popup.
+    const popup = window.open(
+      auth_url,
+      'mcp_oauth_' + serverName,
+      'width=640,height=720,scrollbars=yes,resizable=yes'
+    );
+    if (!popup) {
+      throw new Error('Popup was blocked — please allow popups for this page and try again.');
+    }
+    status.textContent = '⏳ Waiting for authorization in popup…';
+
+    // Step 3: Poll until the Rust callback handler has stored the token.
+    pollTimer = setInterval(async () => {
+      try {
+        const pollRes = await fetch('/api/oauth/token?state=' + encodeURIComponent(oauthState));
+        if (!pollRes.ok) return;
+        const { ready, token, refresh_token, expires_in, token_endpoint, oauth_client_id, oauth_client_secret } = await pollRes.json();
+        if (ready && token) {
+          cleanup();
+          if (popup && !popup.closed) popup.close();
+
+          // Populate the env entry in wizard state.
+          if (!state.mcp_selections[serverName]) {
+            state.mcp_selections[serverName] = { selected: true, env: {} };
+          }
+          if (!state.mcp_selections[serverName].env) {
+            state.mcp_selections[serverName].env = {};
+          }
+          state.mcp_selections[serverName].env[authTokenVar] = token;
+          state.mcp_selections[serverName].selected = true;
+
+          // Store OAuth refresh metadata so the TOML generator can include it.
+          if (refresh_token) state.mcp_selections[serverName].refresh_token = refresh_token;
+          if (expires_in) state.mcp_selections[serverName].expires_in = expires_in;
+          if (token_endpoint) state.mcp_selections[serverName].token_endpoint = token_endpoint;
+          if (oauth_client_id) state.mcp_selections[serverName].oauth_client_id = oauth_client_id;
+          if (oauth_client_secret) state.mcp_selections[serverName].oauth_client_secret = oauth_client_secret;
+
+          // Update the visible token input field.
+          const input = document.getElementById('mcp-env-input-' + serverName + '-' + authTokenVar);
+          if (input) input.value = token;
+
+          // Ensure the tool card shows as selected/checked.
+          const cb   = document.getElementById('mcp-cb-' + serverName);
+          const wrap = document.getElementById('mcp-wrap-' + serverName);
+          const env  = document.getElementById('mcp-env-' + serverName);
+          if (cb)   cb.checked = true;
+          if (wrap) wrap.classList.add('selected');
+          if (env)  env.classList.add('visible');
+
+          status.textContent = '✅ Authorized!';
+          status.style.color = '#48bb78';
+          btn.textContent    = '🔄 Re-authorize';
+        }
+      } catch (err) { console.debug('OAuth poll error:', err); }
+    }, 1500);
+
+    // Abort after 5 minutes.
+    timeoutTimer = setTimeout(() => {
+      if (status.textContent.startsWith('✅')) return;
+      cleanup();
+      if (popup && !popup.closed) popup.close();
+      status.textContent = '✗ Timed out. Please try again.';
+      status.style.color = '#fc8181';
+    }, 300000);
+
+  } catch (err) {
+    cleanup();
+    status.textContent = '✗ ' + err.message;
+    status.style.color = '#fc8181';
+  }
+}
 
 async function init() {
   await loadExistingConfig();

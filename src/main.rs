@@ -1,30 +1,18 @@
-mod agent;
-mod config;
-mod langsmith;
-mod llm;
-mod mcp;
-mod memory;
-mod platform;
-mod scheduler;
-mod skills;
-mod tools;
-mod file_processor;
-mod utils;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::agent::Agent;
-use crate::config::Config;
-use crate::mcp::McpManager;
-use crate::memory::MemoryStore;
-use crate::scheduler::tasks::register_builtin_tasks;
-use crate::scheduler::Scheduler;
-use crate::skills::loader::load_skills_from_dir;
+use rustfox::agent::Agent;
+use rustfox::config::Config;
+use rustfox::mcp::McpManager;
+use rustfox::memory::MemoryStore;
+use rustfox::platform;
+use rustfox::scheduler::tasks::register_builtin_tasks;
+use rustfox::scheduler::Scheduler;
+use rustfox::skills::{loader::load_skills_from_dir, SkillSource};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,7 +29,22 @@ async fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+        .unwrap_or_else(|| {
+            let cwd = PathBuf::from("config.toml");
+            if cwd.exists() {
+                return cwd;
+            }
+            let env_home = std::env::var("RUSTFOX_HOME").ok();
+            if let Some(home) =
+                rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
+            {
+                let candidate = home.join("config.toml");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+            cwd
+        });
 
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
@@ -50,9 +53,12 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully");
     info!("  Model: {}", config.openrouter.model);
     info!("  Sandbox: {}", config.sandbox.allowed_directory.display());
+    if let Some(home) = &config.resolved_home {
+        info!("  Home: {}", home.display());
+    }
     info!("  Allowed users: {:?}", config.telegram.allowed_user_ids);
     info!("  MCP servers: {}", config.mcp_servers.len());
-    let langsmith = std::sync::Arc::new(crate::langsmith::LangSmithClient::new(
+    let langsmith = std::sync::Arc::new(rustfox::langsmith::LangSmithClient::new(
         config.langsmith.as_ref(),
     ));
     if langsmith.is_enabled() {
@@ -69,7 +75,7 @@ async fn main() -> Result<()> {
         config
             .embedding
             .as_ref()
-            .map(|cfg| crate::memory::embeddings::EmbeddingConfig {
+            .map(|cfg| rustfox::memory::embeddings::EmbeddingConfig {
                 api_key: cfg.api_key.clone(),
                 base_url: cfg.base_url.clone(),
                 model: cfg.model.clone(),
@@ -81,20 +87,103 @@ async fn main() -> Result<()> {
         .context("Failed to initialize memory store")?;
     info!("  Database: {}", config.memory.database_path.display());
 
-    // Initialize MCP connections
-    let mut mcp_manager = McpManager::new();
-    mcp_manager.connect_all(&config.mcp_servers).await;
+    // Refresh any expiring OAuth tokens before connecting to MCP servers
+    let http_client = reqwest::Client::new();
+    let mut mcp_server_configs = config.mcp_servers.clone();
+    let refreshed =
+        rustfox::mcp::refresh_expiring_tokens(&mut mcp_server_configs, &config_path, &http_client)
+            .await;
+    if refreshed > 0 {
+        info!("  Refreshed {refreshed} expiring MCP OAuth token(s) at startup");
+    }
 
-    // Load skills from markdown files
-    let skills = load_skills_from_dir(&config.skills.directory).await?;
+    // Initialize MCP connections (using possibly-refreshed configs)
+    let mut mcp_manager = McpManager::new();
+    mcp_manager.connect_all(&mcp_server_configs).await;
+
+    // Seed bundled skills/agents into the instance home on first run.
+    // Seed bundled skills/agents into the instance home on first run.
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.skills.bundled_directory,
+        &config.skills.directory,
+    )
+    .await
+    {
+        warn!("Skill seeding failed: {e}");
+    }
+    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
+        &config.agents.bundled_directory,
+        &config.agents.directory,
+    )
+    .await
+    {
+        warn!("Agent seeding failed: {e}");
+    }
+    // Write the home-side lock so /update-skills can diff later (only when seeded
+    // into the home and a lock does not already exist).
+    if let Some(home) = &config.resolved_home {
+        let seed_lock = |lock_name: &str, dir: &std::path::Path| {
+            let lock_path = home.join(lock_name);
+            if !lock_path.exists() {
+                let lock = rustfox::skills::update::SkillLock {
+                    version: 1,
+                    skills: rustfox::skills::seed::lock_map_for(dir),
+                };
+                if let Ok(json) = serde_json::to_string_pretty(&lock) {
+                    let _ = std::fs::write(&lock_path, json);
+                }
+            }
+        };
+        seed_lock("skills-lock.json", &config.skills.directory);
+        seed_lock("agents-lock.json", &config.agents.directory);
+    }
+
+    // Load skills from instance and bundled directories (instance shadows bundled)
+    let mut skills = load_skills_from_dir(
+        &config.skills.directory,
+        SkillSource::Instance,
+        config.skills.directory.clone(),
+    )
+    .await?;
+    let bundled_skills = load_skills_from_dir(
+        &config.skills.bundled_directory,
+        SkillSource::Bundled,
+        config.skills.bundled_directory.clone(),
+    )
+    .await?;
+    for skill in bundled_skills.list() {
+        skills.register(
+            skill.clone(),
+            SkillSource::Bundled,
+            config.skills.bundled_directory.clone(),
+        );
+    }
     info!("  Skills: {}", skills.len());
 
-    // Load agents from the agents directory
-    let agents = load_skills_from_dir(&config.agents.directory).await?;
+    // Load agents from instance and bundled directories (instance shadows bundled)
+    let mut agents = load_skills_from_dir(
+        &config.agents.directory,
+        SkillSource::Instance,
+        config.agents.directory.clone(),
+    )
+    .await?;
+    let bundled_agents = load_skills_from_dir(
+        &config.agents.bundled_directory,
+        SkillSource::Bundled,
+        config.agents.bundled_directory.clone(),
+    )
+    .await?;
+    for agent in bundled_agents.list() {
+        agents.register(
+            agent.clone(),
+            SkillSource::Bundled,
+            config.agents.bundled_directory.clone(),
+        );
+    }
     info!("  Agents: {}", agents.len());
 
     // Create ScheduledTaskStore sharing the existing SQLite connection
-    let task_store = crate::scheduler::reminders::ScheduledTaskStore::new(memory.connection());
+    let task_store = rustfox::scheduler::reminders::ScheduledTaskStore::new(memory.connection());
 
     // Create scheduler as Arc so Agent can hold it and closures can reference it
     let scheduler = Arc::new(Scheduler::new().await?);
@@ -104,7 +193,7 @@ async fn main() -> Result<()> {
 
     // Channel for dispatching scheduled job work from fire closures to background runner
     let (job_tx, mut job_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::agent::ScheduledJobRequest>();
+        tokio::sync::mpsc::unbounded_channel::<rustfox::agent::ScheduledJobRequest>();
 
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
     let agent = Arc::new_cyclic(|weak| {
@@ -155,7 +244,7 @@ async fn main() -> Result<()> {
                 }
             };
             let chat = teloxide::types::ChatId(chat_id_val);
-            for chunk in crate::agent::split_response_chunks(&response, 4000) {
+            for chunk in rustfox::agent::split_response_chunks(&response, 4000) {
                 if chunk.is_empty() {
                     continue;
                 }
@@ -166,19 +255,82 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn background OAuth token refresh task: checks every 30 minutes.
+    // `cfgs` is kept across ticks so that updated token_expires_at values
+    // are remembered and a freshly-rotated refresh token isn't re-used.
+    {
+        let mut cfgs = mcp_server_configs.clone();
+        let refresh_config_path = config_path.clone();
+        let refresh_http_client = http_client.clone();
+        tokio::spawn(async move {
+            // 30-minute interval — tokens expiring within 5 min are always caught
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30 * 60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let refreshed = rustfox::mcp::refresh_expiring_tokens(
+                    &mut cfgs,
+                    &refresh_config_path,
+                    &refresh_http_client,
+                )
+                .await;
+                if refreshed > 0 {
+                    tracing::info!(
+                        "Background token refresh: updated {refreshed} MCP OAuth token(s)"
+                    );
+                }
+            }
+        });
+    }
+
     // Register built-in background tasks and start scheduler
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
-        crate::llm::LlmClient::new(config.openrouter.clone()),
+        rustfox::llm::LlmClient::new(config.openrouter.clone()),
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
+        config.learning.user_model_cron.clone(),
+        config.learning.user_model_path.clone(),
     )
     .await?;
     scheduler.start().await?;
     info!("  Scheduler: active");
     agent.restore_scheduled_tasks().await;
     info!("  Scheduled tasks: restored from DB");
+
+    // Construct Supervisor with a populated backend Registry so resume /
+    // future routing paths can resolve backends rather than failing with
+    // "backend not found". Held alive in main's scope so the binding isn't
+    // dead-code-eliminated.
+    let mut sup_registry = rustfox::supervisor::backend::Registry::new();
+    sup_registry.register(std::sync::Arc::new(
+        rustfox::supervisor::backend::reasoning::ReasoningBackend::from_agent(
+            Arc::clone(&agent),
+            "supervisor".to_string(),
+            "supervisor".to_string(),
+        ),
+    ));
+    sup_registry.register(std::sync::Arc::new(
+        rustfox::supervisor::backend::shell::ShellBackend::new(
+            config.sandbox.allowed_directory.clone(),
+        ),
+    ));
+
+    let _supervisor = Arc::new(rustfox::supervisor::Supervisor::new(
+        config.supervisor.artifacts_dir.clone(),
+        memory.connection(),
+        sup_registry,
+        config.supervisor.risk.clone(),
+    ));
+    match _supervisor.resumable_task_ids().await {
+        Ok(ids) if !ids.is_empty() => info!(
+            "  Supervisor: {} resumable task(s) found at startup",
+            ids.len()
+        ),
+        Ok(_) => info!("  Supervisor: ready (registry has reasoning + shell backends)"),
+        Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
+    }
 
     // Run the Telegram platform
     info!("Bot is starting...");

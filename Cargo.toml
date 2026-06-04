@@ -21,7 +21,7 @@ serde_json = "1"
 toml = "0.8"
 
 # MCP client
-rmcp = { version = "0.15", features = ["client", "transport-child-process", "transport-io"] }
+rmcp = { version = "0.15", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
 
 # Logging
 tracing = "0.1"
@@ -49,6 +49,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Background task scheduler
 tokio-cron-scheduler = "0.13"
 
+# Markdown parser for entity-based Telegram message formatting
+pulldown-cmark = "0.12"
+
 # SQLite vector search extension
 sqlite-vec = "0.1"
 
@@ -69,8 +72,17 @@ docx-rs = "0.4"
 # MIME type detection
 infer = "0.19"
 
-# Base64 for vision API content parts
+# Base64 for vision API content parts and OAuth PKCE helpers
 base64 = "0.22"
 
+# OAuth 2.0 / PKCE helpers (used only by src/bin/setup.rs)
+rand = "0.8"
+sha2 = "0.10"
+
+# Secret-redaction filter
+regex = "1"
+
+# OS home-directory resolution for the persistent home dir (~/.rustfox)
+dirs = "5"
 [dev-dependencies]
 tempfile = "3"

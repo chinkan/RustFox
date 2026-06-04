@@ -14,6 +14,8 @@ api_key = "YOUR_OPENROUTER_API_KEY"
 model = "moonshotai/kimi-k2.5"
 # API base URL (usually no need to change)
 base_url = "https://openrouter.ai/api/v1"
+# Alternative using local ollama
+# base_url = "http://localhost:11434/v1"
 # Maximum tokens in response
 max_tokens = 4096
 # supports_vision = false  # Set to true if your model supports image inputs
@@ -23,29 +25,51 @@ Use the available tools to help the user with their tasks. \
 When using file or terminal tools, operate only within the allowed sandbox directory. \
 Be concise and helpful."""
 
+# ── Home directory & paths ──────────────────────────────────────────────
+# By default RustFox stores everything under ~/.rustfox:
+#   ~/.rustfox/config.toml, rustfox.db, skills/, agents/, workspace/, artifacts/
+# Override the home root with the RUSTFOX_HOME env var (absolute path) or
+# [general].home (see the [general] section below). Run a second isolated
+# instance with:
+#   RUSTFOX_HOME="$HOME/.rustfox-work" cargo run
+
 [sandbox]
-# The directory where file operations and command execution are allowed
-# The bot cannot access files outside this directory
-allowed_directory = "/tmp/rustfox-sandbox"
+# The LLM's persistent workspace (file/command tools are confined here).
+# Leave unset to use <home>/workspace. Set an absolute path to override.
+# allowed_directory = "/absolute/path/to/workspace"
 
 [memory]
 # Path to the SQLite database file for persistent memory
 # Stores conversations, knowledge base, and vector embeddings
-database_path = "rustfox.db"
+# Leave unset to use <home>/rustfox.db. Set an absolute path to override.
+# database_path = "/absolute/path/to/rustfox.db"
+
+# Query rewriting for memory search (optional; default: false)
+# When enabled, ambiguous follow-up questions are rewritten into self-contained
+# search queries using an LLM call before the RAG vector search.
+# This improves recall accuracy but adds one extra LLM round-trip per message.
+# Can also be toggled per-user at runtime via the /query-rewrite Telegram command.
+# query_rewriter_enabled = false
 
 [skills]
 # Directory containing skill markdown files
 # Skills are natural-language instructions loaded at startup
-directory = "skills"
+# Leave unset to use <home>/skills (seeded from the bundled skills on first run).
+# directory = "/absolute/path/to/skills"
 
 [general]
+# Home directory root for all RustFox state (optional; overrides ~/.rustfox).
+# Must be an absolute path. The RUSTFOX_HOME env var takes precedence over this.
+# home = "/absolute/path/to/home"
+
 # Your location, injected into the system prompt so the AI knows your timezone/region
 # Uncomment and set to your city/region (e.g. "Tokyo, Japan")
 # location = "Tokyo, Japan"
 
 # Agent loop (optional; defaults apply if section omitted)
 # [agent]
-# max_iterations = 25   # Agent loop cap (default 25)
+# max_iterations = 25              # Agent loop cap (default 25)
+# empty_response_retry_limit = 3   # Recovery attempts for empty model responses (default 3; 0 = fail immediately)
 
 # LangSmith observability (optional)
 # Traces every LLM call and tool execution for debugging in the LangSmith UI.
@@ -143,3 +167,53 @@ directory = "skills"
 # args = ["-y", "@brave/brave-search-mcp-server"]
 # [mcp_servers.env]
 # BRAVE_API_KEY = "your-brave-api-key"
+
+# ── HTTP-based MCP Servers (Streamable HTTP transport) ────────────────────────
+# These servers are reached over HTTPS and do not require a local command.
+# Use `url` instead of `command`; optionally set `auth_token` for Bearer auth.
+
+# Example: Notion MCP server (official HTTP MCP — no Node.js required)
+# Docs: https://developers.notion.com/guides/mcp/mcp
+#
+# Recommended: use the setup wizard (cargo run --bin setup) to obtain an OAuth
+# access token via the built-in OAuth 2.0 flow.  The wizard also stores the
+# refresh token and expiry so the bot can automatically renew the connection.
+#
+# The bot refreshes the access token automatically when it is within 5 minutes
+# of expiry and writes the new credentials back to this file.  Manual setup:
+#   1. Create a Notion integration at https://www.notion.so/my-integrations
+#      and note your client_id and client_secret.
+#   2. Complete the OAuth flow to obtain an access_token and refresh_token.
+#   3. Fill in the fields below.
+#
+# [[mcp_servers]]
+# name = "notion"
+# url = "https://mcp.notion.com/mcp"
+# auth_token = "your-notion-oauth-access-token"
+# refresh_token = "your-notion-oauth-refresh-token"
+# token_expires_at = 1234567890          # Unix timestamp; set by the wizard
+# token_endpoint = "https://api.notion.com/v1/oauth/token"
+# oauth_client_id = "your-notion-client-id"
+# oauth_client_secret = "your-notion-client-secret"  # omit for public clients
+
+# Example: Exa AI web search (https://mcp.exa.ai)
+# Get your API key at https://dashboard.exa.ai/api-keys
+#
+# Option A — Bearer token (recommended; keeps the key out of URLs and logs)
+# [[mcp_servers]]
+# name = "exa"
+# url = "https://mcp.exa.ai/mcp"
+# auth_token = "your-exa-api-key"
+#
+# Option B — Inline API key in URL (simpler; key will appear in logs)
+# [[mcp_servers]]
+# name = "exa"
+# url = "https://mcp.exa.ai/mcp?exaApiKey=your-exa-api-key"
+
+# ── Self-Learning (optional; defaults apply if section omitted) ─────────────
+# [learning]
+# user_model_path = "memory/USER.md"          # Honcho-style user model file
+# skill_extraction_enabled = true              # Auto-generate skills from tool-heavy tasks
+# skill_extraction_threshold = 5              # Min tool calls to trigger extraction
+# user_model_update_interval = 10             # Update user model every N user messages
+# user_model_cron = "0 0 3 * * SUN"           # Weekly user model refresh (6-field cron)
