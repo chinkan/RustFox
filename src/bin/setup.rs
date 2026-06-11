@@ -104,7 +104,6 @@ struct ExistingConfig {
     max_tokens: u32, // 0 = not set; frontend treats falsy as "use wizard default (4096)"
     system_prompt: String,
     location: String,
-    sandbox_dir: String,
     db_path: String,
     // New fields
     supports_vision: bool,
@@ -144,7 +143,6 @@ struct ExistingMcpServer {
 struct RawConfig {
     telegram: Option<RawTelegram>,
     openrouter: Option<RawOpenRouter>,
-    sandbox: Option<RawSandbox>,
     memory: Option<RawMemory>,
     general: Option<RawGeneral>,
     agent: Option<RawAgent>,
@@ -176,11 +174,6 @@ struct RawOpenRouter {
     max_tokens: Option<u32>,
     system_prompt: Option<String>,
     supports_vision: Option<bool>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct RawSandbox {
-    allowed_directory: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -675,7 +668,6 @@ struct ConfigParams<'a> {
     or_key: &'a str,
     model: &'a str,
     max_tokens: u32,
-    sandbox: &'a str,
     db_path: &'a str,
     location: &'a str,
 }
@@ -700,7 +692,6 @@ fn format_config(p: &ConfigParams<'_>) -> String {
     let or_key = p.or_key;
     let model = p.model;
     let max_tokens = p.max_tokens;
-    let sandbox = p.sandbox;
     let db_path = p.db_path;
 
     format!(
@@ -717,9 +708,6 @@ system_prompt = """You are a helpful AI assistant with access to tools. \
 Use the available tools to help the user with their tasks. \
 When using file or terminal tools, operate only within the allowed sandbox directory. \
 Be concise and helpful."""
-
-[sandbox]
-allowed_directory = "{sandbox}"
 
 [memory]
 database_path = "{db_path}"
@@ -763,10 +751,6 @@ fn run_cli(project_root: &Path) -> Result<()> {
         read_line("Model [moonshotai/kimi-k2.5]: ")?,
         "moonshotai/kimi-k2.5",
     );
-    let sandbox = or_default(
-        read_line("Sandbox directory [/tmp/rustfox-sandbox]: ")?,
-        "/tmp/rustfox-sandbox",
-    );
     let db_path = or_default(read_line("Memory DB path [rustfox.db]: ")?, "rustfox.db");
     let location = read_line("Your location (optional, e.g. Tokyo, Japan): ")?;
 
@@ -776,7 +760,6 @@ fn run_cli(project_root: &Path) -> Result<()> {
         or_key: &or_key,
         model: &model,
         max_tokens: 4096,
-        sandbox: &sandbox,
         db_path: &db_path,
         location: &location,
     });
@@ -864,7 +847,6 @@ fn parse_existing_config(content: &str) -> ExistingConfig {
 
     let tg = raw.telegram.clone().unwrap_or_default();
     let openrouter = raw.openrouter.clone().unwrap_or_default();
-    let sb = raw.sandbox.unwrap_or_default();
     let mem = raw.memory.clone().unwrap_or_default();
 
     let allowed_user_ids = tg
@@ -907,7 +889,6 @@ fn parse_existing_config(content: &str) -> ExistingConfig {
             .as_ref()
             .and_then(|g| g.location.clone())
             .unwrap_or_default(),
-        sandbox_dir: sb.allowed_directory.unwrap_or_default(),
         db_path: mem.database_path.clone().unwrap_or_default(),
         mcp_servers,
         // New fields default to safe empty values; populated below.
@@ -997,7 +978,6 @@ location = "Tokyo, Japan"
         assert_eq!(cfg.max_tokens, 2048);
         assert_eq!(cfg.system_prompt, "Be helpful.");
         assert_eq!(cfg.location, "Tokyo, Japan");
-        assert_eq!(cfg.sandbox_dir, "/tmp/test");
         assert_eq!(cfg.db_path, "test.db");
         assert!(cfg.mcp_servers.is_empty());
     }
@@ -1053,7 +1033,6 @@ allowed_user_ids = [42]
         assert!(cfg.exists);
         assert_eq!(cfg.telegram_token, "partial");
         assert_eq!(cfg.model, ""); // no default injected — that's the wizard's job
-        assert_eq!(cfg.sandbox_dir, "");
     }
 
     #[test]
@@ -1080,7 +1059,7 @@ allowed_directory = "/tmp"
         user_ids: &str,
         or_key: &str,
         model: &str,
-        sandbox: &str,
+        _sandbox: &str,
         db_path: &str,
         location: &str,
     ) -> String {
@@ -1090,7 +1069,6 @@ allowed_directory = "/tmp"
             or_key,
             model,
             max_tokens: 4096,
-            sandbox,
             db_path,
             location,
         })
@@ -1146,15 +1124,6 @@ allowed_directory = "/tmp"
     fn test_multiple_user_ids_comma_separated() {
         let out = cfg("t", "111, 222, 333", "k", "m", "/tmp", "db.db", "");
         assert!(out.contains("allowed_user_ids = [111, 222, 333]"));
-    }
-
-    #[test]
-    fn test_sandbox_and_memory_sections() {
-        let out = cfg("t", "1", "k", "m", "/my/sandbox", "mem.db", "");
-        assert!(out.contains("[sandbox]"));
-        assert!(out.contains(r#"allowed_directory = "/my/sandbox""#));
-        assert!(out.contains("[memory]"));
-        assert!(out.contains(r#"database_path = "mem.db""#));
     }
 
     #[test]

@@ -723,7 +723,6 @@ const state = {
 
   // Step 2 — Location & Storage
   location: 'Hong Kong',
-  sandbox_dir: '/tmp/rustfox-sandbox',
   db_path: 'rustfox.db',
   skills_dir: '',
   agents_dir: '',
@@ -858,7 +857,6 @@ function collectStep(n) {
   }
   if (n === 2) {
     state.location                   = (document.getElementById('f-location')?.value              || state.location).trim();
-    state.sandbox_dir                = (document.getElementById('f-sandbox-dir')?.value           || state.sandbox_dir).trim() || '/tmp/rustfox-sandbox';
     state.db_path                    = (document.getElementById('f-db-path')?.value               || state.db_path).trim()     || 'rustfox.db';
     state.skills_dir                 = (document.getElementById('f-skills-dir')?.value            || '').trim();
     state.agents_dir                 = (document.getElementById('f-agents-dir')?.value            || '').trim();
@@ -922,9 +920,6 @@ function generateToml() {
     'max_tokens = ' + (parseInt(state.max_tokens, 10) || 4096) + '\n' +
     'supports_vision = ' + (state.supports_vision ? 'true' : 'false') + '\n' +
     'system_prompt = """' + sysprompt + '"""\n' +
-    '\n' +
-    '[sandbox]\n' +
-    'allowed_directory = "' + esc(state.sandbox_dir) + '"\n' +
     '\n' +
     '[memory]\n' +
     'database_path = "' + esc(state.db_path) + '"\n' +
@@ -1078,7 +1073,7 @@ function renderSummary() {
 
   html += section('Location & Storage', [
     row('Location',       state.location),
-    row('Sandbox dir',    state.sandbox_dir),
+
     row('Database path',  state.db_path),
     row('Skills dir',     state.skills_dir || '(default)'),
     row('Agents dir',     state.agents_dir || '(default)'),
@@ -1170,7 +1165,6 @@ async function loadExistingConfig() {
     if (cfg.max_tokens)       state.max_tokens       = String(cfg.max_tokens);
     if (cfg.system_prompt)    state.system_prompt    = cfg.system_prompt;
     if (cfg.location)         state.location         = cfg.location;
-    if (cfg.sandbox_dir)      state.sandbox_dir      = cfg.sandbox_dir;
     if (cfg.db_path)          state.db_path          = cfg.db_path;
     if (cfg.base_url)         state.base_url         = cfg.base_url;
     if (typeof cfg.supports_vision === 'boolean') state.supports_vision = cfg.supports_vision;
@@ -1213,9 +1207,56 @@ async function loadExistingConfig() {
     }
 
     state._loaded = true;
+
+    // Sync state back to DOM form fields
+    syncStateToForm();
   } catch (_) {
     // Network error or JSON parse error — start with blank wizard
   }
+}
+
+function syncStateToForm() {
+  const map = {
+    'f-telegram-token':     state.telegram_token,
+    'f-allowed-ids':        state.allowed_user_ids,
+    'f-openrouter-key':     state.openrouter_key,
+    'f-model':              state.model,
+    'f-max-tokens':         state.max_tokens,
+    'f-system-prompt':      state.system_prompt,
+    'f-base-url':           state.base_url,
+    'f-location':           state.location,
+
+    'f-db-path':            state.db_path,
+    'f-skills-dir':         state.skills_dir,
+    'f-agents-dir':         state.agents_dir,
+    'f-home-dir':           state.home_dir,
+    'f-ocr-model-dir':      state.ocr_model_dir,
+    'f-max-iterations':     state.max_iterations,
+    'f-empty-retry':        state.empty_response_retry_limit,
+    'f-langsmith-key':      state.langsmith_key,
+    'f-langsmith-project':  state.langsmith_project,
+    'f-embedding-key':      state.embedding_key,
+    'f-embedding-base-url': state.embedding_base_url,
+    'f-embedding-model':    state.embedding_model,
+    'f-embedding-dimensions': state.embedding_dimensions,
+    'f-learning-threshold': state.learning_skill_extraction_threshold,
+  };
+  for (const [id, val] of Object.entries(map)) {
+    const el = document.getElementById(id);
+    if (el) el.value = String(val);
+  }
+  // Checkboxes
+  const cbMap = {
+    'f-supports-vision':    state.supports_vision,
+    'f-query-rewriter':     state.query_rewriter_enabled,
+    'f-learning-extraction': state.learning_skill_extraction_enabled,
+  };
+  for (const [id, val] of Object.entries(cbMap)) {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!val;
+  }
+  // Re-render MCP selections
+  renderMcpCatalog();
 }
 
 // ── Custom MCP servers ──────────────────────────────────────────────────────
@@ -1433,10 +1474,6 @@ function buildSteps() {
       <span class="chevron">▾</span>
     </button>
     <div class="advanced-body">
-      <div class="field">
-        <label>Sandbox Directory <span class="hint">— file &amp; command operations are restricted here</span></label>
-        <input type="text" id="f-sandbox-dir" value="${escHtml(state.sandbox_dir)}">
-      </div>
       <div class="field">
         <label>Memory Database Path <span class="hint">— SQLite file for persistent memory</span></label>
         <input type="text" id="f-db-path" value="${escHtml(state.db_path)}">
