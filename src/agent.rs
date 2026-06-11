@@ -51,8 +51,6 @@ pub struct Agent {
     pub langsmith: Arc<LangSmithClient>,
 }
 
-
-
 /// A task parsed from the spawn_agents tool arguments, after validation.
 struct AdHocTask {
     system_prompt: String,
@@ -1649,34 +1647,34 @@ impl Agent {
             }
         };
 
-            // Check if agent has skip_bootstrap: true — use body as system message directly
-            let skip_bootstrap = skill_opt
-                .as_ref()
-                .map(|s| s.skip_bootstrap)
-                .unwrap_or(false);
+        // Check if agent has skip_bootstrap: true — use body as system message directly
+        let skip_bootstrap = skill_opt
+            .as_ref()
+            .map(|s| s.skip_bootstrap)
+            .unwrap_or(false);
 
-            // Strip YAML frontmatter from content if present (between --- markers)
-            let body = skill_opt.as_ref().map(|s| {
-                let content = &s.content;
-                let trimmed = content.trim_start();
-                if let Some(after_first) = trimmed.strip_prefix("---") {
-                    if let Some(end_pos) = after_first.find("---") {
-                        return after_first[end_pos + 3..].trim_start().to_string();
-                    }
+        // Strip YAML frontmatter from content if present (between --- markers)
+        let body = skill_opt.as_ref().map(|s| {
+            let content = &s.content;
+            let trimmed = content.trim_start();
+            if let Some(after_first) = trimmed.strip_prefix("---") {
+                if let Some(end_pos) = after_first.find("---") {
+                    return after_first[end_pos + 3..].trim_start().to_string();
                 }
-                content.clone()
-            });
+            }
+            content.clone()
+        });
 
-            let system_content = if skip_bootstrap {
-                let agent_body = body.as_deref().unwrap_or("");
-                format!("You are the '{}' agent.\n\n{}", skill_name, agent_body)
-            } else {
-                format!(
+        let system_content = if skip_bootstrap {
+            let agent_body = body.as_deref().unwrap_or("");
+            format!("You are the '{}' agent.\n\n{}", skill_name, agent_body)
+        } else {
+            format!(
                     "You are the '{}' agent. Your first action MUST be to call \
                      read_agent_file with agent_name='{}' and relative_path='AGENT.md' to load your instructions.",
                     skill_name, skill_name
                 )
-            };
+        };
 
         let mut messages = vec![
             ChatMessage {
