@@ -1,3 +1,5 @@
+#![deny(dead_code)]
+
 pub mod agent;
 pub mod agent_prompt;
 pub mod config;

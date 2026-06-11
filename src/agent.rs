@@ -51,15 +51,7 @@ pub struct Agent {
     pub langsmith: Arc<LangSmithClient>,
 }
 
-/// Which registry/directory an agent invocation targets.
-#[derive(Clone, Copy)]
-enum AgentKind {
-    /// Look up in the skills registry; bootstrap uses `read_skill_file` / SKILL.md
-    #[allow(dead_code)]
-    Skill,
-    /// Look up in agents registry first, fall back to skills; bootstrap uses `read_agent_file` / AGENT.md
-    Agent,
-}
+
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
 struct AdHocTask {
@@ -185,7 +177,6 @@ impl Agent {
 
     /// Build the system prompt for an ad-hoc subagent by prepending system context
     /// (timestamp, user model, location) to the agent's specific instructions.
-    #[allow(dead_code)]
     async fn build_subagent_system_prompt(&self, agent_instructions: &str) -> String {
         let mut prompt = self.build_system_context().await;
         prompt.push_str("\n\n");
@@ -1500,7 +1491,6 @@ impl Agent {
         user_prompt: &str,
         model_override: Option<&str>,
         tools_override: Option<Vec<String>>,
-        kind: AgentKind,
     ) -> String {
         // --- Ad-hoc mode (no predefined skill/agent) ---
         if skill_name.is_none() {
@@ -1575,20 +1565,14 @@ impl Agent {
         let (resolved_model, declared_tools, max_iter) = {
             let default_model = self.config.openrouter.model.clone();
 
-            let skill_opt = match kind {
-                AgentKind::Agent => {
-                    let agents = self.agents.read().await;
-                    let from_agents = agents.get(skill_name).cloned();
-                    drop(agents);
-                    if from_agents.is_some() {
-                        from_agents
-                    } else {
-                        // fall back to skills registry
-                        let skills = self.skills.read().await;
-                        skills.get(skill_name).cloned()
-                    }
-                }
-                AgentKind::Skill => {
+            let skill_opt = {
+                let agents = self.agents.read().await;
+                let from_agents = agents.get(skill_name).cloned();
+                drop(agents);
+                if from_agents.is_some() {
+                    from_agents
+                } else {
+                    // fall back to skills registry
                     let skills = self.skills.read().await;
                     skills.get(skill_name).cloned()
                 }
@@ -1653,66 +1637,46 @@ impl Agent {
 
         // Resolve the skill/agent metadata again so we can read its body for the
         // skip_bootstrap path. (Cheap HashMap lookups; the locks are dropped quickly.)
-        let skill_opt = match kind {
-            AgentKind::Agent => {
-                let agents = self.agents.read().await;
-                let from_agents = agents.get(skill_name).cloned();
-                drop(agents);
-                if from_agents.is_some() {
-                    from_agents
-                } else {
-                    let skills = self.skills.read().await;
-                    skills.get(skill_name).cloned()
-                }
-            }
-            AgentKind::Skill => {
+        let skill_opt = {
+            let agents = self.agents.read().await;
+            let from_agents = agents.get(skill_name).cloned();
+            drop(agents);
+            if from_agents.is_some() {
+                from_agents
+            } else {
                 let skills = self.skills.read().await;
                 skills.get(skill_name).cloned()
             }
         };
 
-        // Check if agent has skip_bootstrap: true — use body as system message directly
-        let skip_bootstrap = skill_opt
-            .as_ref()
-            .map(|s| s.skip_bootstrap)
-            .unwrap_or(false);
+            // Check if agent has skip_bootstrap: true — use body as system message directly
+            let skip_bootstrap = skill_opt
+                .as_ref()
+                .map(|s| s.skip_bootstrap)
+                .unwrap_or(false);
 
-        // Strip YAML frontmatter from content if present (between --- markers)
-        let body = skill_opt.as_ref().map(|s| {
-            let content = &s.content;
-            let trimmed = content.trim_start();
-            if let Some(after_first) = trimmed.strip_prefix("---") {
-                if let Some(end_pos) = after_first.find("---") {
-                    return after_first[end_pos + 3..].trim_start().to_string();
+            // Strip YAML frontmatter from content if present (between --- markers)
+            let body = skill_opt.as_ref().map(|s| {
+                let content = &s.content;
+                let trimmed = content.trim_start();
+                if let Some(after_first) = trimmed.strip_prefix("---") {
+                    if let Some(end_pos) = after_first.find("---") {
+                        return after_first[end_pos + 3..].trim_start().to_string();
+                    }
                 }
-            }
-            content.clone()
-        });
+                content.clone()
+            });
 
-        let system_content = if skip_bootstrap {
-            let agent_body = body.as_deref().unwrap_or("");
-            match kind {
-                AgentKind::Agent => {
-                    format!("You are the '{}' agent.\n\n{}", skill_name, agent_body)
-                }
-                AgentKind::Skill => {
-                    format!("You are the '{}' subagent.\n\n{}", skill_name, agent_body)
-                }
-            }
-        } else {
-            match kind {
-                AgentKind::Agent => format!(
+            let system_content = if skip_bootstrap {
+                let agent_body = body.as_deref().unwrap_or("");
+                format!("You are the '{}' agent.\n\n{}", skill_name, agent_body)
+            } else {
+                format!(
                     "You are the '{}' agent. Your first action MUST be to call \
                      read_agent_file with agent_name='{}' and relative_path='AGENT.md' to load your instructions.",
                     skill_name, skill_name
-                ),
-                AgentKind::Skill => format!(
-                    "You are the '{}' subagent. Your first action MUST be to call \
-                     read_skill_file with skill_name='{}' and relative_path='SKILL.md' to load your instructions.",
-                    skill_name, skill_name
-                ),
-            }
-        };
+                )
+            };
 
         let mut messages = vec![
             ChatMessage {
@@ -2287,7 +2251,6 @@ impl Agent {
                     &prompt,      // user_prompt
                     model_override.as_deref(),
                     tools_override,
-                    AgentKind::Agent,
                 ))
                 .await
             }
@@ -2361,8 +2324,7 @@ impl Agent {
                         let mo = task.model;
                         let to = task.tools;
                         Box::pin(async move {
-                            self.run_subagent(None, &sp, &pr, mo.as_deref(), to, AgentKind::Skill)
-                                .await
+                            self.run_subagent(None, &sp, &pr, mo.as_deref(), to).await
                         })
                     })
                     .collect();
