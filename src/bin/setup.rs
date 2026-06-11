@@ -106,6 +106,26 @@ struct ExistingConfig {
     location: String,
     sandbox_dir: String,
     db_path: String,
+    // New fields
+    supports_vision: bool,
+    base_url: String,
+    home_dir: String,
+    skills_dir: String,
+    agents_dir: String,
+    ocr_model_dir: String,
+    agent_max_iterations: u32,
+    agent_empty_response_retry_limit: u32,
+    langsmith_key: String,
+    langsmith_project: String,
+    embedding_key: String,
+    embedding_base_url: String,
+    embedding_model: String,
+    embedding_dimensions: u32,
+    query_rewriter_enabled: bool,
+    learning_skill_extraction_enabled: bool,
+    learning_skill_extraction_threshold: u32,
+    learning_user_model_update_interval: u32,
+    learning_user_model_cron: String,
     mcp_servers: Vec<ExistingMcpServer>,
 }
 
@@ -120,47 +140,134 @@ struct ExistingMcpServer {
 
 // ── Raw TOML parse structs (loose — all fields optional so partial configs load) ──
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawConfig {
     telegram: Option<RawTelegram>,
     openrouter: Option<RawOpenRouter>,
     sandbox: Option<RawSandbox>,
     memory: Option<RawMemory>,
     general: Option<RawGeneral>,
+    agent: Option<RawAgent>,
+    langsmith: Option<RawLangSmith>,
+    embedding: Option<RawEmbedding>,
+    ocr: Option<RawOcr>,
+    learning: Option<RawLearning>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    supervisor: Option<RawSupervisor>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    subagents: Option<RawSubagents>,
+    skills: Option<RawSkills>,
+    agents_config: Option<RawAgentsConfig>,
     #[serde(default)]
     mcp_servers: Vec<RawMcpServer>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawTelegram {
     bot_token: Option<String>,
     allowed_user_ids: Option<Vec<toml::Value>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawOpenRouter {
     api_key: Option<String>,
     model: Option<String>,
+    base_url: Option<String>,
     max_tokens: Option<u32>,
     system_prompt: Option<String>,
+    supports_vision: Option<bool>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawSandbox {
     allowed_directory: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawMemory {
     database_path: Option<String>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    query_rewriter_enabled: Option<bool>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct RawGeneral {
     location: Option<String>,
+    home: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
+struct RawAgent {
+    max_iterations: Option<u32>,
+    empty_response_retry_limit: Option<u32>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawLangSmith {
+    api_key: Option<String>,
+    project: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawEmbedding {
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    dimensions: Option<u32>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawOcr {
+    model_dir: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawLearning {
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    user_model_path: Option<String>,
+    skill_extraction_enabled: Option<bool>,
+    skill_extraction_threshold: Option<u32>,
+    user_model_update_interval: Option<u32>,
+    user_model_cron: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawSupervisor {
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    default_autonomy_mode: Option<String>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    artifacts_dir: Option<String>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    risk: Option<RawSupervisorRisk>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawSupervisorRisk {
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    require_approval_for_low: Option<bool>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    require_approval_for_medium: Option<bool>,
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    auto_execute_only_low: Option<bool>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawSubagents {
+    #[allow(dead_code)] // parsed for future use; not yet surfaced to the wizard
+    default_tools: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawSkills {
+    directory: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct RawAgentsConfig {
+    directory: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
 struct RawMcpServer {
     name: Option<String>,
     command: Option<String>,
@@ -755,10 +862,10 @@ fn parse_existing_config(content: &str) -> ExistingConfig {
         }
     };
 
-    let tg = raw.telegram.unwrap_or_default();
-    let openrouter = raw.openrouter.unwrap_or_default();
+    let tg = raw.telegram.clone().unwrap_or_default();
+    let openrouter = raw.openrouter.clone().unwrap_or_default();
     let sb = raw.sandbox.unwrap_or_default();
-    let mem = raw.memory.unwrap_or_default();
+    let mem = raw.memory.clone().unwrap_or_default();
 
     let allowed_user_ids = tg
         .allowed_user_ids
@@ -774,6 +881,7 @@ fn parse_existing_config(content: &str) -> ExistingConfig {
 
     let mcp_servers = raw
         .mcp_servers
+        .clone()
         .into_iter()
         .filter_map(|s| {
             let name = s.name.filter(|n| !n.is_empty())?;
@@ -786,23 +894,64 @@ fn parse_existing_config(content: &str) -> ExistingConfig {
         })
         .collect();
 
-    ExistingConfig {
+    let mut cfg = ExistingConfig {
         exists: true,
         telegram_token: tg.bot_token.unwrap_or_default(),
         allowed_user_ids,
-        openrouter_key: openrouter.api_key.unwrap_or_default(),
-        model: openrouter.model.unwrap_or_default(),
+        openrouter_key: openrouter.api_key.clone().unwrap_or_default(),
+        model: openrouter.model.clone().unwrap_or_default(),
         max_tokens: openrouter.max_tokens.unwrap_or(0),
-        system_prompt: openrouter.system_prompt.unwrap_or_default(),
+        system_prompt: openrouter.system_prompt.clone().unwrap_or_default(),
         location: raw
             .general
             .as_ref()
             .and_then(|g| g.location.clone())
             .unwrap_or_default(),
         sandbox_dir: sb.allowed_directory.unwrap_or_default(),
-        db_path: mem.database_path.unwrap_or_default(),
+        db_path: mem.database_path.clone().unwrap_or_default(),
         mcp_servers,
+        // New fields default to safe empty values; populated below.
+        ..ExistingConfig::default()
+    };
+
+    if let Some(ref or_cfg) = raw.openrouter {
+        cfg.supports_vision = or_cfg.supports_vision.unwrap_or(false);
+        cfg.base_url = or_cfg.base_url.clone().unwrap_or_default();
     }
+    if let Some(ref general) = raw.general {
+        cfg.home_dir = general.home.clone().unwrap_or_default();
+    }
+    if let Some(ref agent) = raw.agent {
+        cfg.agent_max_iterations = agent.max_iterations.unwrap_or(25);
+        cfg.agent_empty_response_retry_limit = agent.empty_response_retry_limit.unwrap_or(3);
+    }
+    if let Some(ref langsmith) = raw.langsmith {
+        cfg.langsmith_key = langsmith.api_key.clone().unwrap_or_default();
+        cfg.langsmith_project = langsmith.project.clone().unwrap_or_default();
+    }
+    if let Some(ref embedding) = raw.embedding {
+        cfg.embedding_key = embedding.api_key.clone().unwrap_or_default();
+        cfg.embedding_base_url = embedding.base_url.clone().unwrap_or_default();
+        cfg.embedding_model = embedding.model.clone().unwrap_or_default();
+        cfg.embedding_dimensions = embedding.dimensions.unwrap_or(0);
+    }
+    if let Some(ref ocr) = raw.ocr {
+        cfg.ocr_model_dir = ocr.model_dir.clone().unwrap_or_default();
+    }
+    if let Some(ref learning) = raw.learning {
+        cfg.learning_skill_extraction_enabled = learning.skill_extraction_enabled.unwrap_or(false);
+        cfg.learning_skill_extraction_threshold = learning.skill_extraction_threshold.unwrap_or(0);
+        cfg.learning_user_model_update_interval = learning.user_model_update_interval.unwrap_or(0);
+        cfg.learning_user_model_cron = learning.user_model_cron.clone().unwrap_or_default();
+    }
+    if let Some(ref skills) = raw.skills {
+        cfg.skills_dir = skills.directory.clone().unwrap_or_default();
+    }
+    if let Some(ref agents) = raw.agents_config {
+        cfg.agents_dir = agents.directory.clone().unwrap_or_default();
+    }
+
+    cfg
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
