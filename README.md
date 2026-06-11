@@ -20,13 +20,18 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 - **Vector Embedding Search** — Hybrid vector + FTS5 search using `qwen/qwen3-embedding-8b`
 - **MCP Integration** — Connect any MCP-compatible server to extend capabilities
 - **Bot Skills** — Folder-based natural-language skill instructions auto-loaded at startup; orchestration and subagent skills (e.g. **daily-news-to-threads**) let the main agent delegate to specialized subagents and override models per task
+- **Ad-Hoc Subagents** — `spawn_agents` tool lets the LLM spawn subagents with inline system prompts; run multiple subagents concurrently via `tokio::join_all`
 - **Agents Layer** — Isolated agentic mini-loops in `agents/` with their own model, tool whitelist, and `AGENT.md` instructions; invoked via `invoke_agent`, with `read_agent_file`/`write_agent_file` for file I/O and `reload_agents` for hot-reloading
+- **Zero-Trust Verifier** — Predefined verifier agent at `agents/verifier/AGENT.md` with read-only sandbox access; checks work output before the main agent finalizes; uses structured PASS/NEEDS_IMPROVEMENT/FAIL evaluation
 - **Plan Tools** — `plan_create`, `plan_update`, `plan_view` built-in tools let the agent create and manage structured execution plans stored in the sandbox; power the `problem-solver` subagent skill
-- **Bundled Subagent Skills** — `code-interpreter` (executes and iterates code snippets) and `problem-solver` (orchestrates multi-step reasoning with plan tools) ship out of the box
+- **Bundled Subagent Skills** — `code-interpreter` (executes and iterates code snippets), `problem-solver` (orchestrates multi-step reasoning), and `verifier` (zero-trust output validation) ship out of the box
+- **File & Image Support** — Photos and documents (PDF, DOCX, images) are processed via vision API or OCR (`ocrs` pure Rust OCR engine), then injected as multi-modal content or text into the conversation
+- **Long-Context RAG** — Large document content is chunked, embedded, and retrieved via vector search per user query
 - **Streaming Responses** — LLM tokens streamed progressively; Telegram message is live-edited as the response arrives
 - **Chat History RAG** — Semantically relevant past messages are auto-injected into each turn's system prompt using vector search
 - **RAG Query Rewriting** — Ambiguous follow-up questions are rewritten before vector search for more accurate retrieval
 - **Nightly Summarization** — LLM-based cron job summarizes long conversations overnight to keep memory efficient
+- **Long-Term Memory** — Conversations can be soft-archived (searchable but excluded from active context); startup and shutdown notifications
 - **Verbose Tool UI** — `/verbose` command toggles a live Telegram status message showing tool calls as they run
 - **Agentic Loop** — Automatic multi-step tool calling until task completion (max iterations configurable, default 25)
 - **Per-user Conversations** — Independent conversation history per user
@@ -232,8 +237,8 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 
 | Tool | Description |
 |------|-------------|
-| `invoke_agent` | Run an agent from the `agents/` directory in an isolated agentic loop |
-| `invoke_subagent` | Alias for `invoke_agent` (backward compat) |
+| `spawn_agents` | Spawn one or more ad-hoc subagents with inline system prompts (supports parallel batch via `tasks` array) |
+| `invoke_agent` | Run a predefined agent from the `agents/` directory in an isolated agentic loop |
 | `read_agent_file` | Read a file from within an agent's directory |
 | `write_agent_file` | Write a file into an agent's directory |
 | `reload_agents` | Hot-reload the agent registry without restarting the bot |
@@ -274,8 +279,9 @@ src/
 ├── home.rs           # Persistent home directory resolution (~/.rustfox)
 ├── llm.rs            # OpenRouter API client with tool calling
 ├── agent.rs          # Agentic loop, tool dispatch, scheduling tools; skills/agents/ layer
-├── agent_prompt.rs   # Prompt preparation, message assembly, recovery nudges
+├── agent_prompt.rs   # Prompt preparation, compaction, recovery nudges, message assembly
 ├── tools.rs          # Built-in tools (file I/O, command execution, plan tools)
+├── file_processor/   # File/attachment processing (image OCR/vision, PDF, DOCX)
 ├── mcp.rs            # MCP client manager for external tool servers
 ├── memory/           # SQLite persistence, vector embeddings, RAG, query rewriter, summarizer
 ├── scheduler/        # Cron/one-shot task scheduler with DB persistence
@@ -307,6 +313,7 @@ skills/               # Bundled skills (15+): code-interpreter, problem-solver, 
 │                     #   soul, soul-keeper, memory-manager, creating-skills, creating-agents,
 │                     #   news-fetcher, codebase-gap-analysis, sup-* workflow skills
 agents/               # Agent definition files (AGENT.md per agent)
+└── verifier/         #   Zero-trust verifier (read-only sandbox, structured evaluation)
 setup/                # Setup wizard HTML
 ```
 
@@ -343,10 +350,14 @@ setup/                # Setup wizard HTML
 - [x] User model persistence (honcho-style `user_model.md`)
 - [x] Skill/agent content hash engine + lock-file re-sync
 - [x] Instance + bundled skills/agents layering
+- [x] File & image upload support (vision API + OCR + document extraction)
+- [x] Long-term memory (soft archive, startup/shutdown notifications)
+- [x] Ad-hoc parallel subagents (`spawn_agents` tool)
+- [x] Zero-trust verifier (read-only verification agent)
+- [x] Context compaction improvements (hard cap, image preservation, retry optimization)
 
 ### Planned
 
-- [ ] Image upload support
 - [ ] Event trigger framework (e.g., on email receive)
 - [ ] WhatsApp support
 - [ ] Webhook mode (in addition to polling)
