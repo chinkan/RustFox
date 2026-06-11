@@ -26,22 +26,75 @@
     margin-top: 2rem;
   }
   /* Progress bar */
-  .progress-wrap { margin-bottom: 2rem; }
+  .progress-wrap { margin-bottom: 1.5rem; }
   .progress-label { font-size: 0.75rem; color: #718096; margin-bottom: 0.5rem; }
   .progress-bar { height: 4px; background: #2d3748; border-radius: 2px; }
   .progress-fill { height: 100%; background: #f6851b; border-radius: 2px; transition: width 0.3s ease; }
+  /* Steps nav (compact chips) */
+  .steps-nav { display: flex; gap: 0.4rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .step-chip {
+    flex: 1;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    background: #2d3748;
+    color: #718096;
+    font-size: 0.75rem;
+    text-align: center;
+    border: 1px solid #2d3748;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .step-chip.active { background: #f6851b; color: #fff; border-color: #f6851b; font-weight: 600; }
+  .step-chip.done { background: #1a4731; color: #68d391; border-color: #1a4731; }
+  /* Global toggle row */
+  .global-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .global-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    cursor: pointer;
+    color: #a0aec0;
+    font-size: 0.82rem;
+    user-select: none;
+  }
+  .global-toggle input { accent-color: #f6851b; width: 15px; height: 15px; cursor: pointer; }
+  .global-toggle:hover { color: #e2e8f0; }
+  /* Existing config banner */
+  .existing-banner {
+    background: #1a2744;
+    border: 1px solid #2b4a8a;
+    border-radius: 8px;
+    padding: 0.65rem 0.875rem;
+    font-size: 0.82rem;
+    color: #90cdf4;
+    flex: 1;
+    min-width: 240px;
+  }
+  .existing-banner strong { color: #bee3f8; }
   /* Steps */
   .step { display: none; }
   .step.active { display: block; }
   h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; }
-  h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1.5rem; color: #cbd5e0; }
-  p.subtitle { color: #718096; margin-bottom: 2rem; line-height: 1.6; }
+  h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1.25rem; color: #cbd5e0; }
+  h3 { font-size: 0.95rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.75rem; color: #cbd5e0; }
+  p.subtitle { color: #718096; margin-bottom: 1.5rem; line-height: 1.6; }
   code { background: #2d3748; border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.85em; }
   /* Form elements */
   .field { margin-bottom: 1.25rem; }
+  .field-row { display: flex; gap: 0.85rem; }
+  .field-row .field { flex: 1; }
   label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.4rem; color: #cbd5e0; }
   label .hint { font-weight: 400; color: #718096; margin-left: 0.4rem; }
-  input[type=text], input[type=password], textarea {
+  input[type=text], input[type=password], input[type=number], textarea {
     width: 100%;
     background: #0f1117;
     border: 1px solid #2d3748;
@@ -52,7 +105,7 @@
     font-family: inherit;
     transition: border-color 0.2s;
   }
-  input[type=text]:focus, input[type=password]:focus, textarea:focus {
+  input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus {
     outline: none;
     border-color: #f6851b;
   }
@@ -60,8 +113,9 @@
   .error-msg { color: #fc8181; font-size: 0.8rem; margin-top: 0.3rem; display: none; }
   .error-msg.visible { display: block; }
   textarea { resize: vertical; min-height: 90px; }
+  input[type=checkbox] { accent-color: #f6851b; width: 16px; height: 16px; cursor: pointer; }
   /* Buttons */
-  .btn-row { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 2rem; }
+  .btn-row { display: flex; gap: 0.75rem; justify-content: space-between; margin-top: 2rem; }
   button {
     padding: 0.6rem 1.4rem;
     border-radius: 8px;
@@ -75,9 +129,45 @@
   button:disabled { opacity: 0.45; cursor: default; }
   .btn-primary { background: #f6851b; color: #fff; }
   .btn-secondary { background: #2d3748; color: #e2e8f0; }
+  /* Advanced collapsible section */
+  .advanced-section {
+    margin-top: 1.5rem;
+    border: 1px solid #2d3748;
+    border-radius: 10px;
+    background: #131825;
+    overflow: hidden;
+  }
+  .advanced-section > .advanced-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: none;
+    border: none;
+    color: #cbd5e0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 0;
+  }
+  .advanced-section > .advanced-header:hover { color: #e2e8f0; opacity: 1; }
+  .advanced-section > .advanced-header .chevron {
+    color: #f6851b;
+    font-size: 0.7rem;
+    transition: transform 0.2s ease;
+    margin-left: 0.5rem;
+  }
+  .advanced-section.collapsed > .advanced-header .chevron { transform: rotate(-90deg); }
+  .advanced-section > .advanced-body {
+    padding: 0.25rem 1.25rem 1.25rem 1.25rem;
+    border-top: 1px solid #2d3748;
+  }
+  .advanced-section.collapsed > .advanced-body { display: none; }
   /* MCP tools */
   .mcp-category { margin-bottom: 1.5rem; }
-  .mcp-category h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.75rem; }
+  .mcp-category h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.75rem; margin-top: 0; }
   .mcp-tool {
     border: 1px solid #2d3748;
     border-radius: 8px;
@@ -237,6 +327,7 @@
     font-weight: 700;
     color: #e2e8f0;
     margin-bottom: 0.3rem;
+    margin-top: 0;
   }
   .modal-subtitle {
     font-size: 0.8rem;
@@ -361,18 +452,43 @@
   }
   .success-msg { color: #68d391; font-size: 0.9rem; margin-top: 1rem; display: none; }
   .success-msg.visible { display: block; }
+  /* Review summary */
+  .summary-list {
+    background: #131825;
+    border: 1px solid #2d3748;
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    font-size: 0.85rem;
+    line-height: 1.85;
+    color: #cbd5e0;
+  }
+  .summary-list .summary-row { display: flex; gap: 0.5rem; }
+  .summary-list .summary-key { color: #718096; min-width: 9rem; }
+  .summary-list .summary-val { color: #e2e8f0; word-break: break-word; flex: 1; }
+  .summary-list .summary-val.muted { color: #4a5568; font-style: italic; }
+  .summary-section { margin-bottom: 1.25rem; }
+  .summary-section h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.4rem; margin-top: 0; }
 </style>
 </head>
 <body>
 <div class="card">
   <div class="progress-wrap">
-    <div class="progress-label" id="progress-label">Step 1 of 6</div>
-    <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:16.6%"></div></div>
+    <div class="progress-label" id="progress-label">Step 1 of 4</div>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:25%"></div></div>
+  </div>
+  <div class="global-row">
+    <label class="global-toggle" for="show-all-toggle">
+      <input type="checkbox" id="show-all-toggle" onchange="toggleShowAll()">
+      <span>⚙️ Show all settings</span>
+    </label>
+    <div class="existing-banner" id="existing-banner" style="display:none">
+      <strong>Editing existing configuration</strong> — pre-loaded from <code>config.toml</code>.
+    </div>
   </div>
   <div id="steps-container"></div>
   <div class="btn-row">
     <button class="btn-secondary" id="btn-back" onclick="prevStep()" style="display:none">← Back</button>
-    <button class="btn-primary" id="btn-next" onclick="nextStep()">Get Started →</button>
+    <button class="btn-primary" id="btn-next" onclick="nextStep()">Continue →</button>
   </div>
 </div>
 
@@ -592,48 +708,84 @@ const MCP_CATALOG = [
 ];
 
 // ── State ──────────────────────────────────────────────────────────────────────
+const DEFAULT_PROMPT = 'You are a helpful AI assistant with access to tools. Use the available tools to help the user with their tasks. When using file or terminal tools, operate only within the allowed sandbox directory. Be concise and helpful.';
+
 const state = {
+  // Step 1 — Bot & LLM Setup
   telegram_token: '',
   allowed_user_ids: '',
   openrouter_key: '',
   model: 'moonshotai/kimi-k2.5',
   max_tokens: '4096',
-  system_prompt: 'You are a helpful AI assistant with access to tools. Use the available tools to help the user with their tasks. When using file or terminal tools, operate only within the allowed sandbox directory. Be concise and helpful.',
+  system_prompt: DEFAULT_PROMPT,
+  supports_vision: false,
+  base_url: 'https://openrouter.ai/api/v1',
+
+  // Step 2 — Location & Storage
   location: 'Hong Kong',
   sandbox_dir: '/tmp/rustfox-sandbox',
   db_path: 'rustfox.db',
+  skills_dir: '',
+  agents_dir: '',
+  home_dir: '',
+  ocr_model_dir: '',
+  query_rewriter_enabled: false,
+  max_iterations: 25,
+  empty_response_retry_limit: 3,
+
+  // Step 3 — Integrations
   mcp_selections: {},
-  custom_mcp_servers: [],  // populated from existing config's non-catalog MCP servers
-  _loaded: false,          // true when an existing config was successfully loaded
+  custom_mcp_servers: [],
+  langsmith_key: '',
+  langsmith_project: 'rustfox',
+  embedding_key: '',
+  embedding_base_url: 'https://openrouter.ai/api/v1',
+  embedding_model: 'qwen/qwen3-embedding-8b',
+  embedding_dimensions: 1536,
+  learning_skill_extraction_enabled: true,
+  learning_skill_extraction_threshold: 5,
+
+  // internal
+  _loaded: false,
 };
 
 // ── Step navigation ────────────────────────────────────────────────────────────
-const TOTAL_STEPS = 7;
-let currentStep = 1;
+// 4 wizard steps + 1 success page.  Step 5 is the "done" page, not a wizard step.
+const WIZARD_STEPS = 4;
+const TOTAL_STEPS  = 5;
+let currentStep    = 1;
 
 function showStep(n) {
   document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
-  document.getElementById('step-' + n).classList.add('active');
+  const el = document.getElementById('step-' + n);
+  if (el) el.classList.add('active');
   currentStep = n;
-  const WIZARD_STEPS = TOTAL_STEPS - 1; // step 7 is the done page, not a wizard step
+  const btnNext = document.getElementById('btn-next');
+  const btnBack = document.getElementById('btn-back');
+
   if (n === TOTAL_STEPS) {
     document.getElementById('progress-fill').style.width = '100%';
     document.getElementById('progress-label').textContent = 'Setup complete!';
-    document.getElementById('btn-back').style.display = 'none';
-    document.getElementById('btn-next').style.display = 'none';
+    btnBack.style.display = 'none';
+    btnNext.style.display = 'none';
     return;
   }
+
   const pct = (n / WIZARD_STEPS * 100).toFixed(1);
   document.getElementById('progress-fill').style.width = pct + '%';
   document.getElementById('progress-label').textContent = 'Step ' + n + ' of ' + WIZARD_STEPS;
-  document.getElementById('btn-back').style.display = n > 1 ? 'inline-block' : 'none';
-  const btnNext = document.getElementById('btn-next');
+  btnBack.style.display = n > 1 ? 'inline-block' : 'none';
   btnNext.style.display = 'inline-block';
   btnNext.disabled = false;
-  if (n === 1) { btnNext.textContent = 'Get Started →'; }
-  else if (n === WIZARD_STEPS) { btnNext.textContent = 'Save config.toml'; }
-  else { btnNext.textContent = 'Continue →'; }
-  if (n === WIZARD_STEPS) renderPreview();
+  if (n === WIZARD_STEPS) btnNext.textContent = 'Save config.toml';
+  else btnNext.textContent = 'Continue →';
+
+  // Render preview when entering the review step
+  if (n === WIZARD_STEPS) {
+    collectAll();
+    renderSummary();
+    renderPreview();
+  }
 }
 
 function prevStep() { if (currentStep > 1) showStep(currentStep - 1); }
@@ -641,27 +793,39 @@ function prevStep() { if (currentStep > 1) showStep(currentStep - 1); }
 function nextStep() {
   if (!validateStep(currentStep)) return;
   collectStep(currentStep);
-  if (currentStep === TOTAL_STEPS - 1) { saveConfig(); return; }
+  if (currentStep === WIZARD_STEPS) { saveConfig(); return; }
   showStep(currentStep + 1);
+}
+
+// ── Advanced section toggles ──────────────────────────────────────────────────
+function toggleAdvanced(headerEl) {
+  const section = headerEl.parentElement;
+  section.classList.toggle('collapsed');
+}
+
+function toggleShowAll() {
+  const showAll = document.getElementById('show-all-toggle').checked;
+  document.querySelectorAll('.advanced-section').forEach(s => {
+    if (showAll) s.classList.remove('collapsed');
+    else s.classList.add('collapsed');
+  });
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────────
 function validateStep(n) {
   let ok = true;
-  if (n === 2) {
+  if (n === 1) {
     ok = requireField('f-telegram-token') & ok;
-    ok = requireField('f-allowed-ids') & ok;
-  }
-  if (n === 3) {
+    ok = requireField('f-allowed-ids')    & ok;
     ok = requireField('f-openrouter-key') & ok;
-    ok = requireField('f-model') & ok;
   }
   return !!ok;
 }
 
 function requireField(id) {
   const el = document.getElementById(id);
-  const errEl = document.getElementById(id + '-err');
+  if (!el) return true;
+  const errEl = el.parentElement.querySelector('.error-msg');
   if (!el.value.trim()) {
     el.classList.add('error');
     if (errEl) errEl.classList.add('visible');
@@ -672,34 +836,67 @@ function requireField(id) {
   return true;
 }
 
+// Clear the error state on the field the user is actively editing
+function clearFieldError(el) {
+  if (!el) return;
+  el.classList.remove('error');
+  const errEl = el.parentElement && el.parentElement.querySelector('.error-msg');
+  if (errEl) errEl.classList.remove('visible');
+}
+
 // ── Collect form values ────────────────────────────────────────────────────────
 function collectStep(n) {
+  if (n === 1) {
+    state.telegram_token   = (document.getElementById('f-telegram-token')?.value || '').trim();
+    state.allowed_user_ids = (document.getElementById('f-allowed-ids')?.value    || '').trim();
+    state.openrouter_key   = (document.getElementById('f-openrouter-key')?.value || '').trim();
+    state.model            = (document.getElementById('f-model')?.value          || state.model).trim();
+    state.max_tokens       = (document.getElementById('f-max-tokens')?.value     || state.max_tokens).toString().trim() || '4096';
+    state.system_prompt    = document.getElementById('f-system-prompt')?.value   || state.system_prompt;
+    state.supports_vision  = !!document.getElementById('f-supports-vision')?.checked;
+    state.base_url         = (document.getElementById('f-base-url')?.value       || state.base_url).trim() || 'https://openrouter.ai/api/v1';
+  }
   if (n === 2) {
-    state.telegram_token = document.getElementById('f-telegram-token').value.trim();
-    state.allowed_user_ids = document.getElementById('f-allowed-ids').value.trim();
+    state.location                   = (document.getElementById('f-location')?.value              || state.location).trim();
+    state.sandbox_dir                = (document.getElementById('f-sandbox-dir')?.value           || state.sandbox_dir).trim() || '/tmp/rustfox-sandbox';
+    state.db_path                    = (document.getElementById('f-db-path')?.value               || state.db_path).trim()     || 'rustfox.db';
+    state.skills_dir                 = (document.getElementById('f-skills-dir')?.value            || '').trim();
+    state.agents_dir                 = (document.getElementById('f-agents-dir')?.value            || '').trim();
+    state.home_dir                   = (document.getElementById('f-home-dir')?.value              || '').trim();
+    state.ocr_model_dir              = (document.getElementById('f-ocr-model-dir')?.value         || '').trim();
+    state.query_rewriter_enabled     = !!document.getElementById('f-query-rewriter')?.checked;
+    state.max_iterations             = parseInt(document.getElementById('f-max-iterations')?.value || state.max_iterations, 10) || 25;
+    state.empty_response_retry_limit = parseInt(document.getElementById('f-empty-retry')?.value     || state.empty_response_retry_limit, 10) || 3;
   }
   if (n === 3) {
-    state.openrouter_key = document.getElementById('f-openrouter-key').value.trim();
-    state.model = document.getElementById('f-model').value.trim();
-    state.max_tokens = document.getElementById('f-max-tokens').value.trim() || '4096';
-    state.system_prompt = document.getElementById('f-system-prompt').value;
-    state.location = document.getElementById('f-location').value.trim();
+    state.langsmith_key                       = (document.getElementById('f-langsmith-key')?.value       || '').trim();
+    state.langsmith_project                   = (document.getElementById('f-langsmith-project')?.value   || 'rustfox').trim() || 'rustfox';
+    state.embedding_key                       = (document.getElementById('f-embedding-key')?.value       || '').trim();
+    state.embedding_base_url                  = (document.getElementById('f-embedding-base-url')?.value  || state.embedding_base_url).trim();
+    state.embedding_model                     = (document.getElementById('f-embedding-model')?.value     || state.embedding_model).trim();
+    state.embedding_dimensions                = parseInt(document.getElementById('f-embedding-dimensions')?.value || state.embedding_dimensions, 10) || 1536;
+    state.learning_skill_extraction_enabled   = !!document.getElementById('f-learning-extraction')?.checked;
+    state.learning_skill_extraction_threshold = parseInt(document.getElementById('f-learning-threshold')?.value || state.learning_skill_extraction_threshold, 10) || 5;
   }
-  if (n === 4) {
-    state.sandbox_dir = document.getElementById('f-sandbox-dir').value.trim() || '/tmp/rustfox-sandbox';
-    state.db_path = document.getElementById('f-db-path').value.trim() || 'rustfox.db';
+}
+
+function collectAll() {
+  // Pull values for every step so the review/TOML view reflects the current form.
+  for (let s = 1; s <= WIZARD_STEPS; s++) {
+    if (s === 4) continue; // Step 4 has no inputs of its own
+    try { collectStep(s); } catch (_) { /* fields may not exist for this view */ }
   }
 }
 
 // ── TOML generation ────────────────────────────────────────────────────────────
 function esc(s) {
   // Escapes for TOML string values only (backslash and double-quote)
-  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function escHtml(s) {
   // Escapes for HTML attributes and text content
-  return String(s)
+  return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -708,12 +905,12 @@ function escHtml(s) {
 
 function generateToml() {
   const ids = state.allowed_user_ids.split(/[\s,]+/).filter(Boolean).join(', ');
-  const locLine = state.location
-    ? 'location = "' + esc(state.location) + '"'
-    : '# location = "Your City, Country"';
   const sysprompt = state.system_prompt.replace(/"""/g, '\\"\\"\\"');
 
   let toml =
+    '# RustFox Configuration\n' +
+    '# Generated by setup wizard\n' +
+    '\n' +
     '[telegram]\n' +
     'bot_token = "' + esc(state.telegram_token) + '"\n' +
     'allowed_user_ids = [' + ids + ']\n' +
@@ -721,8 +918,9 @@ function generateToml() {
     '[openrouter]\n' +
     'api_key = "' + esc(state.openrouter_key) + '"\n' +
     'model = "' + esc(state.model) + '"\n' +
-    'base_url = "https://openrouter.ai/api/v1"\n' +
+    'base_url = "' + esc(state.base_url) + '"\n' +
     'max_tokens = ' + (parseInt(state.max_tokens, 10) || 4096) + '\n' +
+    'supports_vision = ' + (state.supports_vision ? 'true' : 'false') + '\n' +
     'system_prompt = """' + sysprompt + '"""\n' +
     '\n' +
     '[sandbox]\n' +
@@ -730,18 +928,70 @@ function generateToml() {
     '\n' +
     '[memory]\n' +
     'database_path = "' + esc(state.db_path) + '"\n' +
+    'query_rewriter_enabled = ' + (state.query_rewriter_enabled ? 'true' : 'false') + '\n' +
     '\n' +
     '[skills]\n' +
-    'directory = "skills"\n' +
+    'directory = "' + esc(state.skills_dir || 'skills') + '"\n' +
     '\n' +
-    '[general]\n' +
-    locLine + '\n';
+    '[agents]\n' +
+    'directory = "' + esc(state.agents_dir || 'agents') + '"\n' +
+    '\n';
 
+  // [general] — emit commented hints for unset fields so the user knows they exist
+  const generalLines = [];
+  if (state.location) generalLines.push('location = "' + esc(state.location) + '"');
+  if (state.home_dir) generalLines.push('home = "' + esc(state.home_dir) + '"');
+  toml += '[general]\n';
+  if (generalLines.length) toml += generalLines.join('\n') + '\n';
+  else                     toml += '# location = "Your City, Country"\n# home = "/path/to/.rustfox"\n';
+  toml += '\n';
+
+  // [agent] — always emit so users can see the loop limits
+  toml += '[agent]\n';
+  toml += 'max_iterations = ' + (parseInt(state.max_iterations, 10) || 25) + '\n';
+  toml += 'empty_response_retry_limit = ' + (parseInt(state.empty_response_retry_limit, 10) || 3) + '\n';
+  toml += '\n';
+
+  // [embedding] — only emit if user provided an API key
+  if (state.embedding_key) {
+    toml += '[embedding]\n';
+    toml += 'api_key = "' + esc(state.embedding_key) + '"\n';
+    toml += 'base_url = "' + esc(state.embedding_base_url || 'https://openrouter.ai/api/v1') + '"\n';
+    toml += 'model = "' + esc(state.embedding_model || 'qwen/qwen3-embedding-8b') + '"\n';
+    toml += 'dimensions = ' + (parseInt(state.embedding_dimensions, 10) || 1536) + '\n';
+    toml += '\n';
+  }
+
+  // [langsmith] — only emit if user provided an API key
+  if (state.langsmith_key) {
+    toml += '[langsmith]\n';
+    toml += 'api_key = "' + esc(state.langsmith_key) + '"\n';
+    toml += 'project = "' + esc(state.langsmith_project || 'rustfox') + '"\n';
+    toml += 'base_url = "https://api.smith.langchain.com"\n';
+    toml += '\n';
+  }
+
+  // [ocr] — only emit if user overrode the default
+  if (state.ocr_model_dir) {
+    toml += '[ocr]\n';
+    toml += 'model_dir = "' + esc(state.ocr_model_dir) + '"\n';
+    toml += '\n';
+  }
+
+  // [learning] — only emit if the user explicitly enabled extraction
+  if (state.learning_skill_extraction_enabled) {
+    toml += '[learning]\n';
+    toml += 'skill_extraction_enabled = true\n';
+    toml += 'skill_extraction_threshold = ' + (parseInt(state.learning_skill_extraction_threshold, 10) || 5) + '\n';
+    toml += '\n';
+  }
+
+  // [[mcp_servers]] — preserved verbatim from the original wizard
   for (const [name, sel] of Object.entries(state.mcp_selections)) {
     if (!sel.selected) continue;
     const tool = MCP_CATALOG.find(t => t.name === name);
     if (!tool) continue;
-    toml += '\n[[mcp_servers]]\n';
+    toml += '[[mcp_servers]]\n';
     toml += 'name = "' + name + '"\n';
     if (tool.url) {
       // HTTP-based MCP server (url + optional auth_token + optional OAuth refresh fields)
@@ -780,11 +1030,12 @@ function generateToml() {
         }
       }
     }
+    toml += '\n';
   }
 
   for (const s of state.custom_mcp_servers) {
     const args = s.args.map(a => '"' + esc(a) + '"').join(', ');
-    toml += '\n[[mcp_servers]]\n';
+    toml += '[[mcp_servers]]\n';
     toml += 'name = "' + esc(s.name) + '"\n';
     toml += 'command = "' + esc(s.command) + '"\n';
     toml += 'args = [' + args + ']\n';
@@ -795,15 +1046,65 @@ function generateToml() {
         toml += k + ' = "' + esc(v) + '"\n';
       }
     }
+    toml += '\n';
   }
 
   return toml;
 }
 
 function renderPreview() {
-  collectStep(4);
   const pre = document.getElementById('config-preview');
   if (pre) pre.textContent = generateToml();
+}
+
+function renderSummary() {
+  const el = document.getElementById('summary');
+  if (!el) return;
+
+  const val = (v, fallback) => (v && String(v).length) ? escHtml(v) : '<span class="summary-val muted">' + escHtml(fallback || '(not set)') + '</span>';
+  const row = (k, v, fallback) => `<div class="summary-row"><div class="summary-key">${escHtml(k)}</div><div class="summary-val">${val(v, fallback)}</div></div>`;
+  const section = (title, body) => `<div class="summary-section"><h3>${escHtml(title)}</h3><div class="summary-list">${body}</div></div>`;
+
+  let html = '';
+  html += section('Bot & LLM', [
+    row('Bot token',       state.telegram_token ? maskSecret(state.telegram_token) : null, 'missing'),
+    row('Allowed user IDs', state.allowed_user_ids || null, 'missing'),
+    row('OpenRouter key',  state.openrouter_key ? maskSecret(state.openrouter_key) : null, 'missing'),
+    row('Model',           state.model),
+    row('Base URL',        state.base_url),
+    row('Max tokens',      state.max_tokens),
+    row('Supports vision', state.supports_vision ? 'yes' : 'no'),
+  ].join(''));
+
+  html += section('Location & Storage', [
+    row('Location',       state.location),
+    row('Sandbox dir',    state.sandbox_dir),
+    row('Database path',  state.db_path),
+    row('Skills dir',     state.skills_dir || '(default)'),
+    row('Agents dir',     state.agents_dir || '(default)'),
+    row('Home dir',       state.home_dir),
+    row('OCR model dir',  state.ocr_model_dir),
+    row('Query rewriting', state.query_rewriter_enabled ? 'enabled' : 'disabled'),
+    row('Max iterations', state.max_iterations),
+    row('Empty retries',  state.empty_response_retry_limit),
+  ].join(''));
+
+  const mcpCount = Object.values(state.mcp_selections).filter(s => s.selected).length + state.custom_mcp_servers.length;
+  html += section('Integrations', [
+    row('MCP servers enabled', mcpCount ? String(mcpCount) : null, 'none'),
+    row('LangSmith',  state.langsmith_key ? 'configured (key ' + maskSecret(state.langsmith_key) + ')' : null, 'not configured'),
+    row('Embedding',  state.embedding_key ? 'configured (model ' + escHtml(state.embedding_model || 'qwen/qwen3-embedding-8b') + ')' : null, 'not configured'),
+    row('Learning',   state.learning_skill_extraction_enabled ? 'skill extraction enabled' : null, 'not configured'),
+  ].join(''));
+
+  el.innerHTML = html;
+}
+
+function maskSecret(s) {
+  if (!s) return '';
+  const len = s.length;
+  if (len <= 8) return '••••';
+  return s.slice(0, 4) + '••••' + s.slice(-4);
 }
 
 // ── Save ───────────────────────────────────────────────────────────────────────
@@ -871,12 +1172,31 @@ async function loadExistingConfig() {
     if (cfg.location)         state.location         = cfg.location;
     if (cfg.sandbox_dir)      state.sandbox_dir      = cfg.sandbox_dir;
     if (cfg.db_path)          state.db_path          = cfg.db_path;
+    if (cfg.base_url)         state.base_url         = cfg.base_url;
+    if (typeof cfg.supports_vision === 'boolean') state.supports_vision = cfg.supports_vision;
+    if (cfg.skills_dir)       state.skills_dir       = cfg.skills_dir;
+    if (cfg.agents_dir)       state.agents_dir       = cfg.agents_dir;
+    if (cfg.home_dir)         state.home_dir         = cfg.home_dir;
+    if (cfg.ocr_model_dir)    state.ocr_model_dir    = cfg.ocr_model_dir;
+    if (typeof cfg.query_rewriter_enabled === 'boolean') state.query_rewriter_enabled = cfg.query_rewriter_enabled;
+    if (cfg.agent_max_iterations)              state.max_iterations             = cfg.agent_max_iterations;
+    if (cfg.agent_empty_response_retry_limit)  state.empty_response_retry_limit = cfg.agent_empty_response_retry_limit;
+    if (cfg.langsmith_key)     state.langsmith_key     = cfg.langsmith_key;
+    if (cfg.langsmith_project) state.langsmith_project = cfg.langsmith_project;
+    if (cfg.embedding_key)        state.embedding_key        = cfg.embedding_key;
+    if (cfg.embedding_base_url)   state.embedding_base_url   = cfg.embedding_base_url;
+    if (cfg.embedding_model)      state.embedding_model      = cfg.embedding_model;
+    if (cfg.embedding_dimensions) state.embedding_dimensions = cfg.embedding_dimensions;
+    if (typeof cfg.learning_skill_extraction_enabled === 'boolean') {
+      state.learning_skill_extraction_enabled = cfg.learning_skill_extraction_enabled;
+    }
+    if (cfg.learning_skill_extraction_threshold) state.learning_skill_extraction_threshold = cfg.learning_skill_extraction_threshold;
 
     // Split MCP servers: catalog-matched vs custom
     for (const s of (cfg.mcp_servers || [])) {
       const inCatalog = MCP_CATALOG.find(c => c.name === s.name);
       if (inCatalog) {
-        const env = s.env || {};
+        const env = Object.assign({}, s.env || {});
         // For HTTP catalog entries, map auth_token back to the authTokenVar key
         if (inCatalog.authTokenVar && s.auth_token) {
           env[inCatalog.authTokenVar] = s.auth_token;
@@ -971,97 +1291,18 @@ function addCustomServer() {
   document.getElementById('custom-env-rows').innerHTML = '';
 }
 
-// ── Build HTML ─────────────────────────────────────────────────────────────────
-function buildSteps() {
-  const c = document.getElementById('steps-container');
-
-  // Step 1: Welcome
-  c.innerHTML += `<div class="step" id="step-1">
-  <h1>Welcome to RustFox</h1>
-  <p class="subtitle">
-    Your personal AI assistant on Telegram, powered by OpenRouter LLMs and extensible via MCP tools.<br><br>
-    This wizard creates your <code>config.toml</code> in about 2 minutes.
-    You can always edit it by hand afterwards.
-  </p>
-  <div id="existing-banner" style="display:none;background:#1a2744;border:1px solid #2b4a8a;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#90cdf4">
-    <strong style="color:#bee3f8">Editing existing configuration</strong> — all fields pre-loaded from <code>config.toml</code>.
-  </div>
-</div>`;
-
-  // Step 2: Telegram
-  c.innerHTML += `<div class="step" id="step-2">
-  <h2>Telegram</h2>
-  <div class="field">
-    <label>Bot Token <span class="hint">— from @BotFather</span></label>
-    <input type="password" id="f-telegram-token" placeholder="1234567890:ABC-..." value="${escHtml(state.telegram_token)}">
-    <div class="error-msg" id="f-telegram-token-err">Bot token is required.</div>
-  </div>
-  <div class="field">
-    <label>Allowed User IDs <span class="hint">— comma-separated, from @userinfobot</span></label>
-    <input type="text" id="f-allowed-ids" placeholder="123456789, 987654321" value="${escHtml(state.allowed_user_ids)}">
-    <div class="error-msg" id="f-allowed-ids-err">At least one user ID is required.</div>
-  </div>
-</div>`;
-
-  // Step 3: OpenRouter
-  c.innerHTML += `<div class="step" id="step-3">
-  <h2>OpenRouter</h2>
-  <div class="field">
-    <label>API Key <span class="hint">— openrouter.ai/keys</span></label>
-    <input type="password" id="f-openrouter-key" placeholder="sk-or-..." value="${escHtml(state.openrouter_key)}">
-    <div class="error-msg" id="f-openrouter-key-err">API key is required.</div>
-  </div>
-  <div class="field">
-    <label>Model <span class="hint">— openrouter.ai/models</span></label>
-    <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.5')}">
-    <div class="error-msg" id="f-model-err">Model is required.</div>
-  </div>
-  <div class="field">
-    <label>Max Tokens</label>
-    <input type="text" id="f-max-tokens" value="${escHtml(state.max_tokens || '4096')}">
-  </div>
-  <div class="field">
-    <label>System Prompt</label>
-    <textarea id="f-system-prompt">${escHtml(state.system_prompt)}</textarea>
-  </div>
-  <div class="field">
-    <label>Location <span class="hint">— optional, gives the AI your timezone/region</span></label>
-    <input type="text" id="f-location" placeholder="Hong Kong" value="${escHtml(state.location)}">
-  </div>
-</div>`;
-
-  // Step 4: Sandbox & Memory
-  c.innerHTML += `<div class="step" id="step-4">
-  <h2>Sandbox &amp; Memory</h2>
-  <div class="field">
-    <label>Sandbox Directory <span class="hint">— file/command operations are restricted here</span></label>
-    <input type="text" id="f-sandbox-dir" value="${escHtml(state.sandbox_dir || '/tmp/rustfox-sandbox')}">
-  </div>
-  <div class="field">
-    <label>Memory Database Path <span class="hint">— SQLite file for persistent memory</span></label>
-    <input type="text" id="f-db-path" value="${escHtml(state.db_path || 'rustfox.db')}">
-  </div>
-</div>`;
-
-  // Step 5: MCP Tools
+// ── Render MCP catalog (moved into Step 3) ────────────────────────────────────
+function renderMcpCatalog() {
+  const container = document.getElementById('mcp-catalog');
+  if (!container) return;
   const categories = [...new Set(MCP_CATALOG.map(t => t.category))];
-  let html5 = `<div class="step" id="step-5">
-  <h2>MCP Tools <span class="hint" style="font-size:0.85rem;font-weight:400">— all optional, can be added later</span></h2>
-  <div class="mcp-prereqs">
-    <strong>Prerequisites</strong> — MCP servers run as child processes outside RustFox.<br>
-    Tools marked <code>uvx</code> need <strong><a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noopener">uv</a></strong> installed &nbsp;(<code>curl -LsSf https://astral.sh/uv/install.sh | sh</code>).<br>
-    Tools marked <code>npx</code> need <strong><a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a></strong> installed &nbsp;(<a href="https://nodejs.org/en/download/" target="_blank" rel="noopener">nodejs.org/en/download</a>).<br>
-    Click <em>docs ↗</em> on any tool to read its full documentation before enabling it.
-    Filesystem server requires at least one allowed directory path in args (e.g. your sandbox path).
-  </div>`;
+  let html = '';
   for (const cat of categories) {
-    html5 += `<div class="mcp-category"><h3>${cat}</h3>`;
+    html += `<div class="mcp-category"><h3>${cat}</h3>`;
     for (const tool of MCP_CATALOG.filter(t => t.category === cat)) {
-      // Display line: HTTP servers show the URL; stdio servers show runner + args
       const cmd = tool.url
         ? 'HTTP · ' + tool.url
         : (tool.runner + ' ' + (tool.args || []).join(' '));
-      // Env fields: HTTP servers show their authTokenVar; stdio servers show envVars
       const envVars = tool.url
         ? (tool.authTokenVar ? [tool.authTokenVar] : [])
         : (tool.envVars || []);
@@ -1079,8 +1320,6 @@ function buildSteps() {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openOAuthModal()" type="button">&#9432; OAuth Setup Guide</button>`;
       } else if (tool.setupGuide === '__THREADS_GUIDE_BUTTON__') {
         guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openThreadsModal()" type="button">&#9432; Threads Setup Guide</button>`;
-      } else if (tool.setupGuide === '__NOTION_GUIDE_BUTTON__') {
-        guideHtml = `<button class="btn-guide" onclick="event.stopPropagation();openNotionModal()" type="button">&#9432; Notion Setup Guide</button>`;
       } else if (tool.setupGuide === '__NOTION_OAUTH_BUTTON__') {
         guideHtml = `<div class="oauth-connect-row" onclick="event.stopPropagation()">
           <button class="btn-oauth-connect" id="oauth-btn-${tool.name}" type="button"
@@ -1097,7 +1336,7 @@ function buildSteps() {
       const linkHtml = tool.link
         ? `<a class="mcp-tool-link" href="${tool.link}" target="_blank" rel="noopener" onclick="event.stopPropagation()">docs ↗</a>`
         : '';
-      html5 += `<div class="mcp-tool ${state.mcp_selections[tool.name]?.selected ? 'selected' : ''}"
+      html += `<div class="mcp-tool ${state.mcp_selections[tool.name]?.selected ? 'selected' : ''}"
      id="mcp-wrap-${tool.name}" onclick="toggleTool('${tool.name}', event)">
   <div class="mcp-tool-header">
     <input type="checkbox" id="mcp-cb-${tool.name}"
@@ -1111,12 +1350,153 @@ function buildSteps() {
   ${hasExtras ? `<div class="mcp-env-fields ${state.mcp_selections[tool.name]?.selected ? 'visible' : ''}" id="mcp-env-${tool.name}">${guideHtml}${envHtml}</div>` : ''}
 </div>`;
     }
-    html5 += `</div>`;
+    html += `</div>`;
   }
-  html5 += `<div class="mcp-more">
+  container.innerHTML = html;
+}
+
+// ── Build HTML ─────────────────────────────────────────────────────────────────
+function buildSteps() {
+  const c = document.getElementById('steps-container');
+
+  // ── Step 1: Bot & LLM Setup ─────────────────────────────────────────────────
+  c.innerHTML += `<div class="step" id="step-1">
+  <h2>🤖 Bot &amp; LLM Setup</h2>
+  <p class="subtitle">The three essentials — get these right and RustFox will work.</p>
+
+  <div class="field">
+    <label>Bot Token <span class="hint">— from @BotFather on Telegram</span></label>
+    <input type="password" id="f-telegram-token" placeholder="1234567890:ABC-..."
+           value="${escHtml(state.telegram_token)}" oninput="clearFieldError(this)">
+    <div class="error-msg">Bot token is required.</div>
+  </div>
+  <div class="field">
+    <label>Allowed User IDs <span class="hint">— comma-separated, from @userinfobot</span></label>
+    <input type="text" id="f-allowed-ids" placeholder="123456789, 987654321"
+           value="${escHtml(state.allowed_user_ids)}" oninput="clearFieldError(this)">
+    <div class="error-msg">At least one user ID is required.</div>
+  </div>
+  <div class="field">
+    <label>OpenRouter API Key <span class="hint">— <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/keys</a></span></label>
+    <input type="password" id="f-openrouter-key" placeholder="sk-or-..."
+           value="${escHtml(state.openrouter_key)}" oninput="clearFieldError(this)">
+    <div class="error-msg">API key is required.</div>
+  </div>
+
+  <div class="advanced-section collapsed" data-section="llm">
+    <button class="advanced-header" type="button" onclick="toggleAdvanced(this)">
+      <span>▼ Advanced LLM settings</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="advanced-body">
+      <div class="field">
+        <label>System Prompt</label>
+        <textarea id="f-system-prompt">${escHtml(state.system_prompt)}</textarea>
+      </div>
+      <div class="field">
+        <label>Model <span class="hint">— <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/models</a></span></label>
+        <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.5')}">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Max Tokens</label>
+          <input type="number" id="f-max-tokens" value="${escHtml(state.max_tokens || '4096')}" min="1">
+        </div>
+        <div class="field" style="display:flex;flex-direction:column;justify-content:center">
+          <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+            <input type="checkbox" id="f-supports-vision" ${state.supports_vision ? 'checked' : ''}>
+            <span>Supports vision (image inputs)</span>
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <label>API Base URL</label>
+        <input type="text" id="f-base-url" value="${escHtml(state.base_url || 'https://openrouter.ai/api/v1')}">
+      </div>
+    </div>
+  </div>
+</div>`;
+
+  // ── Step 2: Location & Storage ──────────────────────────────────────────────
+  c.innerHTML += `<div class="step" id="step-2">
+  <h2>🌍 Location &amp; Storage</h2>
+  <p class="subtitle">Tells the AI where you are and where to keep files &amp; memory.</p>
+
+  <div class="field">
+    <label>Your Location <span class="hint">— gives the AI your timezone &amp; regional context</span></label>
+    <input type="text" id="f-location" placeholder="Hong Kong" value="${escHtml(state.location)}">
+  </div>
+
+  <div class="advanced-section collapsed" data-section="storage">
+    <button class="advanced-header" type="button" onclick="toggleAdvanced(this)">
+      <span>▼ Advanced storage &amp; agent settings</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="advanced-body">
+      <div class="field">
+        <label>Sandbox Directory <span class="hint">— file &amp; command operations are restricted here</span></label>
+        <input type="text" id="f-sandbox-dir" value="${escHtml(state.sandbox_dir)}">
+      </div>
+      <div class="field">
+        <label>Memory Database Path <span class="hint">— SQLite file for persistent memory</span></label>
+        <input type="text" id="f-db-path" value="${escHtml(state.db_path)}">
+      </div>
+      <div class="field">
+        <label>Skills Directory <span class="hint">— leave blank to use the default</span></label>
+        <input type="text" id="f-skills-dir" placeholder="skills" value="${escHtml(state.skills_dir)}">
+      </div>
+      <div class="field">
+        <label>Agents Directory <span class="hint">— leave blank to use the default</span></label>
+        <input type="text" id="f-agents-dir" placeholder="agents" value="${escHtml(state.agents_dir)}">
+      </div>
+      <div class="field">
+        <label>Home Directory <span class="hint">— overrides the default <code>~/.rustfox</code></span></label>
+        <input type="text" id="f-home-dir" placeholder="/path/to/.rustfox" value="${escHtml(state.home_dir)}">
+      </div>
+      <div class="field">
+        <label>OCR Model Directory <span class="hint">— where OCR model files are cached</span></label>
+        <input type="text" id="f-ocr-model-dir" placeholder="~/.cache/ocrs" value="${escHtml(state.ocr_model_dir)}">
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+          <input type="checkbox" id="f-query-rewriter" ${state.query_rewriter_enabled ? 'checked' : ''}>
+          <span>Enable RAG query rewriting <span class="hint">— rewrites ambiguous follow-ups (extra LLM call)</span></span>
+        </label>
+      </div>
+      <h3>🤖 Agent Loop</h3>
+      <div class="field-row">
+        <div class="field">
+          <label>Max Iterations <span class="hint">— cap on tool-call round-trips per turn</span></label>
+          <input type="number" id="f-max-iterations" value="${state.max_iterations || 25}" min="1">
+        </div>
+        <div class="field">
+          <label>Empty Response Retry Limit</label>
+          <input type="number" id="f-empty-retry" value="${state.empty_response_retry_limit || 3}" min="0">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`;
+
+  // ── Step 3: Integrations ────────────────────────────────────────────────────
+  c.innerHTML += `<div class="step" id="step-3">
+  <h2>🧩 Integrations</h2>
+  <p class="subtitle">Enable the tools your bot should have access to. All are optional.</p>
+
+  <div class="mcp-prereqs">
+    <strong>MCP server prerequisites</strong> — these run as child processes outside RustFox.<br>
+    Tools marked <code>uvx</code> need <strong><a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noopener">uv</a></strong> installed &nbsp;(<code>curl -LsSf https://astral.sh/uv/install.sh | sh</code>).<br>
+    Tools marked <code>npx</code> need <strong><a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a></strong> installed &nbsp;(<a href="https://nodejs.org/en/download/" target="_blank" rel="noopener">nodejs.org/en/download</a>).<br>
+    Click <em>docs ↗</em> on any tool to read its full documentation before enabling it.
+  </div>
+
+  <div id="mcp-catalog"></div>
+
+  <div class="mcp-more">
     Want more tools? Browse the <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noopener">MCP server registry</a>
     or <a href="https://mcp.so/" target="_blank" rel="noopener">mcp.so</a> and add them manually in <code>config.toml</code>.
   </div>
+
   <div class="custom-mcp-section">
     <h3>Custom Servers</h3>
     <div id="custom-mcp-cards"></div>
@@ -1148,22 +1528,71 @@ function buildSteps() {
       </div>
       <button type="button" class="btn-primary" onclick="addCustomServer()">Add Server</button>
     </div>
-  </div>`;
-  html5 += `</div>`;
-  c.innerHTML += html5;
+  </div>
 
-  // Step 6: Review & Save
-  c.innerHTML += `<div class="step" id="step-6">
-  <h2>Review &amp; Save</h2>
-  <p style="color:#718096;margin-bottom:1rem;font-size:0.85rem">
-    Generated <code>config.toml</code> — will be written to the project root.
-  </p>
-  <pre id="config-preview"></pre>
+  <div class="advanced-section collapsed" data-section="integrations">
+    <button class="advanced-header" type="button" onclick="toggleAdvanced(this)">
+      <span>▼ Advanced: LangSmith, Embedding API &amp; Learning</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="advanced-body">
+      <h3>📊 LangSmith <span class="hint" style="font-weight:400">— optional observability</span></h3>
+      <div class="field">
+        <label>API Key</label>
+        <input type="password" id="f-langsmith-key" placeholder="ls__..." value="${escHtml(state.langsmith_key)}">
+      </div>
+      <div class="field">
+        <label>Project Name</label>
+        <input type="text" id="f-langsmith-project" placeholder="rustfox" value="${escHtml(state.langsmith_project || 'rustfox')}">
+      </div>
+
+      <h3>🔍 Embedding API <span class="hint" style="font-weight:400">— for memory / RAG</span></h3>
+      <div class="field">
+        <label>API Key</label>
+        <input type="password" id="f-embedding-key" placeholder="sk-..." value="${escHtml(state.embedding_key)}">
+      </div>
+      <div class="field">
+        <label>Base URL</label>
+        <input type="text" id="f-embedding-base-url" value="${escHtml(state.embedding_base_url || 'https://openrouter.ai/api/v1')}">
+      </div>
+      <div class="field">
+        <label>Model</label>
+        <input type="text" id="f-embedding-model" value="${escHtml(state.embedding_model || 'qwen/qwen3-embedding-8b')}">
+      </div>
+      <div class="field">
+        <label>Dimensions</label>
+        <input type="number" id="f-embedding-dimensions" value="${state.embedding_dimensions || 1536}" min="1">
+      </div>
+
+      <h3>🧠 Learning <span class="hint" style="font-weight:400">— automatic skill extraction</span></h3>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+          <input type="checkbox" id="f-learning-extraction" ${state.learning_skill_extraction_enabled ? 'checked' : ''}>
+          <span>Enable skill extraction from tool calls</span>
+        </label>
+      </div>
+      <div class="field">
+        <label>Extraction Threshold <span class="hint">— minimum tool calls before extraction runs</span></label>
+        <input type="number" id="f-learning-threshold" value="${state.learning_skill_extraction_threshold || 5}" min="1">
+      </div>
+    </div>
+  </div>
 </div>`;
 
-  // Step 7: Done / Support
-  c.innerHTML += `<div class="step" id="step-7">
-  <h1 style="margin-bottom:0.5rem">You're all set!</h1>
+  // ── Step 4: Review & Save ────────────────────────────────────────────────────
+  c.innerHTML += `<div class="step" id="step-4">
+  <h2>✅ Review &amp; Save</h2>
+  <p class="subtitle">Quick summary of what will be written. Toggle the raw TOML preview to verify.</p>
+  <div id="summary"></div>
+  <details style="margin-top:1.25rem">
+    <summary style="cursor:pointer;color:#a0aec0;font-size:0.85rem;font-weight:600">📋 Show raw TOML</summary>
+    <pre id="config-preview" style="margin-top:0.75rem"></pre>
+  </details>
+</div>`;
+
+  // ── Step 5: Success ─────────────────────────────────────────────────────────
+  c.innerHTML += `<div class="step" id="step-5">
+  <h1 style="margin-bottom:0.5rem">🎉 You're all set!</h1>
   <p class="subtitle">
     <code>config.toml</code> has been saved to the project root.<br>
     Start your bot with:
@@ -1181,6 +1610,10 @@ function buildSteps() {
     </a>
   </div>
 </div>`;
+
+  // Render MCP catalog and custom server cards into their containers
+  renderMcpCatalog();
+  renderCustomMcpCards();
 }
 
 // ── OAuth Modal ─────────────────────────────────────────────────────────────────
@@ -1337,11 +1770,8 @@ async function connectOAuth(serverName, mcpUrl, authTokenVar) {
 async function init() {
   await loadExistingConfig();
   buildSteps();
-  renderCustomMcpCards();   // populate pre-loaded custom servers into the DOM
   if (state._loaded) {
     document.getElementById('existing-banner').style.display = 'block';
-    const locEl = document.getElementById('f-location');
-    if (locEl) locEl.value = state.location || '';
   }
   showStep(1);
 }
