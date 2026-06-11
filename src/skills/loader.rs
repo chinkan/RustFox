@@ -90,6 +90,7 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
                 model: extract_field(frontmatter, "model"),
                 tools: extract_list_field(frontmatter, "tools"),
                 max_iterations: extract_u32_field(frontmatter, "max_iterations"),
+                skip_bootstrap: extract_bool_field(frontmatter, "skip_bootstrap"),
                 supervisor_workflow: extract_nested_field(frontmatter, "supervisor", "workflow"),
                 supervisor_required_caps: extract_nested_list(
                     frontmatter,
@@ -112,6 +113,7 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
         model: None,
         tools: vec![],
         max_iterations: None,
+        skip_bootstrap: false,
         supervisor_workflow: None,
         supervisor_required_caps: vec![],
     })
@@ -154,6 +156,13 @@ fn extract_list_field(frontmatter: &str, key: &str) -> Vec<String> {
 /// Extract a `key: N` unsigned integer field from YAML-like frontmatter
 fn extract_u32_field(frontmatter: &str, key: &str) -> Option<u32> {
     extract_field(frontmatter, key)?.parse().ok()
+}
+
+/// Parse a boolean field from frontmatter text.
+fn extract_bool_field(frontmatter: &str, key: &str) -> bool {
+    extract_field(frontmatter, key)
+        .map(|v| v == "true" || v == "yes" || v == "1")
+        .unwrap_or(false)
 }
 
 /// Extract `parent.subkey: value` from a YAML-like block where the parent has its

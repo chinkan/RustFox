@@ -289,7 +289,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "schedule_task" => return "🗓️ Scheduling a task".to_string(),
         "list_scheduled_tasks" => return "🗓️ Checking scheduled tasks".to_string(),
         "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
-        "invoke_agent" | "invoke_subagent" => return "🤖 Calling a specialist".to_string(),
+        "invoke_agent" => return "🤖 Calling a specialist".to_string(),
         "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
         "read_skill_file" | "write_skill_file" => return "📖 Reading skill".to_string(),
         "reload_skills" | "reload_agents" => return "🔄 Reloading".to_string(),
@@ -1059,10 +1059,6 @@ mod tests {
     fn test_friendly_tool_name_builtin_invoke_agent() {
         assert_eq!(
             friendly_tool_name("invoke_agent"),
-            "🤖 Calling a specialist"
-        );
-        assert_eq!(
-            friendly_tool_name("invoke_subagent"),
             "🤖 Calling a specialist"
         );
     }

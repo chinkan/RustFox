@@ -31,6 +31,9 @@ pub struct Skill {
     pub tools: Vec<String>,
     /// Max loop iterations for the subagent (None = use global config default)
     pub max_iterations: Option<u32>,
+    /// If true, use the AGENT.md/SKILL.md body as the system message directly
+    /// instead of the "read your instructions" bootstrap step.
+    pub skip_bootstrap: bool,
     /// Optional supervisor workflow hint (e.g. "coding", "research", "writing")
     pub supervisor_workflow: Option<String>,
     /// Optional list of capabilities the supervisor should require for this skill's workflow
@@ -144,6 +147,9 @@ impl SkillRegistry {
 
         if !instruction_lines.is_empty() {
             context.push_str(
+                "All available skills are listed below. DO NOT try to list skill directories or files — everything you need is documented here.\n\n",
+            );
+            context.push_str(
                 "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them. For subagent skills use invoke_agent.\n\nYou have the following skills available:\n\n",
             );
             context.push_str(&instruction_lines.join("\n"));
@@ -179,7 +185,7 @@ impl SkillRegistry {
         }
 
         let mut context =
-            String::from("Delegate these tasks to specialized agents using `invoke_agent`:\n\n");
+            String::from("All available agents are listed below. DO NOT try to list agent directories or files — everything you need is documented here.\n\nDelegate these tasks to specialized agents using `invoke_agent`:\n\n");
         context.push_str(&lines.join("\n"));
         context.push('\n');
         context
@@ -216,6 +222,7 @@ mod tests {
             model: model.map(str::to_string),
             tools: vec![],
             max_iterations: None,
+            skip_bootstrap: false,
             supervisor_workflow: None,
             supervisor_required_caps: vec![],
         }

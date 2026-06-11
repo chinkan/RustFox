@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    estimate_prompt_chars, prepare_messages_for_llm, recovery_nudge_for, PreparedPrompt,
+    estimate_prompt_bytes, prepare_messages_for_llm, recovery_nudge_for, PreparedPrompt,
 };
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
@@ -61,6 +61,14 @@ enum AgentKind {
     Agent,
 }
 
+/// A task parsed from the spawn_agents tool arguments, after validation.
+struct AdHocTask {
+    system_prompt: String,
+    prompt: String,
+    model: Option<String>,
+    tools: Option<Vec<String>>,
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -113,9 +121,33 @@ impl Agent {
         }
         drop(agents);
 
+        // Work Verification Protocol
+        prompt.push_str(
+            "\n\n# Work Verification Protocol\n\n\
+             BEFORE ending your response, you MUST verify your work:\n\n\
+             1. Call `invoke_agent(agent=\"verifier\", prompt=\"TASK: ...\\nCRITERIA: ...\\nEVIDENCE: ...\")`\n\
+                with the original task, your criteria, and a brief summary of what you did\n\
+                including key file paths.\n\
+             2. The verifier has READ-ONLY sandbox access — it will use read_file and\n\
+                list_files to inspect the actual output. You do NOT need to dump file\n\
+                contents into the prompt. Just tell it which files to look at.\n\
+             3. If the verifier returns NEEDS_IMPROVEMENT or FAIL, do NOT end.\n\
+                Use the feedback to continue working. You will get another iteration.\n\
+             4. Only if the verifier returns PASS may you end.\n\
+             5. You may also verify intermediate results during multi-step tasks."
+        );
+
         // Append ambient system context (user model, timestamp, location).
         // `build_system_context` already includes the leading `\n\n` separators.
         prompt.push_str(&self.build_system_context().await);
+
+        // Warn if system prompt is very large (tight on context window)
+        if prompt.len() > 50_000 {
+            warn!(
+                "System prompt is large: {} bytes — consider reducing skill/agent descriptions",
+                prompt.len()
+            );
+        }
 
         prompt
     }
@@ -499,9 +531,12 @@ impl Agent {
             let mut retry_count = 0u32;
             let response: ChatMessage;
 
+            // Prepare prompt with optional compaction (invariant across retries)
+            let base_prompt = prepare_messages_for_llm(&messages);
+
             loop {
-                // Prepare prompt with optional compaction
-                let mut prompt = prepare_messages_for_llm(&messages);
+                // Clone the base prompt for this retry attempt
+                let mut prompt = base_prompt.clone();
 
                 // On retry, append recovery nudge to in-memory prompt only
                 if retry_count > 0 {
@@ -509,7 +544,7 @@ impl Agent {
                     prompt.messages.push(nudge);
                     // Recompute stats after adding nudge
                     prompt.stats.prepared_message_count = prompt.messages.len();
-                    prompt.stats.prepared_prompt_chars = estimate_prompt_chars(&prompt.messages);
+                    prompt.stats.prepared_prompt_chars = estimate_prompt_bytes(&prompt.messages);
                 }
 
                 // Log prompt compaction if applied
@@ -663,92 +698,184 @@ impl Agent {
                         .await?;
                     messages.push(response.clone());
 
-                    // Execute each tool call
-                    for tool_call in tool_calls {
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(&tool_call.function.arguments)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    // --- Parallel-aware tool execution ---
+                    // Clone tool call data to avoid lifetime issues in async move blocks
+                    let tool_call_data: Vec<(usize, String, serde_json::Value, String)> =
+                        tool_calls
+                            .iter()
+                            .enumerate()
+                            .map(|(i, tc)| {
+                                let name = tc.function.name.clone();
+                                let args = serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                let id = tc.id.clone();
+                                (i, name, args, id)
+                            })
+                            .collect();
 
-                        // Defensive: short-circuit before observability setup when the LLM
-                        // regurgitates a compaction marker as its own tool call arguments.
-                        if is_compacted_regurgitation(&tool_call.function.arguments, &arguments) {
-                            warn!(
-                                "Tool '{}' rejected: args are a regurgitated compaction marker",
-                                tool_call.function.name,
-                            );
+                    // Classify: agent-spawning calls run in parallel, others sequential
+                    let is_agent_tool =
+                        |name: &str| -> bool { matches!(name, "spawn_agents" | "invoke_agent") };
+
+                    let mut agent_group: Vec<(usize, String, serde_json::Value, String)> =
+                        Vec::new();
+                    let mut other_group: Vec<(usize, String, serde_json::Value, String)> =
+                        Vec::new();
+
+                    for (i, name, args, id) in tool_call_data {
+                        if is_agent_tool(&name) {
+                            agent_group.push((i, name, args, id));
+                        } else {
+                            other_group.push((i, name, args, id));
+                        }
+                    }
+
+                    let mut all_results: Vec<(usize, ChatMessage)> = Vec::new();
+
+                    // --- Run subagent-spawning calls in PARALLEL ---
+                    if !agent_group.is_empty() {
+                        let futs: Vec<_> = agent_group
+                            .into_iter()
+                            .map(|(idx, name, args, id)| {
+                                let chain_run_id = chain_run_id.clone();
+                                let ls_project = ls_project.clone();
+                                let tool_event_tx = tool_event_tx.clone();
+                                async move {
+                                    let tool_run_id = uuid::Uuid::new_v4().to_string();
+                                    self.langsmith.start_run(crate::langsmith::RunParams {
+                                        id: tool_run_id.clone(),
+                                        name: name.clone(),
+                                        run_type: crate::langsmith::RunType::Tool,
+                                        parent_run_id: Some(chain_run_id.clone()),
+                                        inputs: serde_json::json!({ "arguments": args }),
+                                        session_name: ls_project.clone(),
+                                        start_time: Self::now_iso8601_static(),
+                                    });
+
+                                    if let Some(ref tx) = tool_event_tx {
+                                        let args_preview =
+                                            crate::platform::tool_notifier::format_args_preview(
+                                                &args.to_string(),
+                                            );
+                                        let _ = tx.try_send(
+                                            crate::platform::tool_notifier::ToolEvent::Started {
+                                                name: name.clone(),
+                                                args_preview,
+                                                arguments_json: args.to_string(),
+                                            },
+                                        );
+                                    }
+
+                                    let result =
+                                        self.execute_tool(&name, &args, user_id, chat_id).await;
+
+                                    if let Some(ref tx) = tool_event_tx {
+                                        let success = !result.starts_with("Error");
+                                        let _ = tx.try_send(
+                                            crate::platform::tool_notifier::ToolEvent::Completed {
+                                                name: name.clone(),
+                                                success,
+                                            },
+                                        );
+                                    }
+
+                                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                                        id: tool_run_id,
+                                        outputs: Some(serde_json::json!({ "result": result })),
+                                        error: None,
+                                        end_time: Self::now_iso8601_static(),
+                                    });
+
+                                    (
+                                        idx,
+                                        ChatMessage {
+                                            role: "tool".to_string(),
+                                            content: Some(MessageContent::from_text(result)),
+                                            tool_calls: None,
+                                            tool_call_id: Some(id),
+                                        },
+                                    )
+                                }
+                            })
+                            .collect();
+                        let parallel_results = futures::future::join_all(futs).await;
+                        all_results.extend(parallel_results);
+                    }
+
+                    // --- Non-agent tool calls run SEQUENTIALLY ---
+                    for (idx, name, args, id) in other_group {
+                        // Compaction regurgitation check
+                        if is_compacted_regurgitation(&args.to_string(), &args) {
                             let tool_msg = ChatMessage {
                                 role: "tool".to_string(),
                                 content: Some(MessageContent::from_text(REGURGITATION_ERROR_MSG)),
                                 tool_calls: None,
-                                tool_call_id: Some(tool_call.id.clone()),
+                                tool_call_id: Some(id),
                             };
-                            self.memory
-                                .save_message(&conversation_id, &tool_msg)
-                                .await?;
-                            messages.push(tool_msg);
+                            all_results.push((idx, tool_msg));
                             continue;
                         }
 
-                        // --- LangSmith: start tool run (child of chain) ---
+                        // LangSmith: start tool run
                         let tool_run_id = uuid::Uuid::new_v4().to_string();
                         self.langsmith.start_run(crate::langsmith::RunParams {
                             id: tool_run_id.clone(),
-                            name: tool_call.function.name.clone(),
+                            name: name.clone(),
                             run_type: crate::langsmith::RunType::Tool,
                             parent_run_id: Some(chain_run_id.clone()),
-                            inputs: serde_json::json!({ "arguments": arguments }),
+                            inputs: serde_json::json!({ "arguments": args }),
                             session_name: ls_project.clone(),
                             start_time: Self::now_iso8601_static(),
                         });
 
                         // Notify tool start
-                        let args_preview = crate::platform::tool_notifier::format_args_preview(
-                            &tool_call.function.arguments,
-                        );
                         if let Some(ref tx) = tool_event_tx {
+                            let args_preview = crate::platform::tool_notifier::format_args_preview(
+                                &args.to_string(),
+                            );
                             let _ =
                                 tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
-                                    name: tool_call.function.name.clone(),
-                                    args_preview: args_preview.clone(),
-                                    arguments_json: tool_call.function.arguments.clone(),
+                                    name: name.clone(),
+                                    args_preview,
+                                    arguments_json: args.to_string(),
                                 });
                         }
 
-                        let tool_result = self
-                            .execute_tool(&tool_call.function.name, &arguments, user_id, chat_id)
-                            .await;
+                        let result = self.execute_tool(&name, &args, user_id, chat_id).await;
 
                         // Notify tool completion
                         if let Some(ref tx) = tool_event_tx {
-                            let success = !tool_result.starts_with("Error");
+                            let success = !result.starts_with("Error");
                             let _ =
                                 tx.try_send(crate::platform::tool_notifier::ToolEvent::Completed {
-                                    name: tool_call.function.name.clone(),
+                                    name: name.clone(),
                                     success,
                                 });
                         }
 
-                        info!(
-                            "Tool '{}' result length: {} chars",
-                            tool_call.function.name,
-                            tool_result.len()
-                        );
-                        debug!("Tool '{}' result: {}", tool_call.function.name, tool_result);
+                        info!("Tool '{}' result length: {} chars", name, result.len());
+                        debug!("Tool '{}' result: {}", name, result);
 
-                        // --- LangSmith: end tool run ---
+                        // LangSmith: end tool run
                         self.langsmith.end_run(crate::langsmith::EndRunParams {
                             id: tool_run_id,
-                            outputs: Some(serde_json::json!({ "result": tool_result })),
+                            outputs: Some(serde_json::json!({ "result": result })),
                             error: None,
                             end_time: Self::now_iso8601_static(),
                         });
 
                         let tool_msg = ChatMessage {
                             role: "tool".to_string(),
-                            content: Some(MessageContent::from_text(tool_result)),
+                            content: Some(MessageContent::from_text(result)),
                             tool_calls: None,
-                            tool_call_id: Some(tool_call.id.clone()),
+                            tool_call_id: Some(id),
                         };
+                        all_results.push((idx, tool_msg));
+                    }
+
+                    // Sort results by original index and push to memory + messages
+                    all_results.sort_by_key(|(i, _)| *i);
+                    for (_idx, tool_msg) in all_results {
                         self.memory
                             .save_message(&conversation_id, &tool_msg)
                             .await?;
@@ -1631,8 +1758,11 @@ impl Agent {
             let mut retry_count = 0u32;
             let response: ChatMessage;
 
+            // Prepare prompt with optional compaction (invariant across retries)
+            let base_prompt = prepare_messages_for_llm(messages);
+
             loop {
-                let mut prompt_prepared = prepare_messages_for_llm(messages);
+                let mut prompt_prepared = base_prompt.clone();
                 if retry_count > 0 {
                     let nudge = recovery_nudge_for(messages);
                     prompt_prepared.messages.push(nudge);
@@ -2161,6 +2291,85 @@ impl Agent {
                 ))
                 .await
             }
+            "spawn_agents" => {
+                // --- Validate tasks first, before creating any futures ---
+                let parsed_tasks: Vec<AdHocTask> = if let Some(tasks) =
+                    arguments["tasks"].as_array()
+                {
+                    if tasks.is_empty() {
+                        return "tasks array is empty".to_string();
+                    }
+                    let mut parsed = Vec::with_capacity(tasks.len());
+                    for (i, task) in tasks.iter().enumerate() {
+                        let system_prompt = match task["system_prompt"].as_str() {
+                            Some(s) => s.to_string(),
+                            None => return format!("Task at index {}: missing system_prompt", i),
+                        };
+                        let prompt = match task["prompt"].as_str() {
+                            Some(p) => p.to_string(),
+                            None => return format!("Task at index {}: missing prompt", i),
+                        };
+                        parsed.push(AdHocTask {
+                            system_prompt,
+                            prompt,
+                            model: task["model"].as_str().map(str::to_string),
+                            tools: task["tools"].as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            }),
+                        });
+                    }
+                    parsed
+                } else {
+                    // Single ad-hoc subagent (shorthand fields)
+                    let system_prompt = match arguments["system_prompt"].as_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            return "Missing tasks: provide either 'tasks' array or system_prompt+prompt"
+                                .to_string()
+                        }
+                    };
+                    if system_prompt.is_empty() {
+                        return "system_prompt cannot be empty".to_string();
+                    }
+                    let prompt = match arguments["prompt"].as_str() {
+                        Some(p) => p.to_string(),
+                        None => return "Missing prompt".to_string(),
+                    };
+                    if prompt.is_empty() {
+                        return "prompt cannot be empty".to_string();
+                    }
+                    vec![AdHocTask {
+                        system_prompt,
+                        prompt,
+                        model: arguments["model"].as_str().map(str::to_string),
+                        tools: arguments["tools"].as_array().map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        }),
+                    }]
+                };
+
+                // All validation passed — now build and run futures
+                let futs: Vec<_> = parsed_tasks
+                    .into_iter()
+                    .map(|task| {
+                        let sp = task.system_prompt;
+                        let pr = task.prompt;
+                        let mo = task.model;
+                        let to = task.tools;
+                        Box::pin(async move {
+                            self.run_subagent(None, &sp, &pr, mo.as_deref(), to, AgentKind::Skill)
+                                .await
+                        })
+                    })
+                    .collect();
+
+                let results = futures::future::join_all(futs).await;
+                serde_json::json!({ "results": results }).to_string()
+            }
             "read_agent_file" => {
                 let agent_name = match arguments["agent_name"].as_str() {
                     Some(n) => n.to_string(),
@@ -2678,6 +2887,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_effective_subagent_tools_includes_read_tools() {
+        let tools = effective_subagent_tools(&[]);
+        assert!(tools.contains(&"read_skill_file".to_string()));
+        assert!(tools.contains(&"read_agent_file".to_string()));
+    }
+
+    #[test]
+    fn test_effective_subagent_tools_dedup() {
+        let tools = effective_subagent_tools(&["execute_command".to_string()]);
+        assert!(tools.contains(&"execute_command".to_string()));
+        assert!(tools.contains(&"read_skill_file".to_string()));
+        assert!(tools.contains(&"read_agent_file".to_string()));
+        // Ensure no duplicates of the auto-injected tools
+        let count_rsf = tools.iter().filter(|t| *t == "read_skill_file").count();
+        let count_raf = tools.iter().filter(|t| *t == "read_agent_file").count();
+        assert_eq!(count_rsf, 1, "read_skill_file should appear only once");
+        assert_eq!(count_raf, 1, "read_agent_file should appear only once");
+    }
+
+    #[test]
+    fn test_effective_subagent_tools_skips_declared_read_tools() {
+        let tools = effective_subagent_tools(&[
+            "read_skill_file".to_string(),
+            "read_agent_file".to_string(),
+            "read_file".to_string(),
+        ]);
+        assert!(tools.contains(&"read_skill_file".to_string()));
+        assert!(tools.contains(&"read_agent_file".to_string()));
+        assert!(tools.contains(&"read_file".to_string()));
+        // Should not have duplicates
+        assert_eq!(tools.iter().filter(|t| *t == "read_skill_file").count(), 1);
+    }
+
+    #[test]
     fn test_tool_status_is_not_streamed_to_answer_channel() {
         let source = include_str!("agent.rs");
         let status_line_call = ["format_tool_status", "_line("].concat();
@@ -2928,8 +3171,7 @@ mod tests {
 
     #[test]
     fn test_is_compacted_regurgitation_new_plain_text_format_detected() {
-        let raw =
-            "[RustFox compacted: previous invoke_subagent call with 1200 characters of arguments]";
+        let raw = "[RustFox compacted: previous invoke_subagent call with 1200 bytes of arguments]";
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
         assert!(is_compacted_regurgitation(raw, &parsed));
     }

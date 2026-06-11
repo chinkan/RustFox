@@ -190,6 +190,7 @@ mod tests {
                 model: None,
                 tools: vec![],
                 max_iterations: None,
+                skip_bootstrap: false,
                 supervisor_workflow: Some("research".into()),
                 supervisor_required_caps: vec!["research".into()],
             },

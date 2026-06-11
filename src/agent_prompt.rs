@@ -7,11 +7,12 @@
 use crate::llm::{ChatMessage, MessageContent};
 
 const COMPACTION_MESSAGE_COUNT_THRESHOLD: usize = 10;
-const COMPACTION_PROMPT_CHAR_THRESHOLD: usize = 20_000;
+const COMPACTION_PROMPT_BYTE_THRESHOLD: usize = 20_000;
 const TOOL_ARGUMENT_COMPACT_THRESHOLD: usize = 1_000;
 const TOOL_RESULT_COMPACT_THRESHOLD: usize = 2_000;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1_000;
 const PRESERVED_TOOL_GROUPS: usize = 2;
+const PROMPT_HARD_CAP_BYTES: usize = 100_000;
 
 /// Truncate a string to at most `max_chars` characters at a safe character boundary.
 ///
@@ -38,10 +39,11 @@ pub struct PreparedPrompt {
     pub stats: PromptStats,
 }
 
-/// Estimate the character count of a prompt from its messages.
+/// Estimate the byte size of a prompt from its messages.
 ///
 /// Counts message content lengths and tool call argument lengths.
-pub fn estimate_prompt_chars(messages: &[ChatMessage]) -> usize {
+/// Uses bytes (not chars) as a rough proxy for token count (~4 bytes ≈ 1 token).
+pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|msg| {
@@ -89,41 +91,55 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
 /// - Estimated prompt size > 20,000 chars
 pub fn prepare_messages_for_llm(messages: &[ChatMessage]) -> PreparedPrompt {
     let original_message_count = messages.len();
-    let original_prompt_chars = estimate_prompt_chars(messages);
+    let original_prompt_bytes = estimate_prompt_bytes(messages);
 
     let should_compact = original_message_count > COMPACTION_MESSAGE_COUNT_THRESHOLD
-        && original_prompt_chars > COMPACTION_PROMPT_CHAR_THRESHOLD;
+        && original_prompt_bytes > COMPACTION_PROMPT_BYTE_THRESHOLD;
 
     let prepared_messages = if should_compact {
-        compact_tool_heavy_history(messages)
+        let messages = compact_tool_heavy_history(messages);
+        // Second pass: if still over the hard cap, reduce preserved groups
+        if estimate_prompt_bytes(&messages) > PROMPT_HARD_CAP_BYTES {
+            compact_tool_heavy_history_with_preserved_groups(&messages, 1)
+        } else {
+            messages
+        }
     } else {
         messages.to_vec()
     };
 
     let prepared_message_count = prepared_messages.len();
-    let prepared_prompt_chars = estimate_prompt_chars(&prepared_messages);
+    let prepared_prompt_bytes = estimate_prompt_bytes(&prepared_messages);
 
     PreparedPrompt {
         messages: prepared_messages,
         stats: PromptStats {
             original_message_count,
             prepared_message_count,
-            original_prompt_chars,
-            prepared_prompt_chars,
+            original_prompt_chars: original_prompt_bytes,
+            prepared_prompt_chars: prepared_prompt_bytes,
             compaction_applied: should_compact,
         },
     }
 }
 
-/// Compact tool-heavy conversation history while preserving recent context.
+/// Compact tool-heavy conversation history, preserving the default 2 most recent groups.
+pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    compact_tool_heavy_history_with_preserved_groups(messages, PRESERVED_TOOL_GROUPS)
+}
+
+/// Compact tool-heavy conversation history with configurable preserved groups.
 ///
 /// Strategy:
 /// - Preserve all system and user messages unchanged
-/// - Preserve the most recent two assistant-with-tool-calls groups and their tool results
+/// - Preserve the most recent `preserved_count` assistant-with-tool-calls groups and their tool results
 /// - Compact older assistant tool arguments longer than 1,000 chars
 /// - Compact older tool results longer than 2,000 chars
 /// - Maintain message order
-pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+fn compact_tool_heavy_history_with_preserved_groups(
+    messages: &[ChatMessage],
+    preserved_count: usize,
+) -> Vec<ChatMessage> {
     // First, identify tool groups: assistant messages with tool calls and their following tool messages
     let mut tool_groups: Vec<(usize, Vec<usize>)> = Vec::new();
     let mut current_group: Option<(usize, Vec<usize>)> = None;
@@ -157,8 +173,8 @@ pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> 
         tool_groups.push(group);
     }
 
-    // Determine which indices to preserve (most recent PRESERVED_TOOL_GROUPS)
-    let preserved_groups_start = tool_groups.len().saturating_sub(PRESERVED_TOOL_GROUPS);
+    // Determine which indices to preserve (most recent preserved_count groups)
+    let preserved_groups_start = tool_groups.len().saturating_sub(preserved_count);
     let mut preserved_indices = std::collections::HashSet::new();
     for group in tool_groups.iter().skip(preserved_groups_start) {
         preserved_indices.insert(group.0);
@@ -192,6 +208,23 @@ pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> 
                 return compact_assistant_tool_calls(msg);
             }
 
+            // Compact assistant text-only messages with long content
+            if msg.role == "assistant" && msg.tool_calls.is_none() {
+                if let Some(ref content) = msg.content {
+                    let text = content.as_text();
+                    if text.len() > TOOL_ARGUMENT_COMPACT_THRESHOLD {
+                        let mut compacted = msg.clone();
+                        let preview = truncate_chars(&text, TOOL_RESULT_PREVIEW_CHARS);
+                        compacted.content = Some(MessageContent::Text(format!(
+                            "[RustFox compacted: previous assistant response with {} bytes]\n{}...",
+                            text.len(),
+                            preview
+                        )));
+                        return compacted;
+                    }
+                }
+            }
+
             // Compact tool results
             if msg.role == "tool" {
                 return compact_tool_result(msg);
@@ -219,7 +252,7 @@ fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
             let args_len = call.function.arguments.len();
             if args_len > TOOL_ARGUMENT_COMPACT_THRESHOLD {
                 call.function.arguments = format!(
-                    "{} previous {} call with {} characters of arguments]",
+                    "{} previous {} call with {} bytes of arguments]",
                     COMPACTION_MARKER_PREFIX, call.function.name, args_len,
                 );
             }
@@ -230,18 +263,47 @@ fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
 }
 
 /// Compact tool result message by truncating long content.
+///
+/// Preserves multi-modal structure: text parts are compacted, image parts
+/// pass through unchanged.
 fn compact_tool_result(msg: &ChatMessage) -> ChatMessage {
+    use crate::llm::ContentPart;
+
     let mut compacted = msg.clone();
 
     if let Some(content) = &compacted.content {
-        let text = content.as_text();
-        let text_len = text.len();
-        if text_len > TOOL_RESULT_COMPACT_THRESHOLD {
-            let preview = truncate_chars(&text, TOOL_RESULT_PREVIEW_CHARS);
-            compacted.content = Some(MessageContent::Text(format!(
-                "[rustfox compacted tool result: {} chars]\n{}...",
-                text_len, preview
-            )));
+        match content {
+            MessageContent::Text(ref text) => {
+                let text_len = text.len();
+                if text_len > TOOL_RESULT_COMPACT_THRESHOLD {
+                    let preview = truncate_chars(text, TOOL_RESULT_PREVIEW_CHARS);
+                    compacted.content = Some(MessageContent::Text(format!(
+                        "[rustfox compacted tool result: {} bytes]\n{}...",
+                        text_len, preview
+                    )));
+                }
+            }
+            MessageContent::Parts(ref parts) => {
+                let new_parts: Vec<ContentPart> = parts
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text }
+                            if text.len() > TOOL_RESULT_COMPACT_THRESHOLD =>
+                        {
+                            let preview = truncate_chars(text, TOOL_RESULT_PREVIEW_CHARS);
+                            ContentPart::Text {
+                                text: format!(
+                                    "[rustfox compacted tool result: {} bytes]\n{}...",
+                                    text.len(),
+                                    preview
+                                ),
+                            }
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                compacted.content = Some(MessageContent::Parts(new_parts));
+            }
         }
     }
 
@@ -254,7 +316,7 @@ mod tests {
     use crate::llm::{FunctionCall, MessageContent, ToolCall};
 
     #[test]
-    fn estimate_prompt_chars_counts_content_and_tool_arguments() {
+    fn estimate_prompt_bytes_counts_content_and_tool_arguments() {
         let messages = vec![
             ChatMessage {
                 role: "user".to_string(),
@@ -283,8 +345,8 @@ mod tests {
             },
         ];
 
-        let total = estimate_prompt_chars(&messages);
-        assert_eq!(total, 5 + 2 + 15 + 6); // 28 chars
+        let total = estimate_prompt_bytes(&messages);
+        assert_eq!(total, 5 + 2 + 15 + 6); // 28 bytes
     }
 
     #[test]
@@ -613,7 +675,7 @@ mod tests {
         // Verify it's been compacted — plain-text marker, no JSON
         assert!(compacted_args.contains("[RustFox compacted:"));
         assert!(compacted_args.contains("unicode_tool"));
-        assert!(compacted_args.contains("characters of arguments"));
+        assert!(compacted_args.contains("bytes of arguments"));
     }
 
     #[test]

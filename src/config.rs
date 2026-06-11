@@ -29,6 +29,8 @@ pub struct Config {
     pub learning: LearningConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -52,6 +54,14 @@ impl Default for SupervisorConfig {
             risk: RiskThresholdsConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SubagentsConfig {
+    /// Default tool whitelist for ad-hoc subagents.
+    /// When None, defaults to sandbox tools only (read_file, write_file, list_files, execute_command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tools: Option<Vec<String>>,
 }
 
 /// Risk-threshold gates that govern when the supervisor may auto-execute a
