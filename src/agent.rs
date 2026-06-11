@@ -649,6 +649,31 @@ impl Agent {
                             serde_json::from_str(&tool_call.function.arguments)
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
+                        // Defensive: short-circuit before observability setup when the LLM
+                        // regurgitates a compaction marker as its own tool call arguments.
+                        if is_compacted_regurgitation(
+                            &tool_call.function.arguments,
+                            &arguments,
+                        ) {
+                            warn!(
+                                "Tool '{}' rejected: args are a regurgitated compaction marker",
+                                tool_call.function.name,
+                            );
+                            let tool_msg = ChatMessage {
+                                role: "tool".to_string(),
+                                content: Some(MessageContent::from_text(
+                                    REGURGITATION_ERROR_MSG,
+                                )),
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                            };
+                            self.memory
+                                .save_message(&conversation_id, &tool_msg)
+                                .await?;
+                            messages.push(tool_msg);
+                            continue;
+                        }
+
                         // --- LangSmith: start tool run (child of chain) ---
                         let tool_run_id = uuid::Uuid::new_v4().to_string();
                         self.langsmith.start_run(crate::langsmith::RunParams {
@@ -1510,6 +1535,24 @@ impl Agent {
                         let arguments: serde_json::Value =
                             serde_json::from_str(&tool_call.function.arguments)
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                        // Defensive: detect regurgitated compaction marker
+                        if is_compacted_regurgitation(&tool_call.function.arguments, &arguments) {
+                            warn!(
+                                "Agent '{}' tool '{}' rejected: args are a regurgitated \
+                                 compaction marker",
+                                skill_name, tool_call.function.name,
+                            );
+                            messages.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: Some(MessageContent::from_text(
+                                    REGURGITATION_ERROR_MSG,
+                                )),
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                            });
+                            continue;
+                        }
 
                         // Only allow whitelisted tools
                         let result = if allowed_tools.contains(&tool_call.function.name) {
@@ -2499,6 +2542,35 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
         .collect()
 }
 
+/// Error message returned when the main agent or a subagent produces a tool call
+/// whose arguments are a regurgitated compaction marker rather than real JSON.
+const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in compacted format \
+    (reproduced from a compressed history entry). \
+    Please regenerate the complete call with all required fields.";
+
+/// Detect when the LLM directly reproduces a compaction-marker string as its own
+/// tool call arguments.  This happens when the model learns the marker from a
+/// compacted history entry and outputs it verbatim instead of real JSON.
+///
+/// Handles two formats:
+/// - Old (backward compat): JSON object with `_rustfox_compacted_arguments: true`
+/// - New: plain-text that starts with `COMPACTION_MARKER_PREFIX`
+fn is_compacted_regurgitation(raw: &str, parsed: &serde_json::Value) -> bool {
+    // Old JSON format — lookup the marker key in the parsed object.
+    if parsed
+        .get("_rustfox_compacted_arguments")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        return true;
+    }
+    // New plain-text format — the raw string itself starts with the marker.
+    if raw.starts_with(crate::agent_prompt::COMPACTION_MARKER_PREFIX) {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2750,5 +2822,47 @@ mod tests {
         let target = base_dir.join("my-skill/SKILL.md");
         let content = tokio::fs::read_to_string(&target).await.unwrap();
         assert_eq!(content, "instance content", "instance must shadow bundled");
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_new_plain_text_format_detected() {
+        let raw = "[RustFox compacted: previous invoke_subagent call with 1200 characters of arguments]";
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+        assert!(is_compacted_regurgitation(raw, &parsed));
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_old_json_format_detected() {
+        let raw = r#"{"_rustfox_compacted_arguments": true, "tool_name": "invoke_subagent", "original_char_count": 1200, "preview": "{\"skill\": \"test\"}"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(is_compacted_regurgitation(raw, &parsed));
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_old_json_false_not_detected() {
+        let raw = r#"{"_rustfox_compacted_arguments": false, "tool_name": "invoke_subagent"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(!is_compacted_regurgitation(raw, &parsed));
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_old_json_missing_field_not_detected() {
+        let raw = r#"{"tool_name": "invoke_subagent", "original_char_count": 1200}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(!is_compacted_regurgitation(raw, &parsed));
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_normal_json_not_detected() {
+        let raw = r#"{"skill": "novel-writer", "prompt": "write a chapter"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(!is_compacted_regurgitation(raw, &parsed));
+    }
+
+    #[test]
+    fn test_is_compacted_regurgitation_empty_string_not_detected() {
+        let raw = "";
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+        assert!(!is_compacted_regurgitation(raw, &parsed));
     }
 }

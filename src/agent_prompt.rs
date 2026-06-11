@@ -202,7 +202,15 @@ pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> 
         .collect()
 }
 
+/// Public so `agent.rs` can detect regurgitated compaction markers.
+pub const COMPACTION_MARKER_PREFIX: &str = "[RustFox compacted:";
+
 /// Compact assistant message with tool calls by shortening long arguments.
+///
+/// Uses a plain-text marker instead of JSON to prevent the LLM from learning
+/// the format and regurgitating it as its own tool call arguments — the root
+/// cause of the "Missing skill" bug when a model copied the old JSON-shaped
+/// `{"_rustfox_compacted_arguments": true, …}` object verbatim.
 fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
     let mut compacted = msg.clone();
 
@@ -210,21 +218,10 @@ fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
         for call in tool_calls.iter_mut() {
             let args_len = call.function.arguments.len();
             if args_len > TOOL_ARGUMENT_COMPACT_THRESHOLD {
-                let preview = if call.function.arguments.chars().count() > 200 {
-                    format!("{}...", truncate_chars(&call.function.arguments, 200))
-                } else {
-                    call.function.arguments.clone()
-                };
-
-                let compacted_json = serde_json::json!({
-                    "_rustfox_compacted_arguments": true,
-                    "tool_name": call.function.name,
-                    "original_char_count": args_len,
-                    "preview": preview,
-                });
-
-                call.function.arguments =
-                    serde_json::to_string(&compacted_json).unwrap_or_else(|_| "{}".to_string());
+                call.function.arguments = format!(
+                    "{} previous {} call with {} characters of arguments]",
+                    COMPACTION_MARKER_PREFIX, call.function.name, args_len,
+                );
             }
         }
     }
@@ -469,7 +466,7 @@ mod tests {
         let old_args = &old_assistant.tool_calls.as_ref().unwrap()[0]
             .function
             .arguments;
-        assert!(old_args.contains("_rustfox_compacted_arguments"));
+        assert!(old_args.contains("[RustFox compacted:"));
         assert!(old_args.len() < long_args.len());
 
         let old_tool = &compacted[3];
@@ -613,17 +610,10 @@ mod tests {
         let compacted = compact_assistant_tool_calls(&message);
         let compacted_args = &compacted.tool_calls.as_ref().unwrap()[0].function.arguments;
 
-        // Verify it's been compacted
-        assert!(compacted_args.contains("_rustfox_compacted_arguments"));
+        // Verify it's been compacted — plain-text marker, no JSON
+        assert!(compacted_args.contains("[RustFox compacted:"));
         assert!(compacted_args.contains("unicode_tool"));
-        assert!(compacted_args.contains("original_char_count"));
-        assert!(compacted_args.contains("preview"));
-
-        // Parse and verify the preview is valid UTF-8 and shorter than original
-        let parsed: serde_json::Value = serde_json::from_str(compacted_args).unwrap();
-        let preview = parsed["preview"].as_str().unwrap();
-        assert!(preview.len() < long_args_with_unicode.len());
-        assert!(preview.chars().count() <= 203); // 200 chars + "..."
+        assert!(compacted_args.contains("characters of arguments"));
     }
 
     #[test]
@@ -771,7 +761,7 @@ mod tests {
         let compacted_args = &compacted[2].tool_calls.as_ref().unwrap()[0]
             .function
             .arguments;
-        assert!(compacted_args.contains("_rustfox_compacted_arguments"));
+        assert!(compacted_args.contains("[RustFox compacted:"));
 
         let compacted_result = compacted[3].content.as_ref().unwrap();
         assert!(compacted_result
