@@ -22,13 +22,23 @@ A new entry in `builtin_tool_definitions()` in `src/tools.rs`:
 
 ### Execution
 
-Handled in `agent.rs::execute_tool()` as a new match arm, **before** the built-in fallthrough to `tools::execute_builtin_tool()`.
+Handled in `agent.rs::execute_tool()` as a new match arm, **before** the built-in fallthrough to `tools::execute_builtin_tool()`. Unlike `read_file`/`write_file`, execution lives in `agent.rs` (not `execute_builtin_tool()`) because it needs the Telegram `Bot` instance and a parsed `ChatId`, which aren't available in the stateless `tools.rs` functions.
 
 The tool uses the existing `bot: Arc<Bot>` on the `Agent` struct to call `send_document()` on the Telegram API. `chat_id` is already available as a parameter to `execute_tool`.
 
+Concrete API call pattern:
+```rust
+let file_name = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+let input_file = InputFile::memory(bytes).file_name(file_name);
+bot.send_document(chat_id, input_file).caption(caption).await?;
+```
+Telegram auto-detects MIME from content — no explicit MIME type needed.
+
 ### Signature change
 
-`execute_tool()` changes `chat_id: &str` to `chat_id: ChatId` (teloxide type) so the `send_file` arm can pass it directly. The call sites parse the string once before calling.
+`execute_tool()` changes `chat_id: &str` to `chat_id: ChatId` (teloxide type) so the `send_file` arm can pass it directly. The two main call sites (sequential tool group, parallel agent tool group) parse the string once before looping.
+
+The subagent call site (`agent.rs:1788`) passes `""` for both `user_id` and `chat_id` — this is safe because subagents use explicit tool whitelists and will never include `send_file` in their available tools, so this code path is never reached for `send_file`. No change needed at that call site.
 
 ### Path validation
 
@@ -36,7 +46,7 @@ Reuses the existing `validate_sandbox_path()` from `tools.rs`, which is made `pu
 
 ### File size limit
 
-Explicit check: if file exceeds 50 MB (Telegram's per-file limit for the standard Bot API), the tool returns an error to the LLM so it can inform the user.
+Check file size **before** reading bytes using `tokio::fs::metadata()` on the validated path. If the file exceeds 50 MB (Telegram's per-file limit for the standard Bot API), the tool returns an error to the LLM so it can inform the user — avoids loading a huge file into memory only to reject it.
 
 ### Error handling
 
