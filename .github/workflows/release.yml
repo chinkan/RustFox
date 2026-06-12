@@ -63,6 +63,14 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path staging\* -DestinationPath ${{ matrix.archive_name }}
 
+      - name: Build .deb package
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/rustfox dist/
+          TARGET=${{ matrix.target }} ./scripts/build-deb.sh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
