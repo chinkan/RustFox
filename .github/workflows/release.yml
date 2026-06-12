@@ -18,46 +18,41 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             rustfox_bin: rustfox
-            setup_bin: setup
-            archive_name: rustfox-linux-x86_64.tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            rustfox_bin: rustfox
-            setup_bin: setup
-            archive_name: rustfox-macos-x86_64.tar.gz
+            archive_name: rustfox-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             rustfox_bin: rustfox
-            setup_bin: setup
-            archive_name: rustfox-macos-aarch64.tar.gz
+            archive_name: rustfox-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rustfox_bin: rustfox.exe
-            setup_bin: setup.exe
-            archive_name: rustfox-windows-x86_64.zip
+            archive_name: rustfox-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release
 
       - name: Stage release files
         shell: bash
         run: |
           mkdir staging
-          cp target/${{ matrix.target }}/release/${{ matrix.rustfox_bin }} staging/
-          cp target/${{ matrix.target }}/release/${{ matrix.setup_bin }} staging/
+          cp target/release/${{ matrix.rustfox_bin }} staging/
           cp config.example.toml staging/
-          cp -r skills staging/
+          cp scripts/install.sh staging/
+          cp -r scripts/services staging/services
+          # Only for Windows
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            cp scripts/services/install-service.bat.template staging/install-service.bat
+            cp scripts/services/uninstall-service.bat.template staging/uninstall-service.bat
+          fi
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
