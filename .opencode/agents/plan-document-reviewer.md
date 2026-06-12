@@ -1,7 +1,7 @@
 ---
 description: Reviews implementation plans for completeness, spec alignment, task decomposition, and buildability before execution.
 mode: subagent
-model: opencode/deepseek-v4-flash-free
+model: opencode-go/deepseek-v4-flash
 permission:
   read: allow
   edit: deny

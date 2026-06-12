@@ -382,6 +382,11 @@ impl McpManager {
         }
     }
 
+    /// Number of connected MCP servers
+    pub fn server_count(&self) -> usize {
+        self.connections.len()
+    }
+
     /// Get all MCP tools as OpenRouter-compatible tool definitions
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = Vec::new();

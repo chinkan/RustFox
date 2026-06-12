@@ -23,10 +23,14 @@ pub struct Config {
     pub embedding: Option<EmbeddingApiConfig>,
     #[serde(default)]
     pub langsmith: Option<LangSmithConfig>,
+    #[serde(default = "default_ocr_config")]
+    pub ocr: OcrConfig,
     #[serde(default = "default_learning_config")]
     pub learning: LearningConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -50,6 +54,14 @@ impl Default for SupervisorConfig {
             risk: RiskThresholdsConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SubagentsConfig {
+    /// Default tool whitelist for ad-hoc subagents.
+    /// When None, defaults to sandbox tools only (read_file, write_file, list_files, execute_command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tools: Option<Vec<String>>,
 }
 
 /// Risk-threshold gates that govern when the supervisor may auto-execute a
@@ -106,6 +118,19 @@ pub struct OpenRouterConfig {
     pub max_tokens: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Whether the configured model supports vision (image inputs).
+    /// When true, images are sent as base64-encoded content parts.
+    /// When false, OCR is used to extract text from images.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OcrConfig {
+    /// Directory where OCR model files are cached.
+    /// Models are downloaded automatically on first OCR use.
+    #[serde(default = "default_ocr_model_dir")]
+    pub model_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -361,6 +386,19 @@ fn default_langsmith_project() -> String {
 
 fn default_langsmith_base_url() -> String {
     "https://api.smith.langchain.com".to_string()
+}
+
+fn default_ocr_model_dir() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(".cache/ocrs")
+}
+
+fn default_ocr_config() -> OcrConfig {
+    OcrConfig {
+        model_dir: default_ocr_model_dir(),
+    }
 }
 
 fn default_bundled_skills_dir() -> PathBuf {
@@ -660,6 +698,52 @@ mod tests {
     }
 
     #[test]
+    fn test_supports_vision_defaults_false() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.openrouter.supports_vision);
+    }
+
+    #[test]
+    fn test_supports_vision_parses_true() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            supports_vision = true
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.openrouter.supports_vision);
+    }
+
+    #[test]
+    fn test_ocr_config_default_model_dir() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.ocr.model_dir.to_string_lossy().contains("ocrs"));
+    }
+
+    #[test]
     fn test_mcp_server_url_config_parses() {
         let toml = r#"
             [telegram]
@@ -745,24 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_config_defaults_when_section_missing() {
-        let toml = r#"
-            [telegram]
-            bot_token = "tok"
-            allowed_user_ids = [1]
-            [openrouter]
-            api_key = "key"
-            [sandbox]
-            allowed_directory = "/tmp"
-        "#;
-        let cfg: Config = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
-        // artifacts_dir now defaults to the empty "unset" sentinel; it is
-        // materialized to an absolute path only by Config::resolve().
-        assert_eq!(cfg.supervisor.artifacts_dir, std::path::PathBuf::new());
-    }
-
-    #[test]
     fn test_query_rewriter_can_be_enabled() {
         let toml = r#"
             [telegram]
@@ -780,6 +846,22 @@ mod tests {
             cfg.memory.query_rewriter_enabled,
             "query_rewriter_enabled should be true when set"
         );
+    }
+
+    #[test]
+    fn supervisor_config_defaults_when_section_missing() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
+        assert_eq!(cfg.supervisor.artifacts_dir, std::path::PathBuf::new());
     }
 
     #[test]

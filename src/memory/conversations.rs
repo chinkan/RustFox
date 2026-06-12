@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use super::MemoryStore;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, MessageContent};
 
 /// Cast a &[f32] to &[u8] for SQLite blob storage
 pub(crate) fn f32_slice_to_bytes(floats: &[f32]) -> &[u8] {
@@ -15,7 +15,8 @@ pub(crate) fn f32_vec_to_bytes(floats: &[f32]) -> Vec<u8> {
 }
 
 impl MemoryStore {
-    /// Get or create a conversation for a platform user
+    /// Get or create an active (non-archived) conversation for a platform user.
+    /// If all existing conversations for the user are archived, a new one is created.
     pub async fn get_or_create_conversation(
         &self,
         platform: &str,
@@ -27,7 +28,7 @@ impl MemoryStore {
         let existing: Option<String> = conn
             .query_row(
                 "SELECT id FROM conversations
-                 WHERE platform = ?1 AND user_id = ?2
+                 WHERE platform = ?1 AND user_id = ?2 AND (is_archived IS NULL OR is_archived = 0)
                  ORDER BY updated_at DESC LIMIT 1",
                 rusqlite::params![platform, user_id],
                 |row| row.get(0),
@@ -62,7 +63,8 @@ impl MemoryStore {
             .map(|tc| serde_json::to_string(tc).unwrap_or_default());
 
         // Generate embedding before acquiring the DB lock (async HTTP call)
-        let embedding = if let Some(content) = &message.content {
+        let content_text: Option<String> = message.content.as_ref().map(|c| c.as_text());
+        let embedding = if let Some(ref content) = content_text {
             if !content.is_empty() && message.role != "tool" {
                 self.embeddings.try_embed_one(content).await
             } else {
@@ -81,7 +83,7 @@ impl MemoryStore {
                 &id,
                 conversation_id,
                 &message.role,
-                &message.content,
+                &content_text,
                 &tool_calls_json,
                 &message.tool_call_id,
             ],
@@ -108,29 +110,13 @@ impl MemoryStore {
         Ok(id)
     }
 
-    /// Clear a conversation (delete all its messages and embeddings)
+    /// Clear a conversation (soft archive: mark as archived, don't delete messages)
     pub async fn clear_conversation(&self, platform: &str, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 
-        // Delete embeddings for messages in this conversation
         conn.execute(
-            "DELETE FROM message_embeddings WHERE rowid IN (
-                SELECT m.rowid FROM messages m
-                JOIN conversations c ON m.conversation_id = c.id
-                WHERE c.platform = ?1 AND c.user_id = ?2
-            )",
-            rusqlite::params![platform, user_id],
-        )?;
-
-        conn.execute(
-            "DELETE FROM messages WHERE conversation_id IN (
-                SELECT id FROM conversations WHERE platform = ?1 AND user_id = ?2
-            )",
-            rusqlite::params![platform, user_id],
-        )?;
-
-        conn.execute(
-            "DELETE FROM conversations WHERE platform = ?1 AND user_id = ?2",
+            "UPDATE conversations SET is_archived = 1, updated_at = datetime('now')
+             WHERE platform = ?1 AND user_id = ?2",
             rusqlite::params![platform, user_id],
         )?;
 
@@ -154,12 +140,14 @@ impl MemoryStore {
 
         // Load all [SUMMARY] system messages ordered by created_at ASC
         let mut summary_stmt = conn.prepare(
-            "SELECT role, content, tool_calls, tool_call_id
-             FROM messages
-             WHERE conversation_id = ?1
-               AND role = 'system'
-               AND content LIKE '[SUMMARY]%'
-             ORDER BY created_at ASC",
+            "SELECT m.role, m.content, m.tool_calls, m.tool_call_id
+             FROM messages m
+             JOIN conversations c ON m.conversation_id = c.id
+             WHERE m.conversation_id = ?1
+               AND m.role = 'system'
+               AND m.content LIKE '[SUMMARY]%'
+               AND (c.is_archived IS NULL OR c.is_archived = 0)
+             ORDER BY m.created_at ASC",
         )?;
         let summaries = summary_stmt
             .query_map(rusqlite::params![conversation_id], |row| {
@@ -171,11 +159,13 @@ impl MemoryStore {
         // Load the most recent raw_limit non-summary messages, re-ordered ASC
         let mut raw_stmt = conn.prepare(
             "SELECT role, content, tool_calls, tool_call_id FROM (
-                SELECT role, content, tool_calls, tool_call_id, created_at
-                FROM messages
-                WHERE conversation_id = ?1
-                  AND NOT (role = 'system' AND content LIKE '[SUMMARY]%')
-                ORDER BY created_at DESC
+                SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.created_at
+                FROM messages m
+                JOIN conversations c ON m.conversation_id = c.id
+                WHERE m.conversation_id = ?1
+                  AND NOT (m.role = 'system' AND m.content LIKE '[SUMMARY]%')
+                  AND (c.is_archived IS NULL OR c.is_archived = 0)
+                ORDER BY m.created_at DESC
                 LIMIT ?2
             ) ORDER BY created_at ASC",
         )?;
@@ -409,9 +399,10 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let tool_calls_json: Option<String> = row.get(2)?;
     let tool_calls = tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
 
+    let content_str: Option<String> = row.get(1)?;
     Ok(ChatMessage {
         role: row.get(0)?,
-        content: row.get(1)?,
+        content: content_str.map(MessageContent::Text),
         tool_calls,
         tool_call_id: row.get(3)?,
     })
@@ -419,12 +410,13 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
 
 #[cfg(test)]
 mod tests {
-    use crate::llm::ChatMessage;
+    use super::*;
+    use crate::llm::{ChatMessage, MessageContent};
 
     fn make_msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
-            content: Some(content.to_string()),
+            content: Some(MessageContent::from_text(content)),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -456,7 +448,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].content.as_deref().unwrap().contains("love"));
+        assert!(results[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap()
+            .contains("love"));
     }
 
     #[tokio::test]
@@ -479,6 +476,165 @@ mod tests {
             messages.len() <= 50,
             "Expected ≤50 messages, got {}",
             messages.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_archives_instead_of_deleting() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_u2")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text("hello world")),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Clear
+        store
+            .clear_conversation("test", "archive_u2")
+            .await
+            .unwrap();
+
+        // Messages should still exist in DB
+        let conn = store.conn.lock().await;
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                rusqlite::params![&conv],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(msg_count > 0, "Messages must persist after archive");
+
+        // Conversation should be marked archived
+        let conn2 = store.conn.lock().await;
+        let archived: Option<i64> = conn2
+            .query_row(
+                "SELECT is_archived FROM conversations WHERE id = ?1",
+                rusqlite::params![&conv],
+                |row| row.get(0),
+            )
+            .ok();
+        drop(conn2);
+        assert_eq!(archived, Some(1), "Conversation must be marked archived");
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_skips_archived() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        // Create a conversation
+        let conv = store
+            .get_or_create_conversation("test", "archive_u1")
+            .await
+            .unwrap();
+
+        // Manually archive it (simulating what clear_conversation will do)
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations SET is_archived = 1 WHERE id = ?1",
+            rusqlite::params![&conv],
+        )
+        .unwrap();
+        drop(conn);
+
+        // get_or_create_conversation should return a NEW conversation
+        let conv2 = store
+            .get_or_create_conversation("test", "archive_u1")
+            .await
+            .unwrap();
+
+        assert_ne!(
+            conv, conv2,
+            "Must create a new conversation when previous is archived"
+        );
+
+        // The new conversation must not be archived
+        let conn2 = store.conn.lock().await;
+        let archived: i64 = conn2
+            .query_row(
+                "SELECT is_archived FROM conversations WHERE id = ?1",
+                rusqlite::params![&conv2],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn2);
+        assert_eq!(archived, 0, "New conversation must not be archived");
+    }
+
+    #[tokio::test]
+    async fn test_search_messages_finds_archived_content() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_search_u1")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text(
+                "I love Rust programming and async runtimes",
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Archive
+        store
+            .clear_conversation("test", "archive_search_u1")
+            .await
+            .unwrap();
+
+        // search_messages should still find the content from archived conversations
+        let results = store.search_messages("Rust", 5).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "search_messages must find content in archived conversations"
+        );
+        assert!(
+            results.iter().any(|m| m
+                .content
+                .as_ref()
+                .map_or(false, |c| c.as_text().contains("Rust"))),
+            "Archived message content must be searchable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_messages_excludes_archived() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+
+        let conv = store
+            .get_or_create_conversation("test", "archive_u3")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text("test")),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        // Archive
+        store
+            .clear_conversation("test", "archive_u3")
+            .await
+            .unwrap();
+
+        // load_messages should return empty for an archived conversation
+        let messages = store.load_messages(&conv).await.unwrap();
+        assert!(
+            messages.is_empty(),
+            "Archived conversation should return no messages via load_messages"
         );
     }
 }

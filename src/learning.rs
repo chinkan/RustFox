@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::llm::{ChatMessage, LlmClient};
+use crate::llm::{ChatMessage, LlmClient, MessageContent};
 use crate::skills::loader::load_skills_from_dir;
 use crate::skills::{SkillRegistry, SkillSource};
 
@@ -88,13 +88,13 @@ async fn extract_skill_from_conversation(
 
     let analysis_messages = vec![ChatMessage {
         role: "user".to_string(),
-        content: Some(analysis_prompt),
+        content: Some(MessageContent::Text(analysis_prompt)),
         tool_calls: None,
         tool_call_id: None,
     }];
 
     let response = llm.chat(&analysis_messages, &[]).await?;
-    let raw = response.content.unwrap_or_default();
+    let raw = response.content.unwrap_or_default().as_text();
 
     // Strip outer code fences if the model wrapped its entire response.
     let content = strip_code_fences(&raw);
@@ -355,7 +355,11 @@ async fn update_user_model_inner(
 
     let conversation_snippets: String = recent
         .iter()
-        .filter_map(|m| m.content.as_ref().map(|c| format!("[{}]: {}", m.role, c)))
+        .filter_map(|m| {
+            m.content
+                .as_ref()
+                .map(|c| format!("[{}]: {}", m.role, c.as_text()))
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -389,13 +393,13 @@ async fn update_user_model_inner(
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
-        content: Some(prompt),
+        content: Some(MessageContent::Text(prompt)),
         tool_calls: None,
         tool_call_id: None,
     }];
 
     let response = llm.chat(&messages, &[]).await?;
-    let new_content = response.content.unwrap_or_default();
+    let new_content = response.content.unwrap_or_default().as_text();
 
     // Strict validation: must start with `---` and contain a closing `---`
     // delimiter so we don't write malformed or injection-bearing content into
@@ -526,7 +530,7 @@ fn build_transcript(messages: &[ChatMessage]) -> String {
         .filter_map(|m| {
             m.content
                 .as_ref()
-                .map(|c| format!("[{}]: {}", m.role, truncate(c, 500)))
+                .map(|c| format!("[{}]: {}", m.role, truncate(&c.as_text(), 500)))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -650,19 +654,19 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: Some("System prompt".to_string()),
+                content: Some(MessageContent::Text("System prompt".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: Some("Hi there".to_string()),
+                content: Some(MessageContent::Text("Hi there".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },

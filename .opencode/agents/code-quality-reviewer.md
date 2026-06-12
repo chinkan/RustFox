@@ -1,7 +1,7 @@
 ---
 description: Reviews implementation code quality — cleanliness, test coverage, maintainability, structure. Only dispatch after spec compliance review passes.
 mode: subagent
-model: opencode/minimax-m3-free
+model: opencode-go/minimax-m3
 permission:
   read: allow
   glob: allow

@@ -31,6 +31,7 @@ impl ReasoningBackend {
                     chat_id: chat,
                     user_name: "supervisor".into(),
                     text: prompt,
+                    attachments: Vec::new(),
                 };
                 agent
                     .process_message(&incoming, None, None)

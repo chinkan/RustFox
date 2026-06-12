@@ -1,12 +1,14 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
 use crate::agent::Agent;
-use crate::platform::IncomingMessage;
+use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
 
@@ -73,12 +75,63 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
     use teloxide::types::BotCommand;
     vec![
         BotCommand::new("start", "Show the welcome message and command help"),
-        BotCommand::new("clear", "Clear the current conversation history"),
+        BotCommand::new(
+            "clear",
+            "Archive the current conversation, keeping past messages searchable",
+        ),
         BotCommand::new("tools", "List available built-in and MCP tools"),
         BotCommand::new("skills", "List loaded skills"),
         BotCommand::new("verbose", "Toggle tool-call progress display"),
         BotCommand::new("queryrewrite", "Toggle query rewriting for memory search"),
     ]
+}
+
+/// Send startup notification to all allowed users.
+/// Best-effort: logs failures, never blocks startup.
+pub async fn notify_startup(
+    bot: &teloxide::Bot,
+    allowed_user_ids: &[u64],
+    model: &str,
+    mcp_count: usize,
+    skills_count: usize,
+    embedding_enabled: bool,
+) {
+    let memory_status = if embedding_enabled {
+        "embedding enabled"
+    } else {
+        "FTS5 only"
+    };
+
+    let msg = format!(
+        "RustFox is online 🦊\nModel: {model}\nMCP: {mcp} server(s) connected\nSkills: {skills} loaded\nMemory: {memory}",
+        model = model, mcp = mcp_count, skills = skills_count, memory = memory_status,
+    );
+
+    for &user_id in allowed_user_ids {
+        let chat_id = teloxide::types::ChatId(user_id as i64);
+        if let Err(e) = bot.send_message(chat_id, &msg).await {
+            warn!(
+                "Failed to send startup notification to user {}: {}",
+                user_id, e
+            );
+        }
+    }
+}
+
+/// Send shutdown notification to all allowed users.
+/// Best-effort: logs failures, never blocks shutdown.
+pub async fn notify_shutdown(bot: &teloxide::Bot, allowed_user_ids: &[u64]) {
+    let msg = "RustFox is going offline. Goodbye!";
+
+    for &user_id in allowed_user_ids {
+        let chat_id = teloxide::types::ChatId(user_id as i64);
+        if let Err(e) = bot.send_message(chat_id, msg).await {
+            warn!(
+                "Failed to send shutdown notification to user {}: {}",
+                user_id, e
+            );
+        }
+    }
 }
 
 /// Run the Telegram bot platform
@@ -90,6 +143,17 @@ pub async fn run(
     let bot = (*bot).clone();
 
     info!("Starting Telegram platform...");
+
+    // Send startup notifications (best-effort) — before agent is moved into dptree
+    notify_startup(
+        &bot,
+        &allowed_user_ids,
+        &agent.config.openrouter.model,
+        agent.mcp.server_count(),
+        agent.skills.read().await.len(),
+        agent.memory.embeddings.is_available(),
+    )
+    .await;
 
     // Publish the slash-command menu to Telegram so clients show suggestions.
     // Best-effort: a network failure here must not block the bot from running.
@@ -135,16 +199,67 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     let user_id = user.id.0;
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return Ok(()),
-    };
-
     let user_name = user.first_name.clone();
 
+    // For media messages, use caption as text; for text messages, use msg.text()
+    let text = msg
+        .text()
+        .or_else(|| msg.caption())
+        .unwrap_or("")
+        .to_string();
+
+    // Temp dir for file downloads — created lazily by download_telegram_file
+    let temp_dir = std::env::temp_dir().join(format!("rustfox_{}", uuid::Uuid::new_v4()));
+
+    let mut attachments: Vec<Attachment> = Vec::new();
+
+    // Handle photo attachments — last PhotoSize is the highest resolution
+    if let Some(photos) = msg.photo() {
+        if let Some(largest) = photos.last() {
+            let file_id = largest.file.id.to_string();
+            match download_telegram_file(&bot, &file_id, &temp_dir, None).await {
+                Ok((path, mime)) => {
+                    attachments.push(Attachment {
+                        kind: AttachmentKind::Image,
+                        path,
+                        mime_type: mime,
+                        file_name: None,
+                    });
+                }
+                Err(e) => warn!("Failed to download photo: {:#}", e),
+            }
+        }
+    }
+
+    // Handle document attachments
+    if let Some(doc) = msg.document() {
+        let file_id = doc.file.id.to_string();
+        let file_name = doc.file_name.clone();
+        match download_telegram_file(&bot, &file_id, &temp_dir, file_name.as_deref()).await {
+            Ok((path, mime)) => {
+                let kind = classify_attachment_kind(&mime, file_name.as_deref());
+                attachments.push(Attachment {
+                    kind,
+                    path,
+                    mime_type: mime,
+                    file_name,
+                });
+            }
+            Err(e) => warn!("Failed to download document: {:#}", e),
+        }
+    }
+
+    // Skip if there is nothing to process
+    if text.is_empty() && attachments.is_empty() {
+        return Ok(());
+    }
+
     info!(
-        "Telegram message from {} ({}): {}",
-        user_name, user_id, text
+        "Telegram message from {} ({}): {} [attachments: {}]",
+        user_name,
+        user_id,
+        if text.is_empty() { "(no text)" } else { &text },
+        attachments.len()
     );
 
     // Handle commands
@@ -155,9 +270,12 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(msg.chat.id, escape_text("Conversation cleared."))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            escape_text("Conversation archived. Past messages remain searchable."),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
         return Ok(());
     }
 
@@ -501,6 +619,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         chat_id: msg.chat.id.0.to_string(),
         user_name,
         text,
+        attachments,
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
@@ -536,6 +655,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Wait for stream receiver to complete its final edit
     stream_handle.await.ok();
 
+    // Cleanup temp dir used for file downloads (async to avoid blocking the executor)
+    if temp_dir.exists() {
+        tokio::fs::remove_dir_all(&temp_dir).await.ok();
+    }
+
     // Delete the "Thinking..." placeholder now that the response (or error
     // reply below) has been delivered. Best-effort: ignore failures so a
     // stale placeholder never blocks reporting the actual outcome.
@@ -554,6 +678,88 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Success: response already delivered via streaming
 
     Ok(())
+}
+
+/// Download a Telegram file to the given directory, creating it if needed.
+/// Returns (local_path, detected_mime_type).
+async fn download_telegram_file(
+    bot: &Bot,
+    file_id: &str,
+    dest_dir: &Path,
+    filename: Option<&str>,
+) -> Result<(PathBuf, String)> {
+    std::fs::create_dir_all(dest_dir).context("Failed to create temp directory")?;
+
+    let file = bot
+        .get_file(file_id.to_string().into())
+        .await
+        .context("Failed to get file info from Telegram")?;
+
+    let ext = Path::new(&file.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+
+    let dest_name = match filename {
+        Some(n) => n.to_string(),
+        None => format!("{}.{}", uuid::Uuid::new_v4(), ext),
+    };
+    let dest_path = dest_dir.join(&dest_name);
+
+    let mut bytes: Vec<u8> = Vec::new();
+    bot.download_file(&file.path, &mut bytes)
+        .await
+        .context("Failed to download file from Telegram")?;
+
+    std::fs::write(&dest_path, &bytes).context("Failed to write downloaded file")?;
+
+    let mime = infer::get(&bytes)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| mime_from_extension(ext).to_string());
+
+    Ok((dest_path, mime))
+}
+
+/// Classify an attachment based on MIME type and filename extension fallback.
+fn classify_attachment_kind(mime_type: &str, file_name: Option<&str>) -> AttachmentKind {
+    if mime_type.starts_with("image/") {
+        return AttachmentKind::Image;
+    }
+    if mime_type == "application/pdf" {
+        return AttachmentKind::Pdf;
+    }
+    if mime_type.contains("wordprocessingml") || mime_type == "application/msword" {
+        return AttachmentKind::Docx;
+    }
+    // Fallback: check extension
+    let name = file_name.unwrap_or("");
+    if name.ends_with(".pdf") {
+        return AttachmentKind::Pdf;
+    }
+    if name.ends_with(".docx") || name.ends_with(".doc") {
+        return AttachmentKind::Docx;
+    }
+    if name.ends_with(".jpg")
+        || name.ends_with(".jpeg")
+        || name.ends_with(".png")
+        || name.ends_with(".gif")
+        || name.ends_with(".webp")
+    {
+        return AttachmentKind::Image;
+    }
+    AttachmentKind::Other
+}
+
+fn mime_from_extension(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        _ => "application/octet-stream",
+    }
 }
 
 #[cfg(test)]
@@ -676,6 +882,32 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_attachment_kind_image_jpeg() {
+        assert_eq!(
+            classify_attachment_kind("image/jpeg", None),
+            AttachmentKind::Image
+        );
+    }
+
+    #[test]
+    fn test_classify_attachment_kind_pdf() {
+        assert_eq!(
+            classify_attachment_kind("application/pdf", None),
+            AttachmentKind::Pdf
+        );
+    }
+
+    #[test]
+    fn test_classify_attachment_kind_docx() {
+        assert_eq!(
+            classify_attachment_kind(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                None
+            ),
+            AttachmentKind::Docx
+        );
+    }
+    #[test]
     fn test_first_token_does_not_inherit_placeholder_msg_id() {
         // The streaming task must seed `current_msg_id` to `None` so the first
         // token is delivered as a NEW message rather than editing the
@@ -706,6 +938,22 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_attachment_kind_fallback_to_extension() {
+        assert_eq!(
+            classify_attachment_kind("application/octet-stream", Some("report.pdf")),
+            AttachmentKind::Pdf
+        );
+        assert_eq!(
+            classify_attachment_kind("application/octet-stream", Some("letter.docx")),
+            AttachmentKind::Docx
+        );
+        assert_eq!(
+            classify_attachment_kind("application/octet-stream", Some("photo.jpg")),
+            AttachmentKind::Image
+        );
+    }
+
+    #[test]
     fn test_placeholder_is_deleted_after_streaming() {
         // The Thinking placeholder must be cleaned up in `handle_message` after
         // `stream_handle.await`, regardless of success/error outcome.
@@ -713,6 +961,14 @@ mod tests {
         assert!(
             source.contains("Failed to delete thinking placeholder"),
             "handle_message must delete the Thinking placeholder after streaming completes"
+        );
+    }
+
+    #[test]
+    fn test_classify_attachment_kind_unknown() {
+        assert_eq!(
+            classify_attachment_kind("application/zip", Some("archive.zip")),
+            AttachmentKind::Other
         );
     }
 

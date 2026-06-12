@@ -18,6 +18,7 @@ base_url = "https://openrouter.ai/api/v1"
 # base_url = "http://localhost:11434/v1"
 # Maximum tokens in response
 max_tokens = 4096
+# supports_vision = false  # Set to true if your model supports image inputs
 # System prompt for the AI assistant
 system_prompt = """You are a helpful AI assistant with access to tools. \
 Use the available tools to help the user with their tasks. \
@@ -86,6 +87,12 @@ Be concise and helpful."""
 # base_url = "https://openrouter.ai/api/v1"
 # model = "qwen/qwen3-embedding-8b"
 # dimensions = 1536
+
+# OCR configuration (optional)
+# Used to extract text from images when supports_vision = false.
+# Models are downloaded automatically on first use.
+# [ocr]
+# model_dir = "~/.cache/ocrs"  # Where OCR model files are cached (downloaded on first use)
 
 # MCP Server Configurations
 # Each [[mcp_servers]] block defines an MCP server to connect to

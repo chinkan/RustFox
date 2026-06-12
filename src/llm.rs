@@ -4,11 +4,71 @@ use tracing::{debug, warn};
 
 use crate::config::OpenRouterConfig;
 
+/// A single part in a multi-modal message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlContent },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlContent {
+    /// "data:image/jpeg;base64,..." or a URL
+    pub url: String,
+}
+
+/// Either a plain text string or a list of content parts (multi-modal).
+/// Serializes as a plain JSON string for text-only, or as a JSON array for multi-modal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract all text from the content (for logging, RAG, DB storage, etc.)
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| {
+                    if let ContentPart::Text { text } = p {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    pub fn from_text(s: impl Into<String>) -> Self {
+        Self::Text(s.into())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(s) => s.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,10 +121,10 @@ pub fn is_empty_assistant_response(message: &ChatMessage) -> bool {
         .tool_calls
         .as_ref()
         .is_some_and(|calls| !calls.is_empty());
-    let has_content = message
-        .content
-        .as_deref()
-        .is_some_and(|content| !content.trim().is_empty());
+    let has_content = message.content.as_ref().is_some_and(|content| {
+        let text = content.as_text();
+        !text.trim().is_empty()
+    });
 
     !has_tool_calls && !has_content
 }
@@ -377,7 +437,11 @@ impl LlmClient {
                 tool_call_count = choice.message.tool_calls.as_ref().map_or(0, |t| t.len()),
                 "Received LLM response"
             );
-            if choice.message.content.as_deref().is_none_or(str::is_empty)
+            if choice
+                .message
+                .content
+                .as_ref()
+                .is_none_or(MessageContent::is_empty)
                 && choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty)
             {
                 warn!(
@@ -402,7 +466,7 @@ impl LlmClient {
             .is_some_and(|t| !t.is_empty());
         if !has_tool_calls {
             if let Some(ref content) = choice.message.content.clone() {
-                if let Some(parsed) = parse_kimi_tool_calls(content) {
+                if let Some(parsed) = parse_kimi_tool_calls(&content.as_text()) {
                     warn!(
                         tool_count = parsed.len(),
                         "Kimi native tool-call format detected in content — \
@@ -490,6 +554,39 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_message_content_text_serializes_as_string() {
+        let content = MessageContent::from_text("hello world");
+        let json = serde_json::to_string(&content).unwrap();
+        assert_eq!(json, r#""hello world""#);
+    }
+
+    #[test]
+    fn test_message_content_parts_serializes_as_array() {
+        let content = MessageContent::Parts(vec![ContentPart::Text {
+            text: "hello".to_string(),
+        }]);
+        let json = serde_json::to_value(&content).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json[0]["type"], "text");
+        assert_eq!(json[0]["text"], "hello");
+    }
+
+    #[test]
+    fn test_message_content_as_text_from_parts() {
+        let content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "hello".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,abc".to_string(),
+                },
+            },
+        ]);
+        assert_eq!(content.as_text(), "hello");
+    }
 
     #[test]
     fn test_chat_request_serializes_model_field() {
@@ -799,7 +896,7 @@ mod tests {
     fn test_empty_assistant_response_detects_whitespace_content_no_tools() {
         let message = ChatMessage {
             role: "assistant".to_string(),
-            content: Some("  \n\t  ".to_string()),
+            content: Some(MessageContent::Text("  \n\t  ".to_string())),
             tool_calls: Some(vec![]),
             tool_call_id: None,
         };
@@ -828,7 +925,7 @@ mod tests {
     fn test_empty_assistant_response_false_when_content_present() {
         let message = ChatMessage {
             role: "assistant".to_string(),
-            content: Some("Done".to_string()),
+            content: Some(MessageContent::Text("Done".to_string())),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -851,7 +948,10 @@ mod tests {
             model: "test-model".to_string(),
         };
         assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(completion.message.content.as_deref(), Some("hello"));
+        assert_eq!(
+            completion.message.content.as_ref().map(|c| c.as_text()),
+            Some("hello".to_string())
+        );
     }
 
     #[test]
@@ -879,7 +979,7 @@ mod tests {
             .is_some_and(|t| !t.is_empty());
         if !has_tool_calls {
             if let Some(ref content) = choice.message.content.clone() {
-                if let Some(parsed) = parse_kimi_tool_calls(content) {
+                if let Some(parsed) = parse_kimi_tool_calls(&content.as_text()) {
                     choice.message.tool_calls = Some(parsed);
                     choice.message.content = None;
                     choice.finish_reason = Some("tool_calls".to_string());

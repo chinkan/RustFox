@@ -332,14 +332,47 @@ async fn main() -> Result<()> {
         Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
     }
 
-    // Run the Telegram platform
+    // Run the Telegram platform with signal-driven graceful shutdown
     info!("Bot is starting...");
-    platform::telegram::run(
-        agent,
-        config.telegram.allowed_user_ids.clone(),
-        Arc::clone(&bot),
-    )
-    .await?;
+
+    let dispatch_agent = Arc::clone(&agent);
+    let dispatch_user_ids = config.telegram.allowed_user_ids.clone();
+    let dispatch_bot = Arc::clone(&bot);
+
+    let mut dispatch_handle = tokio::spawn(async move {
+        platform::telegram::run(dispatch_agent, dispatch_user_ids, dispatch_bot).await
+    });
+
+    // Set up signal handlers (SIGINT via ctrl_c for portability, SIGTERM via unix signal)
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to create SIGTERM handler");
+
+    #[cfg(unix)]
+    let terminate = sigterm.recv();
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT received, shutting down...");
+        }
+        _ = terminate => {
+            info!("SIGTERM received, shutting down...");
+        }
+        result = &mut dispatch_handle => {
+            result??;
+            return Ok(());
+        }
+    };
+
+    // Send shutdown notification
+    platform::telegram::notify_shutdown(&bot, &config.telegram.allowed_user_ids).await;
+
+    // Brief grace period for message delivery
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    info!("Shutdown complete.");
 
     Ok(())
 }
