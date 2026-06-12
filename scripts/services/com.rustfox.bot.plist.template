@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rustfox.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{RUSTFOX_BIN}}</string>
+        <string>--config</string>
+        <string>{{RUSTFOX_CONFIG}}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUSTFOX_HOME</key>
+        <string>{{RUSTFOX_HOME}}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{{RUSTFOX_HOME}}/Library/Logs/rustfox.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{RUSTFOX_HOME}}/Library/Logs/rustfox.log</string>
+</dict>
+</plist>

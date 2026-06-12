@@ -410,7 +410,6 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::llm::{ChatMessage, MessageContent};
 
     fn make_msg(role: &str, content: &str) -> ChatMessage {
@@ -603,7 +602,7 @@ mod tests {
             results.iter().any(|m| m
                 .content
                 .as_ref()
-                .map_or(false, |c| c.as_text().contains("Rust"))),
+                .is_some_and(|c| c.as_text().contains("Rust"))),
             "Archived message content must be searchable"
         );
     }

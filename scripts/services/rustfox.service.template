@@ -1,0 +1,14 @@
+[Unit]
+Description=RustFox Telegram AI Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{RUSTFOX_BIN}} --config {{RUSTFOX_CONFIG}}
+Restart=on-failure
+RestartSec=5
+Environment=RUSTFOX_HOME={{RUSTFOX_HOME}}
+
+[Install]
+WantedBy=default.target

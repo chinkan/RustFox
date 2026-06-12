@@ -1126,6 +1126,43 @@ async function saveConfig() {
   }
 }
 
+// ── Install as background service ──────────────────────────────────────────────
+async function finishSetup() {
+  try {
+    await fetch('/api/shutdown', { method: 'POST' });
+  } catch (_) {
+    // Server may already be gone — that's fine
+  }
+}
+
+async function installService() {
+  const btn = document.getElementById('btn-install-service');
+  const status = document.getElementById('service-install-status');
+  btn.disabled = true;
+  btn.textContent = 'Installing...';
+  try {
+    const res = await fetch('/api/install-service', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      status.textContent = '✓ RustFox installed as a background service!';
+      status.className = 'success-msg visible';
+      btn.textContent = '✓ Installed';
+    } else {
+      status.textContent = '⚠ Service installation failed: ' + (data.error || 'unknown error') + '. You can retry later with: rustfox --service install';
+      status.className = 'success-msg visible';
+      status.style.color = '#fc8181';
+      btn.disabled = false;
+      btn.textContent = 'Retry install';
+    }
+  } catch (e) {
+    status.textContent = '⚠ Error: ' + e.message;
+    status.className = 'success-msg visible';
+    status.style.color = '#fc8181';
+    btn.disabled = false;
+    btn.textContent = 'Retry install';
+  }
+}
+
 // ── MCP interactions ───────────────────────────────────────────────────────────
 function toggleTool(name, event) {
   const cb = document.getElementById('mcp-cb-' + name);
@@ -1635,7 +1672,18 @@ function buildSteps() {
     Start your bot with:
   </p>
   <pre style="margin-bottom:2rem;text-align:center;font-size:0.95rem;color:#e2e8f0">cargo run --bin rustfox</pre>
-  <p style="color:#718096;font-size:0.85rem;margin-bottom:1.25rem;text-align:center">
+  <div id="service-install-section" style="margin-top: 1.5rem; text-align: center;">
+    <button id="btn-install-service" class="btn-primary" onclick="installService()">
+      Install as background service
+    </button>
+    <p id="service-install-status" class="success-msg" style="margin-top: 0.75rem;"></p>
+    <div style="margin-top: 1rem;">
+      <button class="btn-secondary" onclick="finishSetup()">
+        Close &amp; finish →
+      </button>
+    </div>
+  </div>
+  <p style="color:#718096;font-size:0.85rem;margin-bottom:1.25rem;margin-top:2rem;text-align:center">
     If you find RustFox useful, consider supporting the project:
   </p>
   <div style="display:flex;flex-direction:column;gap:0.875rem;align-items:center">

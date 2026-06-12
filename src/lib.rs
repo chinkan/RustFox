@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod memory;
 pub mod platform;
 pub mod scheduler;
+pub mod setup;
 pub mod skills;
 pub mod supervisor;
 pub mod tools;

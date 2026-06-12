@@ -40,6 +40,41 @@ pub fn default_home(env_home: Option<&str>, os_home: Option<&Path>) -> Option<Pa
     os_home.map(|h| h.join(".rustfox"))
 }
 
+/// Resolve the config file path to use at startup.
+///
+/// Lookup order:
+/// 1. `env_config_path` if `Some`, used verbatim (no existence check — the
+///    caller decides what to do with a missing file).
+/// 2. `<cwd>/config.toml` if it exists.
+/// 3. `<home>/config.toml` where `home` comes from `RUSTFOX_HOME` (absolute)
+///    or `<os_home>/.rustfox`. Only returned if the candidate file exists.
+/// 4. Falls back to `<cwd>/config.toml` (the wizard treats a non-existent
+///    candidate as "no config found" and writes the first-run config there).
+///
+/// The function takes `cwd` and `os_home` explicitly (rather than reading
+/// `std::env::current_dir()` internally) so it can be unit-tested without
+/// mutating process state and without tests racing on a shared CWD.
+pub fn resolve_config_path(
+    env_config_path: Option<&str>,
+    cwd: &Path,
+    os_home: Option<&Path>,
+) -> PathBuf {
+    if let Some(p) = env_config_path {
+        return PathBuf::from(p);
+    }
+    let cwd_candidate = cwd.join("config.toml");
+    if cwd_candidate.exists() {
+        return cwd_candidate;
+    }
+    if let Some(home) = default_home(None, os_home) {
+        let home_candidate = home.join("config.toml");
+        if home_candidate.exists() {
+            return home_candidate;
+        }
+    }
+    cwd_candidate
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathOrigin {
     Default,
@@ -263,5 +298,89 @@ mod tests {
         assert!(s.contains("/work/rustfox.db"));
         assert!(s.contains("/h/.rustfox/rustfox.db"));
         assert!(s.contains("cp -rT"));
+    }
+    // ── resolve_config_path tests ───────────────────────────────────
+
+    #[test]
+    fn resolve_config_path_prefers_env_when_set() {
+        // env var wins regardless of whether the file exists — the caller
+        // decides what to do with a missing path.
+        let got = resolve_config_path(
+            Some("/etc/rustfox/override.toml"),
+            Path::new("/work"),
+            Some(Path::new("/home/u")),
+        );
+        assert_eq!(got, PathBuf::from("/etc/rustfox/override.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_env_to_nonexistent_path_is_returned_verbatim() {
+        // Caller (e.g. wizard) is expected to handle "exists == false" — the
+        // resolution itself must not silently swap in the home default.
+        let got = resolve_config_path(
+            Some("/tmp/does-not-exist.toml"),
+            Path::new("/work"),
+            Some(Path::new("/home/u")),
+        );
+        assert_eq!(got, PathBuf::from("/tmp/does-not-exist.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_uses_cwd_config_when_present() {
+        // Set up a CWD-style dir with a config.toml — should beat <home>.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd_config = tmp.path().join("config.toml");
+        std::fs::write(&cwd_config, b"[telegram]\nbot_token = \"x\"\n").unwrap();
+
+        // Set up a "home" candidate that must be ignored in this scenario.
+        let home = tmp.path().join(".rustfox");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            b"[openrouter]\napi_key = \"home\"\n",
+        )
+        .unwrap();
+
+        let got = resolve_config_path(None, tmp.path(), Some(tmp.path()));
+        assert_eq!(got, cwd_config);
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_home_when_cwd_missing() {
+        // CWD has no config.toml; <home>/config.toml exists → use it.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_config = home.join("config.toml");
+        std::fs::write(&home_config, b"[telegram]\nbot_token = \"home\"\n").unwrap();
+
+        // cwd is an empty sibling dir; home is its child. With cwd passed
+        // explicitly, tests are independent and don't share process state.
+        let cwd = tmp.path().join("empty-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let got = resolve_config_path(None, &cwd, Some(tmp.path()));
+        assert_eq!(got, home_config);
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_cwd_when_nothing_exists() {
+        // Neither CWD nor <home> have a config.toml → return the CWD candidate
+        // so the wizard has a deterministic "first run" target to write to.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("empty-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        // Home is provided but its .rustfox dir doesn't exist on disk.
+        let got = resolve_config_path(None, &cwd, Some(tmp.path()));
+        assert_eq!(got, cwd.join("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_cwd_when_no_home_provided() {
+        // No env, no os_home → return CWD candidate unconditionally.
+        let tmp = tempfile::tempdir().unwrap();
+        let got = resolve_config_path(None, tmp.path(), None);
+        assert_eq!(got, tmp.path().join("config.toml"));
     }
 }
