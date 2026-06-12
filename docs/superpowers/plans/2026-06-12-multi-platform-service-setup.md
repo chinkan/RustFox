@@ -226,7 +226,7 @@ git commit -m "feat(setup): add service templates for systemd, launchd, windows"
 
 ---
 
-### Task 4: Create `src/setup/service.rs` with platform service management
+### Task 3: Create `src/setup/service.rs` with platform service management
 
 **Files:**
 - Create: `src/setup/service.rs`
@@ -614,7 +614,7 @@ git commit -m "feat(setup): add service management module (systemd, launchd, win
 
 ---
 
-### Task 5: Create `src/setup/wizard.rs` — extract wizard from bin/setup.rs
+### Task 4: Create `src/setup/wizard.rs` — extract wizard from bin/setup.rs
 
 **Files:**
 - Create: `src/setup/wizard.rs`
@@ -1626,7 +1626,7 @@ git commit -m "feat(setup): extract wizard into library module (web + CLI + OAut
 
 ---
 
-### Task 6: Update `src/bin/setup.rs` as thin wrapper
+### Task 5: Update `src/bin/setup.rs` as thin wrapper
 
 **Files:**
 - Modify: `src/bin/setup.rs`
@@ -1672,7 +1672,7 @@ git commit -m "refactor(setup): bin/setup.rs becomes thin wrapper around rustfox
 
 ---
 
-### Task 7: Update `src/main.rs` with `--setup` and `--service` dispatch
+### Task 6: Update `src/main.rs` with `--setup` and `--service` dispatch
 
 **Files:**
 - Modify: `src/main.rs`
@@ -1743,7 +1743,7 @@ git commit -m "feat: add --setup and --service dispatch to main binary"
 
 ---
 
-### Task 8: Update `release.yml` for single-binary release
+### Task 7: Update `release.yml` for single-binary release
 
 **Files:**
 - Create: `.github/workflows/release.yml`
@@ -1861,7 +1861,7 @@ git commit -m "ci: update release workflow for single-binary + service templates
 
 ---
 
-### Task 9: Create universal install script
+### Task 8: Create universal install script
 
 **Files:**
 - Create: `scripts/install.sh`
@@ -1883,7 +1883,8 @@ echo "============================================"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # When run from the repo, SCRIPT_DIR = <repo>/scripts/, so project root is SCRIPT_DIR/..
-# When run from a release archive, install.sh is at archive root alongside Cargo.toml.
+# When run from a release archive, install.sh is at archive root (no Cargo.toml there;
+# the archive is for binary-only installs — use `tar xzf` and run `rustfox --setup`).
 PROJECT_ROOT="$SCRIPT_DIR"
 if [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
     PROJECT_ROOT="$SCRIPT_DIR"
@@ -1931,7 +1932,7 @@ git commit -m "feat: add universal install script for rustfox"
 
 ---
 
-### Task 10: Create Debian/RedHat package build scripts (deferred — minimal stubs)
+### Task 9: Create Debian/RedHat package build scripts (deferred — minimal stubs)
 
 **Files:**
 - Create: `scripts/build-deb.sh`
@@ -2001,7 +2002,7 @@ git commit -m "chore: add platform build script stubs"
 
 ---
 
-### Task 11: Final verification
+### Task 10: Final verification
 
 - [ ] **Step 1: Run cargo check**
 
