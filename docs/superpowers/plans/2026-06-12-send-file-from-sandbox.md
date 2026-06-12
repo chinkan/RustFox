@@ -74,13 +74,15 @@ git commit -m "feat: add send_file tool definition and make validate_sandbox_pat
 
 - [ ] **Step 1: Parse chat_id once at the top of process_message**
 
-At `src/agent.rs:326`, after `let chat_id = &incoming.chat_id;`, add:
+At `src/agent.rs:326`, replace `let chat_id = &incoming.chat_id;` with:
 
 ```rust
 let parsed_chat_id: ChatId = incoming.chat_id.parse::<i64>().map(ChatId).unwrap_or(ChatId(0));
 ```
 
 The `parse::<i64>()` works because Telegram chat IDs are numeric (positive for private chats, negative for groups/supergroups). The `ChatId(0)` fallback is safe because `send_file` will fail gracefully on invalid IDs.
+
+The old `chat_id: &str` binding is removed since all call sites now use `parsed_chat_id: ChatId`.
 
 - [ ] **Step 2: Pass parsed_chat_id to execute_tool in parallel agent group**
 
