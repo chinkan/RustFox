@@ -1,0 +1,5 @@
+@echo off
+sc create RustFox binPath= "{{RUSTFOX_BIN}} --config {{RUSTFOX_CONFIG}}" start= auto
+sc description RustFox "RustFox Telegram AI Assistant"
+sc failure RustFox reset=86400 actions=restart/5000/restart/10000
+sc start RustFox
