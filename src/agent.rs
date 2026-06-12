@@ -1,8 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info, warn};
 
+use teloxide::payloads::SendDocumentSetters;
+use teloxide::prelude::Requester;
+use teloxide::types::{ChatId, InputFile};
 use teloxide::Bot;
 
 use crate::agent_prompt::{
@@ -323,7 +326,11 @@ impl Agent {
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
-        let chat_id = &incoming.chat_id;
+        let parsed_chat_id: ChatId = incoming
+            .chat_id
+            .parse::<i64>()
+            .map(ChatId)
+            .unwrap_or(ChatId(0));
 
         // Get or create persistent conversation
         let conversation_id = self
@@ -755,8 +762,9 @@ impl Agent {
                                         );
                                     }
 
-                                    let result =
-                                        self.execute_tool(&name, &args, user_id, chat_id).await;
+                                    let result = self
+                                        .execute_tool(&name, &args, user_id, parsed_chat_id)
+                                        .await;
 
                                     if let Some(ref tx) = tool_event_tx {
                                         let success = !result.starts_with("Error");
@@ -830,7 +838,9 @@ impl Agent {
                                 });
                         }
 
-                        let result = self.execute_tool(&name, &args, user_id, chat_id).await;
+                        let result = self
+                            .execute_tool(&name, &args, user_id, parsed_chat_id)
+                            .await;
 
                         // Notify tool completion
                         if let Some(ref tx) = tool_event_tx {
@@ -1788,8 +1798,8 @@ impl Agent {
                             self.execute_tool(
                                 &tool_call.function.name,
                                 &arguments,
-                                "", // agent has no user_id context
-                                "", // agent has no chat_id context
+                                "",        // agent has no user_id context
+                                ChatId(0), // agent has no chat_id context
                             )
                             .await
                         } else {
@@ -1826,7 +1836,7 @@ impl Agent {
         name: &str,
         arguments: &serde_json::Value,
         user_id: &str,
-        chat_id: &str,
+        chat_id: ChatId,
     ) -> String {
         match name {
             "remember" => {
@@ -2668,6 +2678,56 @@ impl Agent {
                 {
                     Ok(msg) => msg,
                     Err(e) => format!("Patch failed: {:#}", e),
+                }
+            }
+            "send_file" => {
+                match async {
+                    let path = arguments["path"]
+                        .as_str()
+                        .context("Missing 'path' argument")?;
+                    let caption = arguments
+                        .get("caption")
+                        .and_then(|v| v.as_str())
+                        .filter(|c| !c.is_empty());
+
+                    let full_path =
+                        tools::validate_sandbox_path(&self.config.sandbox.allowed_directory, path)?;
+
+                    let metadata = tokio::fs::metadata(&full_path)
+                        .await
+                        .with_context(|| format!("File not found: {}", full_path.display()))?;
+                    const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+                    if metadata.len() > TG_FILE_LIMIT {
+                        anyhow::bail!(
+                            "File is {} MB — exceeds Telegram's 50 MB limit",
+                            metadata.len() / 1024 / 1024
+                        );
+                    }
+
+                    let bytes = tokio::fs::read(&full_path)
+                        .await
+                        .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
+
+                    let file_name = full_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+
+                    let input_file = InputFile::memory(bytes).file_name(file_name.clone());
+                    let mut req = self.bot.send_document(chat_id, input_file);
+                    if let Some(c) = caption {
+                        req = req.caption(c);
+                    }
+                    req.await
+                        .with_context(|| "Telegram API failed to send document")?;
+
+                    Ok(format!("File '{}' sent successfully.", file_name))
+                }
+                .await
+                {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Error sending file: {:#}", e),
                 }
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
