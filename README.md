@@ -44,38 +44,81 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 
 ## Quick Start
 
-### 1. Build
+### 1. Install
+
+**Option A — Download a release (recommended)**
+
+Download the latest archive from the [Releases page](https://github.com/chinkan/RustFox/releases) for your platform:
+
+| Platform | Download |
+|----------|----------|
+| Linux x86_64 | `rustfox-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `rustfox-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS (Apple Silicon) | `rustfox-<tag>-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `rustfox-<tag>-x86_64-pc-windows-msvc.zip` |
+
+Extract and run directly:
 
 ```bash
+tar xzf rustfox-*.tar.gz
+./rustfox --setup    # configure your bot
+```
+
+**Option B — Build from source**
+
+```bash
+cargo install --path . --locked
+# or
 cargo build --release
 ```
 
 ### 2. Configure
 
-Run the setup wizard — it guides you through all required fields and writes `config.toml` for you:
+Run the setup wizard — it guides you through all required fields and writes `config.toml`:
 
 ```bash
-# Browser-based wizard (recommended)
-./setup.sh
+# Browser-based wizard (opens http://localhost:8719)
+rustfox --setup
 
 # Terminal wizard (no browser required)
-./setup.sh --cli
+rustfox --setup --cli
 ```
 
 The wizard will ask for your:
 - Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - Allowed Telegram user IDs (from [@userinfobot](https://t.me/userinfobot))
 - OpenRouter API key (from [openrouter.ai/keys](https://openrouter.ai/keys))
-- Sandbox directory, model, and optional MCP tools
+- Model, storage paths, and optional MCP tools
 
 > **Manual setup:** Copy `config.example.toml` to `config.toml` and edit it directly if you prefer.
 
 ### 3. Run
 
 ```bash
-cargo run --bin rustfox
+rustfox
 # or with a custom config path:
-cargo run --bin rustfox -- /path/to/config.toml
+rustfox --config /path/to/config.toml
+```
+
+### 4. (Optional) Run as a background service
+
+After configuring, set RustFox to run automatically in the background:
+
+```bash
+# Linux (systemd user service — no sudo needed)
+rustfox --service install
+
+# macOS (launchd agent)
+rustfox --service install
+
+# Windows (Windows Service)
+rustfox --service install
+```
+
+Then check status with:
+
+```bash
+rustfox --service status
 ```
 
 ## Configuration
@@ -307,6 +350,7 @@ src/
 │   ├── redact.rs     # Secret scrubber for api_key / password / token / bearer
 │   └── backend/      # Backend implementations (reasoning, shell, MCP, claude-code, codex, script)
 ├── platform/         # Telegram bot handler (telegram.rs + tool_notifier.rs)
+├── setup/            # Setup wizard module (mod.rs, wizard.rs, service.rs)
 └── utils/            # String utilities, markdown-to-entities conversion
 
 skills/               # Bundled skills (15+): code-interpreter, problem-solver, coding-assistant,
@@ -355,6 +399,8 @@ setup/                # Setup wizard HTML
 - [x] Ad-hoc parallel subagents (`spawn_agents` tool)
 - [x] Zero-trust verifier (read-only verification agent)
 - [x] Context compaction improvements (hard cap, image preservation, retry optimization)
+- [x] Multi-platform service setup (`--setup` web/CLI wizard, `--service install/remove/status`)
+- [x] Build scripts & CI release workflow (`.tar.gz`, `.zip`, `.deb` per release)
 
 ### Planned
 
