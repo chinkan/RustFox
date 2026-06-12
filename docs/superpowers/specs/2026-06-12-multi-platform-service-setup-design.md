@@ -22,7 +22,6 @@ RustFox runs as a foreground process. Users must manually keep it running (tmux,
 - Changing the existing TOML config format
 - Removing manual `config.toml` editing
 - Cross-compilation for non-host targets in CI (native target only — `ubuntu-latest` builds `x86_64-unknown-linux-gnu`, `macos-latest` builds its native arch, etc.)
-- Docker image
 
 ## Architecture
 
@@ -144,7 +143,7 @@ NOTE: launchd does NOT support `%h` or `~` expansion in `StandardOutPath`. The t
 Install script (`scripts/install-service.bat.template`):
 ```batch
 @echo off
-sc create RustFox binPath="{{RUSTFOX_BIN}} --config {{RUSTFOX_CONFIG}}" start=auto
+sc create RustFox binPath= "{{RUSTFOX_BIN}} --config {{RUSTFOX_CONFIG}}" start=auto
 sc description RustFox "RustFox Telegram AI Assistant"
 sc failure RustFox reset=86400 actions=restart/5000/restart/10000
 sc start RustFox
