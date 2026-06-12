@@ -116,7 +116,6 @@ pub async fn summarize_all_active(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::llm::{ChatMessage, MessageContent};
     use crate::memory::MemoryStore;
 
