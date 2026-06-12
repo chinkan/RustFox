@@ -30,29 +30,11 @@ async fn main() -> Result<()> {
     if let Some(cmd) = setup::parse_args() {
         match cmd {
             setup::Command::Setup { cli } => {
-                let cfg_path = if let Ok(path) = std::env::var("RUSTFOX_CONFIG_PATH") {
-                    PathBuf::from(path)
-                } else {
-                    let cwd = PathBuf::from("config.toml");
-                    if cwd.exists() {
-                        cwd
-                    } else {
-                        let env_home = std::env::var("RUSTFOX_HOME").ok();
-                        if let Some(home) = rustfox::home::default_home(
-                            env_home.as_deref(),
-                            dirs::home_dir().as_deref(),
-                        ) {
-                            let candidate = home.join("config.toml");
-                            if candidate.exists() {
-                                candidate
-                            } else {
-                                cwd
-                            }
-                        } else {
-                            cwd
-                        }
-                    }
-                };
+                let cfg_path = rustfox::home::resolve_config_path(
+                    std::env::var("RUSTFOX_CONFIG_PATH").ok().as_deref(),
+                    &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    dirs::home_dir().as_deref(),
+                );
                 let config_dir = cfg_path
                     .parent()
                     .map(|d| d.to_path_buf())
@@ -69,28 +51,11 @@ async fn main() -> Result<()> {
     }
 
     // If we reach here, it's a normal bot start — resolve config path
-    let config_path = if let Ok(path) = std::env::var("RUSTFOX_CONFIG_PATH") {
-        PathBuf::from(path)
-    } else {
-        let cwd = PathBuf::from("config.toml");
-        if cwd.exists() {
-            cwd
-        } else {
-            let env_home = std::env::var("RUSTFOX_HOME").ok();
-            if let Some(home) =
-                rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
-            {
-                let candidate = home.join("config.toml");
-                if candidate.exists() {
-                    candidate
-                } else {
-                    cwd
-                }
-            } else {
-                cwd
-            }
-        }
-    };
+    let config_path = rustfox::home::resolve_config_path(
+        std::env::var("RUSTFOX_CONFIG_PATH").ok().as_deref(),
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        dirs::home_dir().as_deref(),
+    );
 
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
