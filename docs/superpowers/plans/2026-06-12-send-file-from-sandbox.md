@@ -22,7 +22,7 @@ Change `fn validate_sandbox_path` to `pub fn validate_sandbox_path` at `src/tool
 
 - [ ] **Step 2: Add `send_file` to `builtin_tool_definitions()`**
 
-Insert a new `ToolDefinition` entry (before `plan_create` or after `execute_command` — order doesn't matter):
+Insert a new `ToolDefinition` entry after `list_files` (around line 105, grouping it with the other file-related tools read/write/list):
 
 ```rust
 ToolDefinition {
@@ -131,7 +131,13 @@ async fn execute_tool(
 ) -> String {
 ```
 
-Add `use teloxide::types::ChatId;` to the imports at the top of the file (or reference it fully qualified).
+Add `use teloxide::types::ChatId;` to the imports at the top of the file (alongside the existing `use teloxide::Bot;` at line 6).
+
+Also update the subagent call site at `src/agent.rs:1792` — change `""` to `ChatId(0)` to match the new signature:
+```rust
+"", // agent has no user_id context
+ChatId(0), // agent has no chat_id context
+```
 
 - [ ] **Step 5: Add send_file arm in execute_tool**
 
@@ -139,54 +145,60 @@ Add a new arm **before** the fallthrough to `tools::execute_builtin_tool()` (bef
 
 ```rust
 "send_file" => {
-    let path = arguments["path"]
-        .as_str()
-        .context("Missing 'path' argument")?;
-    let caption = arguments
-        .get("caption")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    match async {
+        let path = arguments["path"]
+            .as_str()
+            .context("Missing 'path' argument")?;
+        let caption = arguments
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.is_empty());
 
-    let full_path = tools::validate_sandbox_path(
-        &self.config.sandbox.allowed_directory,
-        path,
-    )?;
+        let full_path = tools::validate_sandbox_path(
+            &self.config.sandbox.allowed_directory,
+            path,
+        )?;
 
-    // Check file size before reading (Telegram limit: 50 MB)
-    let metadata = tokio::fs::metadata(&full_path).await
-        .with_context(|| format!("File not found: {}", full_path.display()))?;
-    const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
-    if metadata.len() > TG_FILE_LIMIT {
-        anyhow::bail!(
-            "File is {} MB — exceeds Telegram's 50 MB limit",
-            metadata.len() / 1024 / 1024
-        );
+        let metadata = tokio::fs::metadata(&full_path).await
+            .with_context(|| format!("File not found: {}", full_path.display()))?;
+        const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+        if metadata.len() > TG_FILE_LIMIT {
+            anyhow::bail!(
+                "File is {} MB — exceeds Telegram's 50 MB limit",
+                metadata.len() / 1024 / 1024
+            );
+        }
+
+        let bytes = tokio::fs::read(&full_path).await
+            .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
+
+        let file_name = full_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        let input_file = teloxide::types::InputFile::memory(bytes).file_name(file_name.clone());
+        let mut req = self.bot.send_document(chat_id, input_file);
+        if let Some(c) = caption {
+            req = req.caption(c);
+        }
+        req.await
+            .with_context(|| "Telegram API failed to send document")?;
+
+        Ok(format!("File '{}' sent successfully.", file_name))
+    }.await {
+        Ok(msg) => msg,
+        Err(e) => format!("Error sending file: {:#}", e),
     }
-
-    let bytes = tokio::fs::read(&full_path).await
-        .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
-
-    let file_name = full_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
-
-    let input_file = teloxide::types::InputFile::memory(bytes).file_name(file_name.clone());
-    self.bot
-        .send_document(chat_id, input_file)
-        .caption(caption)
-        .await
-        .with_context(|| "Telegram API failed to send document")?;
-
-    Ok(format!("File '{}' sent successfully.", file_name))
 }
 ```
 
 - [ ] **Step 6: Add ChatId and InputFile imports**
 
-Add these to the existing imports in `src/agent.rs`:
+Add these alongside the existing imports at the top of `src/agent.rs` (near `use anyhow::Result;` at line 1 and `use teloxide::Bot;` at line 6):
 ```rust
+use anyhow::Context;
 use teloxide::types::{ChatId, InputFile};
 ```
 
