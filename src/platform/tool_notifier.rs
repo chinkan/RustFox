@@ -285,6 +285,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "read_file" => return "📄 Reading a file".to_string(),
         "write_file" => return "✏️ Writing a file".to_string(),
         "list_files" => return "📁 Listing files".to_string(),
+        "send_file" => return "📤 Sending a file".to_string(),
         "execute_command" => return "💻 Running a command".to_string(),
         "schedule_task" => return "🗓️ Scheduling a task".to_string(),
         "list_scheduled_tasks" => return "🗓️ Checking scheduled tasks".to_string(),
