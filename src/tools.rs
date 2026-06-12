@@ -7,7 +7,7 @@ use crate::llm::{FunctionDefinition, ToolDefinition};
 
 /// Validates that a path is within the allowed sandbox directory.
 /// Returns the canonicalized path if valid.
-fn validate_sandbox_path(sandbox_dir: &Path, requested: &str) -> Result<PathBuf> {
+pub fn validate_sandbox_path(sandbox_dir: &Path, requested: &str) -> Result<PathBuf> {
     let sandbox_canonical = sandbox_dir
         .canonicalize()
         .with_context(|| format!("Sandbox directory not found: {}", sandbox_dir.display()))?;
@@ -100,6 +100,28 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         }
                     },
                     "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "send_file".to_string(),
+                description: "Send a file from the sandbox to the current chat. The file must already exist in the sandbox."
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file path (relative to sandbox or absolute within sandbox)"
+                        },
+                        "caption": {
+                            "type": "string",
+                            "description": "Optional caption for the file"
+                        }
+                    },
+                    "required": ["path"]
                 }),
             },
         },
