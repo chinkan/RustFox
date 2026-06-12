@@ -12,6 +12,7 @@ use rustfox::memory::MemoryStore;
 use rustfox::platform;
 use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
+use rustfox::setup;
 use rustfox::skills::{loader::load_skills_from_dir, SkillSource};
 
 #[tokio::main]
@@ -25,26 +26,52 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load configuration
-    let config_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let cwd = PathBuf::from("config.toml");
-            if cwd.exists() {
-                return cwd;
+    // Check for --setup and --service subcommands before doing anything else
+    if let Some(cmd) = setup::parse_args() {
+        match cmd {
+            setup::Command::Setup { cli } => {
+                let config_dir = std::env::var("RUSTFOX_CONFIG_PATH")
+                    .map(PathBuf::from)
+                    .map(|p| {
+                        p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        })
+                    })
+                    .unwrap_or_else(|_| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    });
+                return setup::wizard::run(&config_dir, cli).await;
             }
+            setup::Command::Service { action } => {
+                setup::service::handle(action)?;
+                return Ok(());
+            }
+        }
+    }
+
+    // If we reach here, it's a normal bot start — resolve config path
+    let config_path = if let Ok(path) = std::env::var("RUSTFOX_CONFIG_PATH") {
+        PathBuf::from(path)
+    } else {
+        let cwd = PathBuf::from("config.toml");
+        if cwd.exists() {
+            cwd
+        } else {
             let env_home = std::env::var("RUSTFOX_HOME").ok();
             if let Some(home) =
                 rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
             {
                 let candidate = home.join("config.toml");
                 if candidate.exists() {
-                    return candidate;
+                    candidate
+                } else {
+                    cwd
                 }
+            } else {
+                cwd
             }
-            cwd
-        });
+        }
+    };
 
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
