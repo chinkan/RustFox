@@ -330,6 +330,7 @@ async fn run_web(config_dir: &Path) -> Result<()> {
         .route("/api/load-config", get(load_config))
         .route("/api/save-config", post(save_config))
         .route("/api/install-service", post(install_service))
+        .route("/api/shutdown", post(shutdown_server))
         .route("/api/oauth/start", get(oauth_start))
         .route("/oauth/callback", get(oauth_callback))
         .route("/api/oauth/token", get(oauth_token_poll))
@@ -380,14 +381,6 @@ async fn save_config(
     let path = st.config_path.to_string_lossy().to_string();
     println!("\n✓ config.toml saved to {path}");
 
-    let tx = st.shutdown_tx.lock().await.take();
-    if let Some(tx) = tx {
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-            let _ = tx.send(());
-        });
-    }
-
     Ok(Json(SaveResponse { ok: true, path }))
 }
 
@@ -406,6 +399,24 @@ async fn install_service(State(_st): State<WizardState>) -> Json<serde_json::Val
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// POST /api/shutdown
+///
+/// Gracefully shuts down the setup server. Called by the frontend when the user
+/// clicks "Finish" on the success page — after they've had a chance to install
+/// the background service.
+async fn shutdown_server(State(st): State<WizardState>) -> Json<serde_json::Value> {
+    let tx = st.shutdown_tx.lock().await.take();
+    if let Some(tx) = tx {
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            let _ = tx.send(());
+        });
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "ok": false }))
     }
 }
 

@@ -1127,6 +1127,14 @@ async function saveConfig() {
 }
 
 // ── Install as background service ──────────────────────────────────────────────
+async function finishSetup() {
+  try {
+    await fetch('/api/shutdown', { method: 'POST' });
+  } catch (_) {
+    // Server may already be gone — that's fine
+  }
+}
+
 async function installService() {
   const btn = document.getElementById('btn-install-service');
   const status = document.getElementById('service-install-status');
@@ -1669,6 +1677,11 @@ function buildSteps() {
       Install as background service
     </button>
     <p id="service-install-status" class="success-msg" style="margin-top: 0.75rem;"></p>
+    <div style="margin-top: 1rem;">
+      <button class="btn-secondary" onclick="finishSetup()">
+        Close &amp; finish →
+      </button>
+    </div>
   </div>
   <p style="color:#718096;font-size:0.85rem;margin-bottom:1.25rem;margin-top:2rem;text-align:center">
     If you find RustFox useful, consider supporting the project:
