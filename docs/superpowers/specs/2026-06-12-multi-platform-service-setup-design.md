@@ -21,7 +21,8 @@ RustFox runs as a foreground process. Users must manually keep it running (tmux,
 - Docker images (separate work)
 - Changing the existing TOML config format
 - Removing manual `config.toml` editing
-- Building for non-host targets in CI (native cross-compilation is a follow-up)
+- Cross-compilation for non-host targets in CI (native target only — `ubuntu-latest` builds `x86_64-unknown-linux-gnu`, `macos-latest` builds its native arch, etc.)
+- Docker image
 
 ## Architecture
 
@@ -184,7 +185,11 @@ pub enum ServiceAction {
 }
 ```
 
-NOTE: `clap` is not yet a dependency. Two options: (A) add clap with derive, (B) manual arg parsing. Option A is recommended — clap is standard in Rust CLI apps.
+NOTE: `clap` is not yet a dependency. Add to `Cargo.toml`:
+```toml
+clap = { version = "4", features = ["derive"] }
+```
+This enables the `#[derive(clap::Subcommand)]` macros used below. The derive approach is recommended — clap is standard in Rust CLI apps.
 
 ### src/setup/service.rs
 
@@ -207,9 +212,16 @@ pub fn install() -> Result<()> {
 Service templates use `{{MUSTACHE}}`-style placeholders. At install time, `service::install()` calls `std::env::current_exe()`, reads the template `.toml` file (or an embedded string if using `include_str!`), replaces placeholders, and writes the rendered file. The Rust `service.rs` module implements a simple string replacement function — no templating library dependency needed.
 
 Placeholder substitution:
-- `{{RUSTFOX_BIN}}` → `std::env::current_exe()` (the binary being run)
-- `{{RUSTFOX_CONFIG}}` → `~/.rustfox/config.toml` (resolved via `dirs::home_dir()`)
-- `{{RUSTFOX_HOME}}` → `~/.rustfox` (resolved via `dirs::home_dir()`)
+- `{{RUSTFOX_BIN}}` → `std::env::current_exe()` (the binary being run, as absolute path)
+- `{{RUSTFOX_CONFIG}}` → `{home_dir}/.rustfox/config.toml` (where `home_dir` = `dirs::home_dir()`)
+- `{{RUSTFOX_HOME}}` → `{home_dir}/.rustfox` (where `home_dir` = `dirs::home_dir()`)
+
+Implementation in `service.rs`:
+```rust
+fn home() -> PathBuf {
+    dirs::home_dir().expect("HOME must be set").join(".rustfox")
+}
+```
 
 ### Code extraction approach
 
@@ -219,6 +231,8 @@ Rather than duplicating the wizard from `src/bin/setup.rs`, the plan is to:
 2. Keep `src/bin/setup.rs` as a thin CLI wrapper that calls `rustfox::setup::wizard::run()`
 3. The main binary's `--setup` flag calls the same function
 4. This avoids any behavior change for existing users of `./setup.sh` or `cargo run --bin setup`
+
+**`src/lib.rs`** must add `pub mod setup;` to the module declarations so `main.rs` can import `rustfox::setup::*`.
 
 ## Build and packaging
 
@@ -270,18 +284,17 @@ on:
     tags: ['v*']
 
 jobs:
+  # Build native binary per platform runner. No cross-compilation — each runner
+  # builds for its own architecture. Rust's default target on each runner:
+  #   ubuntu-latest  → x86_64-unknown-linux-gnu
+  #   macos-latest   → aarch64-apple-darwin (macOS 14 = arm64)
+  #   windows-latest → x86_64-pc-windows-msvc
   build:
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            ext: tar.gz
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            ext: tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
             ext: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -293,14 +306,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/rustfox${{ matrix.ext == 'zip' && '.exe' || '' }}
+          path: target/release/rustfox${{ matrix.ext == 'zip' && '.exe' || '' }}
           if-no-files-found: error
 
   package:
@@ -311,10 +322,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             script: scripts/build-deb.sh
-          - target: aarch64-unknown-linux-gnu
-            script: scripts/build-deb.sh
-          - target: x86_64-apple-darwin
-            script: scripts/build-macos.sh
           - target: aarch64-apple-darwin
             script: scripts/build-macos.sh
           - target: x86_64-pc-windows-msvc
@@ -337,11 +344,9 @@ jobs:
 Artifact filenames use the Rust target triple (not shortened arch names):
 
 ```
-rustfox-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
-rustfox-v1.0.0-aarch64-unknown-linux-gnu.tar.gz
-rustfox-v1.0.0-x86_64-apple-darwin.tar.gz
-rustfox-v1.0.0-aarch64-apple-darwin.tar.gz
-rustfox-v1.0.0-x86_64-pc-windows-msvc.zip
+rustfox-v1.0.0-x86_64-unknown-linux-gnu.tar.gz   # ubuntu-latest runner
+rustfox-v1.0.0-aarch64-apple-darwin.tar.gz       # macos-latest runner (arm64)
+rustfox-v1.0.0-x86_64-pc-windows-msvc.zip        # windows-latest runner
 ```
 
 Each archive contains:
