@@ -55,8 +55,11 @@ pulldown-cmark = "0.12"
 # SQLite vector search extension
 sqlite-vec = "0.1"
 
-# Setup wizard web server (used only by src/bin/setup.rs)
+# Setup wizard web server (used by rustfox --setup)
 axum = "0.8"
+
+# Embed bundled skills/agents into the binary for cargo install
+include_dir = "0.7"
 
 # OCR (pure Rust, neural-network based)
 ocrs = "0.12"
@@ -75,7 +78,7 @@ infer = "0.19"
 # Base64 for vision API content parts and OAuth PKCE helpers
 base64 = "0.22"
 
-# OAuth 2.0 / PKCE helpers (used only by src/bin/setup.rs)
+# OAuth 2.0 / PKCE helpers (used by setup wizard)
 rand = "0.8"
 sha2 = "0.10"
 
@@ -84,5 +87,14 @@ regex = "1"
 
 # OS home-directory resolution for the persistent home dir (~/.rustfox)
 dirs = "5"
+
+[lib]
+name = "rustfox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustfox"
+path = "src/main.rs"
+
 [dev-dependencies]
 tempfile = "3"

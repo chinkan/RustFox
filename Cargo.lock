@@ -2410,6 +2410,7 @@ dependencies = [
  "futures",
  "futures-util",
  "image",
+ "include_dir",
  "infer",
  "ocrs",
  "pdf-extract",

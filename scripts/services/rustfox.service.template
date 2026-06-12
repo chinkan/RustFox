@@ -9,6 +9,7 @@ ExecStart={{RUSTFOX_BIN}} --config {{RUSTFOX_CONFIG}}
 Restart=on-failure
 RestartSec=5
 Environment=RUSTFOX_HOME={{RUSTFOX_HOME}}
+Environment=PATH={{RUSTFOX_PATH}}
 
 [Install]
 WantedBy=default.target

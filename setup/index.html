@@ -925,12 +925,8 @@ function generateToml() {
     'database_path = "' + esc(state.db_path) + '"\n' +
     'query_rewriter_enabled = ' + (state.query_rewriter_enabled ? 'true' : 'false') + '\n' +
     '\n' +
-    '[skills]\n' +
-    'directory = "' + esc(state.skills_dir || 'skills') + '"\n' +
-    '\n' +
-    '[agents]\n' +
-    'directory = "' + esc(state.agents_dir || 'agents') + '"\n' +
-    '\n';
+    (state.skills_dir ? '[skills]\ndirectory = "' + esc(state.skills_dir) + '"\n\n' : '') +
+    (state.agents_dir ? '[agents]\ndirectory = "' + esc(state.agents_dir) + '"\n\n' : '');
 
   // [general] — emit commented hints for unset fields so the user knows they exist
   const generalLines = [];

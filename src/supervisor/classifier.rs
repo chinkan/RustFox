@@ -194,7 +194,6 @@ mod tests {
                 supervisor_workflow: Some("research".into()),
                 supervisor_required_caps: vec!["research".into()],
             },
-            crate::skills::SkillSource::Instance,
             std::path::PathBuf::from("/tmp/test"),
         );
         let c = SkillAwareClassifier::new(HeuristicClassifier, registry);

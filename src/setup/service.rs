@@ -19,10 +19,12 @@ fn home_dir() -> PathBuf {
 fn render_template(template: &str, bin_path: &Path) -> String {
     let home = home_dir();
     let config_path = home.join("config.toml");
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
     template
         .replace("{{RUSTFOX_BIN}}", &bin_path.to_string_lossy())
         .replace("{{RUSTFOX_CONFIG}}", &config_path.to_string_lossy())
         .replace("{{RUSTFOX_HOME}}", &home.to_string_lossy())
+        .replace("{{RUSTFOX_PATH}}", &path)
 }
 
 pub fn handle(action: Action) -> Result<()> {
@@ -374,15 +376,21 @@ mod tests {
 
     #[test]
     fn test_render_template_replaces_placeholders() {
-        let template = "bin={{RUSTFOX_BIN}}\nconfig={{RUSTFOX_CONFIG}}\nhome={{RUSTFOX_HOME}}\n";
+        let template = "bin={{RUSTFOX_BIN}}\nconfig={{RUSTFOX_CONFIG}}\nhome={{RUSTFOX_HOME}}\npath={{RUSTFOX_PATH}}\n";
         let bin_path = Path::new("/usr/local/bin/rustfox");
         let result = render_template(template, bin_path);
         assert!(result.contains("/usr/local/bin/rustfox"));
         assert!(result.contains(".rustfox/config.toml"));
         assert!(result.contains(".rustfox\n"));
+        assert!(
+            result.contains('/'),
+            "PATH must be populated in rendered template, got: {}",
+            result
+        );
         assert!(!result.contains("{{RUSTFOX_BIN}}"));
         assert!(!result.contains("{{RUSTFOX_CONFIG}}"));
         assert!(!result.contains("{{RUSTFOX_HOME}}"));
+        assert!(!result.contains("{{RUSTFOX_PATH}}"));
     }
 
     #[test]

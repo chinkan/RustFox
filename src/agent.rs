@@ -200,81 +200,29 @@ impl Agent {
     /// Returns `(skills_count, agents_count)`.
     pub async fn reload_skills_and_agents(&self) -> (usize, usize) {
         use crate::skills::loader::load_skills_from_dir;
-        use crate::skills::SkillSource;
 
-        // Skills: load both layers, merge
-        let s_instance_dir = self.config.skills.directory.clone();
-        let s_bundled_dir = self.config.skills.bundled_directory.clone();
-        let s_instance = load_skills_from_dir(
-            &s_instance_dir,
-            SkillSource::Instance,
-            s_instance_dir.clone(),
-        )
-        .await;
-        let s_bundled =
-            load_skills_from_dir(&s_bundled_dir, SkillSource::Bundled, s_bundled_dir.clone()).await;
-        let s_instance_ok = s_instance.is_ok();
-        let s_bundled_ok = s_bundled.is_ok();
+        let skills_dir = self.config.skills.directory.clone();
+        let agents_dir = self.config.agents.directory.clone();
 
-        {
-            let mut skills = self.skills.write().await;
-            let mut new_base_dirs = std::collections::BTreeMap::new();
-            if let Ok(reg) = s_instance {
-                skills.instance_skills = reg.instance_skills;
-                for (k, v) in reg.skill_base_dirs {
-                    new_base_dirs.insert(k, v);
-                }
-            }
-            if let Ok(reg) = s_bundled {
-                skills.bundled_skills = reg.bundled_skills;
-                for (k, v) in reg.skill_base_dirs {
-                    new_base_dirs.entry(k).or_insert(v);
-                }
-            }
-            if s_instance_ok || s_bundled_ok {
-                skills.skill_base_dirs.clear();
-                skills.skill_base_dirs.extend(new_base_dirs);
-            }
+        if let Ok(reg) = load_skills_from_dir(&skills_dir, skills_dir.clone()).await {
+            let count = reg.len();
+            let mut s = self.skills.write().await;
+            *s = reg;
+            let a = if let Ok(reg) = load_skills_from_dir(&agents_dir, agents_dir.clone()).await {
+                let count = reg.len();
+                let mut a = self.agents.write().await;
+                *a = reg;
+                count
+            } else {
+                self.agents.read().await.len()
+            };
+            (count, a)
+        } else {
+            (
+                self.skills.read().await.len(),
+                self.agents.read().await.len(),
+            )
         }
-        let s_count = self.skills.read().await.len();
-
-        // Agents: same pattern
-        let a_instance_dir = self.config.agents.directory.clone();
-        let a_bundled_dir = self.config.agents.bundled_directory.clone();
-        let a_instance = load_skills_from_dir(
-            &a_instance_dir,
-            SkillSource::Instance,
-            a_instance_dir.clone(),
-        )
-        .await;
-        let a_bundled =
-            load_skills_from_dir(&a_bundled_dir, SkillSource::Bundled, a_bundled_dir.clone()).await;
-        let a_instance_ok = a_instance.is_ok();
-        let a_bundled_ok = a_bundled.is_ok();
-
-        {
-            let mut agents = self.agents.write().await;
-            let mut new_base_dirs = std::collections::BTreeMap::new();
-            if let Ok(reg) = a_instance {
-                agents.instance_skills = reg.instance_skills;
-                for (k, v) in reg.skill_base_dirs {
-                    new_base_dirs.insert(k, v);
-                }
-            }
-            if let Ok(reg) = a_bundled {
-                agents.bundled_skills = reg.bundled_skills;
-                for (k, v) in reg.skill_base_dirs {
-                    new_base_dirs.entry(k).or_insert(v);
-                }
-            }
-            if a_instance_ok || a_bundled_ok {
-                agents.skill_base_dirs.clear();
-                agents.skill_base_dirs.extend(new_base_dirs);
-            }
-        }
-        let a_count = self.agents.read().await.len();
-
-        (s_count, a_count)
     }
 
     /// Process an incoming message and return the response text
@@ -2139,31 +2087,14 @@ impl Agent {
                     Ok(()) => {
                         info!("Skill file written: {}", target.display());
 
-                        // After writing, reload just the instance layer
+                        // After writing, reload skills
                         let instance_dir = self.config.skills.directory.clone();
                         use crate::skills::loader::load_skills_from_dir;
-                        use crate::skills::SkillSource;
-                        if let Ok(new_instance) = load_skills_from_dir(
-                            &instance_dir,
-                            SkillSource::Instance,
-                            instance_dir.clone(),
-                        )
-                        .await
+                        if let Ok(new_reg) =
+                            load_skills_from_dir(&instance_dir, instance_dir.clone()).await
                         {
-                            let bundled_dir = self.config.skills.bundled_directory.clone();
                             let mut skills = self.skills.write().await;
-                            skills.instance_skills = new_instance.instance_skills;
-                            skills.skill_base_dirs.clear();
-                            let bundled_names =
-                                skills.bundled_skills.keys().cloned().collect::<Vec<_>>();
-                            for name in bundled_names {
-                                skills
-                                    .skill_base_dirs
-                                    .insert(name.clone(), bundled_dir.clone());
-                            }
-                            for (k, v) in new_instance.skill_base_dirs {
-                                skills.skill_base_dirs.insert(k, v);
-                            }
+                            *skills = new_reg;
                         }
 
                         format!("Written: {}", target.display())
@@ -2173,50 +2104,18 @@ impl Agent {
             }
             "reload_skills" => {
                 use crate::skills::loader::load_skills_from_dir;
-                use crate::skills::SkillSource;
 
-                let instance_dir = self.config.skills.directory.clone();
-                let bundled_dir = self.config.skills.bundled_directory.clone();
-
-                let instance_reg = load_skills_from_dir(
-                    &instance_dir,
-                    SkillSource::Instance,
-                    instance_dir.clone(),
-                )
-                .await;
-                let bundled_reg =
-                    load_skills_from_dir(&bundled_dir, SkillSource::Bundled, bundled_dir.clone())
-                        .await;
-                let instance_ok = instance_reg.is_ok();
-                let bundled_ok = bundled_reg.is_ok();
-
-                let mut skills = self.skills.write().await;
-                let mut new_base_dirs = std::collections::BTreeMap::new();
-                if let Ok(reg) = instance_reg {
-                    skills.instance_skills = reg.instance_skills;
-                    for (k, v) in reg.skill_base_dirs {
-                        new_base_dirs.insert(k, v);
+                let skills_dir = self.config.skills.directory.clone();
+                match load_skills_from_dir(&skills_dir, skills_dir.clone()).await {
+                    Ok(new_reg) => {
+                        let count = new_reg.len();
+                        let mut skills = self.skills.write().await;
+                        *skills = new_reg;
+                        info!("Skills reloaded: {} skill(s) active", count);
+                        format!("Skills reloaded. {} skill(s) now active.", count)
                     }
+                    Err(e) => format!("Failed to reload skills: {}", e),
                 }
-                if let Ok(reg) = bundled_reg {
-                    skills.bundled_skills = reg.bundled_skills;
-                    for (k, v) in reg.skill_base_dirs {
-                        new_base_dirs.entry(k).or_insert(v);
-                    }
-                }
-                if instance_ok || bundled_ok {
-                    skills.skill_base_dirs.clear();
-                    skills.skill_base_dirs.extend(new_base_dirs);
-                }
-
-                let count = skills.len();
-                info!(
-                    "Skills reloaded: {} skill(s) active ({:?} instance, {:?} bundled)",
-                    count,
-                    skills.instance_skills.len(),
-                    skills.bundled_skills.len()
-                );
-                format!("Skills reloaded. {} skill(s) now active.", count)
             }
             "invoke_agent" => {
                 // Accepts `agent` parameter; falls back to `skill` for compat
@@ -2413,31 +2312,14 @@ impl Agent {
                     Ok(()) => {
                         info!("Agent file written: {}", target.display());
 
-                        // After writing, reload just the instance layer
+                        // After writing, reload agents
                         let instance_dir = self.config.agents.directory.clone();
                         use crate::skills::loader::load_skills_from_dir;
-                        use crate::skills::SkillSource;
-                        if let Ok(new_instance) = load_skills_from_dir(
-                            &instance_dir,
-                            SkillSource::Instance,
-                            instance_dir.clone(),
-                        )
-                        .await
+                        if let Ok(new_reg) =
+                            load_skills_from_dir(&instance_dir, instance_dir.clone()).await
                         {
-                            let bundled_dir = self.config.agents.bundled_directory.clone();
                             let mut agents = self.agents.write().await;
-                            agents.instance_skills = new_instance.instance_skills;
-                            agents.skill_base_dirs.clear();
-                            let bundled_names =
-                                agents.bundled_skills.keys().cloned().collect::<Vec<_>>();
-                            for name in bundled_names {
-                                agents
-                                    .skill_base_dirs
-                                    .insert(name.clone(), bundled_dir.clone());
-                            }
-                            for (k, v) in new_instance.skill_base_dirs {
-                                agents.skill_base_dirs.insert(k, v);
-                            }
+                            *agents = new_reg;
                         }
 
                         format!("Written: {}", target.display())
@@ -2447,50 +2329,18 @@ impl Agent {
             }
             "reload_agents" => {
                 use crate::skills::loader::load_skills_from_dir;
-                use crate::skills::SkillSource;
 
-                let instance_dir = self.config.agents.directory.clone();
-                let bundled_dir = self.config.agents.bundled_directory.clone();
-
-                let instance_reg = load_skills_from_dir(
-                    &instance_dir,
-                    SkillSource::Instance,
-                    instance_dir.clone(),
-                )
-                .await;
-                let bundled_reg =
-                    load_skills_from_dir(&bundled_dir, SkillSource::Bundled, bundled_dir.clone())
-                        .await;
-                let instance_ok = instance_reg.is_ok();
-                let bundled_ok = bundled_reg.is_ok();
-
-                let mut agents = self.agents.write().await;
-                let mut new_base_dirs = std::collections::BTreeMap::new();
-                if let Ok(reg) = instance_reg {
-                    agents.instance_skills = reg.instance_skills;
-                    for (k, v) in reg.skill_base_dirs {
-                        new_base_dirs.insert(k, v);
+                let agents_dir = self.config.agents.directory.clone();
+                match load_skills_from_dir(&agents_dir, agents_dir.clone()).await {
+                    Ok(new_reg) => {
+                        let count = new_reg.len();
+                        let mut agents = self.agents.write().await;
+                        *agents = new_reg;
+                        info!("Agents reloaded: {} agent(s) active", count);
+                        format!("Agents reloaded. {} agent(s) now active.", count)
                     }
+                    Err(e) => format!("Failed to reload agents: {}", e),
                 }
-                if let Ok(reg) = bundled_reg {
-                    agents.bundled_skills = reg.bundled_skills;
-                    for (k, v) in reg.skill_base_dirs {
-                        new_base_dirs.entry(k).or_insert(v);
-                    }
-                }
-                if instance_ok || bundled_ok {
-                    agents.skill_base_dirs.clear();
-                    agents.skill_base_dirs.extend(new_base_dirs);
-                }
-
-                let count = agents.len();
-                info!(
-                    "Agents reloaded: {} agent(s) active ({:?} instance, {:?} bundled)",
-                    count,
-                    agents.instance_skills.len(),
-                    agents.bundled_skills.len()
-                );
-                format!("Agents reloaded. {} agent(s) now active.", count)
             }
             "try_new_tech" => {
                 let technology = match arguments["technology"].as_str() {
@@ -2897,17 +2747,20 @@ mod tests {
     }
 
     #[test]
-    fn test_reloads_clear_base_dir_maps_before_repopulation() {
+    fn test_reloads_replace_registry_not_just_instance_skills() {
+        // Ensure reload paths use `*registry = new_reg` (full replacement)
+        // rather than only updating instance_skills while leaving stale bundled entries.
         let source = include_str!("agent.rs");
-        let skills_clear_count = source.matches("skills.skill_base_dirs.clear();").count();
-        let agents_clear_count = source.matches("agents.skill_base_dirs.clear();").count();
+        // Each reload/write handler should do `*skills = new_reg` or `*agents = new_reg`
+        let skills_replace = source.matches("*skills = new_reg").count();
+        let agents_replace = source.matches("*agents = new_reg").count();
         assert!(
-            skills_clear_count >= 3,
-            "skills base-dir map must be cleared in all reload/write paths"
+            skills_replace >= 2,
+            "all skill reload paths must replace the entire registry: found {skills_replace}"
         );
         assert!(
-            agents_clear_count >= 3,
-            "agents base-dir map must be cleared in all reload/write paths"
+            agents_replace >= 2,
+            "all agent reload paths must replace the entire registry: found {agents_replace}"
         );
     }
 
@@ -3072,61 +2925,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_skill_file_checks_instance_before_bundled() {
+    async fn test_load_skills_from_single_instance_dir() {
         let dir = tempfile::tempdir().unwrap();
         let instance_dir = dir.path().join("instance-skills");
-        let bundled_dir = dir.path().join("bundled-skills");
 
-        // Create same-named skill in both dirs with different content
         tokio::fs::create_dir_all(instance_dir.join("my-skill"))
             .await
             .unwrap();
         tokio::fs::write(instance_dir.join("my-skill/SKILL.md"), "instance content")
             .await
             .unwrap();
-        tokio::fs::create_dir_all(bundled_dir.join("my-skill"))
-            .await
-            .unwrap();
-        tokio::fs::write(bundled_dir.join("my-skill/SKILL.md"), "bundled content")
-            .await
-            .unwrap();
 
-        // Load both into registry
-        let mut registry = crate::skills::SkillRegistry::new();
-        let inst = crate::skills::loader::load_skills_from_dir(
-            &instance_dir,
-            crate::skills::SkillSource::Instance,
-            instance_dir.clone(),
-        )
-        .await
-        .unwrap();
-        let bund = crate::skills::loader::load_skills_from_dir(
-            &bundled_dir,
-            crate::skills::SkillSource::Bundled,
-            bundled_dir.clone(),
-        )
-        .await
-        .unwrap();
-        for s in inst.list() {
-            registry.register(
-                s.clone(),
-                crate::skills::SkillSource::Instance,
-                instance_dir.clone(),
-            );
-        }
-        for s in bund.list() {
-            registry.register(
-                s.clone(),
-                crate::skills::SkillSource::Bundled,
-                bundled_dir.clone(),
-            );
-        }
+        let registry =
+            crate::skills::loader::load_skills_from_dir(&instance_dir, instance_dir.clone())
+                .await
+                .unwrap();
 
-        // read_skill_file should find instance version
-        let base_dir = registry.base_dir("my-skill").unwrap();
-        let target = base_dir.join("my-skill/SKILL.md");
-        let content = tokio::fs::read_to_string(&target).await.unwrap();
-        assert_eq!(content, "instance content", "instance must shadow bundled");
+        assert_eq!(registry.len(), 1);
+        let skill = registry.get("my-skill").unwrap();
+        assert_eq!(skill.name, "my-skill");
+        assert_eq!(skill.description, "instance content");
     }
 
     #[test]
