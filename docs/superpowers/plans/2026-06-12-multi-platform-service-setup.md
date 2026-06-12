@@ -44,20 +44,22 @@ pub async fn run(_config_dir: &Path, _cli: bool) -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 4: Create `src/setup/mod.rs` with CLI types and dispatch, plus re-exports**
+- [ ] **Step 4: Create `src/setup/mod.rs` with CLI types and dispatch**
 
 Create `src/setup/mod.rs`:
 ```rust
+//! Setup module — CLI subcommands for `--setup` and `--service`.
 pub mod service;
 pub mod wizard;
 
-use anyhow::Result;
-
+/// Subcommands for `rustfox --setup` and `rustfox --service`.
 pub enum Command {
     Setup { cli: bool },
     Service { action: service::Action },
 }
 
+/// Parse argv into Command or return None (meaning: normal bot start).
+/// Also captures `--config <PATH>` and stores it in `RUSTFOX_CONFIG_PATH` env var.
 pub fn parse_args() -> Option<Command> {
     let mut args: Vec<String> = std::env::args().collect();
     args.remove(0);
@@ -131,95 +133,9 @@ git add src/lib.rs src/setup/
 git commit -m "feat: add setup module with CLI arg parsing"
 ```
 
-- [ ] **Step 1: Write mod.rs with enum types and dispatch**
-
-Create `src/setup/mod.rs`:
-```rust
-pub mod service;
-pub mod wizard;
-
-use anyhow::Result;
-
-/// Subcommands for `rustfox --setup` and `rustfox --service`.
-pub enum Command {
-    Setup { cli: bool },
-    Service { action: service::Action },
-}
-
-/// Parse argv into Command or return None (meaning: normal bot start).
-pub fn parse_args() -> Option<Command> {
-    let mut args: Vec<String> = std::env::args().collect();
-    // Skip binary name
-    args.remove(0);
-
-    // Detect --setup and --service flags
-    let mut i = 0;
-    let mut config_path: Option<String> = None;
-    let mut command: Option<Command> = None;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" => {
-                i += 1;
-                config_path = args.get(i).cloned();
-            }
-            "--setup" => {
-                let cli = args.get(i + 1).map(|s| s.as_str()) == Some("--cli");
-                command = Some(Command::Setup { cli });
-                if cli {
-                    i += 1; // consume --cli
-                }
-            }
-            "--service" => {
-                let action_str = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
-                let action = match action_str {
-                    "install" => service::Action::Install,
-                    "remove" => service::Action::Remove,
-                    "status" => service::Action::Status,
-                    "start" => service::Action::Start,
-                    "stop" => service::Action::Stop,
-                    _ => {
-                        eprintln!("Usage: rustfox --service <install|remove|status|start|stop>");
-                        std::process::exit(1);
-                    }
-                };
-                command = Some(Command::Service { action });
-                i += 1; // consume action word
-            }
-            _ => {
-                // Positional arg = config path (deprecated but supported)
-                if config_path.is_none() && !args[i].starts_with('-') {
-                    config_path = Some(args[i].clone());
-                }
-            }
-        }
-        i += 1;
-    }
-
-    // If --config was passed, set env var so main.rs picks it up
-    if let Some(path) = config_path {
-        std::env::set_var("RUSTFOX_CONFIG_PATH", path);
-    }
-
-    command
-}
-```
-
-- [ ] **Step 2: Verify it compiles**
-
-Run: `cargo check`
-Expected: compilation succeeds (wizard.rs and service.rs exist but are minimal — they can return `unimplemented!()` for now)
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/setup/mod.rs
-git commit -m "feat(setup): add CLI arg parsing for --setup and --service"
-```
-
 ---
 
-### Task 3: Create service templates
+### Task 2: Create service templates
 
 **Files:**
 - Create: `scripts/services/rustfox.service.template`
@@ -1082,10 +998,17 @@ async fn save_config(
 ///
 /// Installs the bot as a background service. Returns JSON with success/error.
 /// Called by the frontend after config is saved (user clicks "Install as service").
+/// Uses spawn_blocking because service::handle() performs synchronous I/O
+/// (std::fs::write, std::process::Command) that would block the async runtime.
 async fn install_service(
     State(_st): State<WizardState>,
 ) -> Json<serde_json::Value> {
-    match crate::setup::service::handle(crate::setup::service::Action::Install) {
+    let result = tokio::task::spawn_blocking(|| {
+        crate::setup::service::handle(crate::setup::service::Action::Install)
+    })
+    .await
+    .unwrap_or(Err(anyhow::anyhow!("Task join failed")));
+    match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
@@ -1798,13 +1721,10 @@ Replace the config-path detection block (lines 28-47) with:
                 rustfox::home::default_home(env_home.as_deref(), dirs::home_dir().as_deref())
             {
                 let candidate = home.join("config.toml");
-                if candidate.exists() {
-                    candidate
-                } else {
-                    cwd
-                }
+                if candidate.exists() { candidate } else { cwd }
+            } else {
+                cwd
             }
-            cwd
         }
     };
 ```
@@ -1826,18 +1746,16 @@ git commit -m "feat: add --setup and --service dispatch to main binary"
 ### Task 8: Update `release.yml` for single-binary release
 
 **Files:**
-- Modify: `.github/workflows/release.yml`
+- Create: `.github/workflows/release.yml`
 
-- [ ] **Step 1: Update release workflow**
+- [ ] **Step 1: Create release workflow**
 
-Edit `.github/workflows/release.yml`:
+Create `.github/workflows/release.yml` (replaces the previous workflow — setup binary is now part of the main binary, so only `rustfox` is shipped):
 
-The existing workflow already builds for all targets and creates archives. The changes needed:
-
-1. Remove `setup_bin` references (setup is now part of the main binary)
-2. Add `config.example.toml` and service templates to the archive
-3. Remove the `aarch64-unknown-linux-gnu` matrix entry (cross-compile)
-4. Remove the `x86_64-apple-darwin` on `macos-latest` entry (cross-compile on arm64 runner)
+Key changes from the previous version:
+1. Single binary (setup is now part of `rustfox` via `--setup`)
+2. Service templates bundled in archives
+3. Native target only (no cross-compilation)
 
 ```yaml
 name: Release
@@ -1964,6 +1882,17 @@ echo "  RustFox Installer"
 echo "============================================"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When run from the repo, SCRIPT_DIR = <repo>/scripts/, so project root is SCRIPT_DIR/..
+# When run from a release archive, install.sh is at archive root alongside Cargo.toml.
+PROJECT_ROOT="$SCRIPT_DIR"
+if [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    PROJECT_ROOT="$SCRIPT_DIR"
+elif [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
+    PROJECT_ROOT="$SCRIPT_DIR/.."
+else
+    echo "Error: Cannot find Cargo.toml. Run install.sh from the rustfox repository root."
+    exit 1
+fi
 
 # Check prerequisites
 if ! command -v cargo &>/dev/null; then
@@ -1972,10 +1901,10 @@ if ! command -v cargo &>/dev/null; then
     exit 1
 fi
 
-# Install from source (local directory or git)
+# Install from source
 echo ""
-echo "Installing rustfox from ${SCRIPT_DIR}..."
-cargo install --path "$SCRIPT_DIR" --locked
+echo "Installing rustfox from ${PROJECT_ROOT}..."
+cargo install --path "$PROJECT_ROOT" --locked
 
 echo ""
 echo "✓ rustfox installed to $(which rustfox)"
