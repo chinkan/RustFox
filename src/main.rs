@@ -43,7 +43,11 @@ async fn main() -> Result<()> {
                             dirs::home_dir().as_deref(),
                         ) {
                             let candidate = home.join("config.toml");
-                            if candidate.exists() { candidate } else { cwd }
+                            if candidate.exists() {
+                                candidate
+                            } else {
+                                cwd
+                            }
                         } else {
                             cwd
                         }
@@ -52,7 +56,9 @@ async fn main() -> Result<()> {
                 let config_dir = cfg_path
                     .parent()
                     .map(|d| d.to_path_buf())
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    });
                 return setup::wizard::run(&config_dir, cli).await;
             }
             setup::Command::Service { action } => {
