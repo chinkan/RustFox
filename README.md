@@ -258,6 +258,7 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 | `read_file` | Read file contents within sandbox |
 | `write_file` | Write/create files within sandbox |
 | `list_files` | List directory contents within sandbox |
+| `send_file` | Send a file from the sandbox to the current chat |
 | `execute_command` | Run shell commands within sandbox directory |
 
 ### Scheduling Tools
@@ -275,6 +276,7 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 | `read_skill_file` | Read a file from a skill's directory (loads skill instructions) |
 | `write_skill_file` | Write new or update existing skill files |
 | `reload_skills` | Hot-reload the skill registry without restarting the bot |
+| `patch_skill` | Patch an existing skill's SKILL.md by appending or replacing content |
 
 ### Agent Tools
 
@@ -294,6 +296,14 @@ Tools from MCP servers are automatically namespaced as `mcp_<server-name>_<tool-
 | `plan_create` | Create a new structured execution plan (stored as `.rustfox_plan.json` in the sandbox) |
 | `plan_update` | Update a step's status or notes in the current plan |
 | `plan_view` | View the current plan and its step statuses |
+
+### Utility Tools
+
+| Tool | Description |
+|------|-------------|
+| `try_new_tech` | Run a sandboxed experiment with a new technology or approach (Rust/JS) |
+| `self_update_to_branch` | Update the bot to a specific git branch and rebuild |
+| `patch_skill` | Patch an existing skill's SKILL.md by appending or replacing content |
 
 ## Bot Commands
 
@@ -401,6 +411,7 @@ setup/                # Setup wizard HTML
 - [x] Context compaction improvements (hard cap, image preservation, retry optimization)
 - [x] Multi-platform service setup (`--setup` web/CLI wizard, `--service install/remove/status`)
 - [x] Build scripts & CI release workflow (`.tar.gz`, `.zip`, `.deb` per release)
+- [x] `send_file` tool — agent can send files from sandbox to Telegram user
 
 ### Planned
 

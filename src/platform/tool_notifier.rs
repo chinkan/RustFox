@@ -292,9 +292,17 @@ pub fn friendly_tool_name(name: &str) -> String {
         "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
         "invoke_agent" => return "🤖 Calling a specialist".to_string(),
         "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
-        "read_skill_file" | "write_skill_file" => return "📖 Reading skill".to_string(),
-        "reload_skills" | "reload_agents" => return "🔄 Reloading".to_string(),
-        "read_agent_file" | "write_agent_file" => return "🤖 Agent file".to_string(),
+        "read_skill_file" => return "📖 Reading skill".to_string(),
+        "write_skill_file" => return "✏️ Writing a skill".to_string(),
+        "reload_skills" | "reload_agents" | "reload_skills_and_agents" => {
+            return "🔄 Reloading".to_string()
+        }
+        "read_agent_file" => return "📖 Reading agent file".to_string(),
+        "write_agent_file" => return "✏️ Writing agent file".to_string(),
+        "spawn_agents" => return "🧬 Spawning subagents".to_string(),
+        "try_new_tech" => return "🧪 Trying new tech".to_string(),
+        "self_update_to_branch" => return "🔄 Self-updating".to_string(),
+        "patch_skill" => return "🔧 Patching skill".to_string(),
         _ => name,
     };
 
