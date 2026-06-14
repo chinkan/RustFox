@@ -6,6 +6,21 @@ pub mod update;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Build the shared preamble for a "listed below" section that warns the LLM
+/// not to enumerate files itself. `noun_singular` is used in both the intro
+/// ("All available {noun}s are listed below.") and the warning
+/// ("DO NOT try to list {noun} directories or files"). `followup` is appended
+/// after the preamble and before the listed items.
+///
+/// This is shared between `build_context` (skills) and the agents section in
+/// `agent.rs::build_system_prompt` to keep the wording consistent.
+pub fn format_listed_section(noun_singular: &str, followup: &str) -> String {
+    format!(
+        "All available {0}s are listed below. DO NOT try to list {0} directories or files — everything you need is documented here.\n\n{1}\n\n",
+        noun_singular, followup
+    )
+}
+
 /// A loaded skill from a markdown file
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -83,8 +98,7 @@ impl SkillRegistry {
     }
 
     /// Build context string for the system prompt (skills directory).
-    /// Instruction skills (no model field) are loaded via `read_skill_file` when relevant.
-    /// Subagent skills (model field set) are invoked via `invoke_agent`.
+    /// Instruction skills (no model/tools) are loaded via `read_skill_file` when relevant.
     pub fn build_context(&self) -> String {
         let unique_skills = self.list();
         if unique_skills.is_empty() {
@@ -92,16 +106,9 @@ impl SkillRegistry {
         }
 
         let mut instruction_lines = Vec::new();
-        let mut subagent_section = String::new();
 
         for skill in &unique_skills {
-            let is_subagent = skill.model.is_some() || !skill.tools.is_empty();
-            if is_subagent {
-                subagent_section.push_str(&format!(
-                    "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`\n",
-                    skill.name, skill.description, skill.name
-                ));
-            } else {
+            if skill.model.is_none() && skill.tools.is_empty() {
                 instruction_lines.push(format!(
                     "- **{}** (instruction): {}. Load with: read_skill_file(skill_name=\"{}\", relative_path=\"SKILL.md\") when relevant.",
                     skill.name, skill.description, skill.name
@@ -109,39 +116,43 @@ impl SkillRegistry {
             }
         }
 
-        let mut context = String::new();
-
-        if !instruction_lines.is_empty() {
-            context.push_str(
-                "All available skills are listed below. DO NOT try to list skill directories or files — everything you need is documented here.\n\n",
-            );
-            context.push_str(
-                "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them. For subagent skills use invoke_agent.\n\nYou have the following skills available:\n\n",
-            );
-            context.push_str(&instruction_lines.join("\n"));
-            context.push('\n');
+        if instruction_lines.is_empty() {
+            return String::new();
         }
 
-        if !subagent_section.is_empty() {
-            if !instruction_lines.is_empty() {
-                context.push('\n');
-            }
-            context.push_str("## Available Subagent Skills\n\n");
-            context.push_str("Delegate these tasks using `invoke_agent`:\n\n");
-            context.push_str(&subagent_section);
-        }
+        let mut context = format_listed_section(
+            "skill",
+            "When an instruction skill is relevant, load its full instructions with read_skill_file(skill_name=\"<name>\", relative_path=\"SKILL.md\"), then follow them.\n\n\
+             You have the following skills available:",
+        );
+        context.push_str(&instruction_lines.join("\n"));
+        context.push('\n');
 
         context
     }
 
-    /// Build context string for the agents directory (agents with their own model/tools).
-    /// All agents are invoked via `invoke_agent`.
-    pub fn build_agents_context(&self) -> String {
-        let unique_agents = self.list();
-        if unique_agents.is_empty() {
-            return String::new();
+    /// Build formatted lines for subagent-style skills (those with model or tools).
+    /// Returns formatted lines only (no preamble) — caller prepends the unified section header.
+    pub fn build_subagent_lines(&self) -> String {
+        let unique_skills = self.list();
+        let mut lines = Vec::new();
+
+        for skill in &unique_skills {
+            if skill.model.is_some() || !skill.tools.is_empty() {
+                lines.push(format!(
+                    "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
+                    skill.name, skill.description, skill.name
+                ));
+            }
         }
 
+        lines.join("\n")
+    }
+
+    /// Build formatted lines for the agents directory (agents with their own model/tools).
+    /// Returns formatted lines only (no preamble) — caller prepends the unified section header.
+    pub fn build_agents_context(&self) -> String {
+        let unique_agents = self.list();
         let mut lines = Vec::new();
         for agent in &unique_agents {
             lines.push(format!(
@@ -150,11 +161,7 @@ impl SkillRegistry {
             ));
         }
 
-        let mut context =
-            String::from("All available agents are listed below. DO NOT try to list agent directories or files — everything you need is documented here.\n\nDelegate these tasks to specialized agents using `invoke_agent`:\n\n");
-        context.push_str(&lines.join("\n"));
-        context.push('\n');
-        context
+        lines.join("\n")
     }
 
     pub fn len(&self) -> usize {
@@ -240,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_context_subagent_skill_injects_metadata_only() {
+    fn test_build_context_excludes_subagent_skills() {
         let mut registry = SkillRegistry::new();
         registry.register(
             make_skill(
@@ -252,6 +259,22 @@ mod tests {
             PathBuf::from("/tmp/test"),
         );
         let ctx = registry.build_context();
+        assert_eq!(ctx, "");
+    }
+
+    #[test]
+    fn test_build_subagent_context_returns_subagent_skills() {
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            make_skill(
+                "thread-writer",
+                "Use when writing Thread posts.",
+                "# Super Secret Instructions\nLong style guide...",
+                Some("anthropic/claude-sonnet-4-6"),
+            ),
+            PathBuf::from("/tmp/test"),
+        );
+        let ctx = registry.build_subagent_lines();
         assert!(ctx.contains("thread-writer"));
         assert!(ctx.contains("Use when writing Thread posts."));
         assert!(ctx.contains("invoke_agent"));
@@ -263,10 +286,12 @@ mod tests {
     fn test_build_context_empty_registry() {
         let registry = SkillRegistry::new();
         assert_eq!(registry.build_context(), String::new());
+        assert_eq!(registry.build_subagent_lines(), String::new());
+        assert_eq!(registry.build_agents_context(), String::new());
     }
 
     #[test]
-    fn test_build_context_mixed_skills() {
+    fn test_build_context_instruction_only() {
         let mut registry = SkillRegistry::new();
         registry.register(
             make_skill(
@@ -287,11 +312,17 @@ mod tests {
             PathBuf::from("/tmp/test"),
         );
         let ctx = registry.build_context();
-        assert!(ctx.contains("You have the following skills available"));
-        assert!(ctx.contains("Available Subagent Skills"));
+        assert!(ctx.contains("instruction-skill"));
+        assert!(ctx.contains("An instruction skill"));
+        assert!(ctx.contains("read_skill_file"));
+        assert!(!ctx.contains("subagent-skill"));
+        assert!(!ctx.contains("invoke_agent"));
         assert!(!ctx.contains("Follow these instructions."));
         assert!(!ctx.contains("Secret subagent body."));
-        assert!(ctx.contains("read_skill_file"));
-        assert!(ctx.contains("invoke_agent"));
+
+        let subagent_ctx = registry.build_subagent_lines();
+        assert!(subagent_ctx.contains("subagent-skill"));
+        assert!(subagent_ctx.contains("invoke_agent"));
+        assert!(!subagent_ctx.contains("instruction-skill"));
     }
 }

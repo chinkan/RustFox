@@ -715,7 +715,7 @@ const state = {
   telegram_token: '',
   allowed_user_ids: '',
   openrouter_key: '',
-  model: 'moonshotai/kimi-k2.5',
+  model: 'moonshotai/kimi-k2.6',
   max_tokens: '4096',
   system_prompt: DEFAULT_PROMPT,
   supports_vision: false,
@@ -1469,7 +1469,7 @@ function buildSteps() {
       </div>
       <div class="field">
         <label>Model <span class="hint">— <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/models</a></span></label>
-        <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.5')}">
+        <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.6')}">
       </div>
       <div class="field-row">
         <div class="field">

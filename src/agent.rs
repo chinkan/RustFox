@@ -19,7 +19,7 @@ use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
 use crate::scheduler::reminders::ScheduledTaskStore;
 use crate::scheduler::Scheduler;
-use crate::skills::SkillRegistry;
+use crate::skills::{format_listed_section, SkillRegistry};
 use crate::tools;
 
 /// A request dispatched from a fire closure to the background job runner.
@@ -57,6 +57,35 @@ struct AdHocTask {
     prompt: String,
     model: Option<String>,
     tools: Option<Vec<String>>,
+}
+
+/// Build the unified `# Available Agents` section from the two line sources
+/// (subagent-style skills and agents directory). Returns `None` when both
+/// inputs are empty so the caller can skip the section entirely. The returned
+/// string includes the leading `\n\n` separator so it can be appended
+/// directly to a prompt that already ends with content.
+fn format_available_agents_section(subagent_lines: &str, agent_lines: &str) -> Option<String> {
+    if subagent_lines.is_empty() && agent_lines.is_empty() {
+        return None;
+    }
+
+    let mut section = String::from("\n\n# Available Agents\n\n");
+    section.push_str(&format_listed_section(
+        "agent",
+        "Delegate these tasks to specialized agents using `invoke_agent`:",
+    ));
+
+    if !subagent_lines.is_empty() {
+        section.push_str(subagent_lines);
+    }
+    if !subagent_lines.is_empty() && !agent_lines.is_empty() {
+        section.push('\n');
+    }
+    if !agent_lines.is_empty() {
+        section.push_str(agent_lines);
+    }
+    section.push('\n');
+    Some(section)
 }
 
 impl Agent {
@@ -101,15 +130,17 @@ impl Agent {
             prompt.push_str("\n\n# Available Skills\n\n");
             prompt.push_str(&skill_context);
         }
-        drop(skills); // release read lock before further work
 
+        // Build unified "Available Agents" section from both subagent skills and agents/
+        let subagent_skills = skills.build_subagent_lines();
+        drop(skills);
         let agents = self.agents.read().await;
-        let agent_context = agents.build_agents_context();
-        if !agent_context.is_empty() {
-            prompt.push_str("\n\n# Available Agents\n\n");
-            prompt.push_str(&agent_context);
-        }
+        let agent_lines = agents.build_agents_context();
         drop(agents);
+
+        if let Some(section) = format_available_agents_section(&subagent_skills, &agent_lines) {
+            prompt.push_str(&section);
+        }
 
         // Work Verification Protocol
         prompt.push_str(
@@ -1263,7 +1294,7 @@ impl Agent {
                     name: "invoke_agent".to_string(),
                     description: concat!(
                         "Delegate a task to a named agent running as an isolated agentic loop. ",
-                        "Agents are listed under 'Available Agents' and 'Available Subagent Skills' in the system prompt. ",
+                        "Agents are listed under 'Available Agents' in the system prompt. ",
                         "The agent uses its own model and tool whitelist declared in its frontmatter. ",
                         "Looks up in the agents/ directory first, then falls back to the skills/ directory."
                     ).to_string(),
@@ -2987,5 +3018,77 @@ mod tests {
         let raw = "";
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
         assert!(!is_compacted_regurgitation(raw, &parsed));
+    }
+
+    // ---- Available Agents section builder ----
+
+    #[test]
+    fn test_format_available_agents_section_both_empty_returns_none() {
+        let section = format_available_agents_section("", "");
+        assert!(
+            section.is_none(),
+            "expected None when both inputs are empty"
+        );
+    }
+
+    #[test]
+    fn test_format_available_agents_section_only_subagent_nonempty() {
+        let section = format_available_agents_section("- sub line", "").expect("expected Some");
+        assert!(section.contains("# Available Agents"));
+        assert!(section.contains("- sub line"));
+        assert!(section.contains("All available agents are listed below"));
+        assert!(section.contains("invoke_agent"));
+        // No separator needed when only one source is present
+        assert!(!section.contains("- sub line\n\n"));
+    }
+
+    #[test]
+    fn test_format_available_agents_section_only_agents_nonempty() {
+        let section = format_available_agents_section("", "- agent line").expect("expected Some");
+        assert!(section.contains("# Available Agents"));
+        assert!(section.contains("- agent line"));
+        assert!(section.contains("All available agents are listed below"));
+    }
+
+    #[test]
+    fn test_format_available_agents_section_both_nonempty_merged() {
+        let section =
+            format_available_agents_section("- sub line", "- agent line").expect("expected Some");
+
+        // Header and preamble are present
+        assert!(section.contains("# Available Agents"));
+        assert!(section.contains("All available agents are listed below"));
+        assert!(section.contains("DO NOT try to list agent directories"));
+
+        // Both line sources appear
+        assert!(section.contains("- sub line"));
+        assert!(section.contains("- agent line"));
+
+        // Subagent block appears before agent block, separated by at least one newline
+        let sub_idx = section.find("- sub line").expect("subagent line present");
+        let agent_idx = section.find("- agent line").expect("agent line present");
+        assert!(
+            sub_idx < agent_idx,
+            "subagent lines must precede agent lines"
+        );
+        let between = &section[sub_idx..agent_idx];
+        assert!(
+            between.contains('\n'),
+            "expected a newline separator between subagent and agent lines, got {between:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_available_agents_section_uses_shared_preamble() {
+        // The preamble should come from `format_listed_section("agent", ...)`.
+        let section = format_available_agents_section("- sub", "- ag").expect("expected Some");
+        let shared = format_listed_section(
+            "agent",
+            "Delegate these tasks to specialized agents using `invoke_agent`:",
+        );
+        assert!(
+            section.contains(&shared),
+            "section should embed the shared preamble exactly"
+        );
     }
 }
