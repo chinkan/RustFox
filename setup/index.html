@@ -715,7 +715,7 @@ const state = {
   telegram_token: '',
   allowed_user_ids: '',
   openrouter_key: '',
-  model: 'moonshotai/kimi-k2.5',
+  model: 'moonshotai/kimi-k2.6',
   max_tokens: '4096',
   system_prompt: DEFAULT_PROMPT,
   supports_vision: false,
@@ -925,12 +925,8 @@ function generateToml() {
     'database_path = "' + esc(state.db_path) + '"\n' +
     'query_rewriter_enabled = ' + (state.query_rewriter_enabled ? 'true' : 'false') + '\n' +
     '\n' +
-    '[skills]\n' +
-    'directory = "' + esc(state.skills_dir || 'skills') + '"\n' +
-    '\n' +
-    '[agents]\n' +
-    'directory = "' + esc(state.agents_dir || 'agents') + '"\n' +
-    '\n';
+    (state.skills_dir ? '[skills]\ndirectory = "' + esc(state.skills_dir) + '"\n\n' : '') +
+    (state.agents_dir ? '[agents]\ndirectory = "' + esc(state.agents_dir) + '"\n\n' : '');
 
   // [general] — emit commented hints for unset fields so the user knows they exist
   const generalLines = [];
@@ -1473,7 +1469,7 @@ function buildSteps() {
       </div>
       <div class="field">
         <label>Model <span class="hint">— <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/models</a></span></label>
-        <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.5')}">
+        <input type="text" id="f-model" value="${escHtml(state.model || 'moonshotai/kimi-k2.6')}">
       </div>
       <div class="field-row">
         <div class="field">

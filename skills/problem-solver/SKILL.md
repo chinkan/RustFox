@@ -7,7 +7,7 @@ tools:
   - plan_update
   - plan_view
   - read_skill_file
-  - invoke_subagent
+  - invoke_agent
   - read_file
   - write_file
   - execute_command
@@ -40,7 +40,7 @@ After all steps are done, call `plan_view` to review, then return a concise fina
 
 ## Delegation Rules
 
-- Code/scripting/computation → `invoke_subagent(skill="code-interpreter", ...)`
+- Code/scripting/computation → `invoke_agent(agent="code-interpreter", ...)`
 - Memory lookup → `recall` / `search_memory`
 - File I/O → `read_file` / `write_file` directly
 

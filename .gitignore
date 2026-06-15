@@ -8,3 +8,6 @@ rustfox.db*
 
 # Playwright config and cache
 .playwright/
+
+# Opencode
+.opencode/package-lock.json
