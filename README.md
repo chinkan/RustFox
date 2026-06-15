@@ -9,7 +9,17 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-%E2%98%95-yellow)](https://buymeacoffee.com/chinkan.ai)
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/chinkan)
 
-A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRouter LLM with sandboxed tools, MCP server integration, and persistent memory.
+**What is RustFox?**
+
+An open-source, self-hosted Telegram AI assistant written in Rust. It solves a simple problem: most AI assistants are locked inside proprietary chat UIs with no access to your files, tools, or schedule. RustFox lives in Telegram — your everyday messaging app — and acts as a full agentic AI teammate.
+
+**Why RustFox?**
+
+Drop a file, ask a question, schedule a task — RustFox handles it. Powered by OpenRouter LLM (Kimi K2.6), it runs an agentic loop: receive your message, call sandboxed tools (file I/O, command execution, web search via MCP), and loop until done. It remembers context via SQLite + vector RAG, runs skills and sub-agents, and even verifies its own work.
+
+**Self-hosted, no cloud dependency.** Single binary. Setup wizard. Runs as systemd/launchd service. `cargo install` and you're running in 2 minutes.
+
+Star the repo ⭐, fork to contribute, or open an issue for feedback.
 
 **docs:** [README.md](README.md) · [GUIDE.md](docs/GUIDE.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
