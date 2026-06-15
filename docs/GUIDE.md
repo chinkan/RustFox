@@ -22,7 +22,7 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 | `[telegram]` | `bot_token` | Telegram Bot API token | — |
 | | `allowed_user_ids` | Comma-separated whitelist of user IDs | — |
 | `[openrouter]` | `api_key` | OpenRouter API key | — |
-| | `model` | LLM model ID | `qwen/qwen3-235b-a22b` |
+| | `model` | LLM model ID | `moonshotai/kimi-k2.6` |
 | | `base_url` | API base URL override | `https://openrouter.ai/api/v1` |
 | `[sandbox]` | `allowed_directory` | Directory for sandboxed file/command ops | `<home>/workspace` |
 | `[memory]` | `database_path` | SQLite database path | `<home>/rustfox.db` |

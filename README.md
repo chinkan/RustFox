@@ -19,7 +19,7 @@ A self-hosted, agentic Telegram AI assistant written in Rust, powered by OpenRou
 
 | | |
 |---|---|
-| 🤖 **AI Agent** | OpenRouter LLM (default: `qwen/qwen3-235b-a22b`), agentic loop with tool calling, configurable max iterations |
+| 🤖 **AI Agent** | OpenRouter LLM (default: `moonshotai/kimi-k2.6`), agentic loop with tool calling, configurable max iterations |
 | 🔧 **Built-in Tools** | File read/write, command execution, file sending, task scheduling — all sandboxed |
 | 🧩 **MCP Servers** | Connect any MCP-compatible server (Git, Brave Search, GitHub, Filesystem, Threads…) |
 | 🧠 **Persistent Memory** | SQLite-backed conversation history, vector embedding search (hybrid + FTS5), RAG |
@@ -86,7 +86,7 @@ rustfox --service status
 | `telegram.bot_token` | Telegram Bot API token (from [@BotFather](https://t.me/BotFather)) |
 | `telegram.allowed_user_ids` | Comma-separated user IDs allowed to use the bot |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
-| `openrouter.model` | LLM model ID (default: `qwen/qwen3-235b-a22b`) |
+| `openrouter.model` | LLM model ID (default: `moonshotai/kimi-k2.6`) |
 | `sandbox.allowed_directory` | Directory for sandboxed file/command operations |
 | `mcp_servers` | List of MCP servers to connect (see [GUIDE.md](docs/GUIDE.md#mcp-server-integration)) |
 
