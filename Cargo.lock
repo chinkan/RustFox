@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "rustfox"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2410,6 +2410,7 @@ dependencies = [
  "futures",
  "futures-util",
  "image",
+ "include_dir",
  "infer",
  "ocrs",
  "pdf-extract",

@@ -1,6 +1,6 @@
 ---
 name: news-fetcher
-description: Fetches AI news from Gmail Google Alerts; invoke via invoke_subagent only. Returns date-prioritized list of title and url.
+description: Fetches AI news from Gmail Google Alerts; invoke via invoke_agent only. Returns date-prioritized list of title and url.
 tools: [read_skill_file, mcp_google-workspace_query_gmail_emails]
 tags: [news, gmail, subagent]
 ---

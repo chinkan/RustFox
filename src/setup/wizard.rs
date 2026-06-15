@@ -686,8 +686,8 @@ fn run_cli(config_dir: &Path) -> Result<()> {
     let user_ids = read_line("Allowed user IDs (comma-separated): ")?;
     let or_key = read_line("OpenRouter API key: ")?;
     let model = or_default(
-        read_line("Model [moonshotai/kimi-k2.5]: ")?,
-        "moonshotai/kimi-k2.5",
+        read_line("Model [moonshotai/kimi-k2.6]: ")?,
+        "moonshotai/kimi-k2.6",
     );
     let db_path = or_default(read_line("Memory DB path [rustfox.db]: ")?, "rustfox.db");
     let location = read_line("Your location (optional, e.g. Tokyo, Japan): ")?;
@@ -771,9 +771,6 @@ Be concise and helpful."""
 
 [memory]
 database_path = "{db_path}"
-
-[skills]
-directory = "skills"
 
 [general]
 {loc_line}
@@ -1074,9 +1071,11 @@ allowed_directory = "/tmp"
     }
 
     #[test]
-    fn test_skills_section_present() {
+    fn test_no_relative_skills_directory() {
         let out = cfg("t", "1", "k", "m", "/tmp", "db.db", "");
-        assert!(out.contains("[skills]"));
-        assert!(out.contains(r#"directory = "skills""#));
+        assert!(
+            !out.contains(r#"directory = "skills""#),
+            "Generated config must not hardcode a CWD-relative skills directory"
+        );
     }
 }

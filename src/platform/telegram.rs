@@ -331,34 +331,20 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     }
 
     if text == "/updateskills" || text == "/update-skills" {
-        let bundled_skills = agent.config.skills.bundled_directory.clone();
-        let bundled_agents = agent.config.agents.bundled_directory.clone();
-        let home = agent.config.resolved_home.clone();
-        let lock_for = |name: &str| -> std::path::PathBuf {
-            home.clone()
-                .map(|h| h.join(name))
-                .unwrap_or_else(|| std::path::PathBuf::from(name))
-        };
-
         let mut lines = Vec::new();
-        match crate::skills::update::update_skills(
-            &bundled_skills,
-            &agent.config.skills.directory,
-            &lock_for("skills-lock.json"),
-        )
-        .await
-        {
-            Ok(r) => lines.push(format!("Skills — {}", r.summary())),
+
+        match crate::skills::embed::overwrite_skills(&agent.config.skills.directory).await {
+            Ok(r) => lines.push(format!(
+                "Skills — {} written, {} backed up.",
+                r.written, r.backed_up
+            )),
             Err(e) => lines.push(format!("Skills update failed: {e}")),
         }
-        match crate::skills::update::update_skills(
-            &bundled_agents,
-            &agent.config.agents.directory,
-            &lock_for("agents-lock.json"),
-        )
-        .await
-        {
-            Ok(r) => lines.push(format!("Agents — {}", r.summary())),
+        match crate::skills::embed::overwrite_agents(&agent.config.agents.directory).await {
+            Ok(r) => lines.push(format!(
+                "Agents — {} written, {} backed up.",
+                r.written, r.backed_up
+            )),
             Err(e) => lines.push(format!("Agents update failed: {e}")),
         }
 

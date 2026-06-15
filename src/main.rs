@@ -13,7 +13,7 @@ use rustfox::platform;
 use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
 use rustfox::setup;
-use rustfox::skills::{loader::load_skills_from_dir, SkillSource};
+use rustfox::skills::loader::load_skills_from_dir;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -112,26 +112,14 @@ async fn main() -> Result<()> {
     let mut mcp_manager = McpManager::new();
     mcp_manager.connect_all(&mcp_server_configs).await;
 
-    // Seed bundled skills/agents into the instance home on first run.
-    // Seed bundled skills/agents into the instance home on first run.
-    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
-        &config.skills.bundled_directory,
-        &config.skills.directory,
-    )
-    .await
-    {
+    // Seed bundled skills/agents from embedded data into the home directory.
+    if let Err(e) = rustfox::skills::embed::seed_skills(&config.skills.directory).await {
         warn!("Skill seeding failed: {e}");
     }
-    if let Err(e) = rustfox::skills::seed::seed_dir_if_empty(
-        &config.agents.bundled_directory,
-        &config.agents.directory,
-    )
-    .await
-    {
+    if let Err(e) = rustfox::skills::embed::seed_agents(&config.agents.directory).await {
         warn!("Agent seeding failed: {e}");
     }
-    // Write the home-side lock so /update-skills can diff later (only when seeded
-    // into the home and a lock does not already exist).
+    // Write a home-side lock recording content hashes for future diff/audit.
     if let Some(home) = &config.resolved_home {
         let seed_lock = |lock_name: &str, dir: &std::path::Path| {
             let lock_path = home.join(lock_name);
@@ -149,48 +137,14 @@ async fn main() -> Result<()> {
         seed_lock("agents-lock.json", &config.agents.directory);
     }
 
-    // Load skills from instance and bundled directories (instance shadows bundled)
-    let mut skills = load_skills_from_dir(
-        &config.skills.directory,
-        SkillSource::Instance,
-        config.skills.directory.clone(),
-    )
-    .await?;
-    let bundled_skills = load_skills_from_dir(
-        &config.skills.bundled_directory,
-        SkillSource::Bundled,
-        config.skills.bundled_directory.clone(),
-    )
-    .await?;
-    for skill in bundled_skills.list() {
-        skills.register(
-            skill.clone(),
-            SkillSource::Bundled,
-            config.skills.bundled_directory.clone(),
-        );
-    }
+    // Load skills from the instance directory.
+    let skills =
+        load_skills_from_dir(&config.skills.directory, config.skills.directory.clone()).await?;
     info!("  Skills: {}", skills.len());
 
-    // Load agents from instance and bundled directories (instance shadows bundled)
-    let mut agents = load_skills_from_dir(
-        &config.agents.directory,
-        SkillSource::Instance,
-        config.agents.directory.clone(),
-    )
-    .await?;
-    let bundled_agents = load_skills_from_dir(
-        &config.agents.bundled_directory,
-        SkillSource::Bundled,
-        config.agents.bundled_directory.clone(),
-    )
-    .await?;
-    for agent in bundled_agents.list() {
-        agents.register(
-            agent.clone(),
-            SkillSource::Bundled,
-            config.agents.bundled_directory.clone(),
-        );
-    }
+    // Load agents from the instance directory.
+    let agents =
+        load_skills_from_dir(&config.agents.directory, config.agents.directory.clone()).await?;
     info!("  Agents: {}", agents.len());
 
     // Create ScheduledTaskStore sharing the existing SQLite connection
