@@ -423,6 +423,84 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         return Ok(());
     }
 
+    // Combined parse_command dispatch for /self-upgrade and /models.
+    if let Some((cmd, arg)) = parse_command(&text) {
+        match cmd.as_str() {
+            "self-upgrade" | "selfupgrade" => {
+                let branch = if arg.is_empty() { "main" } else { &arg };
+
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<String>();
+
+                let sent = bot
+                    .send_message(msg.chat.id, "🔄 Starting self-upgrade...")
+                    .await?;
+
+                let bot_clone = bot.clone();
+                let bot_progress = bot.clone();
+                let chat_id = msg.chat.id;
+                let msg_id = sent.id;
+                let branch_owned = branch.to_string();
+
+                let progress_handle = tokio::spawn(async move {
+                    let mut buffer = String::from("🔄 Self-upgrading...\n");
+                    while let Some(step) = progress_rx.recv().await {
+                        buffer.push_str(&format!("{}\n", step));
+                        if buffer.len() > 3500 {
+                            let suffix = "\n...(truncated)";
+                            let trunc = buffer.len() - 3500 + suffix.len();
+                            buffer =
+                                format!("...{}", &buffer[buffer.len().saturating_sub(trunc)..]);
+                            buffer.push_str(suffix);
+                        }
+                        let _ = bot_progress
+                            .edit_message_text(chat_id, msg_id, &buffer)
+                            .await;
+                    }
+                });
+
+                let result =
+                    crate::learning::self_upgrade(&branch_owned, "auto", Some(progress_tx)).await;
+
+                // Wait for progress to be fully displayed.
+                progress_handle.await.ok();
+
+                match result {
+                    Ok(log) => {
+                        let display = if log.len() > 3500 {
+                            format!("{}...\n(truncated)", &log[..3500])
+                        } else {
+                            log
+                        };
+                        bot_clone
+                            .edit_message_text(
+                                chat_id,
+                                msg_id,
+                                format!("✅ Upgrade successful!\n\n{}", display),
+                            )
+                            .await
+                            .ok();
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let _ = crate::learning::restart_bot();
+                    }
+                    Err(e) => {
+                        bot_clone
+                            .edit_message_text(
+                                chat_id,
+                                msg_id,
+                                format!("❌ Upgrade failed:\n{}", e),
+                            )
+                            .await
+                            .ok();
+                    }
+                }
+
+                return Ok(());
+            }
+            _ => {} // ignore unknown commands for now
+        }
+    }
+
     // Send "typing" indicator
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await
@@ -662,6 +740,23 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await?;
     }
     // Success: response already delivered via streaming
+
+    // Check if a self-upgrade tool call requested a restart.
+    if agent
+        .restart_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        agent
+            .restart_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        let _ = bot
+            .send_message(msg.chat.id, "🔄 Self-upgrade complete. Restarting...")
+            .await;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = crate::learning::restart_bot();
+        });
+    }
 
     Ok(())
 }
