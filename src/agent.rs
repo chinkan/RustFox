@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info, warn};
 
@@ -52,6 +53,9 @@ pub struct Agent {
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
     pub langsmith: Arc<LangSmithClient>,
+    pub restart_pending: AtomicBool,
+    pub current_model: tokio::sync::RwLock<String>,
+    pub config_path: PathBuf,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -105,8 +109,10 @@ impl Agent {
         self_weak: Weak<Agent>,
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
         langsmith: Arc<LangSmithClient>,
+        config_path: PathBuf,
     ) -> Self {
         let llm = LlmClient::new(config.openrouter.clone());
+        let initial_model = config.openrouter.model.clone();
         Self {
             llm,
             config,
@@ -120,6 +126,9 @@ impl Agent {
             self_weak,
             job_tx,
             langsmith,
+            restart_pending: AtomicBool::new(false),
+            current_model: tokio::sync::RwLock::new(initial_model),
+            config_path,
         }
     }
 
@@ -257,6 +266,41 @@ impl Agent {
                 self.agents.read().await.len(),
             )
         }
+    }
+
+    /// Change the active model and persist to config.toml.
+    pub async fn set_model(&self, model_id: &str) -> anyhow::Result<()> {
+        if model_id.is_empty() {
+            anyhow::bail!("Model ID cannot be empty");
+        }
+
+        let content = tokio::fs::read_to_string(&self.config_path)
+            .await
+            .context("Failed to read config.toml")?;
+        let mut doc: toml::value::Table =
+            toml::from_str(&content).context("Failed to parse config.toml")?;
+
+        let openrouter_entry = doc
+            .entry("openrouter")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(table) = openrouter_entry.as_table_mut() {
+            table.insert(
+                "model".to_string(),
+                toml::Value::String(model_id.to_string()),
+            );
+        }
+
+        let new_content =
+            toml::to_string_pretty(&doc).context("Failed to serialize config.toml")?;
+        tokio::fs::write(&self.config_path, &new_content)
+            .await
+            .with_context(|| format!("Failed to write {}", self.config_path.display()))?;
+
+        let mut current = self.current_model.write().await;
+        *current = model_id.to_string();
+
+        tracing::info!(model = %model_id, "Model changed and persisted");
+        Ok(())
     }
 
     /// Process an incoming message and return the response text
@@ -554,8 +598,11 @@ impl Agent {
                 });
 
                 // Call LLM with prepared prompt
-                let completion_result =
-                    self.llm.chat_completion(&prompt.messages, &all_tools).await;
+                let model = self.current_model.read().await.clone();
+                let completion_result = self
+                    .llm
+                    .chat_completion_with_model(&prompt.messages, &all_tools, &model)
+                    .await;
 
                 // Handle LLM transport/API errors
                 let completion = match completion_result {
@@ -2508,7 +2555,10 @@ impl Agent {
                 info!("Self-update requested: branch '{}'", branch);
 
                 match crate::learning::self_upgrade(&branch, "auto", None).await {
-                    Ok(log) => log,
+                    Ok(log) => {
+                        self.restart_pending.store(true, Ordering::Release);
+                        log
+                    }
                     Err(e) => format!("Self-update failed: {:#}", e),
                 }
             }

@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
             weak.clone(),
             job_tx,
             Arc::clone(&langsmith),
+            config_path.clone(),
         )
     });
 
