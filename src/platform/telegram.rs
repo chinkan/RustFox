@@ -84,6 +84,11 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
         BotCommand::new("skills", "List loaded skills"),
         BotCommand::new("verbose", "Toggle tool-call progress display"),
         BotCommand::new("queryrewrite", "Toggle query rewriting for memory search"),
+        BotCommand::new(
+            "selfupgrade",
+            "Upgrade the bot to the latest version (source or release binary)",
+        ),
+        BotCommand::new("models", "Browse and change the OpenRouter model"),
     ]
 }
 
