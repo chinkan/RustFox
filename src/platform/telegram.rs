@@ -220,6 +220,125 @@ fn is_verbose_enabled(value: Option<&str>) -> bool {
     value.map(|v| v == "true").unwrap_or(false)
 }
 
+/// Shared model search logic: fetch models, try exact match, fall back to fuzzy search,
+/// show top 5 results as inline keyboard buttons.
+async fn handle_model_search(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    query: &str,
+) -> ResponseResult<()> {
+    let models = match agent.llm.fetch_models().await {
+        Ok(list) => list,
+        Err(e) => {
+            bot.send_message(
+                chat_id,
+                escape_text(&format!("Failed to fetch model list: {:#}", e)),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Try exact match first.
+    if let Some(model) = models.iter().find(|m| m.id == query) {
+        match agent.set_model(&model.id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(
+                    chat_id,
+                    escape_text(&format!("Failed to save model: {:#}", e)),
+                )
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Fuzzy search: case-insensitive match on id or name.
+    let q = query.to_lowercase();
+    let mut matches: Vec<&ModelInfo> = models
+        .iter()
+        .filter(|m| m.id.to_lowercase().contains(&q) || m.name.to_lowercase().contains(&q))
+        .collect();
+    matches.sort_by(|a, b| {
+        let a_name = a.name.to_lowercase().contains(&q);
+        let b_name = b.name.to_lowercase().contains(&q);
+        b_name.cmp(&a_name).then(a.id.cmp(&b.id))
+    });
+    matches.truncate(10);
+
+    if matches.is_empty() {
+        bot.send_message(
+            chat_id,
+            escape_text(&format!(
+                "No models found matching '{}'. Try a different search term.",
+                query
+            )),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+        return Ok(());
+    }
+
+    if matches.len() == 1 {
+        let model = &matches[0];
+        match agent.set_model(&model.id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(
+                    chat_id,
+                    escape_text(&format!("Failed to save model: {:#}", e)),
+                )
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Show top 5 results with inline keyboard buttons.
+    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+    let mut keyboard: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for model in matches.iter().take(5) {
+        let label = if model.name.len() > 35 {
+            format!("{}…", &model.name[..35])
+        } else {
+            model.name.clone()
+        };
+        keyboard.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("model_select:{}", model.id),
+        )]);
+    }
+    keyboard.push(vec![InlineKeyboardButton::callback(
+        "❌ Cancel",
+        "model_select:cancel",
+    )]);
+
+    let reply = format!(
+        "Found {} models matching '{}'. Select one:",
+        matches.len(),
+        query
+    );
+    bot.send_message(chat_id, &reply)
+        .reply_markup(InlineKeyboardMarkup::new(keyboard))
+        .await?;
+    Ok(())
+}
+
 async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseResult<()> {
     let user = match msg.from.as_ref() {
         Some(user) => user,
@@ -280,6 +399,29 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Skip if there is nothing to process
     if text.is_empty() && attachments.is_empty() {
         return Ok(());
+    }
+
+    // Check if user is in model-search-pending state (tapped "Search models" button).
+    let search_pending = agent
+        .memory
+        .recall("settings", &format!("model_search_pending_{}", user_id))
+        .await
+        .unwrap_or(None)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if search_pending && !text.is_empty() && !text.starts_with('/') {
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("model_search_pending_{}", user_id),
+                "false",
+                None,
+            )
+            .await
+            .ok();
+        // Treat message as a model search query — dispatch to shared model search logic.
+        return handle_model_search(bot, msg.chat.id, &agent, &text).await;
     }
 
     info!(
@@ -531,131 +673,27 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 if arg.is_empty() {
                     let current = agent.current_model.read().await;
                     let reply = format!(
-                        "Current model: `{}`\n\nWhat model would you like to switch to?\n\
-                         Send `/models <model-id>` for exact match, or `/models <keyword>` \
-                         to search by name.\nExample: `/models claude`",
+                        "Current model: `{}`\n\nTap the button below to search for a model.",
                         *current
                     );
-                    bot.send_message(msg.chat.id, escape_text(&reply))
-                        .parse_mode(ParseMode::MarkdownV2)
+                    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+                    let keyboard = InlineKeyboardMarkup::new(vec![
+                        vec![InlineKeyboardButton::callback(
+                            "🔍 Search models",
+                            "model_search_prompt",
+                        )],
+                        vec![InlineKeyboardButton::callback(
+                            "❌ Cancel",
+                            "model_select:cancel",
+                        )],
+                    ]);
+                    bot.send_message(msg.chat.id, &reply)
+                        .reply_markup(keyboard)
                         .await?;
                     return Ok(());
                 }
 
-                let models = match agent.llm.fetch_models().await {
-                    Ok(list) => list,
-                    Err(e) => {
-                        bot.send_message(
-                            msg.chat.id,
-                            escape_text(&format!("Failed to fetch model list: {:#}", e)),
-                        )
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .await?;
-                        return Ok(());
-                    }
-                };
-
-                // Try exact match first.
-                if let Some(model) = models.iter().find(|m| m.id == arg) {
-                    match agent.set_model(&model.id).await {
-                        Ok(()) => {
-                            let reply =
-                                format!("✅ Model changed to `{}` ({})", model.id, model.name);
-                            bot.send_message(msg.chat.id, escape_text(&reply))
-                                .parse_mode(ParseMode::MarkdownV2)
-                                .await?;
-                        }
-                        Err(e) => {
-                            bot.send_message(
-                                msg.chat.id,
-                                escape_text(&format!("Failed to save model: {:#}", e)),
-                            )
-                            .parse_mode(ParseMode::MarkdownV2)
-                            .await?;
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Fuzzy search: case-insensitive match on id or name.
-                let query = arg.to_lowercase();
-                let mut matches: Vec<&ModelInfo> = models
-                    .iter()
-                    .filter(|m| {
-                        m.id.to_lowercase().contains(&query)
-                            || m.name.to_lowercase().contains(&query)
-                    })
-                    .collect();
-                matches.sort_by(|a, b| {
-                    let a_name = a.name.to_lowercase().contains(&query);
-                    let b_name = b.name.to_lowercase().contains(&query);
-                    b_name.cmp(&a_name).then(a.id.cmp(&b.id))
-                });
-                matches.truncate(10);
-
-                if matches.is_empty() {
-                    bot.send_message(
-                        msg.chat.id,
-                        escape_text(&format!(
-                            "No models found matching '{}'. Try a different search term.",
-                            arg
-                        )),
-                    )
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .await?;
-                    return Ok(());
-                }
-
-                if matches.len() == 1 {
-                    let model = &matches[0];
-                    match agent.set_model(&model.id).await {
-                        Ok(()) => {
-                            let reply =
-                                format!("✅ Model changed to `{}` ({})", model.id, model.name);
-                            bot.send_message(msg.chat.id, escape_text(&reply))
-                                .parse_mode(ParseMode::MarkdownV2)
-                                .await?;
-                        }
-                        Err(e) => {
-                            bot.send_message(
-                                msg.chat.id,
-                                escape_text(&format!("Failed to save model: {:#}", e)),
-                            )
-                            .parse_mode(ParseMode::MarkdownV2)
-                            .await?;
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Show top 5 results with inline keyboard buttons.
-                use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-                let mut keyboard: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-                for model in matches.iter().take(5) {
-                    let label = if model.name.len() > 35 {
-                        format!("{}…", &model.name[..35])
-                    } else {
-                        model.name.clone()
-                    };
-                    keyboard.push(vec![InlineKeyboardButton::callback(
-                        label,
-                        format!("model_select:{}", model.id),
-                    )]);
-                }
-                keyboard.push(vec![InlineKeyboardButton::callback(
-                    "❌ Cancel",
-                    "model_select:cancel",
-                )]);
-
-                let reply = format!(
-                    "Found {} models matching '{}'. Select one:",
-                    matches.len(),
-                    arg
-                );
-                bot.send_message(msg.chat.id, &reply)
-                    .reply_markup(InlineKeyboardMarkup::new(keyboard))
-                    .await?;
-                return Ok(());
+                return handle_model_search(bot, msg.chat.id, &agent, &arg).await;
             }
             _ => {} // ignore unknown commands for now
         }
@@ -935,6 +973,26 @@ async fn handle_model_callback(
     let msg = q.regular_message().cloned();
 
     bot.answer_callback_query(callback_id).await?;
+
+    if data == "model_search_prompt" {
+        if let Some(m) = msg {
+            let prompt = "Send me a model name or ID to search for. Examples: claude, kimi, gpt, or a full model ID like openrouter/o3-mini.";
+            bot.edit_message_text(m.chat.id, m.id, prompt).await?;
+        }
+        // Store pending search state for this user.
+        let user_id = q.from.id.0.to_string();
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("model_search_pending_{}", user_id),
+                "true",
+                None,
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
 
     if data == "model_select:cancel" {
         if let Some(m) = msg {
