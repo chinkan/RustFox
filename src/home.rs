@@ -104,7 +104,9 @@ pub struct ResolvedPaths {
     pub skills: PathBuf,
     pub agents: PathBuf,
     pub artifacts: PathBuf,
-    pub user_model: PathBuf,
+    pub soul: PathBuf,       // SOUL.md
+    pub agents_md: PathBuf,  // AGENTS.md
+    pub user_model: PathBuf, // USER.md
 }
 
 pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
@@ -119,7 +121,15 @@ pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
     }
-    for file in [&paths.database, &paths.user_model] {
+    // Soul files live directly in the home dir; their parent is `home`, which
+    // is already created above. Only the database file lives in a separate
+    // subdirectory we need to make sure exists.
+    for file in [
+        &paths.database,
+        &paths.soul,
+        &paths.agents_md,
+        &paths.user_model,
+    ] {
         if let Some(parent) = file.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
@@ -273,7 +283,9 @@ mod tests {
             skills: home.join("skills"),
             agents: home.join("agents"),
             artifacts: home.join("artifacts"),
-            user_model: home.join("user_model.md"),
+            soul: home.join("SOUL.md"),
+            agents_md: home.join("AGENTS.md"),
+            user_model: home.join("USER.md"),
         };
         ensure_dirs(&paths).unwrap();
         assert!(paths.home.is_dir());
@@ -281,8 +293,11 @@ mod tests {
         assert!(paths.skills.is_dir());
         assert!(paths.agents.is_dir());
         assert!(paths.artifacts.is_dir());
-        // db + user_model are files, but their parent dirs must exist
+        // Soul files live directly in the home dir (parent == home);
+        // the database lives in home/ as well, so its parent must also exist.
         assert!(paths.database.parent().unwrap().is_dir());
+        assert!(paths.soul.parent().unwrap().is_dir());
+        assert!(paths.agents_md.parent().unwrap().is_dir());
         assert!(paths.user_model.parent().unwrap().is_dir());
     }
 

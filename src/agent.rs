@@ -191,8 +191,15 @@ impl Agent {
     async fn build_system_context(&self) -> String {
         let mut ctx = String::new();
 
+        let user_model_path = self
+            .config
+            .resolved_home
+            .as_ref()
+            .map(|h| h.join("USER.md"))
+            .unwrap_or_default();
         let user_model =
-            crate::learning::read_user_model(&self.config.learning.user_model_path).await;
+            crate::learning::read_user_model(&user_model_path).await;
+        // TODO: This whole block will be replaced by Task 4 (soul files in build_system_context)
         if !user_model.is_empty() {
             ctx.push_str(
                 "\n\n# User Model\n\n\
@@ -986,13 +993,19 @@ impl Agent {
                         msg_count
                     );
                     if let Some(agent) = self.self_weak.upgrade() {
+                        let user_model_path = self
+                            .config
+                            .resolved_home
+                            .as_ref()
+                            .map(|h| h.join("USER.md"))
+                            .unwrap_or_default();
                         tokio::spawn(async move {
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(60),
                                 crate::learning::update_user_model(
                                     &agent.llm,
                                     &agent.memory,
-                                    &agent.config.learning.user_model_path,
+                                    &user_model_path,
                                 ),
                             )
                             .await

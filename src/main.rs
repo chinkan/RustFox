@@ -257,7 +257,8 @@ async fn main() -> Result<()> {
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
-        config.learning.user_model_path.clone(),
+        // TEMPORARY: will be replaced with `home` in Task 6
+        config.resolved_home.clone().unwrap_or_default().join("USER.md"),
     )
     .await?;
     scheduler.start().await?;

@@ -243,9 +243,6 @@ pub struct LangSmithConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LearningConfig {
-    /// Path to the user model file (Honcho-style USER.md).
-    #[serde(default)]
-    pub user_model_path: PathBuf,
     /// Whether post-task skill extraction is enabled.
     #[serde(default = "default_true")]
     pub skill_extraction_enabled: bool,
@@ -411,7 +408,6 @@ fn default_user_model_cron() -> String {
 
 fn default_learning_config() -> LearningConfig {
     LearningConfig {
-        user_model_path: PathBuf::new(),
         skill_extraction_enabled: true,
         skill_extraction_threshold: default_skill_extraction_threshold(),
         user_model_update_interval: default_user_model_update_interval(),
@@ -481,11 +477,22 @@ impl Config {
             &self.supervisor.artifacts_dir,
             "artifacts",
         );
-        let user_model = resolve_one(
-            "learning.user_model_path",
-            &self.learning.user_model_path,
-            "user_model.md",
-        );
+
+        // Soul files are hardcoded siblings of the home dir; not configurable.
+        let soul = home.join("SOUL.md");
+        let agents_md = home.join("AGENTS.md");
+        let user_model = home.join("USER.md");
+
+        // Migration: copy old user_model.md to USER.md if the old name is
+        // present and the new one is not. This keeps existing user data
+        // alive after removing the `learning.user_model_path` config key.
+        let old_user_model = home.join("user_model.md");
+        if old_user_model.exists() && !user_model.exists() {
+            if let Ok(content) = std::fs::read_to_string(&old_user_model) {
+                std::fs::write(&user_model, &content).ok();
+                tracing::info!("Migrated old user_model.md to USER.md");
+            }
+        }
 
         let paths = ResolvedPaths {
             home: home.clone(),
@@ -494,6 +501,8 @@ impl Config {
             skills: skills.clone(),
             agents: agents.clone(),
             artifacts: artifacts.clone(),
+            soul: soul.clone(),
+            agents_md: agents_md.clone(),
             user_model: user_model.clone(),
         };
         ensure_dirs(&paths)?;
@@ -503,7 +512,6 @@ impl Config {
         self.skills.directory = skills;
         self.agents.directory = agents;
         self.supervisor.artifacts_dir = artifacts;
-        self.learning.user_model_path = user_model;
         self.resolved_home = Some(home);
 
         Ok(warnings)
@@ -556,7 +564,6 @@ mod tests {
         assert_eq!(cfg.skills.directory, home.join("skills"));
         assert_eq!(cfg.agents.directory, home.join("agents"));
         assert_eq!(cfg.supervisor.artifacts_dir, home.join("artifacts"));
-        assert_eq!(cfg.learning.user_model_path, home.join("user_model.md"));
         assert!(warnings.is_empty());
     }
 
