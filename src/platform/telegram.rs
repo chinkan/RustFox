@@ -531,10 +531,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 if arg.is_empty() {
                     let current = agent.current_model.read().await;
                     let reply = format!(
-                        "Current model: `{}`\n\nTo change model, use:\n\
-                         `/models <model-id>` — exact model ID\n\
-                         `/models <keyword>` — search by name\n\
-                         Example: `/models claude` to search for Claude models",
+                        "Current model: `{}`\n\nWhat model would you like to switch to?\n\
+                         Send `/models <model-id>` for exact match, or `/models <keyword>` \
+                         to search by name.\nExample: `/models claude`",
                         *current
                     );
                     bot.send_message(msg.chat.id, escape_text(&reply))
