@@ -172,16 +172,36 @@ pub async fn run(
         Err(e) => warn!(error = %e, "Failed to register Telegram commands"),
     }
 
-    let handler = Update::filter_message()
-        .filter_map(move |msg: Message| {
-            let user = msg.from.as_ref()?;
-            if allowed_user_ids.contains(&user.id.0) {
-                Some(msg)
-            } else {
-                None
+    let message_handler = Update::filter_message()
+        .filter_map({
+            let allowed = allowed_user_ids.clone();
+            move |msg: Message| {
+                let user = msg.from.as_ref()?;
+                if allowed.contains(&user.id.0) {
+                    Some(msg)
+                } else {
+                    None
+                }
             }
         })
         .endpoint(handle_message);
+
+    let callback_handler = Update::filter_callback_query()
+        .filter_map({
+            let allowed = allowed_user_ids.clone();
+            move |q: CallbackQuery| {
+                if allowed.contains(&q.from.id.0) {
+                    Some(q)
+                } else {
+                    None
+                }
+            }
+        })
+        .endpoint(handle_model_callback);
+
+    let handler = dptree::entry()
+        .branch(message_handler)
+        .branch(callback_handler);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![agent])
@@ -609,22 +629,32 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                     return Ok(());
                 }
 
-                let mut reply = format!("Found {} models matching '{}':\n\n", matches.len(), arg);
-                for model in &matches {
-                    reply.push_str(&format!(
-                        "`{}` — {} ({} context)\n",
-                        model.id,
-                        model.name,
-                        if model.context_length > 0 {
-                            format!("{}K", model.context_length / 1024)
-                        } else {
-                            "??".to_string()
-                        }
-                    ));
+                // Show top 5 results with inline keyboard buttons.
+                use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+                let mut keyboard: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+                for model in matches.iter().take(5) {
+                    let label = if model.name.len() > 35 {
+                        format!("{}…", &model.name[..35])
+                    } else {
+                        model.name.clone()
+                    };
+                    keyboard.push(vec![InlineKeyboardButton::callback(
+                        label,
+                        format!("model_select:{}", model.id),
+                    )]);
                 }
-                reply.push_str("\nSelect by typing: `/models <model-id>`");
-                bot.send_message(msg.chat.id, escape_text(&reply))
-                    .parse_mode(ParseMode::MarkdownV2)
+                keyboard.push(vec![InlineKeyboardButton::callback(
+                    "❌ Cancel",
+                    "model_select:cancel",
+                )]);
+
+                let reply = format!(
+                    "Found {} models matching '{}'. Select one:",
+                    matches.len(),
+                    arg
+                );
+                bot.send_message(msg.chat.id, &reply)
+                    .reply_markup(InlineKeyboardMarkup::new(keyboard))
                     .await?;
                 return Ok(());
             }
@@ -887,6 +917,49 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let _ = crate::learning::restart_bot();
         });
+    }
+
+    Ok(())
+}
+
+/// Handle callback queries from inline keyboard buttons (e.g. model selection).
+async fn handle_model_callback(
+    bot: Bot,
+    q: CallbackQuery,
+    agent: Arc<Agent>,
+) -> ResponseResult<()> {
+    let callback_id = q.id.clone();
+    let data = match q.data {
+        Some(ref d) => d.clone(),
+        None => return Ok(()),
+    };
+    let msg = q.regular_message().cloned();
+
+    bot.answer_callback_query(callback_id).await?;
+
+    if data == "model_select:cancel" {
+        if let Some(m) = msg {
+            bot.edit_message_text(m.chat.id, m.id, "❌ Model selection cancelled.")
+                .await?;
+        }
+        return Ok(());
+    }
+
+    if let Some(model_id) = data.strip_prefix("model_select:") {
+        match agent.set_model(model_id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}`", model_id);
+                if let Some(m) = msg {
+                    bot.edit_message_text(m.chat.id, m.id, &reply).await?;
+                }
+            }
+            Err(e) => {
+                let reply = format!("Failed to save model: {:#}", e);
+                if let Some(m) = msg {
+                    bot.edit_message_text(m.chat.id, m.id, &reply).await?;
+                }
+            }
+        }
     }
 
     Ok(())
