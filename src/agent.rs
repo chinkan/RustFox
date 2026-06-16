@@ -1869,6 +1869,30 @@ impl Agent {
         )
     }
 
+    /// Get the path for a soul file by name.
+    fn soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
+        let home = self
+            .config
+            .resolved_home()
+            .context("Home directory not resolved")?;
+        match file_name {
+            "SOUL.md" => Ok(home.join("SOUL.md")),
+            "AGENTS.md" => Ok(home.join("AGENTS.md")),
+            "USER.md" => Ok(home.join("USER.md")),
+            _ => anyhow::bail!("Invalid soul file name: {}", file_name),
+        }
+    }
+
+    /// Validate that a soul file path is within the home directory.
+    async fn validate_soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
+        let home = self
+            .config
+            .resolved_home()
+            .context("Home directory not resolved")?;
+        let path = self.soul_file_path(file_name)?;
+        tools::validate_home_path(home, &path.to_string_lossy())
+    }
+
     /// Execute a tool call by routing to the right handler
     async fn execute_tool(
         &self,
@@ -2649,6 +2673,185 @@ impl Agent {
                 {
                     Ok(msg) => msg,
                     Err(e) => format!("Error sending file: {:#}", e),
+                }
+            }
+            "read_soul_file" => {
+                let file_name = match arguments["file_name"].as_str() {
+                    Some(n) => n,
+                    None => return "Missing 'file_name'".to_string(),
+                };
+                let path = match self.validate_soul_file_path(file_name).await {
+                    Ok(p) => p,
+                    Err(e) => return format!("Invalid soul file path: {}", e),
+                };
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(content) => content,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        format!(
+                            "Soul file '{}' does not exist yet. It will be created on first update.",
+                            file_name
+                        )
+                    }
+                    Err(e) => format!("Error reading soul file: {}", e),
+                }
+            }
+            "update_soul_file" => {
+                let file_name = match arguments["file_name"].as_str() {
+                    Some(n) => n,
+                    None => return "Missing 'file_name'".to_string(),
+                };
+                let content = match arguments["content"].as_str() {
+                    Some(c) => c,
+                    None => return "Missing 'content'".to_string(),
+                };
+                let mode = arguments["mode"].as_str().unwrap_or("append");
+
+                // Null byte check
+                if content.contains('\0') {
+                    return "Content contains null bytes and was rejected.".to_string();
+                }
+
+                // Hard size limit (check first for unambiguous rejection)
+                if content.len() > 100_000 {
+                    return "Content too large (max 100KB). Please consolidate the file first."
+                        .to_string();
+                }
+                // Soft size warning
+                let size_warning = if content.len() > 50_000 {
+                    format!(
+                        "\n\n(Warning: content is {} bytes >50KB. Consider consolidating if it keeps growing.)",
+                        content.len()
+                    )
+                } else {
+                    String::new()
+                };
+
+                let path = match self.validate_soul_file_path(file_name).await {
+                    Ok(p) => p,
+                    Err(e) => return format!("Invalid soul file path: {}", e),
+                };
+
+                let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+
+                let new_content = match mode {
+                    "append" => {
+                        if existing.trim().is_empty() {
+                            // New file — create with frontmatter if not provided
+                            if content.starts_with("---") {
+                                content.to_string()
+                            } else {
+                                format!(
+                                    "---\nname: {}\nversion: 1\n---\n\n{}",
+                                    file_name.trim_end_matches(".md"),
+                                    content
+                                )
+                            }
+                        } else {
+                            if !existing.trim().starts_with("---") {
+                                return "Existing soul file has invalid format (missing frontmatter). Rejected.".to_string();
+                            }
+                            format!("{}\n{}", existing.trim_end(), content)
+                        }
+                    }
+                    "replace" => {
+                        if !content.trim().starts_with("---") {
+                            return "Replace mode requires content with YAML frontmatter"
+                                .to_string();
+                        }
+                        content.to_string()
+                    }
+                    _ => return "Invalid mode. Use 'append' or 'replace'.".to_string(),
+                };
+
+                // Validate frontmatter
+                if !crate::learning::has_valid_frontmatter(&new_content) {
+                    return "Update would produce invalid soul file (missing frontmatter). Rejected."
+                        .to_string();
+                }
+                // Verify name and version fields in frontmatter
+                if !new_content.contains("name:") || !new_content.contains("version:") {
+                    return "Update rejected: frontmatter must contain 'name' and 'version' fields."
+                        .to_string();
+                }
+
+                // Helper to append suffix to path (not with_extension, which replaces .md)
+                fn bak_path(p: &Path, suffix: &str) -> PathBuf {
+                    let mut s = p.to_string_lossy().to_string();
+                    s.push_str(suffix);
+                    PathBuf::from(s)
+                }
+
+                // Rotate backups: .bak.2→.bak.3, .bak.1→.bak.2, .bak→.bak.1, current→.bak
+                let bak_2 = bak_path(&path, ".bak.2");
+                let bak_3 = bak_path(&path, ".bak.3");
+                if bak_2.exists() {
+                    let _ = tokio::fs::rename(&bak_2, &bak_3).await;
+                }
+                let bak_1 = bak_path(&path, ".bak.1");
+                let bak_2_new = bak_path(&path, ".bak.2");
+                if bak_1.exists() {
+                    let _ = tokio::fs::rename(&bak_1, &bak_2_new).await;
+                }
+                let bak_current = bak_path(&path, ".bak");
+                let bak_1_new = bak_path(&path, ".bak.1");
+                if bak_current.exists() {
+                    let _ = tokio::fs::rename(&bak_current, &bak_1_new).await;
+                }
+                if path.exists() {
+                    let _ = tokio::fs::copy(&path, &bak_current).await;
+                }
+
+                // Write with post-write validation
+                if let Err(e) = tokio::fs::write(&path, &new_content).await {
+                    if bak_current.exists() {
+                        let _ = tokio::fs::copy(&bak_current, &path).await;
+                    }
+                    return format!("Failed to write soul file (restored from backup): {}", e);
+                }
+
+                // Read back and verify
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(read_back) if read_back == new_content => format!(
+                        "{} updated successfully. Backup at {}{}",
+                        file_name,
+                        bak_current.display(),
+                        size_warning
+                    ),
+                    Ok(_) => {
+                        if bak_current.exists() {
+                            let _ = tokio::fs::copy(&bak_current, &path).await;
+                        }
+                        "Write verification failed (content mismatch). Restored from backup."
+                            .to_string()
+                    }
+                    Err(e) => {
+                        if bak_current.exists() {
+                            let _ = tokio::fs::copy(&bak_current, &path).await;
+                        }
+                        format!("Write verification error (restored from backup): {}", e)
+                    }
+                }
+            }
+            "revert_soul_file" => {
+                let file_name = match arguments["file_name"].as_str() {
+                    Some(n) => n,
+                    None => return "Missing 'file_name'".to_string(),
+                };
+                let path = match self.validate_soul_file_path(file_name).await {
+                    Ok(p) => p,
+                    Err(e) => return format!("Invalid soul file path: {}", e),
+                };
+                let bak = {
+                    let mut s = path.to_string_lossy().to_string();
+                    s.push_str(".bak");
+                    PathBuf::from(s)
+                };
+                if !bak.exists() {
+                    return format!("No backup found for {}", file_name);
+                }
+                match tokio::fs::copy(&bak, &path).await {
+                    Ok(_) => format!("{} restored from backup.", file_name),
+                    Err(e) => format!("Failed to restore backup: {}", e),
                 }
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {

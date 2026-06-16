@@ -315,6 +315,69 @@ after successful upgrade. Use this when the user asks to update/upgrade the bot.
                 }),
             },
         },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "read_soul_file".to_string(),
+                description: "Read the full contents of a soul file (SOUL.md, AGENTS.md, or USER.md) from the home directory.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to read"
+                        }
+                    },
+                    "required": ["file_name"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_soul_file".to_string(),
+                description: "Update a soul file. Use 'append' mode to add content at the end (safe, no data loss). Use 'replace' mode to rewrite the entire file (for consolidation).".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to update"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The markdown content to append or replace with"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["append", "replace"],
+                            "description": "'append' adds content after the frontmatter; 'replace' rewrites the entire file"
+                        }
+                    },
+                    "required": ["file_name", "content", "mode"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "revert_soul_file".to_string(),
+                description: "Restore a soul file from its most recent .bak backup.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to revert"
+                        }
+                    },
+                    "required": ["file_name"]
+                }),
+            },
+        },
     ]
 }
 
@@ -715,5 +778,42 @@ mod tests {
 
         let result = validate_home_path(&home, "../outside.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builtin_tool_definitions_includes_soul_tools() {
+        let defs = builtin_tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"read_soul_file"),
+            "read_soul_file must be in builtin_tool_definitions"
+        );
+        assert!(
+            names.contains(&"update_soul_file"),
+            "update_soul_file must be in builtin_tool_definitions"
+        );
+        assert!(
+            names.contains(&"revert_soul_file"),
+            "revert_soul_file must be in builtin_tool_definitions"
+        );
+    }
+
+    #[test]
+    fn test_soul_tool_definitions_have_required_file_name_enum() {
+        let defs = builtin_tool_definitions();
+        for name in ["read_soul_file", "update_soul_file", "revert_soul_file"] {
+            let def = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            let file_name_schema = &def.function.parameters["properties"]["file_name"];
+            assert_eq!(file_name_schema["type"].as_str(), Some("string"));
+            let allowed = file_name_schema["enum"].as_array().expect("enum array");
+            let allowed_strs: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+            assert!(allowed_strs.contains(&"SOUL.md"));
+            assert!(allowed_strs.contains(&"AGENTS.md"));
+            assert!(allowed_strs.contains(&"USER.md"));
+        }
     }
 }

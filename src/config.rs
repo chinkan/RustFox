@@ -421,6 +421,14 @@ impl Config {
         self.general.as_ref().and_then(|g| g.location.as_deref())
     }
 
+    /// Resolved home directory (set by `resolve()`). Returns `None` before
+    /// `resolve()` has been called or if the home directory could not be
+    /// resolved. Used by soul file handlers to scope file access to the
+    /// RustFox home (NOT the sandbox — soul files live in the home parent).
+    pub fn resolved_home(&self) -> Option<&PathBuf> {
+        self.resolved_home.as_ref()
+    }
+
     /// Maximum agent loop iterations (from [agent] max_iterations, default 25).
     pub fn max_iterations(&self) -> u32 {
         self.agent.max_iterations
@@ -546,6 +554,31 @@ mod tests {
             [openrouter]
             api_key = "key"
         "#
+    }
+
+    #[test]
+    fn resolved_home_returns_none_before_resolve() {
+        let cfg: Config = toml::from_str(base_toml()).unwrap();
+        assert!(
+            cfg.resolved_home().is_none(),
+            "resolved_home() should return None before resolve() runs"
+        );
+    }
+
+    #[test]
+    fn resolved_home_returns_some_after_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        cfg.resolve().unwrap();
+        let resolved = cfg
+            .resolved_home()
+            .expect("resolved_home() should be Some after resolve()");
+        assert_eq!(resolved, &home);
     }
 
     #[test]

@@ -868,7 +868,7 @@ fn strip_code_fences(s: &str) -> String {
 
 /// Return `true` if `content` has a valid YAML frontmatter block, i.e. it
 /// starts with `---` and contains a second `---` delimiter on its own line.
-fn has_valid_frontmatter(content: &str) -> bool {
+pub fn has_valid_frontmatter(content: &str) -> bool {
     let trimmed = content.trim();
     let mut lines = trimmed.lines();
     // The very first line must be exactly "---".
