@@ -662,7 +662,10 @@ pub async fn self_upgrade(
             .context("self_update failed")?;
 
             if update_result.updated() {
-                log.push_str(&format!("→ Updated to version: {}\n", update_result.version()));
+                log.push_str(&format!(
+                    "→ Updated to version: {}\n",
+                    update_result.version()
+                ));
             } else {
                 log.push_str(&format!(
                     "→ Already up to date ({})\n",
