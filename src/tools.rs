@@ -233,14 +233,23 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
-                name: "self_update_to_branch".to_string(),
-                description: "Update the bot to a specific git branch and rebuild. Runs: git fetch, git checkout <branch>, git pull, cargo build --release. Use for development without manual SSH. The bot should be restarted after a successful build.".to_string(),
+                name: "self_upgrade".to_string(),
+                description: "Upgrade the bot to the latest version. \
+Auto-detects whether running from source code (git pull + cargo build --release) \
+or from a pre-built release binary (downloads latest from GitHub). If running as \
+a systemd/launchd service, re-registers the service unit. Restarts the bot \
+after successful upgrade. Use this when the user asks to update/upgrade the bot.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "branch": {
                             "type": "string",
-                            "description": "Git branch to update to (default: 'main')"
+                            "description": "Git branch to build from (source mode only, default: 'main')"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "source", "release"],
+                            "description": "Force a specific upgrade mode (default: 'auto')"
                         }
                     },
                     "required": []
