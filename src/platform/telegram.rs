@@ -8,6 +8,7 @@ use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
 use crate::agent::Agent;
+use crate::llm::ModelInfo;
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
@@ -495,6 +496,127 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                     }
                 }
 
+                return Ok(());
+            }
+            "models" => {
+                if arg.is_empty() {
+                    let current = agent.current_model.read().await;
+                    let reply = format!(
+                        "Current model: `{}`\n\nTo change model, use:\n\
+                         `/models <model-id>` — exact model ID\n\
+                         `/models <keyword>` — search by name\n\
+                         Example: `/models claude` to search for Claude models",
+                        *current
+                    );
+                    bot.send_message(msg.chat.id, escape_text(&reply))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                    return Ok(());
+                }
+
+                let models = match agent.llm.fetch_models().await {
+                    Ok(list) => list,
+                    Err(e) => {
+                        bot.send_message(
+                            msg.chat.id,
+                            escape_text(&format!("Failed to fetch model list: {:#}", e)),
+                        )
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                        return Ok(());
+                    }
+                };
+
+                // Try exact match first.
+                if let Some(model) = models.iter().find(|m| m.id == arg) {
+                    match agent.set_model(&model.id).await {
+                        Ok(()) => {
+                            let reply =
+                                format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                            bot.send_message(msg.chat.id, escape_text(&reply))
+                                .parse_mode(ParseMode::MarkdownV2)
+                                .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                escape_text(&format!("Failed to save model: {:#}", e)),
+                            )
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Fuzzy search: case-insensitive match on id or name.
+                let query = arg.to_lowercase();
+                let mut matches: Vec<&ModelInfo> = models
+                    .iter()
+                    .filter(|m| {
+                        m.id.to_lowercase().contains(&query)
+                            || m.name.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                matches.sort_by(|a, b| {
+                    let a_name = a.name.to_lowercase().contains(&query);
+                    let b_name = b.name.to_lowercase().contains(&query);
+                    b_name.cmp(&a_name).then(a.id.cmp(&b.id))
+                });
+                matches.truncate(10);
+
+                if matches.is_empty() {
+                    bot.send_message(
+                        msg.chat.id,
+                        escape_text(&format!(
+                            "No models found matching '{}'. Try a different search term.",
+                            arg
+                        )),
+                    )
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+                    return Ok(());
+                }
+
+                if matches.len() == 1 {
+                    let model = &matches[0];
+                    match agent.set_model(&model.id).await {
+                        Ok(()) => {
+                            let reply =
+                                format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                            bot.send_message(msg.chat.id, escape_text(&reply))
+                                .parse_mode(ParseMode::MarkdownV2)
+                                .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                escape_text(&format!("Failed to save model: {:#}", e)),
+                            )
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                let mut reply = format!("Found {} models matching '{}':\n\n", matches.len(), arg);
+                for model in &matches {
+                    reply.push_str(&format!(
+                        "`{}` — {} ({} context)\n",
+                        model.id,
+                        model.name,
+                        if model.context_length > 0 {
+                            format!("{}K", model.context_length / 1024)
+                        } else {
+                            "??".to_string()
+                        }
+                    ));
+                }
+                reply.push_str("\nSelect by typing: `/models <model-id>`");
+                bot.send_message(msg.chat.id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
                 return Ok(());
             }
             _ => {} // ignore unknown commands for now
