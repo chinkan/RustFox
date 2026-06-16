@@ -301,7 +301,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "write_agent_file" => return "✏️ Writing agent file".to_string(),
         "spawn_agents" => return "🧬 Spawning subagents".to_string(),
         "try_new_tech" => return "🧪 Trying new tech".to_string(),
-        "self_update_to_branch" => return "🔄 Self-updating".to_string(),
+        "self_upgrade" => return "🔄 Self-upgrading".to_string(),
         "patch_skill" => return "🔧 Patching skill".to_string(),
         _ => name,
     };
