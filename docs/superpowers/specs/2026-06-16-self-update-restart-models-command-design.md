@@ -65,7 +65,7 @@ if agent.restart_pending.load(Ordering::Acquire) {
 }
 ```
 
-**In `src/setup/service.rs`:** update systemd service template from `Restart=on-failure` to `Restart=always` so that if systemd is tracking the original PID, it re-launches. (The spawned child is independent, so this is a safety net, not the primary mechanism.)
+**In `scripts/services/rustfox.service.template`:** update systemd service template from `Restart=on-failure` to `Restart=always` so that if systemd is tracking the original PID, it re-launches. (The spawned child is independent, so this is a safety net, not the primary mechanism.)
 
 ### Why Not Detect systemd?
 
@@ -78,6 +78,7 @@ The simplest universal approach: spawn the new binary as a child process before 
 | Build fails | `restart_pending` not set, normal error returned |
 | User sends another message quickly | Restart happens after first response only |
 | New binary fails to start | Old process has already exited — user starts the binary manually (or systemd restart) |
+| Spawn of new binary fails | Error propagates to caller, old process continues running, restart aborted |
 | Multiple rapid updates | Each tool call sets `restart_pending`, only the last triggers restart |
 
 ---
@@ -146,12 +147,11 @@ Add before the LLM processing section (alongside `/clear`, `/start`, etc.):
 
 **`/models`** — show current model + instructions
 **`/models <text>`** — smart dispatch:
-1. If `text == "cancel"` → clear state, return
-2. Fetch model list from OpenRouter API
-3. If exact match on `id` → save and hot-reload
-4. Otherwise → case-insensitive search `id` and `name` fields → return top 10
-5. If single result → auto-select
-6. Show results with: "To select: `/models <id>`"
+1. Fetch model list from OpenRouter API (public endpoint, no auth required)
+2. If exact match on `id` → save and hot-reload
+3. Otherwise → case-insensitive search `id` and `name` fields → return top 10
+4. If single result → auto-select
+5. Show results with: "To select: `/models <id>`"
 
 **No state tracking needed** — each `/models` invocation is self-contained. The model list is fetched fresh each time.
 
@@ -175,6 +175,20 @@ After `set_model()` returns:
 
 ---
 
+### Command Registration
+
+Register `/models` in `supported_commands()` (`src/platform/telegram.rs`) so Telegram shows it in the "/" autocomplete menu alongside `/clear`, `/tools`, `/skills`, etc.
+
+### TOML Round-Trip
+
+Config persistence uses `toml::from_str` / `toml::to_string_pretty` on the raw TOML table. Comments and formatting in `config.toml` are not preserved across round-trips. This is acceptable since `config.toml` is primarily machine-generated and the model field is a simple string value.
+
+### Background Tasks
+
+Internal LLM calls (query rewriter, summarizer, learning) use `self.llm.chat()` which reads `self.llm.config.model` directly — these are unaffected by the `/models` command and always use the original config model. This is intentional: only the main agent's interactive model is user-switchable.
+
+---
+
 ## Files Changed Summary
 
 | File | Changes |
@@ -183,7 +197,7 @@ After `set_model()` returns:
 | `src/llm.rs` | Add `ModelInfo` struct + `fetch_models()` method on `LlmClient` |
 | `src/platform/telegram.rs` | Add `/models` command handler with smart matching + restart check after `process_message` |
 | `src/main.rs` | Pass `config_path` to `Agent::new()` |
-| `src/setup/service.rs` | Update systemd template: `Restart=on-failure` → `Restart=always` |
+| `scripts/services/rustfox.service.template` | Update systemd template: `Restart=on-failure` → `Restart=always` |
 
 ## No New Dependencies
 
