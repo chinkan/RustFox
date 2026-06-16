@@ -134,7 +134,6 @@ git commit -m "feat: add ModelInfo and fetch_models to LlmClient"
 At the top of `src/learning.rs`, add:
 ```rust
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 ```
 
 - [ ] **Step 2: Add detection helpers**
@@ -253,7 +252,7 @@ pub fn restart_bot() -> anyhow::Result<()> {
 
 - [ ] **Step 3: Rewrite `self_update` into unified `self_upgrade` function**
 
-Replace the existing `self_update` function (lines 426-472) with:
+Replace the existing `self_update` function (lines 431-472) with:
 
 ```rust
 /// Unified self-upgrade: auto-detects deployment mode (source or release binary),
@@ -262,11 +261,23 @@ Replace the existing `self_update` function (lines 426-472) with:
 /// Returns a status log string. The caller should set `restart_pending` and
 /// call `restart_bot()` after the response is delivered to the user.
 ///
+/// If `progress` is `Some(tx)`, sends per-step updates for inline progress display.
+///
 /// For release binary mode, the `self_update` crate downloads the latest
 /// GitHub release matching the current platform. `branch` is ignored.
 /// For source mode, `branch` specifies which git branch to build from.
-pub async fn self_upgrade(branch: &str, mode: &str) -> Result<String> {
+pub async fn self_upgrade(
+    branch: &str,
+    mode: &str,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<String> {
     let mut log = String::new();
+    let mut prog = || {
+        let tx = progress.as_ref()?;
+        let msg = log.lines().last().unwrap_or("").to_string();
+        let _ = tx.send(msg);
+        Some(())
+    };
 
     let deployment = match mode {
         "source" => UpgradeMode::Source,
@@ -284,38 +295,45 @@ pub async fn self_upgrade(branch: &str, mode: &str) -> Result<String> {
             });
 
             // Step 0: Check for uncommitted changes.
+            log.push_str("→ Checking for uncommitted changes...\n");
+            prog();
             let status_output = run_git_command(&project_root, &["status", "--porcelain"]).await?;
             if !status_output.trim().is_empty() {
                 let stash_result = run_git_command(
                     &project_root,
                     &["stash", "push", "-m", "rustfox-auto-stash-before-update"],
                 ).await?;
-                log.push_str(&format!("⚠ Stashed uncommitted changes: {}\n", stash_result.trim()));
+                log.push_str(&format!("  ⚠ Stashed: {}\n", stash_result.trim()));
             }
 
             // Step 1: git fetch --all
             log.push_str("→ git fetch --all\n");
+            prog();
             let fetch = run_git_command(&project_root, &["fetch", "--all"]).await?;
-            log.push_str(&format!("  {}\n", fetch.trim()));
+            log.push_str(&format!("  ✓ {}\n", fetch.trim()));
 
             // Step 2: git checkout <branch>
             log.push_str(&format!("→ git checkout {}\n", branch));
+            prog();
             let checkout = run_git_command(&project_root, &["checkout", branch]).await?;
-            log.push_str(&format!("  {}\n", checkout.trim()));
+            log.push_str(&format!("  ✓ {}\n", checkout.trim()));
 
             // Step 3: git pull origin <branch>
             log.push_str(&format!("→ git pull origin {}\n", branch));
+            prog();
             let pull = run_git_command(&project_root, &["pull", "origin", branch]).await?;
-            log.push_str(&format!("  {}\n", pull.trim()));
+            log.push_str(&format!("  ✓ {}\n", pull.trim()));
 
             // Step 4: cargo build --release
             log.push_str("→ cargo build --release\n");
+            prog();
             let build = run_cargo_build(&project_root).await?;
-            log.push_str(&format!("  {}\n", build.trim()));
+            log.push_str(&format!("  ✓ {}\n", build.trim()));
 
             // Step 5: cargo install --path . (if running as service)
             if is_service_installed() {
                 log.push_str("→ cargo install --path . --force\n");
+                prog();
                 let install_output = tokio::process::Command::new("cargo")
                     .args(["install", "--path", ".", "--force"])
                     .current_dir(&project_root)
@@ -325,14 +343,16 @@ pub async fn self_upgrade(branch: &str, mode: &str) -> Result<String> {
                 let install_log = format!("{}{}",
                     String::from_utf8_lossy(&install_output.stdout),
                     String::from_utf8_lossy(&install_output.stderr));
-                log.push_str(&format!("  {}\n", install_log.trim()));
+                log.push_str(&format!("  ✓ {}\n", install_log.trim()));
             }
 
             log.push_str("✅ Build successful.");
+            prog();
         }
 
         UpgradeMode::Release => {
-            log.push_str("Mode: release binary (checking GitHub releases)\n");
+            log.push_str("Mode: release binary\n→ Checking GitHub releases...\n");
+            prog();
 
             let update_result = tokio::task::spawn_blocking(|| {
                 self_update::backends::github::Update::configure()
@@ -353,13 +373,14 @@ pub async fn self_upgrade(branch: &str, mode: &str) -> Result<String> {
                 update_result.version()
             ));
             log.push_str("✅ Download and replace successful.");
+            prog();
         }
     }
 
     // Re-register service if installed.
     if is_service_installed() {
         log.push_str("\n→ Re-registering service...\n");
-        // Run `rustfox --service install` using the current binary.
+        prog();
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rustfox"));
         let service_output = tokio::process::Command::new(&exe)
             .args(["--service", "install"])
@@ -369,10 +390,11 @@ pub async fn self_upgrade(branch: &str, mode: &str) -> Result<String> {
         let service_log = format!("{}{}",
             String::from_utf8_lossy(&service_output.stdout),
             String::from_utf8_lossy(&service_output.stderr));
-        log.push_str(&format!("  {}\n", service_log.trim()));
+        log.push_str(&format!("  ✓ {}\n", service_log.trim()));
     }
 
     log.push_str("\n✅ Upgrade complete. Restarting...");
+    prog();
     Ok(log)
 }
 
@@ -501,9 +523,8 @@ git commit -m "chore: change systemd Restart from on-failure to always"
 
 - [ ] **Step 1: Add new imports at top of agent.rs**
 
-Add to imports:
+Add to imports (note: `PathBuf` is already imported at line 2, only add what's missing):
 ```rust
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 ```
 
@@ -631,7 +652,7 @@ Replace `"self_update_to_branch" => {` with `"self_upgrade" => {`, and replace t
 
     info!("Self-upgrade requested: branch '{}', mode '{}'", branch, mode);
 
-    match crate::learning::self_upgrade(&branch, &mode).await {
+    match crate::learning::self_upgrade(&branch, &mode, None).await {
         Ok(log) => {
             self.restart_pending.store(true, Ordering::Release);
             log
@@ -706,48 +727,59 @@ if let Some((cmd, arg)) = parse_command(&text) {
     if cmd == "self-upgrade" || cmd == "selfupgrade" {
         let branch = if arg.is_empty() { "main" } else { &arg };
 
+        // Set up progress channel for per-step inline updates.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+
         let sent = bot
-            .send_message(msg.chat.id, format!("🔄 Starting self-upgrade on `{}`...", branch))
+            .send_message(msg.chat.id, "🔄 Starting self-upgrade...")
             .await?;
 
         // Run the upgrade in a background task so we can update the message.
         let bot_clone = bot.clone();
+        let bot_progress = bot.clone();
         let chat_id = msg.chat.id;
         let msg_id = sent.id;
         let branch_owned = branch.to_string();
 
-        tokio::spawn(async move {
-            let update_msg = |text: String| {
-                let b = bot_clone.clone();
-                async move {
-                    let _ = b.edit_message_text(chat_id, msg_id, &text).await;
+        // Spawn a progress listener that edits the message on each update.
+        let progress_handle = tokio::spawn(async move {
+            let mut buffer = String::from("🔄 Self-upgrading...\n");
+            while let Some(step) = progress_rx.recv().await {
+                buffer.push_str(&format!("{}\n", step));
+                // Keep message under 4000 chars.
+                if buffer.len() > 3500 {
+                    let suffix = "\n...(truncated)";
+                    let trunc = buffer.len() - 3500 + suffix.len();
+                    buffer = format!("...{}", &buffer[buffer.len().saturating_sub(trunc)..]);
+                    buffer.push_str(suffix);
                 }
-            };
-
-            update_msg(format!(
-                "🔄 Self-upgrading on `{}`...\n→ Detecting deployment mode...", branch_owned
-            )).await;
-
-            let result = crate::learning::self_upgrade(&branch_owned, "auto").await;
-
-            match result {
-                Ok(log) => {
-                    // Truncate log to fit in a single Telegram message (4096 chars).
-                    let display = if log.len() > 3500 {
-                        format!("{}...\n(truncated)", &log[..3500])
-                    } else {
-                        log
-                    };
-                    update_msg(format!("✅ Upgrade successful!\n\n{}", display)).await;
-                    // Brief delay for message delivery.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let _ = crate::learning::restart_bot();
-                }
-                Err(e) => {
-                    update_msg(format!("❌ Upgrade failed:\n{}", e)).await;
-                }
+                let _ = bot_progress.edit_message_text(chat_id, msg_id, &buffer).await;
             }
         });
+
+        // Run the upgrade.
+        let result = crate::learning::self_upgrade(&branch_owned, "auto", Some(progress_tx)).await;
+
+        // Wait for progress to be fully displayed.
+        drop(progress_rx);
+        progress_handle.await.ok();
+
+        match result {
+            Ok(log) => {
+                let display = if log.len() > 3500 {
+                    format!("{}...\n(truncated)", &log[..3500])
+                } else {
+                    log
+                };
+                bot_clone.edit_message_text(chat_id, msg_id, &format!("✅ Upgrade successful!\n\n{}", display)).await.ok();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let _ = crate::learning::restart_bot();
+            }
+            Err(e) => {
+                bot_clone.edit_message_text(chat_id, msg_id, &format!("❌ Upgrade failed:\n{}", e)).await.ok();
+            }
+        }
 
         return Ok(());
     }
@@ -790,7 +822,14 @@ git commit -m "feat: add /self-upgrade command with inline progress and restart 
 **Files:**
 - Modify: `src/platform/telegram.rs`
 
-- [ ] **Step 1: Add /models command handler**
+- [ ] **Step 1: Add ModelInfo import to telegram.rs**
+
+Add at the top of `src/platform/telegram.rs`, alongside the existing imports:
+```rust
+use crate::llm::ModelInfo;
+```
+
+- [ ] **Step 2: Add /models command handler**
 
 Add this after the `/self-upgrade` block (inserted in Task 9), but before the `// Send "typing" indicator` line:
 
@@ -934,16 +973,31 @@ Add this after the `/self-upgrade` block (inserted in Task 9), but before the `/
     }
 ```
 
-Note: The `parse_command` helper already exists in `telegram.rs:57-67`. We must ensure the `/self-upgrade` and `/models` handlers use a single `parse_command` call or pattern-match the prefix. The code above uses `parse_command(&text)` in a new if-let block. To avoid code duplication, restructure: instead of isolated `if text == "/start"` checks, the `/self-upgrade` and `/models` handlers both use `parse_command`. Keep the existing simple `==` checks for the current commands, add the `parse_command` blocks for the new ones after the existing command section.
+Note: The `parse_command` helper already exists in `telegram.rs:57-67`. The `/self-upgrade` and `/models` handlers should share a single `parse_command` dispatch block to avoid redundant parsing. Place them together after the existing command chain (before `// Send "typing" indicator`):
 
-Place the `/models` block at the same location as `/self-upgrade` (after the existing command chain, before `// Send "typing" indicator`). Both `parse_command` blocks should be inserted together.
+```rust
+// Combined parse_command dispatch for /self-upgrade and /models.
+if let Some((cmd, arg)) = parse_command(&text) {
+    match cmd.as_str() {
+        "self-upgrade" | "selfupgrade" => {
+            // ... self-upgrade handler from Task 9 ...
+        }
+        "models" => {
+            // ... models handler from Task 10 ...
+        }
+        _ => {} // ignore unknown commands
+    }
+}
+```
 
-- [ ] **Step 2: Verify cargo check passes**
+The existing simple `==` checks (`/clear`, `/start`, `/tools`, etc.) remain as-is for backward compatibility.
+
+- [ ] **Step 3: Verify cargo check passes**
 
 Run: `cargo check`
 Expected: Compilation succeeds
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/platform/telegram.rs
@@ -1001,7 +1055,7 @@ After all tasks are complete, verify:
 
 2. **No placeholders:** All code blocks are concrete.
 
-3. **Type consistency:** Function signatures match between tasks. `self_upgrade()` returns `Result<String>`, `restart_bot()` returns `Result<()>`, `set_model()` returns `Result<()>`.
+3. **Type consistency:** Function signatures match between tasks. `self_upgrade(branch, mode, Option<UnboundedSender<String>>)` returns `Result<String>`, `restart_bot()` returns `Result<()>`, `set_model(model_id)` returns `Result<()>`.
 
 4. **Run cargo clippy and cargo test:**
 
