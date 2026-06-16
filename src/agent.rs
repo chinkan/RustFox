@@ -54,6 +54,7 @@ pub struct Agent {
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
     pub langsmith: Arc<LangSmithClient>,
     pub restart_pending: AtomicBool,
+    pub soul_updated: AtomicBool,
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
 }
@@ -127,6 +128,7 @@ impl Agent {
             job_tx,
             langsmith,
             restart_pending: AtomicBool::new(false),
+            soul_updated: AtomicBool::new(false),
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
         }
@@ -168,6 +170,22 @@ impl Agent {
                 Use the feedback to continue working. You will get another iteration.\n\
              4. Only if the verifier returns PASS may you end.\n\
              5. You may also verify intermediate results during multi-step tasks."
+        );
+
+        // Soul file protocol — instruct the AI to maintain its own identity files
+        prompt.push_str(
+            "\n\n# Soul Files\n\n\
+             You maintain three soul files in your home directory:\n\
+             - SOUL.md — your identity, values, and boundaries\n\
+             - AGENTS.md — what you've learned across sessions\n\
+             - USER.md — the user's preferences and context\n\n\
+             When you discover something worth remembering:\n\
+             1. Call `update_soul_file()` during the conversation\n\
+             2. Use 'append' mode for new observations\n\
+             3. Use 'replace' mode only when consolidating\n\n\
+             If you reach your final answer and haven't updated any soul file\n\
+             but learned something significant, call `update_soul_file()` before\n\
+             giving your final response.",
         );
 
         // Append ambient system context (user model, timestamp, location).
@@ -571,6 +589,10 @@ impl Agent {
         let empty_response_retry_limit = self.config.empty_response_retry_limit();
         let mut iteration_count = 0u32;
         let mut tool_call_count = 0u32;
+
+        // Reset soul-update flag for this session
+        self.soul_updated
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         for iteration in 0..max_iterations {
             debug!(
@@ -1040,6 +1062,55 @@ impl Agent {
                                 Err(_) => warn!("Periodic user model update timed out"),
                             }
                         });
+                    }
+                }
+            }
+
+            // --- Self-learning: session-end soul reflection ---
+            if !self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
+                let reflection_prompt = vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(MessageContent::Text(
+                        "Review the conversation above. Did you learn anything about the \
+                         user or yourself that should be recorded in SOUL.md, AGENTS.md, \
+                         or USER.md? If yes, respond with EXACTLY:\n\
+                         UPDATE_SOUL: <file_name>\n\
+                         CONTENT:\n\
+                         <content to append>\n\n\
+                         If nothing worth recording, respond with: NO_UPDATE"
+                            .to_string(),
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }];
+
+                if let Ok(reflection_response) = self.llm.chat(&reflection_prompt, &[]).await {
+                    if let Some(content) = reflection_response.content {
+                        let text = content.as_text();
+                        if let Some(rest) = text.strip_prefix("UPDATE_SOUL:") {
+                            let parts: Vec<&str> = rest.splitn(2, '\n').collect();
+                            if parts.len() == 2 {
+                                let file_name = parts[0].trim();
+                                let append_content = parts[1]
+                                    .strip_prefix("CONTENT:\n")
+                                    .or_else(|| parts[1].strip_prefix("CONTENT:"))
+                                    .unwrap_or(parts[1])
+                                    .trim();
+                                let args = serde_json::json!({
+                                    "file_name": file_name,
+                                    "content": append_content,
+                                    "mode": "append"
+                                });
+                                let _ = self
+                                    .execute_tool(
+                                        "update_soul_file",
+                                        &args,
+                                        user_id,
+                                        parsed_chat_id,
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
@@ -2722,6 +2793,8 @@ impl Agent {
                 }
             }
             "update_soul_file" => {
+                self.soul_updated
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 let file_name = match arguments["file_name"].as_str() {
                     Some(n) => n,
                     None => return "Missing 'file_name'".to_string(),
