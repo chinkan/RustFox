@@ -73,7 +73,8 @@ pub fn is_service_installed() -> bool {
     {
         use std::process::Command;
         if let Ok(output) = Command::new("sc").args(["query", "RustFox"]).output() {
-            if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("STATE") {
                 return true;
             }
         }
@@ -87,41 +88,57 @@ pub fn restart_bot() -> anyhow::Result<()> {
     if is_service_installed() {
         #[cfg(target_os = "linux")]
         {
-            let mut child = std::process::Command::new("systemctl")
+            let status = std::process::Command::new("systemctl")
                 .args(["--user", "restart", "rustfox.service"])
-                .spawn()
-                .context("Failed to spawn systemctl restart")?;
-            let _ = child.wait();
+                .status()
+                .context("Failed to run systemctl restart")?;
+            if !status.success() {
+                tracing::warn!("systemctl restart failed with exit: {:?}", status.code());
+            }
         }
         #[cfg(target_os = "macos")]
         {
-            let mut child = std::process::Command::new("launchctl")
+            let status = std::process::Command::new("launchctl")
                 .args(["stop", "com.rustfox.bot"])
-                .spawn()
-                .context("Failed to spawn launchctl stop")?;
-            let _ = child.wait();
+                .status()
+                .context("Failed to run launchctl stop")?;
+            if !status.success() {
+                tracing::warn!("launchctl stop failed with exit: {:?}", status.code());
+            }
         }
         #[cfg(target_os = "windows")]
         {
-            let mut child = std::process::Command::new("sc")
+            let status = std::process::Command::new("sc")
                 .args(["stop", "RustFox"])
-                .spawn()
-                .context("Failed to spawn sc stop")?;
-            let _ = child.wait();
-            let mut child = std::process::Command::new("sc")
+                .status()
+                .context("Failed to run sc stop")?;
+            if !status.success() {
+                tracing::warn!("sc stop failed with exit: {:?}", status.code());
+            }
+            let status = std::process::Command::new("sc")
                 .args(["start", "RustFox"])
-                .spawn()
-                .context("Failed to spawn sc start")?;
-            let _ = child.wait();
+                .status()
+                .context("Failed to run sc start")?;
+            if !status.success() {
+                tracing::warn!("sc start failed with exit: {:?}", status.code());
+            }
         }
     } else {
         let exe = std::env::current_exe().context("Failed to get current executable path")?;
         let args: Vec<String> = std::env::args().skip(1).collect();
-        std::process::Command::new(exe)
+        let mut child = std::process::Command::new(&exe)
             .args(&args)
             .spawn()
             .context("Failed to spawn new binary")?;
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Brief pause to detect immediate startup failure.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok(Some(status)) = child.try_wait() {
+            anyhow::bail!(
+                "New binary exited immediately with code {:?}",
+                status.code()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
         std::process::exit(0);
     }
     Ok(())

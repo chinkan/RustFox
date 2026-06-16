@@ -52,9 +52,11 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 /// token immediately after the slash; the argument is the remainder of the
 /// line (trimmed of surrounding whitespace).
 ///
-/// Currently exercised only by tests; full Telegram dispatch of `/supervise`
-/// is wired in M7.3.
-#[allow(dead_code)]
+/// Parse a Telegram-style slash command into `(command, argument)`.
+///
+/// Returns `None` if the input does not start with `/`. The command is the
+/// token immediately after the slash; the argument is the remainder of the
+/// line (trimmed of surrounding whitespace).
 pub(crate) fn parse_command(s: &str) -> Option<(String, String)> {
     let s = s.trim_start();
     if !s.starts_with('/') {
@@ -294,7 +296,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              /skills - List loaded skills\n\
              /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
              /verbose - Toggle tool call progress display\n\
-             /queryrewrite - Toggle query rewriting for memory search",
+             /queryrewrite - Toggle query rewriting for memory search\n\
+             /selfupgrade - Upgrade the bot (source or release binary)\n\
+             /models - Browse and change the OpenRouter model",
         );
         bot.send_message(msg.chat.id, help)
             .parse_mode(ParseMode::MarkdownV2)
