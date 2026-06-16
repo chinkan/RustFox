@@ -2507,34 +2507,7 @@ impl Agent {
 
                 info!("Self-update requested: branch '{}'", branch);
 
-                // Determine project root from the current executable's location.
-                let project_root = match std::env::current_exe() {
-                    Ok(exe) => {
-                        // Navigate up from target/release/rustfox or target/debug/rustfox
-                        let mut root = exe.clone();
-                        let mut depth = 0;
-                        const MAX_DEPTH: usize = 10;
-                        // Try to find Cargo.toml by walking up
-                        loop {
-                            if root.join("Cargo.toml").exists() {
-                                break;
-                            }
-                            depth += 1;
-                            if depth > MAX_DEPTH || !root.pop() {
-                                // Fallback to current directory
-                                root = std::env::current_dir()
-                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                break;
-                            }
-                        }
-                        root
-                    }
-                    Err(_) => {
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    }
-                };
-
-                match crate::learning::self_update(&branch, &project_root).await {
+                match crate::learning::self_upgrade(&branch, "auto", None).await {
                     Ok(log) => log,
                     Err(e) => format!("Self-update failed: {:#}", e),
                 }
