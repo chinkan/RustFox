@@ -185,7 +185,7 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 | Tool | Description |
 |------|-------------|
 | `try_new_tech` | Run a sandboxed experiment with a new technology (Rust/JS) |
-| `self_update_to_branch` | Update the bot to a specific git branch and rebuild |
+| `self_upgrade` | Upgrade the bot — auto-detects source code (git + cargo build) or release binary (downloads from GitHub). Re-registers systemd/launchd service if installed. Restarts after success. |
 
 ---
 

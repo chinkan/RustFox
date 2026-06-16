@@ -2526,8 +2526,9 @@ impl Agent {
 
                 result
             }
-            "self_update_to_branch" => {
+            "self_upgrade" => {
                 let branch = arguments["branch"].as_str().unwrap_or("main").to_string();
+                let mode = arguments["mode"].as_str().unwrap_or("auto").to_string();
 
                 // Validate branch name to prevent git flag injection and path traversal.
                 // A single chars() pass checks both the allowlist and the blocklist.
@@ -2549,17 +2550,20 @@ impl Agent {
                     });
 
                 if !is_valid_branch {
-                    return format!("Self-update failed: invalid branch name '{}'", branch);
+                    return format!("Self-upgrade failed: invalid branch name '{}'", branch);
                 }
 
-                info!("Self-update requested: branch '{}'", branch);
+                info!(
+                    "Self-upgrade requested: branch '{}', mode '{}'",
+                    branch, mode
+                );
 
-                match crate::learning::self_upgrade(&branch, "auto", None).await {
+                match crate::learning::self_upgrade(&branch, &mode, None).await {
                     Ok(log) => {
                         self.restart_pending.store(true, Ordering::Release);
                         log
                     }
-                    Err(e) => format!("Self-update failed: {:#}", e),
+                    Err(e) => format!("Self-upgrade failed: {:#}", e),
                 }
             }
             "patch_skill" => {
