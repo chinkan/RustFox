@@ -666,13 +666,14 @@ pub async fn self_upgrade(
                     "→ Updated to version: {}\n",
                     update_result.version()
                 ));
+                log.push_str("✅ Download and replace successful.");
             } else {
                 log.push_str(&format!(
                     "→ Already up to date ({})\n",
                     update_result.version()
                 ));
+                log.push_str("✅ Already at latest version.");
             }
-            log.push_str("✅ Download and replace successful.");
             send_progress(&mut log);
         }
     }
@@ -688,11 +689,15 @@ pub async fn self_upgrade(
             .await
             .context("Failed to run rustfox --service install")?;
         if !service_output.status.success() {
-            let stderr = String::from_utf8_lossy(&service_output.stderr);
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&service_output.stdout),
+                String::from_utf8_lossy(&service_output.stderr)
+            );
             anyhow::bail!(
                 "rustfox --service install failed (exit {:?}): {}",
                 service_output.status.code(),
-                stderr.trim()
+                combined.trim()
             );
         }
         let service_log = format!(
