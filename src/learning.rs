@@ -460,6 +460,19 @@ pub async fn read_user_model(user_model_path: &Path) -> String {
     }
 }
 
+/// Read a soul file (SOUL.md / AGENTS.md / USER.md), returning empty string
+/// if it doesn't exist. Silently skips read errors — soul files are ambient
+/// context and a missing/unreadable file simply means "no context to inject".
+pub async fn read_soul_file(path: &Path) -> String {
+    tokio::fs::read_to_string(path).await.unwrap_or_default()
+}
+
+/// Truncate a string to at most `max_chars` characters at a char boundary.
+/// Returns the original string if it is already short enough.
+pub fn truncate_to(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Update the user model by summarizing recent conversations through the LLM.
 pub async fn update_user_model(
     llm: &LlmClient,
