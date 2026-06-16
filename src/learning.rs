@@ -574,6 +574,8 @@ pub async fn self_upgrade(
         _ => detect_deployment_mode(),
     };
 
+    let service_installed = is_service_installed();
+
     match deployment {
         UpgradeMode::Source => {
             log.push_str(&format!("Mode: source (branch: {})\n", branch));
@@ -620,7 +622,7 @@ pub async fn self_upgrade(
             log.push_str(&format!("  ✓ {}\n", build.trim()));
 
             // Step 5: cargo install --path . (if running as service)
-            if is_service_installed() {
+            if service_installed {
                 log.push_str("→ cargo install --path . --force\n");
                 send_progress(&mut log);
                 let install_output = tokio::process::Command::new("cargo")
@@ -659,25 +661,37 @@ pub async fn self_upgrade(
             .context("spawn_blocking failed")?
             .context("self_update failed")?;
 
-            log.push_str(&format!(
-                "→ Updated to version: {}\n",
-                update_result.version()
-            ));
+            if update_result.updated() {
+                log.push_str(&format!("→ Updated to version: {}\n", update_result.version()));
+            } else {
+                log.push_str(&format!(
+                    "→ Already up to date ({})\n",
+                    update_result.version()
+                ));
+            }
             log.push_str("✅ Download and replace successful.");
             send_progress(&mut log);
         }
     }
 
     // Re-register service if installed.
-    if is_service_installed() {
+    if service_installed {
         log.push_str("\n→ Re-registering service...\n");
         send_progress(&mut log);
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rustfox"));
+        let exe = std::env::current_exe().context("Failed to get current executable path")?;
         let service_output = tokio::process::Command::new(&exe)
             .args(["--service", "install"])
             .output()
             .await
             .context("Failed to run rustfox --service install")?;
+        if !service_output.status.success() {
+            let stderr = String::from_utf8_lossy(&service_output.stderr);
+            anyhow::bail!(
+                "rustfox --service install failed (exit {:?}): {}",
+                service_output.status.code(),
+                stderr.trim()
+            );
+        }
         let service_log = format!(
             "{}{}",
             String::from_utf8_lossy(&service_output.stdout),
