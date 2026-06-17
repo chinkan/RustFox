@@ -40,10 +40,37 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 
 → Full feature reference: [docs/GUIDE.md](docs/GUIDE.md#advanced-features)
 
+### Agent Lifecycle & Runtime
+
+| Capability | Description |
+|------------|-------------|
+| **Self-Upgrade** | Trigger an in-place upgrade: pulls from git source or downloads the latest GitHub release binary. Auto-restarts after upgrade — no SSH, no manual steps. |
+| **Model Switching** | Switch OpenRouter models at runtime via `/models`. Interactive picker lets you choose the best model per task: fast/cheap for simple queries, powerful for complex reasoning. |
+| **Soul Files** | SOUL.md (persona), AGENTS.md (behaviour), USER.md (preferences) — persistent identity files auto-injected into every system prompt. Session-end self-reflection with `.bak` backups. |
+
 ---
-| 🚀 **Self-Upgrade** | `/self-upgrade` slash command + `self_upgrade` tool, auto-restart after upgrade, git source or GitHub release binary |
-| 🔀 **Model Switching** | `/models` slash command to switch OpenRouter LLM models at runtime, with interactive model picker |
-| 📝 **Soul Files** | SOUL.md / AGENTS.md / USER.md persistent identity files, auto-injected into system prompt, session-end reflection with `.bak` backups |
+
+### 💭 Multi-Session & Multi-Model (Brainstorming)
+
+> ⚠️ **Planning phase** — not yet implemented. This section captures ideas explored in the `feat/readme-improve-multi-session-brainstorm` branch.
+
+The vision: run multiple concurrent chat sessions, each with its own model and isolated context.
+
+| Use Case | Description |
+|----------|-------------|
+| **Parallel execution** | Run a cheap model for quick tasks while a powerful model tackles deep analysis — concurrently, not sequentially |
+| **Per-user isolation** | Each Telegram user gets their own session with independent conversation context and model preference |
+| **Sub-agent delegation** | Spawn sub-agents with different models (e.g., GPT-4o for code review, Claude for writing) without polluting the main session |
+
+**Topics to explore:**
+
+- Session lifecycle — create, switch, merge, archive
+- Per-session model binding vs global default model
+- Context isolation between sessions (independent or shared RAG?)
+- Telegram UX for multi-session management (inline buttons? slash commands?)
+- Persistence and RAG across session boundaries
+
+See [docs/roadmap/multi-session.md](docs/roadmap/multi-session.md) for detailed design notes.
 
 ## Quick Start
 
