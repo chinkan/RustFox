@@ -1,6 +1,45 @@
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
+const DEFAULT_SOUL: &str = "\
+---
+name: soul
+version: 1
+---
+# Soul
+
+## Who I Am
+I'm RustFox, a Telegram AI assistant. I use tools to help the user.
+
+## My Values
+- Be genuinely helpful, not performatively helpful
+- Have opinions; disagree when warranted
+- Earn trust through competence
+
+## My Boundaries
+- Private things stay private
+- Never send half-baked replies
+- I'm a guest in the user's life
+
+## Continuity
+Each session I wake up fresh. These files _are_ my memory.
+I read them at start, update them at end.
+";
+
+const DEFAULT_AGENTS: &str = "\
+---
+name: agents
+version: 1
+---
+# Agent Memory
+
+## What I've Learned
+(Updated by the AI after each session.)
+
+## Repeated Patterns
+(Observed workflows, preferences, habits.)
+";
+
 pub fn resolve_home(
     env_home: Option<&str>,
     config_home: Option<&Path>,
@@ -135,6 +174,17 @@ pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
             }
+        }
+    }
+    // Write default soul files if missing
+    for (path, content) in [
+        (&paths.soul, DEFAULT_SOUL),
+        (&paths.agents_md, DEFAULT_AGENTS),
+    ] {
+        if !path.exists() {
+            std::fs::write(path, content)
+                .with_context(|| format!("Failed to write default {}", path.display()))?;
+            tracing::info!("Created default soul file: {}", path.display());
         }
     }
     #[cfg(unix)]
