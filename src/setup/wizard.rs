@@ -189,7 +189,6 @@ pub struct RawOcr {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct RawLearning {
-    pub user_model_path: Option<String>,
     pub skill_extraction_enabled: Option<bool>,
     pub skill_extraction_threshold: Option<u32>,
     pub user_model_update_interval: Option<u32>,

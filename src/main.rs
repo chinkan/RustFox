@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
             weak.clone(),
             job_tx,
             Arc::clone(&langsmith),
+            config_path.clone(),
         )
     });
 
@@ -249,6 +250,10 @@ async fn main() -> Result<()> {
     }
 
     // Register built-in background tasks and start scheduler
+    let home = config
+        .resolved_home
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
@@ -256,7 +261,7 @@ async fn main() -> Result<()> {
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
-        config.learning.user_model_path.clone(),
+        home,
     )
     .await?;
     scheduler.start().await?;

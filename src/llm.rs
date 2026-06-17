@@ -551,6 +551,69 @@ impl LlmClient {
     }
 }
 
+/// Information about an OpenRouter model, deserialized from GET /api/v1/models.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub context_length: u64,
+    #[serde(default)]
+    pub pricing: ModelPricing,
+    #[serde(default)]
+    pub architecture: ModelArchitecture,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct ModelPricing {
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub completion: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct ModelArchitecture {
+    #[serde(default)]
+    pub modality: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ModelsListResponse {
+    data: Vec<ModelInfo>,
+}
+
+impl LlmClient {
+    /// Fetch the list of available models from OpenRouter.
+    /// The endpoint is public (no auth required for GET /api/v1/models),
+    /// but we send the API key in case of rate-limiting.
+    pub async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        let url = format!("{}/models", self.config.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .send()
+            .await
+            .context("Failed to fetch model list from OpenRouter")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter models API error ({}): {}", status, body);
+        }
+
+        let list: ModelsListResponse = response
+            .json()
+            .await
+            .context("Failed to parse OpenRouter model list response")?;
+
+        Ok(list.data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

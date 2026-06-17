@@ -8,6 +8,7 @@ use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
 use crate::agent::Agent;
+use crate::llm::ModelInfo;
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
@@ -51,9 +52,11 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 /// token immediately after the slash; the argument is the remainder of the
 /// line (trimmed of surrounding whitespace).
 ///
-/// Currently exercised only by tests; full Telegram dispatch of `/supervise`
-/// is wired in M7.3.
-#[allow(dead_code)]
+/// Parse a Telegram-style slash command into `(command, argument)`.
+///
+/// Returns `None` if the input does not start with `/`. The command is the
+/// token immediately after the slash; the argument is the remainder of the
+/// line (trimmed of surrounding whitespace).
 pub(crate) fn parse_command(s: &str) -> Option<(String, String)> {
     let s = s.trim_start();
     if !s.starts_with('/') {
@@ -83,6 +86,11 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
         BotCommand::new("skills", "List loaded skills"),
         BotCommand::new("verbose", "Toggle tool-call progress display"),
         BotCommand::new("queryrewrite", "Toggle query rewriting for memory search"),
+        BotCommand::new(
+            "selfupgrade",
+            "Upgrade the bot to the latest version (source or release binary)",
+        ),
+        BotCommand::new("models", "Browse and change the OpenRouter model"),
     ]
 }
 
@@ -164,16 +172,36 @@ pub async fn run(
         Err(e) => warn!(error = %e, "Failed to register Telegram commands"),
     }
 
-    let handler = Update::filter_message()
-        .filter_map(move |msg: Message| {
-            let user = msg.from.as_ref()?;
-            if allowed_user_ids.contains(&user.id.0) {
-                Some(msg)
-            } else {
-                None
+    let message_handler = Update::filter_message()
+        .filter_map({
+            let allowed = allowed_user_ids.clone();
+            move |msg: Message| {
+                let user = msg.from.as_ref()?;
+                if allowed.contains(&user.id.0) {
+                    Some(msg)
+                } else {
+                    None
+                }
             }
         })
         .endpoint(handle_message);
+
+    let callback_handler = Update::filter_callback_query()
+        .filter_map({
+            let allowed = allowed_user_ids.clone();
+            move |q: CallbackQuery| {
+                if allowed.contains(&q.from.id.0) {
+                    Some(q)
+                } else {
+                    None
+                }
+            }
+        })
+        .endpoint(handle_model_callback);
+
+    let handler = dptree::entry()
+        .branch(message_handler)
+        .branch(callback_handler);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![agent])
@@ -190,6 +218,125 @@ pub async fn run(
 
 fn is_verbose_enabled(value: Option<&str>) -> bool {
     value.map(|v| v == "true").unwrap_or(false)
+}
+
+/// Shared model search logic: fetch models, try exact match, fall back to fuzzy search,
+/// show top 5 results as inline keyboard buttons.
+async fn handle_model_search(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    query: &str,
+) -> ResponseResult<()> {
+    let models = match agent.llm.fetch_models().await {
+        Ok(list) => list,
+        Err(e) => {
+            bot.send_message(
+                chat_id,
+                escape_text(&format!("Failed to fetch model list: {:#}", e)),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Try exact match first.
+    if let Some(model) = models.iter().find(|m| m.id == query) {
+        match agent.set_model(&model.id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(
+                    chat_id,
+                    escape_text(&format!("Failed to save model: {:#}", e)),
+                )
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Fuzzy search: case-insensitive match on id or name.
+    let q = query.to_lowercase();
+    let mut matches: Vec<&ModelInfo> = models
+        .iter()
+        .filter(|m| m.id.to_lowercase().contains(&q) || m.name.to_lowercase().contains(&q))
+        .collect();
+    matches.sort_by(|a, b| {
+        let a_name = a.name.to_lowercase().contains(&q);
+        let b_name = b.name.to_lowercase().contains(&q);
+        b_name.cmp(&a_name).then(a.id.cmp(&b.id))
+    });
+    matches.truncate(10);
+
+    if matches.is_empty() {
+        bot.send_message(
+            chat_id,
+            escape_text(&format!(
+                "No models found matching '{}'. Try a different search term.",
+                query
+            )),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+        return Ok(());
+    }
+
+    if matches.len() == 1 {
+        let model = &matches[0];
+        match agent.set_model(&model.id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}` ({})", model.id, model.name);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(
+                    chat_id,
+                    escape_text(&format!("Failed to save model: {:#}", e)),
+                )
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Show top 5 results with inline keyboard buttons.
+    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+    let mut keyboard: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for model in matches.iter().take(5) {
+        let label = if model.name.len() > 35 {
+            format!("{}…", &model.name[..35])
+        } else {
+            model.name.clone()
+        };
+        keyboard.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("model_select:{}", model.id),
+        )]);
+    }
+    keyboard.push(vec![InlineKeyboardButton::callback(
+        "❌ Cancel",
+        "model_select:cancel",
+    )]);
+
+    let reply = format!(
+        "Found {} models matching '{}'. Select one:",
+        matches.len(),
+        query
+    );
+    bot.send_message(chat_id, &reply)
+        .reply_markup(InlineKeyboardMarkup::new(keyboard))
+        .await?;
+    Ok(())
 }
 
 async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseResult<()> {
@@ -254,6 +401,29 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         return Ok(());
     }
 
+    // Check if user is in model-search-pending state (tapped "Search models" button).
+    let search_pending = agent
+        .memory
+        .recall("settings", &format!("model_search_pending_{}", user_id))
+        .await
+        .unwrap_or(None)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if search_pending && !text.is_empty() && !text.starts_with('/') {
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("model_search_pending_{}", user_id),
+                "false",
+                None,
+            )
+            .await
+            .ok();
+        // Treat message as a model search query — dispatch to shared model search logic.
+        return handle_model_search(bot, msg.chat.id, &agent, &text).await;
+    }
+
     info!(
         "Telegram message from {} ({}): {} [attachments: {}]",
         user_name,
@@ -288,7 +458,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              /skills - List loaded skills\n\
              /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
              /verbose - Toggle tool call progress display\n\
-             /queryrewrite - Toggle query rewriting for memory search",
+             /queryrewrite - Toggle query rewriting for memory search\n\
+             /selfupgrade - Upgrade the bot (source or release binary)\n\
+             /models - Browse and change the OpenRouter model",
         );
         bot.send_message(msg.chat.id, help)
             .parse_mode(ParseMode::MarkdownV2)
@@ -421,6 +593,110 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .parse_mode(ParseMode::MarkdownV2)
             .await?;
         return Ok(());
+    }
+
+    // Combined parse_command dispatch for /self-upgrade and /models.
+    if let Some((cmd, arg)) = parse_command(&text) {
+        match cmd.as_str() {
+            "self-upgrade" | "selfupgrade" => {
+                let branch = if arg.is_empty() { "main" } else { &arg };
+
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<String>();
+
+                let sent = bot
+                    .send_message(msg.chat.id, "🔄 Starting self-upgrade...")
+                    .await?;
+
+                let bot_clone = bot.clone();
+                let bot_progress = bot.clone();
+                let chat_id = msg.chat.id;
+                let msg_id = sent.id;
+                let branch_owned = branch.to_string();
+
+                let progress_handle = tokio::spawn(async move {
+                    let mut buffer = String::from("🔄 Self-upgrading...\n");
+                    while let Some(step) = progress_rx.recv().await {
+                        buffer.push_str(&format!("{}\n", step));
+                        if buffer.len() > 3500 {
+                            let suffix = "\n...(truncated)";
+                            let trunc = buffer.len() - 3500 + suffix.len();
+                            buffer =
+                                format!("...{}", &buffer[buffer.len().saturating_sub(trunc)..]);
+                            buffer.push_str(suffix);
+                        }
+                        let _ = bot_progress
+                            .edit_message_text(chat_id, msg_id, &buffer)
+                            .await;
+                    }
+                });
+
+                let result =
+                    crate::learning::self_upgrade(&branch_owned, "auto", Some(progress_tx)).await;
+
+                // Wait for progress to be fully displayed.
+                progress_handle.await.ok();
+
+                match result {
+                    Ok(log) => {
+                        let display = if log.len() > 3500 {
+                            format!("{}...\n(truncated)", &log[..3500])
+                        } else {
+                            log
+                        };
+                        bot_clone
+                            .edit_message_text(
+                                chat_id,
+                                msg_id,
+                                format!("✅ Upgrade successful!\n\n{}", display),
+                            )
+                            .await
+                            .ok();
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let _ = crate::learning::restart_bot();
+                    }
+                    Err(e) => {
+                        bot_clone
+                            .edit_message_text(
+                                chat_id,
+                                msg_id,
+                                format!("❌ Upgrade failed:\n{}", e),
+                            )
+                            .await
+                            .ok();
+                    }
+                }
+
+                return Ok(());
+            }
+            "models" => {
+                if arg.is_empty() {
+                    let current = agent.current_model.read().await;
+                    let reply = format!(
+                        "Current model: `{}`\n\nTap the button below to search for a model.",
+                        *current
+                    );
+                    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+                    let keyboard = InlineKeyboardMarkup::new(vec![
+                        vec![InlineKeyboardButton::callback(
+                            "🔍 Search models",
+                            "model_search_prompt",
+                        )],
+                        vec![InlineKeyboardButton::callback(
+                            "❌ Cancel",
+                            "model_select:cancel",
+                        )],
+                    ]);
+                    bot.send_message(msg.chat.id, &reply)
+                        .reply_markup(keyboard)
+                        .await?;
+                    return Ok(());
+                }
+
+                return handle_model_search(bot, msg.chat.id, &agent, &arg).await;
+            }
+            _ => {} // ignore unknown commands for now
+        }
     }
 
     // Send "typing" indicator
@@ -662,6 +938,86 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await?;
     }
     // Success: response already delivered via streaming
+
+    // Check if a self-upgrade tool call requested a restart.
+    if agent
+        .restart_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        agent
+            .restart_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        let _ = bot
+            .send_message(msg.chat.id, "🔄 Self-upgrade complete. Restarting...")
+            .await;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = crate::learning::restart_bot();
+        });
+    }
+
+    Ok(())
+}
+
+/// Handle callback queries from inline keyboard buttons (e.g. model selection).
+async fn handle_model_callback(
+    bot: Bot,
+    q: CallbackQuery,
+    agent: Arc<Agent>,
+) -> ResponseResult<()> {
+    let callback_id = q.id.clone();
+    let data = match q.data {
+        Some(ref d) => d.clone(),
+        None => return Ok(()),
+    };
+    let msg = q.regular_message().cloned();
+
+    bot.answer_callback_query(callback_id).await?;
+
+    if data == "model_search_prompt" {
+        if let Some(m) = msg {
+            let prompt = "Send me a model name or ID to search for. Examples: claude, kimi, gpt, or a full model ID like openrouter/o3-mini.";
+            bot.edit_message_text(m.chat.id, m.id, prompt).await?;
+        }
+        // Store pending search state for this user.
+        let user_id = q.from.id.0.to_string();
+        agent
+            .memory
+            .remember(
+                "settings",
+                &format!("model_search_pending_{}", user_id),
+                "true",
+                None,
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+
+    if data == "model_select:cancel" {
+        if let Some(m) = msg {
+            bot.edit_message_text(m.chat.id, m.id, "❌ Model selection cancelled.")
+                .await?;
+        }
+        return Ok(());
+    }
+
+    if let Some(model_id) = data.strip_prefix("model_select:") {
+        match agent.set_model(model_id).await {
+            Ok(()) => {
+                let reply = format!("✅ Model changed to `{}`", model_id);
+                if let Some(m) = msg {
+                    bot.edit_message_text(m.chat.id, m.id, &reply).await?;
+                }
+            }
+            Err(e) => {
+                let reply = format!("Failed to save model: {:#}", e);
+                if let Some(m) = msg {
+                    bot.edit_message_text(m.chat.id, m.id, &reply).await?;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

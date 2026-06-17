@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::llm::{ChatMessage, LlmClient, MessageContent};
@@ -8,6 +8,141 @@ use crate::skills::SkillRegistry;
 
 /// Minimum number of conversation messages needed before updating the user model.
 const MIN_MESSAGES_FOR_USER_MODEL: usize = 3;
+
+// ─── Self-Upgrade Helpers ───────────────────────────────────────────────────
+
+/// Result of a self-upgrade operation.
+pub struct UpgradeResult {
+    pub log: String,
+    pub mode: UpgradeMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeMode {
+    Source,
+    Release,
+}
+
+/// Detect whether we are running from a source clone or a release binary.
+/// Walks up from the current executable to find Cargo.toml.
+fn detect_deployment_mode() -> UpgradeMode {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut root = exe.clone();
+        for _ in 0..10 {
+            if root.join("Cargo.toml").exists() {
+                return UpgradeMode::Source;
+            }
+            if !root.pop() {
+                break;
+            }
+        }
+    }
+    UpgradeMode::Release
+}
+
+/// Detect if RustFox is running as a systemd/launchd service.
+pub fn is_service_installed() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let service_path = dirs::home_dir().map(|h| {
+            h.join(".config")
+                .join("systemd")
+                .join("user")
+                .join("rustfox.service")
+        });
+        if let Some(p) = service_path {
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = dirs::home_dir().map(|h| {
+            h.join("Library")
+                .join("LaunchAgents")
+                .join("com.rustfox.bot.plist")
+        });
+        if let Some(p) = plist_path {
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        if let Ok(output) = Command::new("sc").args(["query", "RustFox"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("STATE") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Restart the bot: for service mode, restart via systemd/launchd;
+/// for foreground mode, spawn new binary and exit.
+pub fn restart_bot() -> anyhow::Result<()> {
+    if is_service_installed() {
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::process::Command::new("systemctl")
+                .args(["--user", "restart", "rustfox.service"])
+                .status()
+                .context("Failed to run systemctl restart")?;
+            if !status.success() {
+                tracing::warn!("systemctl restart failed with exit: {:?}", status.code());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("launchctl")
+                .args(["stop", "com.rustfox.bot"])
+                .status()
+                .context("Failed to run launchctl stop")?;
+            if !status.success() {
+                tracing::warn!("launchctl stop failed with exit: {:?}", status.code());
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let status = std::process::Command::new("sc")
+                .args(["stop", "RustFox"])
+                .status()
+                .context("Failed to run sc stop")?;
+            if !status.success() {
+                tracing::warn!("sc stop failed with exit: {:?}", status.code());
+            }
+            let status = std::process::Command::new("sc")
+                .args(["start", "RustFox"])
+                .status()
+                .context("Failed to run sc start")?;
+            if !status.success() {
+                tracing::warn!("sc start failed with exit: {:?}", status.code());
+            }
+        }
+    } else {
+        let exe = std::env::current_exe().context("Failed to get current executable path")?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut child = std::process::Command::new(&exe)
+            .args(&args)
+            .spawn()
+            .context("Failed to spawn new binary")?;
+        // Brief pause to detect immediate startup failure.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok(Some(status)) = child.try_wait() {
+            anyhow::bail!(
+                "New binary exited immediately with code {:?}",
+                status.code()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::process::exit(0);
+    }
+    Ok(())
+}
 
 // ─── Feature 1: Post-task Skill Extractor ───────────────────────────────────
 
@@ -325,6 +460,19 @@ pub async fn read_user_model(user_model_path: &Path) -> String {
     }
 }
 
+/// Read a soul file (SOUL.md / AGENTS.md / USER.md), returning empty string
+/// if it doesn't exist. Silently skips read errors — soul files are ambient
+/// context and a missing/unreadable file simply means "no context to inject".
+pub async fn read_soul_file(path: &Path) -> String {
+    tokio::fs::read_to_string(path).await.unwrap_or_default()
+}
+
+/// Truncate a string to at most `max_chars` characters at a char boundary.
+/// Returns the original string if it is already short enough.
+pub fn truncate_to(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Update the user model by summarizing recent conversations through the LLM.
 pub async fn update_user_model(
     llm: &LlmClient,
@@ -414,61 +562,221 @@ async fn update_user_model_inner(
         tokio::fs::create_dir_all(parent).await.ok();
     }
 
+    // Create backup before overwriting
+    if user_model_path.exists() {
+        let mut bak_path = user_model_path.to_string_lossy().to_string();
+        bak_path.push_str(".bak");
+        let bak = std::path::PathBuf::from(&bak_path);
+        let _ = tokio::fs::copy(user_model_path, &bak).await;
+    }
+
     tokio::fs::write(user_model_path, &new_content)
         .await
         .with_context(|| format!("Failed to write user model: {}", user_model_path.display()))?;
+
+    // Log diff summary
+    let old_lines: usize = existing.lines().count();
+    let new_lines: usize = new_content.lines().count();
+    let added = new_lines.saturating_sub(old_lines);
+    let removed = old_lines.saturating_sub(new_lines);
+    tracing::info!(
+        "User model updated: {} ({} lines, +{}/-{})",
+        user_model_path.display(),
+        new_lines,
+        added,
+        removed
+    );
 
     Ok(true)
 }
 
 // ─── Feature 4: Self-Update ─────────────────────────────────────────────────
 
-/// Run `git fetch`, `git checkout <branch>`, `git pull`, and `cargo build --release`
-/// in the project root directory. Returns a multi-line status log.
+/// Unified self-upgrade: auto-detects deployment mode (source or release binary),
+/// upgrades the binary, re-registers the service if running as one, and restarts.
 ///
-/// Does NOT restart the process — the caller should arrange restart after a
-/// successful build (e.g. via `std::process::Command` or systemd).
-pub async fn self_update(branch: &str, project_root: &Path) -> Result<String> {
+/// Returns a status log string. The caller should set `restart_pending` and
+/// call `restart_bot()` after the response is delivered to the user.
+///
+/// If `progress` is `Some(tx)`, sends per-step updates for inline progress display.
+///
+/// For release binary mode, the `self_update` crate downloads the latest
+/// GitHub release matching the current platform. `branch` is ignored.
+/// For source mode, `branch` specifies which git branch to build from.
+pub async fn self_upgrade(
+    branch: &str,
+    mode: &str,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<String> {
     let mut log = String::new();
+    // Send a progress update with the most recent line of the log.
+    // The closure takes `&mut String` instead of capturing `log` so the
+    // immutable borrow does not live across later `log.push_str` calls.
+    let send_progress = |log: &mut String| {
+        if let Some(tx) = progress.as_ref() {
+            let msg = log.lines().last().unwrap_or("").to_string();
+            let _ = tx.send(msg);
+        }
+    };
 
-    // Step 0: Check for uncommitted changes.
-    let status_output = run_git_command(project_root, &["status", "--porcelain"]).await?;
-    if !status_output.trim().is_empty() {
-        // Stash changes to avoid losing them.
-        let stash_result = run_git_command(
-            project_root,
-            &["stash", "push", "-m", "rustfox-auto-stash-before-update"],
-        )
-        .await?;
-        log.push_str(&format!(
-            "⚠ Stashed uncommitted changes: {}\n",
-            stash_result.trim()
-        ));
+    let deployment = match mode {
+        "source" => UpgradeMode::Source,
+        "release" => UpgradeMode::Release,
+        _ => detect_deployment_mode(),
+    };
+
+    let service_installed = is_service_installed();
+
+    match deployment {
+        UpgradeMode::Source => {
+            log.push_str(&format!("Mode: source (branch: {})\n", branch));
+
+            let project_root = find_project_root().unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+
+            // Step 0: Check for uncommitted changes.
+            log.push_str("→ Checking for uncommitted changes...\n");
+            send_progress(&mut log);
+            let status_output = run_git_command(&project_root, &["status", "--porcelain"]).await?;
+            if !status_output.trim().is_empty() {
+                let stash_result = run_git_command(
+                    &project_root,
+                    &["stash", "push", "-m", "rustfox-auto-stash-before-update"],
+                )
+                .await?;
+                log.push_str(&format!("  ⚠ Stashed: {}\n", stash_result.trim()));
+            }
+
+            // Step 1: git fetch --all
+            log.push_str("→ git fetch --all\n");
+            send_progress(&mut log);
+            let fetch = run_git_command(&project_root, &["fetch", "--all"]).await?;
+            log.push_str(&format!("  ✓ {}\n", fetch.trim()));
+
+            // Step 2: git checkout <branch>
+            log.push_str(&format!("→ git checkout {}\n", branch));
+            send_progress(&mut log);
+            let checkout = run_git_command(&project_root, &["checkout", branch]).await?;
+            log.push_str(&format!("  ✓ {}\n", checkout.trim()));
+
+            // Step 3: git pull origin <branch>
+            log.push_str(&format!("→ git pull origin {}\n", branch));
+            send_progress(&mut log);
+            let pull = run_git_command(&project_root, &["pull", "origin", branch]).await?;
+            log.push_str(&format!("  ✓ {}\n", pull.trim()));
+
+            // Step 4: cargo build --release
+            log.push_str("→ cargo build --release\n");
+            send_progress(&mut log);
+            let build = run_cargo_build(&project_root).await?;
+            log.push_str(&format!("  ✓ {}\n", build.trim()));
+
+            // Step 5: cargo install --path . (if running as service)
+            if service_installed {
+                log.push_str("→ cargo install --path . --force\n");
+                send_progress(&mut log);
+                let install_output = tokio::process::Command::new("cargo")
+                    .args(["install", "--path", ".", "--force"])
+                    .current_dir(&project_root)
+                    .output()
+                    .await
+                    .context("Failed to run cargo install --path .")?;
+                let install_log = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&install_output.stdout),
+                    String::from_utf8_lossy(&install_output.stderr)
+                );
+                log.push_str(&format!("  ✓ {}\n", install_log.trim()));
+            }
+
+            log.push_str("✅ Build successful.");
+            send_progress(&mut log);
+        }
+
+        UpgradeMode::Release => {
+            log.push_str("Mode: release binary\n→ Checking GitHub releases...\n");
+            send_progress(&mut log);
+
+            let update_result = tokio::task::spawn_blocking(|| {
+                self_update::backends::github::Update::configure()
+                    .repo_owner("chinkan")
+                    .repo_name("RustFox")
+                    .bin_name("rustfox")
+                    .show_download_progress(false)
+                    .current_version(self_update::cargo_crate_version!())
+                    .build()
+                    .and_then(|updater| updater.update())
+            })
+            .await
+            .context("spawn_blocking failed")?
+            .context("self_update failed")?;
+
+            if update_result.updated() {
+                log.push_str(&format!(
+                    "→ Updated to version: {}\n",
+                    update_result.version()
+                ));
+                log.push_str("✅ Download and replace successful.");
+            } else {
+                log.push_str(&format!(
+                    "→ Already up to date ({})\n",
+                    update_result.version()
+                ));
+                log.push_str("✅ Already at latest version.");
+            }
+            send_progress(&mut log);
+        }
     }
 
-    // Step 1: git fetch --all
-    log.push_str("→ git fetch --all\n");
-    let fetch = run_git_command(project_root, &["fetch", "--all"]).await?;
-    log.push_str(&format!("  {}\n", fetch.trim()));
+    // Re-register service if installed.
+    if service_installed {
+        log.push_str("\n→ Re-registering service...\n");
+        send_progress(&mut log);
+        let exe = std::env::current_exe().context("Failed to get current executable path")?;
+        let service_output = tokio::process::Command::new(&exe)
+            .args(["--service", "install"])
+            .output()
+            .await
+            .context("Failed to run rustfox --service install")?;
+        if !service_output.status.success() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&service_output.stdout),
+                String::from_utf8_lossy(&service_output.stderr)
+            );
+            anyhow::bail!(
+                "rustfox --service install failed (exit {:?}): {}",
+                service_output.status.code(),
+                combined.trim()
+            );
+        }
+        let service_log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&service_output.stdout),
+            String::from_utf8_lossy(&service_output.stderr)
+        );
+        log.push_str(&format!("  ✓ {}\n", service_log.trim()));
+    }
 
-    // Step 2: git checkout <branch>
-    log.push_str(&format!("→ git checkout {}\n", branch));
-    let checkout = run_git_command(project_root, &["checkout", branch]).await?;
-    log.push_str(&format!("  {}\n", checkout.trim()));
-
-    // Step 3: git pull origin <branch>
-    log.push_str(&format!("→ git pull origin {}\n", branch));
-    let pull = run_git_command(project_root, &["pull", "origin", branch]).await?;
-    log.push_str(&format!("  {}\n", pull.trim()));
-
-    // Step 4: cargo build --release
-    log.push_str("→ cargo build --release\n");
-    let build = run_cargo_build(project_root).await?;
-    log.push_str(&format!("  {}\n", build.trim()));
-
-    log.push_str("✅ Build successful. Restart to activate the new version.");
-
+    log.push_str("\n✅ Upgrade complete. Restarting...");
+    send_progress(&mut log);
     Ok(log)
+}
+
+/// Walk up from the current executable to find the project root containing Cargo.toml.
+fn find_project_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut root = exe.clone();
+    for _ in 0..10 {
+        if root.join("Cargo.toml").exists() {
+            return Some(root);
+        }
+        if !root.pop() {
+            return None;
+        }
+    }
+    None
 }
 
 /// Run a git command in the given directory and return combined stdout+stderr.
@@ -594,7 +902,7 @@ fn strip_code_fences(s: &str) -> String {
 
 /// Return `true` if `content` has a valid YAML frontmatter block, i.e. it
 /// starts with `---` and contains a second `---` delimiter on its own line.
-fn has_valid_frontmatter(content: &str) -> bool {
+pub fn has_valid_frontmatter(content: &str) -> bool {
     let trimmed = content.trim();
     let mut lines = trimmed.lines();
     // The very first line must be exactly "---".

@@ -44,6 +44,44 @@ pub fn validate_sandbox_path(sandbox_dir: &Path, requested: &str) -> Result<Path
     Ok(check_path)
 }
 
+/// Validates that a path is within the RustFox home directory.
+/// Returns the canonicalized path if valid.
+pub fn validate_home_path(home_dir: &Path, requested: &str) -> Result<PathBuf> {
+    let home_canonical = home_dir
+        .canonicalize()
+        .with_context(|| format!("Home directory not found: {}", home_dir.display()))?;
+
+    let requested_path = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        home_dir.join(requested)
+    };
+
+    let check_path = if requested_path.exists() {
+        requested_path
+            .canonicalize()
+            .context("Failed to canonicalize path")?
+    } else {
+        let parent = requested_path
+            .parent()
+            .context("Path has no parent directory")?;
+        let parent_canonical = parent
+            .canonicalize()
+            .with_context(|| format!("Parent directory not found: {}", parent.display()))?;
+        parent_canonical.join(requested_path.file_name().context("Path has no filename")?)
+    };
+
+    if !check_path.starts_with(&home_canonical) {
+        anyhow::bail!(
+            "Access denied: path '{}' is outside the home directory '{}'",
+            requested,
+            home_dir.display()
+        );
+    }
+
+    Ok(check_path)
+}
+
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -233,14 +271,23 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
-                name: "self_update_to_branch".to_string(),
-                description: "Update the bot to a specific git branch and rebuild. Runs: git fetch, git checkout <branch>, git pull, cargo build --release. Use for development without manual SSH. The bot should be restarted after a successful build.".to_string(),
+                name: "self_upgrade".to_string(),
+                description: "Upgrade the bot to the latest version. \
+Auto-detects whether running from source code (git pull + cargo build --release) \
+or from a pre-built release binary (downloads latest from GitHub). If running as \
+a systemd/launchd service, re-registers the service unit. Restarts the bot \
+after successful upgrade. Use this when the user asks to update/upgrade the bot.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "branch": {
                             "type": "string",
-                            "description": "Git branch to update to (default: 'main')"
+                            "description": "Git branch to build from (source mode only, default: 'main')"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "source", "release"],
+                            "description": "Force a specific upgrade mode (default: 'auto')"
                         }
                     },
                     "required": []
@@ -265,6 +312,69 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         }
                     },
                     "required": ["skill_name", "patch_content"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "read_soul_file".to_string(),
+                description: "Read the full contents of a soul file (SOUL.md, AGENTS.md, or USER.md) from the home directory.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to read"
+                        }
+                    },
+                    "required": ["file_name"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_soul_file".to_string(),
+                description: "Update a soul file. Use 'append' mode to add content at the end (safe, no data loss). Use 'replace' mode to rewrite the entire file (for consolidation).".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to update"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The markdown content to append or replace with"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["append", "replace"],
+                            "description": "'append' adds content after the frontmatter; 'replace' rewrites the entire file"
+                        }
+                    },
+                    "required": ["file_name", "content", "mode"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "revert_soul_file".to_string(),
+                description: "Restore a soul file from its most recent .bak backup.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
+                            "description": "Which soul file to revert"
+                        }
+                    },
+                    "required": ["file_name"]
                 }),
             },
         },
@@ -644,5 +754,66 @@ mod tests {
         assert!(result.contains("[ ]"));
         assert!(result.contains("Alpha"));
         assert!(result.contains("ok"));
+    }
+
+    #[test]
+    fn test_validate_home_path_allows_home_files() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join(".rustfox");
+        std::fs::create_dir_all(&home).unwrap();
+        let soul = home.join("SOUL.md");
+        std::fs::write(&soul, "# Soul").unwrap();
+
+        let result = validate_home_path(&home, "SOUL.md").unwrap();
+        assert_eq!(result, soul.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_validate_home_path_denies_outside() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join(".rustfox");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "data").unwrap();
+
+        let result = validate_home_path(&home, "../outside.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builtin_tool_definitions_includes_soul_tools() {
+        let defs = builtin_tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"read_soul_file"),
+            "read_soul_file must be in builtin_tool_definitions"
+        );
+        assert!(
+            names.contains(&"update_soul_file"),
+            "update_soul_file must be in builtin_tool_definitions"
+        );
+        assert!(
+            names.contains(&"revert_soul_file"),
+            "revert_soul_file must be in builtin_tool_definitions"
+        );
+    }
+
+    #[test]
+    fn test_soul_tool_definitions_have_required_file_name_enum() {
+        let defs = builtin_tool_definitions();
+        for name in ["read_soul_file", "update_soul_file", "revert_soul_file"] {
+            let def = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            let file_name_schema = &def.function.parameters["properties"]["file_name"];
+            assert_eq!(file_name_schema["type"].as_str(), Some("string"));
+            let allowed = file_name_schema["enum"].as_array().expect("enum array");
+            let allowed_strs: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+            assert!(allowed_strs.contains(&"SOUL.md"));
+            assert!(allowed_strs.contains(&"AGENTS.md"));
+            assert!(allowed_strs.contains(&"USER.md"));
+        }
     }
 }
