@@ -1031,52 +1031,62 @@ impl Agent {
                 }
             }
 
-            // --- Self-learning: session-end soul reflection ---
+            // --- Self-learning: session-end soul reflection (background) ---
             if !self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
-                let reflection_prompt = vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: Some(MessageContent::Text(
-                        "Review the conversation above. Did you learn anything about the \
-                         user or yourself that should be recorded in SOUL.md, AGENTS.md, \
-                         or USER.md? If yes, respond with EXACTLY:\n\
-                         UPDATE_SOUL: <file_name>\n\
-                         CONTENT:\n\
-                         <content to append>\n\n\
-                         If nothing worth recording, respond with: NO_UPDATE"
-                            .to_string(),
-                    )),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }];
+                if let Some(agent) = self.self_weak.upgrade() {
+                    let msgs = messages.clone();
+                    let uid = user_id.to_string();
+                    let cid = parsed_chat_id;
+                    tokio::spawn(async move {
+                        let mut reflection_messages = msgs;
+                        reflection_messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(MessageContent::Text(
+                                "Review the conversation above. Did you learn anything about the \
+                                 user or yourself that should be recorded in SOUL.md, AGENTS.md, \
+                                 or USER.md? If yes, respond with EXACTLY:\n\
+                                 UPDATE_SOUL: <file_name>\n\
+                                 CONTENT:\n\
+                                 <content to append>\n\n\
+                                 If nothing worth recording, respond with: NO_UPDATE"
+                                    .to_string(),
+                            )),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
 
-                if let Ok(reflection_response) = self.llm.chat(&reflection_prompt, &[]).await {
-                    if let Some(content) = reflection_response.content {
-                        let text = content.as_text();
-                        if let Some(rest) = text.strip_prefix("UPDATE_SOUL:") {
-                            let parts: Vec<&str> = rest.splitn(2, '\n').collect();
-                            if parts.len() == 2 {
-                                let file_name = parts[0].trim();
-                                let append_content = parts[1]
-                                    .strip_prefix("CONTENT:\n")
-                                    .or_else(|| parts[1].strip_prefix("CONTENT:"))
-                                    .unwrap_or(parts[1])
-                                    .trim();
-                                let args = serde_json::json!({
-                                    "file_name": file_name,
-                                    "content": append_content,
-                                    "mode": "append"
-                                });
-                                let _ = self
-                                    .execute_tool(
-                                        "update_soul_file",
-                                        &args,
-                                        user_id,
-                                        parsed_chat_id,
-                                    )
-                                    .await;
+                        if let Ok(reflection_response) =
+                            agent.llm.chat(&reflection_messages, &[]).await
+                        {
+                            if let Some(content) = reflection_response.content {
+                                let text = content.as_text();
+                                if let Some(rest) = text.strip_prefix("UPDATE_SOUL:") {
+                                    let parts: Vec<&str> = rest.splitn(2, '\n').collect();
+                                    if parts.len() == 2 {
+                                        let file_name = parts[0].trim();
+                                        let append_content = parts[1]
+                                            .strip_prefix("CONTENT:\n")
+                                            .or_else(|| parts[1].strip_prefix("CONTENT:"))
+                                            .unwrap_or(parts[1])
+                                            .trim();
+                                        let args = serde_json::json!({
+                                            "file_name": file_name,
+                                            "content": append_content,
+                                            "mode": "append"
+                                        });
+                                        let _ = agent
+                                            .execute_tool(
+                                                "update_soul_file",
+                                                &args,
+                                                &uid,
+                                                cid,
+                                            )
+                                            .await;
+                                    }
+                                }
                             }
                         }
-                    }
+                    });
                 }
             }
 
@@ -2758,8 +2768,6 @@ impl Agent {
                 }
             }
             "update_soul_file" => {
-                self.soul_updated
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 let file_name = match arguments["file_name"].as_str() {
                     Some(n) => n,
                     None => return "Missing 'file_name'".to_string(),
@@ -2875,12 +2883,16 @@ impl Agent {
 
                 // Read back and verify
                 match tokio::fs::read_to_string(&path).await {
-                    Ok(read_back) if read_back == new_content => format!(
-                        "{} updated successfully. Backup at {}{}",
-                        file_name,
-                        bak_current.display(),
-                        size_warning
-                    ),
+                    Ok(read_back) if read_back == new_content => {
+                        self.soul_updated
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        format!(
+                            "{} updated successfully. Backup at {}{}",
+                            file_name,
+                            bak_current.display(),
+                            size_warning
+                        )
+                    }
                     Ok(_) => {
                         if bak_current.exists() {
                             let _ = tokio::fs::copy(&bak_current, &path).await;
