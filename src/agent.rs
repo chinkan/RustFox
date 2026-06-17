@@ -1031,41 +1031,6 @@ impl Agent {
                 }
             }
 
-            // --- Self-learning: periodic user model update (background) ---
-            {
-                let msg_count = messages.iter().filter(|m| m.role == "user").count();
-                let update_interval = self.config.learning.user_model_update_interval;
-                if update_interval > 0 && msg_count % update_interval == 0 && msg_count > 0 {
-                    info!(
-                        "Triggering periodic user model update ({} user messages)",
-                        msg_count
-                    );
-                    if let Some(agent) = self.self_weak.upgrade() {
-                        let user_model_path = self
-                            .config
-                            .resolved_home
-                            .as_ref()
-                            .map(|h| h.join("USER.md"))
-                            .unwrap_or_default();
-                        tokio::spawn(async move {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(60),
-                                crate::learning::update_user_model(
-                                    &agent.llm,
-                                    &agent.memory,
-                                    &user_model_path,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(()) => debug!("Periodic user model update completed"),
-                                Err(_) => warn!("Periodic user model update timed out"),
-                            }
-                        });
-                    }
-                }
-            }
-
             // --- Self-learning: session-end soul reflection ---
             if !self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
                 let reflection_prompt = vec![ChatMessage {
