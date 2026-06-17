@@ -250,6 +250,10 @@ async fn main() -> Result<()> {
     }
 
     // Register built-in background tasks and start scheduler
+    let home = config
+        .resolved_home
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
@@ -257,8 +261,7 @@ async fn main() -> Result<()> {
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
-        // TEMPORARY: will be replaced with `home` in Task 6
-        config.resolved_home.clone().unwrap_or_default().join("USER.md"),
+        home,
     )
     .await?;
     scheduler.start().await?;

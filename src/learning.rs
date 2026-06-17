@@ -562,9 +562,30 @@ async fn update_user_model_inner(
         tokio::fs::create_dir_all(parent).await.ok();
     }
 
+    // Create backup before overwriting
+    if user_model_path.exists() {
+        let mut bak_path = user_model_path.to_string_lossy().to_string();
+        bak_path.push_str(".bak");
+        let bak = std::path::PathBuf::from(&bak_path);
+        let _ = tokio::fs::copy(user_model_path, &bak).await;
+    }
+
     tokio::fs::write(user_model_path, &new_content)
         .await
         .with_context(|| format!("Failed to write user model: {}", user_model_path.display()))?;
+
+    // Log diff summary
+    let old_lines: usize = existing.lines().count();
+    let new_lines: usize = new_content.lines().count();
+    let added = new_lines.saturating_sub(old_lines);
+    let removed = old_lines.saturating_sub(new_lines);
+    tracing::info!(
+        "User model updated: {} ({} lines, +{}/-{})",
+        user_model_path.display(),
+        new_lines,
+        added,
+        removed
+    );
 
     Ok(true)
 }
