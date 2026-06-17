@@ -1075,12 +1075,7 @@ impl Agent {
                                             "mode": "append"
                                         });
                                         let _ = agent
-                                            .execute_tool(
-                                                "update_soul_file",
-                                                &args,
-                                                &uid,
-                                                cid,
-                                            )
+                                            .execute_tool("update_soul_file", &args, &uid, cid)
                                             .await;
                                     }
                                 }
