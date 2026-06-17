@@ -41,6 +41,9 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 → Full feature reference: [docs/GUIDE.md](docs/GUIDE.md#advanced-features)
 
 ---
+| 🚀 **Self-Upgrade** | `/self-upgrade` slash command + `self_upgrade` tool, auto-restart after upgrade, git source or GitHub release binary |
+| 🔀 **Model Switching** | `/models` slash command to switch OpenRouter LLM models at runtime, with interactive model picker |
+| 📝 **Soul Files** | SOUL.md / AGENTS.md / USER.md persistent identity files, auto-injected into system prompt, session-end reflection with `.bak` backups |
 
 ## Quick Start
 
@@ -110,6 +113,11 @@ rustfox --service status
 |------|-------------|
 | `read_file` / `write_file` | Read and write files within the sandbox |
 | `send_file` | Send a file from the sandbox to the current chat |
+| `self_upgrade` | Trigger self-upgrade from git source or GitHub release, auto-restart |
+| `read_soul_file` | Read SOUL.md, AGENTS.md, or USER.md soul files |
+| `update_soul_file` | Append or replace content in a soul file with `.bak` backup |
+| `revert_soul_file` | Restore a soul file from its most recent `.bak` backup |
+| `try_new_tech` | Sandboxed experiment — run Rust/JS code and check results |
 | `execute_command` | Run shell commands within the sandbox |
 | `schedule_task` | Schedule recurring (cron) or one-shot tasks |
 | `invoke_agent` | Run a predefined agent from the `agents/` directory |
