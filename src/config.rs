@@ -31,6 +31,15 @@ pub struct Config {
     pub supervisor: SupervisorConfig,
     #[serde(default)]
     pub subagents: SubagentsConfig,
+    /// Explicit provider sections (multi-provider mode). Optional —
+    /// when empty, `build_providers()` synthesizes a single OpenRouter
+    /// provider from the legacy `[openrouter]` section.
+    #[serde(default)]
+    pub provider: Vec<ProviderSection>,
+    /// Fallback chain — additional provider/model names tried when
+    /// the primary call fails.
+    #[serde(default)]
+    pub fallback: FallbackConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -123,6 +132,46 @@ pub struct OpenRouterConfig {
     /// When false, OCR is used to extract text from images.
     #[serde(default)]
     pub supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub enum ProviderType {
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    #[serde(rename = "openai_compatible")]
+    OpenAICompatible,
+    #[serde(rename = "ollama")]
+    Ollama,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for ProviderType {
+    fn default() -> Self {
+        Self::OpenRouter
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderSection {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub provider_type: ProviderType,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub discover_models: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FallbackConfig {
+    #[serde(default)]
+    pub chain: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -539,6 +588,40 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Build the provider list from config, handling legacy [openrouter] backward compat.
+    /// Returns (providers, default_provider_name, fallback_chain).
+    pub fn build_providers(&self) -> (Vec<ProviderSection>, String, Vec<String>) {
+        let mut providers: Vec<ProviderSection> = self.provider.clone();
+
+        // Backward compat: if [openrouter] section exists and no explicit provider named "openrouter"
+        let has_openrouter = providers.iter().any(|p| p.name == "openrouter");
+        if has_openrouter {
+            tracing::warn!(
+                "Both [[provider]] name=\"openrouter\" and [openrouter] configured — explicit [[provider]] entry takes precedence"
+            );
+        } else {
+            providers.push(ProviderSection {
+                name: "openrouter".to_string(),
+                provider_type: ProviderType::OpenRouter,
+                base_url: self.openrouter.base_url.clone(),
+                api_key: Some(self.openrouter.api_key.clone()),
+                model: self.openrouter.model.clone(),
+                supports_vision: self.openrouter.supports_vision,
+                max_tokens: self.openrouter.max_tokens,
+                discover_models: false,
+            });
+        }
+
+        let default = if providers.is_empty() {
+            "openrouter".to_string()
+        } else {
+            providers[0].name.clone()
+        };
+
+        let fallback = self.fallback.chain.clone();
+        (providers, default, fallback)
     }
 }
 
