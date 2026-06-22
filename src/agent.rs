@@ -39,6 +39,7 @@ pub struct ScheduledJobRequest {
 /// Platform-agnostic — receives IncomingMessage, returns response text.
 pub struct Agent {
     pub llm: LlmClient,
+    pub registry: Arc<crate::provider::ProviderRegistry>,
     pub config: Config,
     pub mcp: McpManager,
     pub memory: MemoryStore,
@@ -100,6 +101,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
+        registry: Arc<crate::provider::ProviderRegistry>,
         mcp: McpManager,
         memory: MemoryStore,
         skills: SkillRegistry,
@@ -112,10 +114,18 @@ impl Agent {
         langsmith: Arc<LangSmithClient>,
         config_path: PathBuf,
     ) -> Self {
-        let llm = LlmClient::new(config.openrouter.clone());
-        let initial_model = config.openrouter.model.clone();
+        let llm = LlmClient::new(registry.clone());
+        let initial_model = format!(
+            "{}/{}",
+            registry.default_provider_name(),
+            registry
+                .resolve_model(registry.default_provider_name())
+                .0
+                .default_model()
+        );
         Self {
             llm,
+            registry,
             config,
             mcp,
             memory,
@@ -325,32 +335,53 @@ impl Agent {
             anyhow::bail!("Model ID cannot be empty");
         }
 
-        let content = tokio::fs::read_to_string(&self.config_path)
-            .await
-            .context("Failed to read config.toml")?;
-        let mut doc: toml::value::Table =
-            toml::from_str(&content).context("Failed to parse config.toml")?;
-
-        let openrouter_entry = doc
-            .entry("openrouter")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        if let Some(table) = openrouter_entry.as_table_mut() {
-            table.insert(
-                "model".to_string(),
-                toml::Value::String(model_id.to_string()),
-            );
+        // Validate: resolve succeeds for any string
+        let (provider, actual_model) = self.registry.resolve_model(model_id);
+        if let Some((prefix, _)) = model_id.split_once('/') {
+            if self.registry.get_provider(prefix).is_none() {
+                tracing::warn!(
+                    "Model '{}': prefix '{}' does not match any known provider \
+                     (falling through to default '{}')",
+                    model_id,
+                    prefix,
+                    self.registry.default_provider_name()
+                );
+            }
         }
 
-        let new_content =
-            toml::to_string_pretty(&doc).context("Failed to serialize config.toml")?;
-        tokio::fs::write(&self.config_path, &new_content)
-            .await
-            .with_context(|| format!("Failed to write {}", self.config_path.display()))?;
+        let content = tokio::fs::read_to_string(&self.config_path).await?;
+        let mut doc: toml::value::Table = toml::from_str(&content)?;
+
+        let provider_name = provider.name().to_string();
+
+        if provider_name == "openrouter" && doc.contains_key("openrouter") {
+            if let Some(table) = doc.get_mut("openrouter").and_then(|v| v.as_table_mut()) {
+                table.insert(
+                    "model".to_string(),
+                    toml::Value::String(actual_model.to_string()),
+                );
+            }
+        } else if let Some(provider_array) = doc.get_mut("provider").and_then(|v| v.as_array_mut())
+        {
+            for entry in provider_array.iter_mut() {
+                if let Some(table) = entry.as_table_mut() {
+                    if table.get("name").and_then(|v| v.as_str()) == Some(&provider_name) {
+                        table.insert(
+                            "model".to_string(),
+                            toml::Value::String(actual_model.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+
+        let new_content = toml::to_string_pretty(&doc)?;
+        tokio::fs::write(&self.config_path, &new_content).await?;
 
         let mut current = self.current_model.write().await;
         *current = model_id.to_string();
 
-        tracing::info!(model = %model_id, "Model changed and persisted");
+        tracing::info!(model = %model_id, provider = %provider_name, "Model changed and persisted");
         Ok(())
     }
 
@@ -494,12 +525,19 @@ impl Agent {
         }
 
         // Process attachments (images → vision parts or OCR text; PDFs/DOCXs → extracted text)
+        let supports_vision = {
+            let current = self.current_model.read().await;
+            let (provider, _) = self.registry.resolve_model(&current);
+            provider.supports_vision()
+        };
+
         let (attachment_text, image_parts) = if !incoming.attachments.is_empty() {
             crate::file_processor::process_attachments(
                 &incoming.attachments,
                 &incoming.text,
                 &self.config,
                 &self.memory,
+                supports_vision, // NEW parameter
             )
             .await
         } else {
@@ -652,12 +690,57 @@ impl Agent {
                     start_time: llm_start,
                 });
 
-                // Call LLM with prepared prompt
+                // Call LLM with prepared prompt (with fallback chain)
                 let model = self.current_model.read().await.clone();
-                let completion_result = self
-                    .llm
-                    .chat_completion_with_model(&prompt.messages, &all_tools, &model)
-                    .await;
+                let fallback_chain = &self.config.fallback.chain;
+                let mut last_error = None;
+
+                let completion_result = 'fallback: {
+                    for attempt in 0..=fallback_chain.len() {
+                        let current_model = if attempt == 0 {
+                            model.clone()
+                        } else {
+                            fallback_chain[attempt - 1].clone()
+                        };
+
+                        match self
+                            .llm
+                            .chat_completion_with_model(
+                                &prompt.messages,
+                                &all_tools,
+                                &current_model,
+                            )
+                            .await
+                        {
+                            Ok(c) => {
+                                if attempt > 0 {
+                                    tracing::info!(
+                                        "Fallback succeeded: switched from '{}' to '{}'",
+                                        model,
+                                        current_model
+                                    );
+                                    *self.current_model.write().await = current_model.clone();
+                                }
+                                break 'fallback Ok(c);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Model '{}' failed (attempt {}/{}): {}",
+                                    current_model,
+                                    attempt,
+                                    fallback_chain.len(),
+                                    e
+                                );
+                                last_error = Some(e);
+                                if attempt == fallback_chain.len() {
+                                    break 'fallback Err(last_error.unwrap());
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    Err(last_error.unwrap())
+                };
 
                 // Handle LLM transport/API errors
                 let completion = match completion_result {

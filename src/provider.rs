@@ -205,7 +205,6 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: messages.to_vec(),
             tools: tools_param,
-            tool_choice: None,
             max_tokens,
         };
 
@@ -215,7 +214,10 @@ impl Provider for OpenRouterProvider {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
-        let response = req.send().await.context("Failed to send request to OpenRouter")?;
+        let response = req
+            .send()
+            .await
+            .context("Failed to send request to OpenRouter")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -262,7 +264,10 @@ impl Provider for OpenRouterProvider {
         if let Some(ref key) = self.config.api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
-        let response = req.send().await.context("Failed to fetch models from OpenRouter")?;
+        let response = req
+            .send()
+            .await
+            .context("Failed to fetch models from OpenRouter")?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -326,7 +331,6 @@ impl Provider for OpenAICompatibleProvider {
             model: model.to_string(),
             messages: messages.to_vec(),
             tools: tools_param,
-            tool_choice: None,
             max_tokens,
         };
 

@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::config::OpenRouterConfig;
+use std::sync::Arc;
 
 /// A single part in a multi-modal message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,8 +135,6 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<String>,
     pub max_tokens: u32,
 }
 
@@ -353,174 +351,49 @@ pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
 
 #[derive(Clone)]
 pub struct LlmClient {
-    client: reqwest::Client,
-    config: OpenRouterConfig,
+    pub client: reqwest::Client,
+    pub registry: Arc<crate::provider::ProviderRegistry>,
 }
 
 impl LlmClient {
-    pub fn new(config: OpenRouterConfig) -> Self {
+    pub fn new(registry: Arc<crate::provider::ProviderRegistry>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            config,
+            registry,
         }
     }
 
     /// Core chat method returning full completion metadata (message, finish_reason, model).
     ///
-    /// This is the lowest-level method that performs the HTTP request and returns
-    /// all available metadata from the LLM response. All other chat methods delegate
-    /// to this one.
+    /// Resolves the model string through the registry to pick the right provider,
+    /// then delegates the actual HTTP call to that provider.
     pub async fn chat_completion_with_model(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
         model: &str,
     ) -> Result<ChatCompletion> {
-        let tools_param = if tools.is_empty() {
-            None
-        } else {
-            let sanitized = tools
-                .iter()
-                .map(|t| {
-                    let mut t = t.clone();
-                    sanitize_parameters(&mut t.function.parameters);
-                    t
-                })
-                .collect();
-            Some(sanitized)
-        };
+        let (provider, actual_model) = self.registry.resolve_model(model);
+        let max_tokens = provider.config().max_tokens;
 
-        let tool_choice = if tools_param.is_some() {
-            Some("auto".to_string())
-        } else {
-            None
-        };
+        let mut completion = provider
+            .chat_completion(&self.client, messages, tools, actual_model, max_tokens)
+            .await?;
 
-        let request = ChatRequest {
-            model: model.to_string(),
-            messages: messages.to_vec(),
-            tools: tools_param,
-            tool_choice,
-            max_tokens: self.config.max_tokens,
-        };
-
-        let url = format!("{}/chat/completions", self.config.base_url);
-
-        debug!(
-            url = %url,
-            model = %model,
-            message_count = messages.len(),
-            tool_count = tools.len(),
-            "Sending request to OpenRouter"
-        );
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to OpenRouter")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error ({}): {}", status, error_body);
-        }
-
-        let chat_response: ChatResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenRouter response")?;
-
-        if let Some(choice) = chat_response.choices.first() {
-            debug!(
-                finish_reason = ?choice.finish_reason,
-                has_content = choice.message.content.is_some(),
-                tool_call_count = choice.message.tool_calls.as_ref().map_or(0, |t| t.len()),
-                "Received LLM response"
-            );
-            if choice
-                .message
-                .content
-                .as_ref()
-                .is_none_or(MessageContent::is_empty)
-                && choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty)
-            {
-                warn!(
-                    finish_reason = ?choice.finish_reason,
-                    "LLM returned no content and no tool calls"
-                );
-            }
-        }
-
-        let mut choice = chat_response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from OpenRouter")?;
-
-        // Kimi-family models occasionally leak their native tool-call syntax into
-        // the `content` field instead of populating `tool_calls`.  Detect and fix.
-        let has_tool_calls = choice
-            .message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|t| !t.is_empty());
-        if !has_tool_calls {
-            if let Some(ref content) = choice.message.content.clone() {
-                if let Some(parsed) = parse_kimi_tool_calls(&content.as_text()) {
-                    warn!(
-                        tool_count = parsed.len(),
-                        "Kimi native tool-call format detected in content — \
-                         extracting tool calls and clearing content"
-                    );
-                    choice.message.tool_calls = Some(parsed);
-                    choice.message.content = None;
-                    choice.finish_reason = Some("tool_calls".to_string());
-                }
-            }
-        }
-
-        Ok(ChatCompletion {
-            message: choice.message,
-            finish_reason: choice.finish_reason,
-            model: model.to_string(),
-        })
+        completion.model = model.to_string();
+        Ok(completion)
     }
 
-    /// Compatibility wrapper returning only the message (delegates to chat_completion_with_model).
-    pub async fn chat_with_model(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[ToolDefinition],
-        model: &str,
-    ) -> Result<ChatMessage> {
-        Ok(self
-            .chat_completion_with_model(messages, tools, model)
-            .await?
-            .message)
-    }
-
-    /// Chat using an explicit model, returning full completion metadata.
-    pub async fn chat_completion(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[ToolDefinition],
-    ) -> Result<ChatCompletion> {
-        self.chat_completion_with_model(messages, tools, &self.config.model)
-            .await
-    }
-
-    /// Chat using the model configured in config.toml (delegates to chat_completion).
+    /// Convenience wrapper that uses the default provider's model.
     pub async fn chat(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<ChatMessage> {
-        Ok(self.chat_completion(messages, tools).await?.message)
+        let default_model = self.registry.default_provider_name().to_string();
+        self.chat_completion_with_model(messages, tools, &default_model)
+            .await
+            .map(|c| c.message)
     }
 
     /// Stream an already-complete `content` string through a token channel in small chunks.
@@ -557,68 +430,6 @@ impl LlmClient {
 }
 
 /// Information about an OpenRouter model, deserialized from GET /api/v1/models.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub context_length: u64,
-    #[serde(default)]
-    pub pricing: ModelPricing,
-    #[serde(default)]
-    pub architecture: ModelArchitecture,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-pub struct ModelPricing {
-    #[serde(default)]
-    pub prompt: String,
-    #[serde(default)]
-    pub completion: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-pub struct ModelArchitecture {
-    #[serde(default)]
-    pub modality: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ModelsListResponse {
-    data: Vec<ModelInfo>,
-}
-
-impl LlmClient {
-    /// Fetch the list of available models from OpenRouter.
-    /// The endpoint is public (no auth required for GET /api/v1/models),
-    /// but we send the API key in case of rate-limiting.
-    pub async fn fetch_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        let url = format!("{}/models", self.config.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .send()
-            .await
-            .context("Failed to fetch model list from OpenRouter")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter models API error ({}): {}", status, body);
-        }
-
-        let list: ModelsListResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenRouter model list response")?;
-
-        Ok(list.data)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,7 +474,6 @@ mod tests {
             model: "anthropic/claude-sonnet-4-6".to_string(),
             messages: vec![],
             tools: None,
-            tool_choice: None,
             max_tokens: 100,
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -672,19 +482,17 @@ mod tests {
 
     #[test]
     fn test_chat_request_default_model_is_different_from_override() {
-        // Ensures chat_with_model can use a different model than the config default
+        // Ensures chat_completion_with_model can use a different model than the config default
         let default_req = ChatRequest {
             model: "moonshotai/kimi-k2.5".to_string(),
             messages: vec![],
             tools: None,
-            tool_choice: None,
             max_tokens: 100,
         };
         let override_req = ChatRequest {
             model: "anthropic/claude-sonnet-4-6".to_string(),
             messages: vec![],
             tools: None,
-            tool_choice: None,
             max_tokens: 100,
         };
         let json_default = serde_json::to_value(&default_req).unwrap();

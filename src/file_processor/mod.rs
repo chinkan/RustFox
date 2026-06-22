@@ -27,6 +27,7 @@ pub async fn process_attachments(
     user_query: &str,
     config: &Config,
     memory: &MemoryStore,
+    supports_vision: bool,
 ) -> (String, Vec<ContentPart>) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut image_parts: Vec<ContentPart> = Vec::new();
@@ -37,7 +38,7 @@ pub async fn process_attachments(
                 match process_image(
                     &attachment.path,
                     &attachment.mime_type,
-                    config.openrouter.supports_vision,
+                    supports_vision,
                     &config.ocr.model_dir,
                 )
                 .await

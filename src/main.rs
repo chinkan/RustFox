@@ -10,6 +10,7 @@ use rustfox::config::Config;
 use rustfox::mcp::McpManager;
 use rustfox::memory::MemoryStore;
 use rustfox::platform;
+use rustfox::provider;
 use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
 use rustfox::setup;
@@ -60,6 +61,19 @@ async fn main() -> Result<()> {
     info!("Loading configuration from: {}", config_path.display());
     let config = Config::load(&config_path)
         .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+
+    // Build provider registry from config
+    let (provider_sections, default_provider, fallback_chain) = config.build_providers();
+    let registry = Arc::new(
+        provider::build_registry(&provider_sections, &default_provider)
+            .context("Failed to build LLM provider registry")?,
+    );
+    info!(
+        "  Providers: {} (default: {}, fallback: {} model(s))",
+        registry.provider_count(),
+        registry.default_provider_name(),
+        fallback_chain.len()
+    );
 
     info!("Configuration loaded successfully");
     info!("  Model: {}", config.openrouter.model);
@@ -164,6 +178,7 @@ async fn main() -> Result<()> {
     let agent = Arc::new_cyclic(|weak| {
         Agent::new(
             config.clone(),
+            registry.clone(),
             mcp_manager,
             memory.clone(),
             skills,
@@ -257,7 +272,7 @@ async fn main() -> Result<()> {
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
-        rustfox::llm::LlmClient::new(config.openrouter.clone()),
+        rustfox::llm::LlmClient::new(registry.clone()),
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
