@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::Agent;
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
+use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
 
@@ -219,6 +220,98 @@ fn is_verbose_enabled(value: Option<&str>) -> bool {
     value.map(|v| v == "true").unwrap_or(false)
 }
 
+/// Show models for a selected provider, or prompt for text search.
+/// When prompting for text search, stores pending state in memory so the next
+/// user message from this user routes to `handle_model_search` scoped to this provider.
+async fn handle_provider_model_select(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    provider_name: &str,
+    provider: &dyn Provider,
+    user_id: &str,
+) -> ResponseResult<()> {
+
+    let set_pending = |agent: &Arc<Agent>, user_id: &str| {
+        let agent = agent.clone();
+        let user_id = user_id.to_string();
+        let provider_name = provider_name.to_string();
+        Box::pin(async move {
+            agent.memory.remember(
+                "settings",
+                &format!("model_search_pending_{}", user_id),
+                "true",
+                None,
+            ).await.ok();
+            agent.memory.remember(
+                "settings",
+                &format!("model_search_provider_{}", user_id),
+                &provider_name,
+                None,
+            ).await.ok();
+        })
+    };
+
+    if !provider.config().discover_models {
+        let prompt = format!(
+            "Send me a model name or ID to search for on **{provider_name}**.\n\
+             Example: `{}`",
+            provider.default_model()
+        );
+        bot.send_message(chat_id, &prompt).await?;
+        set_pending(agent, user_id).await;
+        return Ok(());
+    }
+
+    match provider.list_models(&agent.llm.client).await {
+        Ok(models) if models.len() <= 20 => {
+            use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+            let mut keyboard: Vec<Vec<InlineKeyboardButton>> = models
+                .iter()
+                .map(|m| {
+                    let qualified = format!("{}/{}", provider_name, m);
+                    vec![InlineKeyboardButton::callback(
+                        m.clone(),
+                        format!("model_select:{}", qualified),
+                    )]
+                })
+                .collect();
+            keyboard.push(vec![InlineKeyboardButton::callback(
+                "\u{1F50D} Search all",
+                "model_search_prompt",
+            )]);
+            keyboard.push(vec![InlineKeyboardButton::callback(
+                "\u{274C} Cancel",
+                "model_select:cancel",
+            )]);
+
+            let reply = format!("Models on **{provider_name}** ({}):", models.len());
+            bot.send_message(chat_id, &reply)
+                .reply_markup(InlineKeyboardMarkup::new(keyboard))
+                .await?;
+        }
+        Ok(models) => {
+            let prompt = format!(
+                "**{provider_name}** has {} models available.\n\
+                 Send me a model name or ID to search for.",
+                models.len()
+            );
+            bot.send_message(chat_id, &prompt).await?;
+            set_pending(agent, user_id).await;
+        }
+        Err(e) => {
+            let prompt = format!(
+                "Could not load model list from **{provider_name}**: {e}\n\
+                 Send a model name or ID directly."
+            );
+            bot.send_message(chat_id, &prompt).await?;
+            set_pending(agent, user_id).await;
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared model search logic: fetch models, try exact match, fall back to fuzzy search,
 /// show top 5 results as inline keyboard buttons.
 async fn handle_model_search(
@@ -227,10 +320,11 @@ async fn handle_model_search(
     agent: &Arc<Agent>,
     query: &str,
 ) -> ResponseResult<()> {
-    // TODO(Task 9): /models interactive picker will be reworked against the new
-    // ProviderRegistry (per-provider list_models, fuzzy match across providers).
-    // For now, accept the model string verbatim via set_model().
-    let _ = agent;
+    // Direct model set via qualified ID (e.g. "ollama/llama3" or
+    // "openrouter/moonshotai/kimi-k2.6"). The agent.set_model handles validation
+    // through the registry; the multi-step provider→model picker is in
+    // `handle_provider_model_select` and is invoked from the `/models` command
+    // and the `provider_select:` callback.
     match agent.set_model(query).await {
         Ok(()) => {
             let reply = format!("✅ Model changed to `{}`", query);
@@ -581,30 +675,61 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 return Ok(());
             }
             "models" => {
-                if arg.is_empty() {
-                    let current = agent.current_model.read().await;
-                    let reply = format!(
-                        "Current model: `{}`\n\nTap the button below to search for a model.",
-                        *current
-                    );
-                    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-                    let keyboard = InlineKeyboardMarkup::new(vec![
-                        vec![InlineKeyboardButton::callback(
-                            "🔍 Search models",
-                            "model_search_prompt",
-                        )],
-                        vec![InlineKeyboardButton::callback(
-                            "❌ Cancel",
-                            "model_select:cancel",
-                        )],
-                    ]);
-                    bot.send_message(msg.chat.id, &reply)
-                        .reply_markup(keyboard)
-                        .await?;
-                    return Ok(());
+                if !arg.is_empty() {
+                    return handle_model_search(bot, msg.chat.id, &agent, &arg).await;
                 }
 
-                return handle_model_search(bot, msg.chat.id, &agent, &arg).await;
+                let providers = agent.registry.provider_names();
+
+                if providers.len() == 1 {
+                    // Single provider: jump straight to model search
+                    let provider_name = providers[0].clone();
+                    let provider = match agent.registry.get_provider(&provider_name) {
+                        Some(p) => p,
+                        None => {
+                            bot.send_message(
+                                msg.chat.id,
+                                escape_text(&format!("Provider '{}' not found.", provider_name)),
+                            )
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                    let user_id = user_id.to_string();
+                    return handle_provider_model_select(
+                        bot,
+                        msg.chat.id,
+                        &agent,
+                        &provider_name,
+                        provider,
+                        &user_id,
+                    )
+                    .await;
+                }
+
+                // Multiple providers: show inline keyboard
+                let current = agent.current_model.read().await;
+                let reply = format!("Active model: `{}`\n\nSelect a provider:", *current);
+                use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+                let mut keyboard: Vec<Vec<InlineKeyboardButton>> = providers
+                    .iter()
+                    .map(|name| {
+                        vec![InlineKeyboardButton::callback(
+                            name.clone(),
+                            format!("provider_select:{}", name),
+                        )]
+                    })
+                    .collect();
+                keyboard.push(vec![InlineKeyboardButton::callback(
+                    "❌ Cancel",
+                    "model_select:cancel",
+                )]);
+
+                bot.send_message(msg.chat.id, &reply)
+                    .reply_markup(InlineKeyboardMarkup::new(keyboard))
+                    .await?;
+                return Ok(());
             }
             _ => {} // ignore unknown commands for now
         }
@@ -884,6 +1009,24 @@ async fn handle_model_callback(
     let msg = q.regular_message().cloned();
 
     bot.answer_callback_query(callback_id).await?;
+
+    if let Some(provider_name) = data.strip_prefix("provider_select:") {
+        if let Some(provider) = agent.registry.get_provider(provider_name) {
+            if let Some(ref m) = msg {
+                let user_id = q.from.id.0.to_string();
+                return handle_provider_model_select(
+                    bot,
+                    m.chat.id,
+                    &agent,
+                    provider_name,
+                    provider,
+                    &user_id,
+                )
+                .await;
+            }
+        }
+        return Ok(());
+    }
 
     if data == "model_search_prompt" {
         if let Some(m) = msg {
