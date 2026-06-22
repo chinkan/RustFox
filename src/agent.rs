@@ -115,14 +115,7 @@ impl Agent {
         config_path: PathBuf,
     ) -> Self {
         let llm = LlmClient::new(registry.clone());
-        let initial_model = format!(
-            "{}/{}",
-            registry.default_provider_name(),
-            registry
-                .resolve_model(registry.default_provider_name())
-                .0
-                .default_model()
-        );
+        let initial_model = registry.default_qualified_model();
         Self {
             llm,
             registry,
@@ -354,15 +347,9 @@ impl Agent {
 
         let provider_name = provider.name().to_string();
 
-        if provider_name == "openrouter" && doc.contains_key("openrouter") {
-            if let Some(table) = doc.get_mut("openrouter").and_then(|v| v.as_table_mut()) {
-                table.insert(
-                    "model".to_string(),
-                    toml::Value::String(actual_model.to_string()),
-                );
-            }
-        } else if let Some(provider_array) = doc.get_mut("provider").and_then(|v| v.as_array_mut())
-        {
+        // Try explicit [[provider]] array first
+        let mut found_in_array = false;
+        if let Some(provider_array) = doc.get_mut("provider").and_then(|v| v.as_array_mut()) {
             for entry in provider_array.iter_mut() {
                 if let Some(table) = entry.as_table_mut() {
                     if table.get("name").and_then(|v| v.as_str()) == Some(&provider_name) {
@@ -370,8 +357,19 @@ impl Agent {
                             "model".to_string(),
                             toml::Value::String(actual_model.to_string()),
                         );
+                        found_in_array = true;
                     }
                 }
+            }
+        }
+
+        // Fall back to legacy [openrouter] section if not found in [[provider]] array
+        if !found_in_array && provider_name == "openrouter" && doc.contains_key("openrouter") {
+            if let Some(table) = doc.get_mut("openrouter").and_then(|v| v.as_table_mut()) {
+                table.insert(
+                    "model".to_string(),
+                    toml::Value::String(actual_model.to_string()),
+                );
             }
         }
 

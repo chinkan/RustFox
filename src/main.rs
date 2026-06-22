@@ -76,7 +76,14 @@ async fn main() -> Result<()> {
     );
 
     info!("Configuration loaded successfully");
-    info!("  Model: {}", config.openrouter.model);
+    let default_provider_obj = registry
+        .get_provider(registry.default_provider_name())
+        .expect("default provider must exist");
+    info!(
+        "  Model: {}/{}",
+        registry.default_provider_name(),
+        default_provider_obj.default_model()
+    );
     info!("  Sandbox: {}", config.sandbox.allowed_directory.display());
     if let Some(home) = &config.resolved_home {
         info!("  Home: {}", home.display());

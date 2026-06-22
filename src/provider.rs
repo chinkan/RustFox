@@ -119,6 +119,12 @@ impl ProviderRegistry {
     pub fn provider_names(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
     }
+
+    /// Return the fully-qualified default model string, e.g. `"openrouter/moonshotai/kimi-k2.6"`.
+    pub fn default_qualified_model(&self) -> String {
+        let provider = &self.providers[&self.default_provider];
+        format!("{}/{}", self.default_provider, provider.default_model())
+    }
 }
 
 /// Build a ProviderRegistry from config sections.

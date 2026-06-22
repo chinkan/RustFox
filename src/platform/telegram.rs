@@ -231,24 +231,31 @@ async fn handle_provider_model_select(
     provider: &dyn Provider,
     user_id: &str,
 ) -> ResponseResult<()> {
-
     let set_pending = |agent: &Arc<Agent>, user_id: &str| {
         let agent = agent.clone();
         let user_id = user_id.to_string();
         let provider_name = provider_name.to_string();
         Box::pin(async move {
-            agent.memory.remember(
-                "settings",
-                &format!("model_search_pending_{}", user_id),
-                "true",
-                None,
-            ).await.ok();
-            agent.memory.remember(
-                "settings",
-                &format!("model_search_provider_{}", user_id),
-                &provider_name,
-                None,
-            ).await.ok();
+            agent
+                .memory
+                .remember(
+                    "settings",
+                    &format!("model_search_pending_{}", user_id),
+                    "true",
+                    None,
+                )
+                .await
+                .ok();
+            agent
+                .memory
+                .remember(
+                    "settings",
+                    &format!("model_search_provider_{}", user_id),
+                    &provider_name,
+                    None,
+                )
+                .await
+                .ok();
         })
     };
 
@@ -311,23 +318,43 @@ async fn handle_provider_model_select(
 
     Ok(())
 }
-
-/// Shared model search logic: fetch models, try exact match, fall back to fuzzy search,
-/// show top 5 results as inline keyboard buttons.
+/// Accept a text model query and attempt to set the active model.
+/// If the user previously selected a provider (via the inline keyboard),
+/// the bare query is prefixed with that provider's name to form a
+/// qualified model ID.
 async fn handle_model_search(
     bot: Bot,
     chat_id: ChatId,
     agent: &Arc<Agent>,
     query: &str,
+    user_id: &str,
 ) -> ResponseResult<()> {
-    // Direct model set via qualified ID (e.g. "ollama/llama3" or
-    // "openrouter/moonshotai/kimi-k2.6"). The agent.set_model handles validation
-    // through the registry; the multi-step provider→model picker is in
-    // `handle_provider_model_select` and is invoked from the `/models` command
-    // and the `provider_select:` callback.
-    match agent.set_model(query).await {
+    // Check if user has a stored provider from the interactive picker
+    let stored_provider = agent
+        .memory
+        .recall("settings", &format!("model_search_provider_{}", user_id))
+        .await
+        .unwrap_or(None);
+
+    let qualified = if let Some(ref provider_name) = stored_provider {
+        // Clear the stored provider so it doesn't affect future searches
+        agent
+            .memory
+            .forget("settings", &format!("model_search_provider_{}", user_id))
+            .await
+            .ok();
+        if query.contains('/') {
+            query.to_string()
+        } else {
+            format!("{}/{}", provider_name, query)
+        }
+    } else {
+        query.to_string()
+    };
+
+    match agent.set_model(&qualified).await {
         Ok(()) => {
-            let reply = format!("✅ Model changed to `{}`", query);
+            let reply = format!("✅ Model changed to `{}`", qualified);
             bot.send_message(chat_id, escape_text(&reply))
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
@@ -341,6 +368,7 @@ async fn handle_model_search(
             .await?;
         }
     }
+
     Ok(())
 }
 
@@ -426,7 +454,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await
             .ok();
         // Treat message as a model search query — dispatch to shared model search logic.
-        return handle_model_search(bot, msg.chat.id, &agent, &text).await;
+        return handle_model_search(bot, msg.chat.id, &agent, &text, &user_id.to_string()).await;
     }
 
     info!(
@@ -676,7 +704,14 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             }
             "models" => {
                 if !arg.is_empty() {
-                    return handle_model_search(bot, msg.chat.id, &agent, &arg).await;
+                    return handle_model_search(
+                        bot,
+                        msg.chat.id,
+                        &agent,
+                        &arg,
+                        &user_id.to_string(),
+                    )
+                    .await;
                 }
 
                 let providers = agent.registry.provider_names();
