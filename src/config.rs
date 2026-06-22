@@ -994,4 +994,102 @@ mod tests {
         assert_eq!(cfg.agent.empty_response_retry_limit, 0);
         assert_eq!(cfg.empty_response_retry_limit(), 0);
     }
+
+    #[test]
+    fn test_provider_section_parses_ollama() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            model = "moonshotai/kimi-k2.6"
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://localhost:11434/v1"
+            model = "llama3.1"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.provider.len(), 1);
+        assert_eq!(cfg.provider[0].name, "ollama");
+        assert_eq!(cfg.provider[0].model, "llama3.1");
+    }
+
+    #[test]
+    fn test_legacy_openrouter_auto_creates_provider() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            model = "moonshotai/kimi-k2.6"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, default_name, _) = cfg.build_providers();
+        assert!(providers.iter().any(|p| p.name == "openrouter"));
+        assert_eq!(default_name, "openrouter");
+    }
+
+    #[test]
+    fn test_visible_provider_overrides_legacy() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "old-key"
+            model = "moonshotai/kimi-k2.6"
+            [[provider]]
+            name = "openrouter"
+            type = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = "new-key"
+            model = "anthropic/claude-sonnet-4-6"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, _default, _) = cfg.build_providers();
+        // Should not have duplicate openrouter providers
+        let or_count = providers.iter().filter(|p| p.name == "openrouter").count();
+        assert_eq!(
+            or_count, 1,
+            "should not duplicate openrouter when explicit [[provider]] exists"
+        );
+        let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
+        assert_eq!(
+            or.api_key.as_deref(),
+            Some("new-key"),
+            "explicit [[provider]] should win"
+        );
+    }
+
+    #[test]
+    fn test_fallback_config_parses() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [fallback]
+            chain = ["openrouter/model-a", "ollama/model-b"]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.fallback.chain.len(), 2);
+        assert_eq!(cfg.fallback.chain[0], "openrouter/model-a");
+    }
+
+    #[test]
+    fn test_fallback_defaults_empty() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.fallback.chain.is_empty());
+    }
 }
