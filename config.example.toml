@@ -25,6 +25,37 @@ Use the available tools to help the user with their tasks. \
 When using file or terminal tools, operate only within the allowed sandbox directory. \
 Be concise and helpful."""
 
+# ── Multi-Provider Configuration (optional) ────────────────────────────
+# Define additional LLM providers alongside OpenRouter.
+# Each [[provider]] block adds a new provider. Model strings use the
+# format `provider_name/model_id` (e.g., `ollama/llama3.1`).
+# The first provider becomes the default.
+
+# Example: Ollama (local models)
+# [[provider]]
+# name = "ollama"
+# type = "ollama"
+# base_url = "http://localhost:11434/v1"
+# model = "llama3.1"
+# discover_models = true
+
+# Example: Any OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp, etc.)
+# [[provider]]
+# name = "lmstudio"
+# type = "openai_compatible"
+# base_url = "http://localhost:1234/v1"
+# model = "qwen2.5-7b-instruct"
+
+# ── Fallback Chain (optional) ──────────────────────────────────────────
+# When the primary model fails, RustFox tries each fallback in order.
+# Each entry is a full provider-prefixed model string.
+# [fallback]
+# chain = [
+#     "openrouter/moonshotai/kimi-k2.6",
+#     "ollama/llama3.1",
+#     "lmstudio/qwen2.5-7b-instruct",
+# ]
+
 # ── Home directory & paths ──────────────────────────────────────────────
 # By default RustFox stores everything under ~/.rustfox:
 #   ~/.rustfox/config.toml, rustfox.db, skills/, agents/, workspace/, artifacts/
