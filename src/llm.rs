@@ -130,26 +130,31 @@ pub fn is_empty_assistant_response(message: &ChatMessage) -> bool {
 }
 
 #[derive(Debug, Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
+    pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-    max_tokens: u32,
+    pub tool_choice: Option<String>,
+    pub max_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
+pub struct ChatResponse {
+    pub choices: Vec<Choice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Choice {
-    message: ChatMessage,
+pub struct Choice {
+    pub message: ChatMessage,
     #[serde(default)]
-    finish_reason: Option<String>,
+    pub finish_reason: Option<String>,
+}
+
+#[doc(hidden)]
+pub mod internal {
+    pub use super::{ChatRequest, ChatResponse, Choice};
 }
 
 /// Sanitize a JSON Schema parameter object so it is accepted by strict providers
@@ -170,7 +175,7 @@ struct Choice {
 ///
 /// This function mutates the schema in-place and recurses into `properties`,
 /// `items`, `anyOf`, `oneOf`, and `allOf` sub-schemas.
-fn sanitize_parameters(schema: &mut serde_json::Value) {
+pub fn sanitize_parameters(schema: &mut serde_json::Value) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
         None => return,
@@ -276,7 +281,7 @@ fn sanitize_parameters(schema: &mut serde_json::Value) {
 ///
 /// Returns `Some(Vec<ToolCall>)` with at least one entry when the format is
 /// detected, or `None` if the content does not contain the Kimi markers.
-fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
+pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
     if !content.contains("<|tool_calls_section_begin|>") {
         return None;
     }

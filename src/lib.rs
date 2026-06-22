@@ -11,6 +11,7 @@ pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod platform;
+pub mod provider;
 pub mod scheduler;
 pub mod setup;
 pub mod skills;
