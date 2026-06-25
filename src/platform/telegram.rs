@@ -319,9 +319,12 @@ async fn handle_provider_model_select(
     Ok(())
 }
 /// Accept a text model query and attempt to set the active model.
-/// If the user previously selected a provider (via the inline keyboard),
-/// the bare query is prefixed with that provider's name to form a
-/// qualified model ID.
+/// If the query is a bare name (e.g. "deepseek v4 flash"), fetches the
+/// provider's model list via `list_models()` and does fuzzy matching to
+/// resolve the actual model ID (e.g. "deepseek/deepseek-v4-flash").
+///
+/// If the user previously selected a provider via the inline keyboard,
+/// the search is scoped to that provider.
 async fn handle_model_search(
     bot: Bot,
     chat_id: ChatId,
@@ -329,32 +332,139 @@ async fn handle_model_search(
     query: &str,
     user_id: &str,
 ) -> ResponseResult<()> {
-    // Check if user has a stored provider from the interactive picker
+    // If query already has a known provider prefix, set directly
+    if let Some((prefix, _)) = query.split_once('/') {
+        if agent.registry.get_provider(prefix).is_some() {
+            return set_model_and_reply(bot, chat_id, agent, query).await;
+        }
+    }
+
+    // Determine which provider to search
     let stored_provider = agent
         .memory
         .recall("settings", &format!("model_search_provider_{}", user_id))
         .await
         .unwrap_or(None);
 
-    let qualified = if let Some(ref provider_name) = stored_provider {
-        // Clear the stored provider so it doesn't affect future searches
+    let provider_name = stored_provider
+        .clone()
+        .unwrap_or_else(|| agent.registry.default_provider_name().to_string());
+
+    // Clear stored provider so it doesn't affect future searches
+    if stored_provider.is_some() {
         agent
             .memory
             .forget("settings", &format!("model_search_provider_{}", user_id))
             .await
             .ok();
-        if query.contains('/') {
-            query.to_string()
-        } else {
-            format!("{}/{}", provider_name, query)
+    }
+
+    let provider = match agent.registry.get_provider(&provider_name) {
+        Some(p) => p,
+        None => {
+            return set_model_and_reply(
+                bot,
+                chat_id,
+                agent,
+                &format!("{}/{}", provider_name, query),
+            )
+            .await;
         }
-    } else {
-        query.to_string()
     };
 
-    match agent.set_model(&qualified).await {
+    // Fetch model list and fuzzy match
+    match provider.list_models(&agent.llm.client).await {
+        Ok(models) if !models.is_empty() => {
+            let q = query
+                .to_lowercase()
+                .replace(['-', '_', '.', ' '], "");
+
+            // Exact match (full model ID)
+            if let Some(exact) = models
+                .iter()
+                .find(|m| m.to_lowercase() == query.to_lowercase())
+            {
+                return set_model_and_reply(
+                    bot,
+                    chat_id,
+                    agent,
+                    &format!("{}/{}", provider_name, exact),
+                )
+                .await;
+            }
+
+            // Fuzzy match: normalize both sides and check containment
+            let mut matches: Vec<&String> = models
+                .iter()
+                .filter(|m| {
+                    m.to_lowercase()
+                        .replace(['-', '_', '.', ' '], "")
+                        .contains(&q)
+                })
+                .collect();
+            matches.sort();
+            matches.truncate(10);
+
+            match matches.len() {
+                0 => {
+                    // No fuzzy match — try direct set anyway
+                    return set_model_and_reply(
+                        bot,
+                        chat_id,
+                        agent,
+                        &format!("{}/{}", provider_name, query),
+                    )
+                    .await;
+                }
+                1 => {
+                    return set_model_and_reply(
+                        bot,
+                        chat_id,
+                        agent,
+                        &format!("{}/{}", provider_name, matches[0]),
+                    )
+                    .await;
+                }
+                _ => {
+                    let mut reply = format!(
+                        "Multiple models match '{}' on **{}**:\n\n",
+                        query, provider_name
+                    );
+                    for m in &matches {
+                        reply.push_str(&format!("`{}/{m}`\n", provider_name));
+                    }
+                    reply.push_str("\nUse `/models <full_model_id>` to set one.");
+                    bot.send_message(chat_id, escape_text(&reply))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                }
+            }
+        }
+        _ => {
+            // API unavailable or empty list — try direct set
+            return set_model_and_reply(
+                bot,
+                chat_id,
+                agent,
+                &format!("{}/{}", provider_name, query),
+            )
+            .await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Set the model and send a success/failure reply.
+async fn set_model_and_reply(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    model_id: &str,
+) -> ResponseResult<()> {
+    match agent.set_model(model_id).await {
         Ok(()) => {
-            let reply = format!("✅ Model changed to `{}`", qualified);
+            let reply = format!("✅ Model changed to `{}`", model_id);
             bot.send_message(chat_id, escape_text(&reply))
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
@@ -368,7 +478,6 @@ async fn handle_model_search(
             .await?;
         }
     }
-
     Ok(())
 }
 
