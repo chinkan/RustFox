@@ -375,9 +375,7 @@ async fn handle_model_search(
     // Fetch model list and fuzzy match
     match provider.list_models(&agent.llm.client).await {
         Ok(models) if !models.is_empty() => {
-            let q = query
-                .to_lowercase()
-                .replace(['-', '_', '.', ' '], "");
+            let q = query.to_lowercase().replace(['-', '_', '.', ' '], "");
 
             // Exact match (full model ID)
             if let Some(exact) = models
