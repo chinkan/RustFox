@@ -28,36 +28,51 @@ Key insight from Anthropic's official docs: **"tool result clearing is one of th
 
 Research shows that compaction should be **adaptive to trajectory structure**, not fixed-interval. A rubric specifying when to fire (sub-task resolved, trajectory converging) and when to suppress (mid-derivation, stuck) significantly improves outcomes.
 
-## Design: 4-Tier Progressive Pipeline
+## Architecture: 4-Tier Pipeline (Split Across Modules)
 
-Replace `compact_tool_heavy_history()` with a graduated pipeline:
+Tiers 1-2 live in `agent_prompt.rs` (sync, 0 LLM cost). Tiers 3-4 live in `agent.rs` (async, require LLM call).
 
 ```
-prepare_messages_for_llm():
-  1. Estimate context bytes %
-  2. If >50%  → Tier 1: observation masking (mask old tool results, 0 LLM cost)
-  3. If >70%  → Tier 2: context collapse (drop oldest tool groups, 0 LLM cost)
-  4. If >85%  → Tier 3: auto compact (LLM summarization, 1 LLM call)
-  5. If >95%  → Tier 4: reactive (keep last 4 messages, summarize rest)
+agent.rs loop:
+  │
+  ├─ 1. Call should_auto_compact(messages, turn_count)
+  │     │
+  │     ├─ False → skip to step 2
+  │     └─ True  → async auto_compact_conversation(messages, llm)
+  │                 └─ LLM generates 8-section summary
+  │                 └─ Replaces old messages with summary + recent
+  │                 └─ Updates last_compact_turn
+  │
+  ├─ 2. Call sync prepare_messages_for_llm(messages)          ← Tiers 1-2 only
+  │     │
+  │     ├─ If >20% → Tier 1: observation masking (mask tool results)
+  │     ├─ If >60% → Tier 2: context collapse (drop oldest groups)
+  │     └─ Return PreparedPrompt
+  │
+  └─ 3. Send to LLM API
+        │
+        └─ On 413 error → Tier 4: reactive_compact (keep last 4, summarize rest)
 ```
 
 ### Tier 1: Observation Masking
 
 Replace old tool result content with `[previous tool result — masked]` marker. Preserves the message structure and tool_use record. The LLM knows it made the call, but doesn't carry the bulky payload.
 
-- **Trigger:** estimated bytes > 50% of hard cap (50,000/100,000)
+- **Trigger:** estimated bytes > 20,000 (20% of hard cap; preserves backward compat with old `COMPACTION_PROMPT_BYTE_THRESHOLD`)
 - **Scope:** tool results older than `PRESERVED_TOOL_GROUPS` (2)
 - **Cost:** 0 LLM calls
 
+Also neutralizes any old `[RustFox compacted:` markers found in tool call arguments by replacing them with a simpler `[compacted]` marker. This prevents the regurgitation problem from persisting through Tiers 1-2.
+
 ### Tier 2: Context Collapse
 
-Remove entire oldest assistant-with-tool-calls groups and their tool results. These messages are **gone**, not compacted.
+Remove entire oldest assistant-with-tool-calls groups and their tool results. These messages are **gone**, not compacted. A structural boundary marker `[system] ★ earlier conversation collapsed ★` is inserted at the collapse point so the LLM doesn't perceive a confusing jump.
 
-- **Trigger:** still > 70% after Tier 1
+- **Trigger:** still > 60,000 bytes (60%) after Tier 1
 - **Scope:** oldest 50% of non-preserved tool groups
 - **Cost:** 0 LLM calls
 
-### Tier 3: Auto Compact (Core)
+### Tier 3: Auto Compact (Core, Async in agent.rs)
 
 Replace the older portion of conversation (everything except the most recent `PRESERVED_TOOL_GROUPS` tool groups) with a single structured summary message.
 
@@ -86,8 +101,9 @@ Replace the older portion of conversation (everything except the most recent `PR
 
 **Trigger Conditions (ALL must be true):**
 - Message count > 15
-- Estimated prompt bytes > 40,000
-- Last compact was ≥ 5 turns ago (anti-loop guard)
+- Estimated prompt bytes > 85,000 (matches `COMPACT_THRESHOLD` in constants table)
+- Last compact was ≥ 5 turns ago (`COMPACT_TURN_GAP`)
+- `query_source != "compact"` (recursion guard)
 
 **Summary Prompt (adapted from Claude Code's `BASE_COMPACT_PROMPT`):**
 
@@ -106,74 +122,150 @@ Your summary must include these sections:
 8. Next Step: The next logical action based on the most recent user request
 
 IMPORTANT: Do NOT call any tools. Respond with text only.
-Use <summary> tags to wrap your output.
 ```
 
-**Post-Compact Reconstruction (after LLM returns summary):**
-1. Strip `<summary>` tags from LLM output (`format_compact_summary()`)
-2. Create compact boundary marker message (system role)
-3. Create summary message (system role)
-4. Append preserved recent messages
-5. Append `recovery_nudge_for()` message
+**Post-Compact Reconstruction (after LLM returns summary in agent.rs):**
+1. Create compact boundary marker message (system role, contains pre-compact stats)
+2. Create summary message (system role, contains raw LLM summary text)
+3. Append preserved recent messages
+4. Append `recovery_nudge_for()` message
+5. Update `last_compact_turn` in `ConversationMeta`
 6. Return new message list
 
-**Cost:** 1 LLM call (returns ~500-2000 tokens of summary, saves potentially 50K+ tokens)
+**Cost:** 1 LLM call (returns ~500-2000 tokens of summary, saves potentially 80K+ tokens)
 
-**Integration Note:** `prepare_messages_for_llm()` is currently sync. Tier 3 requires an async LLM call, so the trigger logic moves to `agent.rs`:
-1. `agent.rs` processing loop calls `should_auto_compact(messages, turn_count)` to check thresholds
-2. If true, calls `async auto_compact_conversation(messages, llm_client)` → returns new message list with summary
-3. Then calls sync `prepare_messages_for_llm()` (which now does only Tiers 1-2 masking/collapse) on the already-compacted messages
-4. Tiers 1-2 remain sync inside `prepare_messages_for_llm()` as they are 0-cost
+**Both call sites get Tier 3:** The main agent loop (line 645) and `run_subagent_loop` (line ~1921) both call `should_auto_compact()` + `auto_compact_conversation()`. Subagent loops use the same thresholds and same `ConversationMeta` tracking.
 
 ### Tier 4: Reactive Compact
 
-Emergency path triggered when the API returns a 413 / prompt-too-long error.
+Emergency path, triggered when the API returns a 413 / prompt-too-long error. Lives in `agent.rs` as a catch block around the LLM API call.
 
 - Keep only the last 4 messages
 - Summarize everything else using Tier 3's prompt
-- One-attempt guard to prevent retry loops
+- One-attempt guard (`has_attempted_reactive_compact` bool) to prevent retry loops
+- On failure: surface error to user
+
+## State: ConversationMeta
+
+A new struct to hold per-conversation compaction state. Currently conversation is a bare `Vec<ChatMessage>`. The agent loop wraps it with this metadata:
+
+```rust
+pub struct ConversationMeta {
+    pub messages: Vec<ChatMessage>,
+    pub last_compact_turn: usize,       // turn count when last Tier 3/4 occurred
+    pub has_attempted_reactive_compact: bool,  // one-shot guard for Tier 4
+}
+```
+
+`last_compact_turn` is incremented by the agent loop on every iteration and read by `should_auto_compact()`. It is an in-memory counter, not persisted.
 
 ## Anti-Loop Guards
 
-- **Recursion guard:** Set `query_source = "compact"` when calling LLM for summary; Tier 3 checks this and skips itself
-- **Turn counter:** Track `last_compact_turn` per conversation; skip if < 5 turns since last compact
-- **Backward compat:** Keep `is_compacted_regurgitation()` as safety net, but new system should never trigger it
+- **Recursion guard:** When calling LLM for Tier 3 summary, set an internal flag (`query_source = "compact"`). `should_auto_compact()` checks this and returns false. Without this, the compaction LLM call would itself trigger compaction → infinite loop.
+- **Turn counter:** `last_compact_turn` tracks last Tier 3/4 compact; skip if `current_turn - last_compact_turn < COMPACT_TURN_GAP`.
+- **Reactive one-shot:** `has_attempted_reactive_compact` prevents Tier 4 retry loops.
+- **Backward compat:** Keep `is_compacted_regurgitation()` as safety net. After Tier 3 fires, no old markers remain in context.
 
 ## Threshold Constants
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `OBSERVATION_MASK_THRESHOLD` | 50,000 bytes (50%) | Trigger Tier 1 |
-| `COLLAPSE_THRESHOLD` | 70,000 bytes (70%) | Trigger Tier 2 |
-| `COMPACT_THRESHOLD` | 85,000 bytes (85%) | Trigger Tier 3 |
-| `REACTIVE_THRESHOLD` | 95,000 bytes (95%) | Trigger Tier 4 |
-| `PROMPT_HARD_CAP_BYTES` | 100,000 bytes (unchanged) | Absolute limit |
-| `COMPACT_TURN_GAP` | 5 | Minimum turns between compacts |
-| `PRESERVED_TOOL_GROUPS` | 2 | Groups to keep verbatim (unchanged) |
+| Constant | Value | Purpose | Notes |
+|----------|-------|---------|-------|
+| `OBSERVATION_MASK_THRESHOLD` | 20,000 bytes (20%) | Trigger Tier 1 | Same as old `COMPACTION_PROMPT_BYTE_THRESHOLD` for backward compat |
+| `COLLAPSE_THRESHOLD` | 60,000 bytes (60%) | Trigger Tier 2 | |
+| `COMPACT_THRESHOLD` | 85,000 bytes (85%) | Trigger Tier 3 | |
+| `REACTIVE_THRESHOLD` | 95,000 bytes (95%) | Trigger Tier 4 | |
+| `PROMPT_HARD_CAP_BYTES` | 100,000 bytes | Absolute limit | Unchanged |
+| `COMPACT_TURN_GAP` | 5 | Minimum turns between compacts | |
+| `PRESERVED_TOOL_GROUPS` | 2 | Groups to keep verbatim | Unchanged |
+
+Deprecated constants to remove:
+| Old Constant | Reason |
+|--------------|--------|
+| `COMPACTION_MESSAGE_COUNT_THRESHOLD` (10) | Replaced by explicit > 15 in trigger conditions |
+| `COMPACTION_PROMPT_BYTE_THRESHOLD` (20,000) | Replaced by `OBSERVATION_MASK_THRESHOLD` |
+| `TOOL_ARGUMENT_COMPACT_THRESHOLD` (1,000) | No longer needed — tools are not individually truncated |
+| `TOOL_RESULT_COMPACT_THRESHOLD` (2,000) | Replaced by observation masking |
+| `TOOL_RESULT_PREVIEW_CHARS` (1,000) | Replaced by masking |
+| `COMPACTION_MARKER_PREFIX` | Removed — no new markers created (retain for `is_compacted_regurgitation` backward compat) |
 
 ## Files to Change
 
-| File | Changes |
-|------|---------|
-| `src/agent_prompt.rs` | Replace `compact_tool_heavy_history()` with 4-tier pipeline. Add `format_compact_summary()`. Add `auto_compact_conversation()`. Add `reactive_compact()`. |
-| `src/agent.rs` | Wire LangSmith logging for new compaction events. Update `is_compacted_regurgitation()` docs. |
-| `src/llm.rs` | Add `is_tool_call()` helper to ChatMessage (needed by pipeline). |
+### `src/agent_prompt.rs`
+- Remove `compact_tool_heavy_history()`, `compact_tool_heavy_history_with_preserved_groups()`, `compact_assistant_tool_calls()`, `compact_tool_result()`
+- Remove old threshold constants
+- Add `observation_mask(messages) → Vec<ChatMessage>` (Tier 1)
+  - For tool results older than PRESERVED_TOOL_GROUPS: replace content with `[previous tool result — masked]`
+  - For old `[RustFox compacted:` markers in tool call arguments: replace with `[compacted]`
+- Add `collapse_context(messages) → Vec<ChatMessage>` (Tier 2)
+  - Identify tool groups via existing algorithm
+  - Drop oldest 50% of non-preserved groups
+  - Insert `[system] ★ earlier conversation collapsed ★` at collapse boundary
+- Keep `prepare_messages_for_llm()` as sync function, now calls Tiers 1-2 only
+- Keep `recovery_nudge_for()` unchanged
+- Keep `estimate_prompt_bytes()` unchanged
+
+### `src/agent.rs`
+- Add `pub use agent_prompt::*` imports for new functions
+- Add `ConversationMeta` struct definition
+- At both call sites (main loop line ~645, subagent loop line ~1921):
+  - Before `prepare_messages_for_llm()`:
+    1. Call `should_auto_compact(meta)` — checks bytes + turn gap + recursion guard
+    2. If true → call `async auto_compact_conversation(messages, llm)` → returns new messages
+    3. Update `meta.last_compact_turn`
+  - Around LLM API call:
+    - Catch 413 error → call `async reactive_compact(messages, llm)`
+    - Set `meta.has_attempted_reactive_compact` to prevent retry loop
+- Wire LangSmith logging for Tier 3/4 events (tier, pre/post byte counts, message count delta)
+- Keep `is_compacted_regurgitation()` as safety net
+
+### `src/llm.rs`
+- Add `fn has_tool_calls(&self) -> bool` to `ChatMessage`:
+  ```rust
+  pub fn has_tool_calls(&self) -> bool {
+      self.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
+  }
+  ```
+  Replaces inline `msg.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())` patterns.
+
+### `src/agent_prompt.rs` — New Module Functions
+
+```rust
+/// Check whether Tier 3 auto-compact should trigger.
+/// Returns false if query_source == "compact" (recursion guard) or
+/// if COMPACT_TURN_GAP turns haven't passed since last compact.
+pub fn should_auto_compact(messages: &[ChatMessage], meta: &ConversationMeta) -> bool;
+
+/// Async: call LLM to summarize older portion of conversation.
+/// Returns new message list with summary + preserved recent messages.
+pub async fn auto_compact_conversation(
+    messages: Vec<ChatMessage>,
+    llm: &LlmClient,
+) -> Result<Vec<ChatMessage>>;
+
+/// Async: emergency compact for 413 recovery.
+/// Keeps last 4 messages, summarizes the rest.
+pub async fn reactive_compact(
+    messages: Vec<ChatMessage>,
+    llm: &LlmClient,
+) -> Result<Vec<ChatMessage>>;
+```
 
 ## Test Plan
 
-### Unit Tests (in `agent_prompt.rs`)
+### Unit Tests (in `agent_prompt.rs`, sync)
 
-1. **Tier 1 masking:** Old tool results replaced with marker, recent tool results preserved
-2. **Tier 2 collapse:** Oldest tool groups removed entirely, structure preserved (system → user → compact → recent)
-3. **Tier 3 auto compact:** 15+ messages over threshold → replaced with summary + recent messages
-4. **Tier 3 no-trigger:** Under threshold → passthrough unchanged
-5. **Tier 3 anti-loop:** Second compact within 5 turns → skipped
-6. **Summary format:** `format_compact_summary()` strips `<analysis>` blocks, formats `<summary>` correctly
-7. **Progressive pipeline:** All 4 tiers execute in correct order with correct thresholds
-8. **Regurgitation elimination:** After Tier 3, no `[RustFox compacted:` markers remain in context
+1. **Tier 1 masking:** Old tool results replaced with `[previous tool result — masked]` marker, recent tool results preserved, old `[RustFox compacted:` markers neutralized
+2. **Tier 2 collapse:** Oldest tool groups removed entirely, structure is `[system] → [user] → [collapsed marker] → [recent groups]`
+3. **Tier 2 boundary marker:** Collapse boundary has a structural marker, not silent removal
+4. **Tiers 1-2 pipeline:** Both tiers execute in correct order with correct thresholds; Tiers 1-2 are purely sync and tested in isolation
+5. **should_auto_compact:** Returns true when bytes > 85K, message count > 15, turn gap ≥ 5; false otherwise
+6. **should_auto_compact recursion guard:** Returns false when `query_source == "compact"`
+7. **should_auto_compact turn gap:** Returns false when turn gap < 5
+8. **Summary prompt stripping:** Format output correctly (no stray XML)
+9. **No regression:** Old `is_compacted_regurgitation()` still works if called
 
 ### Integration Tests
 
-1. Run a real conversation through `prepare_messages_for_llm()` with all 4 tiers
-2. Verify message count is significantly reduced after Tier 3
-3. Verify the LLM doesn't repeat tool calls after compact
+1. Run a full Tier 1-4 conversation through the pipeline: sync Tiers 1-2 produce correct output, then Tier 3 replaces old portion with summary, message count drops significantly
+2. Verify 413 error triggers Tier 4 and falls back to last 4 messages
+3. Verify the LLM doesn't repeat tool calls after Tier 3 compact
