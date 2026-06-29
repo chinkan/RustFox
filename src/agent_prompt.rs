@@ -16,7 +16,9 @@ const OBSERVATION_MASK_PCT: f64 = 0.20;
 const COLLAPSE_PCT: f64 = 0.60;
 /// Percentage that triggers Tier 3 (auto compact).
 pub const COMPACT_PCT: f64 = 0.85;
-/// Percentage that triggers Tier 4 (reactive compact).
+/// Documentary threshold — Tier 4 is triggered by HTTP 413 errors,
+/// not by a percentage, but this documents the utilization level at
+/// which a 413 would typically occur.
 #[allow(dead_code)]
 pub(crate) const REACTIVE_PCT: f64 = 0.95;
 /// Minimum turns between Tier 3/4 compactions.
@@ -274,17 +276,19 @@ pub fn collapse_context(messages: &[ChatMessage], context_window: usize) -> Vec<
 
     // If boundary still not inserted and messages were removed
     if !inserted_boundary && messages.len() > result.len() {
-        result.insert(
-            1,
-            ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text(
-                    "★ earlier conversation collapsed ★".to_string(),
-                )),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        );
+        let boundary_msg = ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(
+                "★ earlier conversation collapsed ★".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        if result.is_empty() {
+            result.push(boundary_msg);
+        } else {
+            result.insert(1, boundary_msg);
+        }
     }
 
     result

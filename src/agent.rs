@@ -1323,6 +1323,10 @@ impl Agent {
     }
 
     /// Tier 3: Auto-compact via LLM summarization.
+    ///
+    /// `_context_window` is reserved for future threshold-based
+    /// split-point calculation — the summarization LLM handles
+    /// split decisions internally.
     async fn auto_compact_conversation(
         llm: &LlmClient,
         messages: &[ChatMessage],
@@ -1347,59 +1351,21 @@ impl Agent {
         let to_summarize = &messages[..summary_end];
         let preserved = &messages[summary_end..];
 
-        let summary_prompt = build_compact_summary_prompt();
-        let mut compact_messages = Vec::with_capacity(to_summarize.len() + 2);
-        compact_messages.push(summary_prompt);
-        compact_messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "Summarize the following conversation portion ({} messages):",
-                to_summarize.len(),
-            ))),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        compact_messages.extend(to_summarize.iter().cloned());
-
-        let summary_response = match llm.chat(&compact_messages, &[]).await {
-            Ok(c) => c,
-            Err(e) => anyhow::bail!("Auto-compact LLM call failed: {}", e),
-        };
-
-        let summary_text = summary_response
-            .content
-            .as_ref()
-            .map(|c| c.as_text())
-            .unwrap_or_default();
-
-        if summary_text.is_empty() {
-            anyhow::bail!("Auto-compact returned empty summary");
-        }
-
-        let mut result: Vec<ChatMessage> = Vec::new();
-        let boundary = build_compact_boundary_marker(to_summarize.len(), 1);
-        result.push(boundary);
-
-        let summary_msg = ChatMessage {
-            role: "system".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "★ COMPACT SUMMARY ★\n\n{}",
-                summary_text
-            ))),
-            tool_calls: None,
-            tool_call_id: None,
-        };
-        result.push(summary_msg);
-
-        result.extend(preserved.iter().cloned());
-
-        let nudge = recovery_nudge_for(&result);
-        result.push(nudge);
-
-        Ok(result)
+        Self::summarize_and_replace(
+            llm,
+            to_summarize,
+            preserved,
+            "Auto-compact",
+            "★ COMPACT SUMMARY ★",
+        )
+        .await
     }
 
     /// Tier 4: Reactive compact — emergency 413 recovery.
+    ///
+    /// `_context_window` is reserved for future threshold-based
+    /// split-point calculation — the summarization LLM handles
+    /// split decisions internally.
     async fn reactive_compact(
         llm: &LlmClient,
         messages: &[ChatMessage],
@@ -1414,13 +1380,32 @@ impl Agent {
         let to_summarize = &messages[..split];
         let preserved = &messages[split..];
 
+        Self::summarize_and_replace(
+            llm,
+            to_summarize,
+            preserved,
+            "Reactive compact",
+            "★ COMPACT SUMMARY (EMERGENCY) ★",
+        )
+        .await
+    }
+
+    /// Shared helper for Tiers 3 and 4: send messages to LLM for
+    /// summarization, then assemble the compacted result.
+    async fn summarize_and_replace(
+        llm: &LlmClient,
+        to_summarize: &[ChatMessage],
+        preserved: &[ChatMessage],
+        error_label: &str,
+        summary_label: &str,
+    ) -> Result<Vec<ChatMessage>> {
         let summary_prompt = build_compact_summary_prompt();
         let mut compact_msgs = Vec::with_capacity(to_summarize.len() + 2);
         compact_msgs.push(summary_prompt);
         compact_msgs.push(ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::Text(format!(
-                "Summarize the following conversation portion ({} messages) — emergency compact:",
+                "Summarize the following conversation portion ({} messages):",
                 to_summarize.len(),
             ))),
             tool_calls: None,
@@ -1430,7 +1415,7 @@ impl Agent {
 
         let summary_response = match llm.chat(&compact_msgs, &[]).await {
             Ok(c) => c,
-            Err(e) => anyhow::bail!("Reactive compact LLM call failed: {}", e),
+            Err(e) => anyhow::bail!("{} LLM call failed: {}", error_label, e),
         };
 
         let summary_text = summary_response
@@ -1440,21 +1425,21 @@ impl Agent {
             .unwrap_or_default();
 
         if summary_text.is_empty() {
-            anyhow::bail!("Reactive compact returned empty summary");
+            anyhow::bail!("{} returned empty summary", error_label);
         }
 
         let boundary = build_compact_boundary_marker(to_summarize.len(), 1);
         let summary_msg = ChatMessage {
             role: "system".to_string(),
             content: Some(MessageContent::Text(format!(
-                "★ COMPACT SUMMARY (EMERGENCY) ★\n\n{}",
-                summary_text
+                "{}\n\n{}",
+                summary_label, summary_text
             ))),
             tool_calls: None,
             tool_call_id: None,
         };
 
-        let mut result = Vec::with_capacity(3 + preserved.len());
+        let mut result: Vec<ChatMessage> = Vec::with_capacity(3 + preserved.len());
         result.push(boundary);
         result.push(summary_msg);
         result.extend(preserved.iter().cloned());
