@@ -642,7 +642,8 @@ impl Agent {
             let response: ChatMessage;
 
             // Prepare prompt with optional compaction (invariant across retries)
-            let base_prompt = prepare_messages_for_llm(&messages);
+            let context_window = self.registry.default_context_window();
+            let base_prompt = prepare_messages_for_llm(&messages, context_window);
 
             loop {
                 // Clone the base prompt for this retry attempt
@@ -1918,7 +1919,8 @@ impl Agent {
             let response: ChatMessage;
 
             // Prepare prompt with optional compaction (invariant across retries)
-            let base_prompt = prepare_messages_for_llm(messages);
+            let context_window = self.registry.default_context_window();
+            let base_prompt = prepare_messages_for_llm(messages, context_window);
 
             loop {
                 let mut prompt_prepared = base_prompt.clone();

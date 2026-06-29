@@ -1,26 +1,35 @@
 //! In-memory prompt preparation and compaction for LLM context management.
 //!
-//! This module provides functionality to prepare conversation history for LLM calls,
-//! including automatic compaction of tool-heavy conversations to stay within context
-//! limits while preserving recent and relevant information.
+//! Tiers 1-2 (sync, 0 LLM cost):
+//!   Tier 1: observation_mask — replace old tool results with placeholder,
+//!           neutralize old [RustFox compacted:...] markers
+//!   Tier 2: collapse_context — remove oldest tool groups entirely,
+//!           insert boundary marker
+//!
+//! Tiers 3-4 live in agent.rs (async, require LLM call).
 
 use crate::llm::{ChatMessage, MessageContent};
 
-const COMPACTION_MESSAGE_COUNT_THRESHOLD: usize = 10;
-const COMPACTION_PROMPT_BYTE_THRESHOLD: usize = 20_000;
-const TOOL_ARGUMENT_COMPACT_THRESHOLD: usize = 1_000;
-const TOOL_RESULT_COMPACT_THRESHOLD: usize = 2_000;
-const TOOL_RESULT_PREVIEW_CHARS: usize = 1_000;
-const PRESERVED_TOOL_GROUPS: usize = 2;
+/// Percentage of context_window that triggers Tier 1 (observation masking).
+const OBSERVATION_MASK_PCT: f64 = 0.20;
+/// Percentage that triggers Tier 2 (context collapse).
+const COLLAPSE_PCT: f64 = 0.60;
+/// Percentage that triggers Tier 3 (auto compact).
+pub const COMPACT_PCT: f64 = 0.85;
+/// Percentage that triggers Tier 4 (reactive compact).
+#[allow(dead_code)]
+pub(crate) const REACTIVE_PCT: f64 = 0.95;
+/// Minimum turns between Tier 3/4 compactions.
+pub const COMPACT_TURN_GAP: usize = 5;
+/// Number of most recent tool groups to preserve verbatim.
+pub const PRESERVED_TOOL_GROUPS: usize = 2;
+/// Absolute hard cap safety net (applied regardless of context_window).
 const PROMPT_HARD_CAP_BYTES: usize = 100_000;
+/// Minimum message count to consider Tier 3 compact.
+const COMPACT_MIN_MESSAGE_COUNT: usize = 15;
 
-/// Truncate a string to at most `max_chars` characters at a safe character boundary.
-///
-/// Returns a new string containing up to `max_chars` characters from `value`.
-/// If the string is longer, it is truncated at a character boundary (not mid-codepoint).
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
+/// Keep for backward compat — `is_compacted_regurgitation` references this.
+pub const COMPACTION_MARKER_PREFIX: &str = "[RustFox compacted:";
 
 /// Statistics about prompt preparation and compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,10 +48,37 @@ pub struct PreparedPrompt {
     pub stats: PromptStats,
 }
 
-/// Estimate the byte size of a prompt from its messages.
+/// Per-conversation compaction metadata.
 ///
-/// Counts message content lengths and tool call argument lengths.
-/// Uses bytes (not chars) as a rough proxy for token count (~4 bytes ≈ 1 token).
+/// Tracked in-memory alongside the message list. The agent loop increments
+/// `current_turn` each iteration and updates `last_compact_turn` after
+/// Tier 3/4 fires.
+#[derive(Debug, Clone)]
+pub struct ConversationMeta {
+    pub last_compact_turn: usize,
+    pub has_attempted_reactive_compact: bool,
+    pub is_compact_agent: bool,
+    pub current_turn: usize,
+}
+
+impl ConversationMeta {
+    pub fn new() -> Self {
+        Self {
+            last_compact_turn: 0,
+            has_attempted_reactive_compact: false,
+            is_compact_agent: false,
+            current_turn: 0,
+        }
+    }
+}
+
+impl Default for ConversationMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Estimate the byte size of a prompt from its messages.
 pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
@@ -64,9 +100,6 @@ pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
 }
 
 /// Create a recovery nudge message appropriate for the conversation context.
-///
-/// If the previous message role is `tool`, mentions "tool result above".
-/// Otherwise mentions "user's request above".
 pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
     let previous_is_tool = messages.last().is_some_and(|msg| msg.role == "tool");
 
@@ -84,25 +117,269 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
     }
 }
 
+/// Tier 1: Observation Masking
+///
+/// Replace old tool result content with a masked placeholder. The LLM
+/// knows it made the call but the bulky payload is gone. Also neutralize
+/// any old [RustFox compacted:...] markers in tool call arguments.
+///
+/// Trigger: estimated bytes > context_window * OBSERVATION_MASK_PCT
+/// Applies to: tool results older than PRESERVED_TOOL_GROUPS.
+pub fn observation_mask(messages: &[ChatMessage], context_window: usize) -> Vec<ChatMessage> {
+    let threshold = (context_window as f64 * OBSERVATION_MASK_PCT) as usize;
+    if estimate_prompt_bytes(messages) <= threshold {
+        return messages.to_vec();
+    }
+
+    // Identify tool groups
+    let tool_groups = find_tool_groups(messages);
+    let preserved_start = tool_groups.len().saturating_sub(PRESERVED_TOOL_GROUPS);
+
+    let mut preserved_indices = std::collections::HashSet::new();
+    for group in tool_groups.iter().skip(preserved_start) {
+        preserved_indices.insert(group.assistant_idx);
+        for &ti in &group.tool_result_indices {
+            preserved_indices.insert(ti);
+        }
+    }
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(idx, msg)| {
+            // System and user: pass through
+            if msg.role == "system" || msg.role == "user" {
+                return msg.clone();
+            }
+
+            // Preserved indices: pass through
+            if preserved_indices.contains(&idx) {
+                return msg.clone();
+            }
+
+            // Neutralize old compaction markers in tool call arguments
+            if msg.role == "assistant" && msg.has_tool_calls() {
+                let mut compacted = msg.clone();
+                if let Some(calls) = &mut compacted.tool_calls {
+                    for call in calls.iter_mut() {
+                        if call.function.arguments.contains(COMPACTION_MARKER_PREFIX) {
+                            call.function.arguments = call
+                                .function
+                                .arguments
+                                .replace(COMPACTION_MARKER_PREFIX, "[compacted");
+                        }
+                    }
+                }
+                return compacted;
+            }
+
+            // Mask tool results
+            if msg.role == "tool" {
+                let mut masked = msg.clone();
+                masked.content = Some(MessageContent::Text(
+                    "[previous tool result — masked]".to_string(),
+                ));
+                return masked;
+            }
+
+            msg.clone()
+        })
+        .collect()
+}
+
+/// Tier 2: Context Collapse
+///
+/// Remove the oldest 50% of non-preserved tool groups (assistant + tool
+/// messages). Insert a structural boundary marker at the collapse point
+/// so the LLM doesn't perceive a confusing jump.
+///
+/// Trigger: still > context_window * COLLAPSE_PCT after Tier 1.
+pub fn collapse_context(messages: &[ChatMessage], context_window: usize) -> Vec<ChatMessage> {
+    let threshold = (context_window as f64 * COLLAPSE_PCT) as usize;
+    if estimate_prompt_bytes(messages) <= threshold {
+        return messages.to_vec();
+    }
+
+    let tool_groups = find_tool_groups(messages);
+    let non_preserved_count = tool_groups.len().saturating_sub(PRESERVED_TOOL_GROUPS);
+    // Remove oldest 50% of non-preserved groups only
+    let keep_start = non_preserved_count / 2;
+
+    let mut keep_indices = std::collections::HashSet::new();
+
+    for (i, group) in tool_groups.iter().enumerate() {
+        if i >= keep_start {
+            keep_indices.insert(group.assistant_idx);
+            for &ti in &group.tool_result_indices {
+                keep_indices.insert(ti);
+            }
+        }
+    }
+
+    // Always keep system + user messages
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == "system" || msg.role == "user" {
+            keep_indices.insert(idx);
+        }
+    }
+
+    // Keep messages after the last kept group
+    if let Some(last_keep) = tool_groups
+        .iter()
+        .rev()
+        .find(|g| keep_indices.contains(&g.assistant_idx))
+    {
+        for idx in (last_keep.assistant_idx + 1)..messages.len() {
+            keep_indices.insert(idx);
+        }
+    }
+
+    // Build result: filter to kept indices in order, inserting boundary marker
+    let mut result: Vec<ChatMessage> = Vec::new();
+    let mut inserted_boundary = false;
+
+    // Find the first index that is kept after the removal zone
+    let boundary_group_idx = tool_groups
+        .iter()
+        .position(|g| keep_indices.contains(&g.assistant_idx));
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if keep_indices.contains(&idx) {
+            if !inserted_boundary {
+                if let Some(bg_idx) = boundary_group_idx {
+                    if let Some(group) = tool_groups.iter().find(|g| g.assistant_idx == idx) {
+                        if tool_groups
+                            .iter()
+                            .position(|g| g.assistant_idx == group.assistant_idx)
+                            == Some(bg_idx)
+                        {
+                            result.push(ChatMessage {
+                                role: "system".to_string(),
+                                content: Some(MessageContent::Text(
+                                    "★ earlier conversation collapsed ★".to_string(),
+                                )),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                            inserted_boundary = true;
+                        }
+                    }
+                } else {
+                    inserted_boundary = true;
+                }
+            }
+            result.push(msg.clone());
+        }
+    }
+
+    // If boundary still not inserted and messages were removed
+    if !inserted_boundary && messages.len() > result.len() {
+        result.insert(
+            1,
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text(
+                    "★ earlier conversation collapsed ★".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        );
+    }
+
+    result
+}
+
+/// Helper: identify tool groups in a message list.
+pub struct ToolGroup {
+    pub assistant_idx: usize,
+    pub tool_result_indices: Vec<usize>,
+}
+
+pub fn find_tool_groups(messages: &[ChatMessage]) -> Vec<ToolGroup> {
+    let mut groups: Vec<ToolGroup> = Vec::new();
+    let mut current: Option<ToolGroup> = None;
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == "assistant" && msg.has_tool_calls() {
+            if let Some(g) = current.take() {
+                groups.push(g);
+            }
+            current = Some(ToolGroup {
+                assistant_idx: idx,
+                tool_result_indices: Vec::new(),
+            });
+        } else if msg.role == "tool" {
+            if let Some(ref mut g) = current {
+                g.tool_result_indices.push(idx);
+            }
+        } else if current.is_some() {
+            if let Some(g) = current.take() {
+                groups.push(g);
+            }
+        }
+    }
+    if let Some(g) = current {
+        groups.push(g);
+    }
+    groups
+}
+
 /// Prepare messages for LLM by applying compaction if needed.
 ///
-/// Applies compaction only when:
-/// - Message count > 10 AND
-/// - Estimated prompt size > 20,000 chars
-pub fn prepare_messages_for_llm(messages: &[ChatMessage]) -> PreparedPrompt {
+/// Sync function: applies Tiers 1-2 only.
+/// - Tier 1: observation masking (replace old tool results with placeholder)
+/// - Tier 2: context collapse (remove oldest tool groups, insert boundary marker)
+///
+/// If still over PROMPT_HARD_CAP_BYTES after both tiers, reduce preserved
+/// groups to 1 as a last resort.
+pub fn prepare_messages_for_llm(messages: &[ChatMessage], context_window: usize) -> PreparedPrompt {
     let original_message_count = messages.len();
     let original_prompt_bytes = estimate_prompt_bytes(messages);
 
-    let should_compact = original_message_count > COMPACTION_MESSAGE_COUNT_THRESHOLD
-        && original_prompt_bytes > COMPACTION_PROMPT_BYTE_THRESHOLD;
+    let obs_threshold = (context_window as f64 * OBSERVATION_MASK_PCT) as usize;
+    let coll_threshold = (context_window as f64 * COLLAPSE_PCT) as usize;
+
+    let should_compact = original_prompt_bytes > obs_threshold
+        && original_message_count > compact_min_message_count(context_window);
 
     let prepared_messages = if should_compact {
-        let messages = compact_tool_heavy_history(messages);
-        // Second pass: if still over the hard cap, reduce preserved groups
-        if estimate_prompt_bytes(&messages) > PROMPT_HARD_CAP_BYTES {
-            compact_tool_heavy_history_with_preserved_groups(&messages, 1)
+        // Tier 1: observation masking
+        let after_tier1 = observation_mask(messages, context_window);
+
+        // Tier 2: context collapse if still over COLLAPSE_PCT
+        let after_tier2 = if estimate_prompt_bytes(&after_tier1) > coll_threshold {
+            collapse_context(&after_tier1, context_window)
         } else {
-            messages
+            after_tier1
+        };
+
+        // Safety net: if still over hard cap, keep all sys/user + the 2 newest messages (1 preserved pair)
+        if estimate_prompt_bytes(&after_tier2) > PROMPT_HARD_CAP_BYTES {
+            let preserved_count = after_tier2
+                .iter()
+                .filter(|m| m.role == "system" || m.role == "user")
+                .count();
+            let mut hard_cap_messages: Vec<ChatMessage> = Vec::with_capacity(preserved_count + 2);
+            for m in &after_tier2 {
+                if m.role == "system" || m.role == "user" {
+                    hard_cap_messages.push(m.clone());
+                }
+            }
+            // Append the 2 newest non-system/user messages (preserves latest preserved pair)
+            let mut newest_pair: Vec<ChatMessage> = Vec::with_capacity(2);
+            for m in after_tier2.iter().rev() {
+                if m.role != "system" && m.role != "user" {
+                    newest_pair.push(m.clone());
+                    if newest_pair.len() == 2 {
+                        break;
+                    }
+                }
+            }
+            hard_cap_messages.extend(newest_pair.into_iter().rev());
+            hard_cap_messages
+        } else {
+            after_tier2
         }
     } else {
         messages.to_vec()
@@ -123,230 +400,116 @@ pub fn prepare_messages_for_llm(messages: &[ChatMessage]) -> PreparedPrompt {
     }
 }
 
-/// Compact tool-heavy conversation history, preserving the default 2 most recent groups.
-pub fn compact_tool_heavy_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    compact_tool_heavy_history_with_preserved_groups(messages, PRESERVED_TOOL_GROUPS)
+/// Returns minimum message count to consider compaction, scaled by
+/// context_window size. Larger windows need more messages to justify
+/// the LLM cost of Tier 3.
+fn compact_min_message_count(context_window: usize) -> usize {
+    // Base: 15 messages. Scale linearly: 15 for 128K, 30 for 1M, etc.
+    let base = COMPACT_MIN_MESSAGE_COUNT;
+    let window_k = context_window / 512_000; // 512K = 128K tokens
+    base + (base / 2) * window_k
 }
 
-/// Compact tool-heavy conversation history with configurable preserved groups.
+/// Check whether Tier 3 auto-compact should trigger.
 ///
-/// Strategy:
-/// - Preserve all system and user messages unchanged
-/// - Preserve the most recent `preserved_count` assistant-with-tool-calls groups and their tool results
-/// - Compact older assistant tool arguments longer than 1,000 chars
-/// - Compact older tool results longer than 2,000 chars
-/// - Maintain message order
-fn compact_tool_heavy_history_with_preserved_groups(
+/// All conditions must be true:
+/// - Message count > compact_min_message_count
+/// - Estimated prompt bytes > context_window * COMPACT_PCT
+/// - Turn gap >= COMPACT_TURN_GAP since last compact
+/// - Not already in compact agent loop (recursion guard)
+pub fn should_auto_compact(
     messages: &[ChatMessage],
-    preserved_count: usize,
-) -> Vec<ChatMessage> {
-    // First, identify tool groups: assistant messages with tool calls and their following tool messages
-    let mut tool_groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    let mut current_group: Option<(usize, Vec<usize>)> = None;
+    meta: &ConversationMeta,
+    context_window: usize,
+) -> bool {
+    let threshold = (context_window as f64 * COMPACT_PCT) as usize;
+    let bytes = estimate_prompt_bytes(messages);
 
-    for (idx, msg) in messages.iter().enumerate() {
-        if msg.role == "assistant"
-            && msg
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-        {
-            // Start a new tool group
-            if let Some(group) = current_group.take() {
-                tool_groups.push(group);
-            }
-            current_group = Some((idx, Vec::new()));
-        } else if msg.role == "tool" {
-            // Add to current group if one exists
-            if let Some((_, ref mut tool_indices)) = current_group {
-                tool_indices.push(idx);
-            }
-        } else if current_group.is_some() {
-            // Non-tool message encountered, close current group
-            if let Some(group) = current_group.take() {
-                tool_groups.push(group);
-            }
-        }
-    }
-    // Don't forget the last group
-    if let Some(group) = current_group {
-        tool_groups.push(group);
-    }
-
-    // Determine which indices to preserve (most recent preserved_count groups)
-    let preserved_groups_start = tool_groups.len().saturating_sub(preserved_count);
-    let mut preserved_indices = std::collections::HashSet::new();
-    for group in tool_groups.iter().skip(preserved_groups_start) {
-        preserved_indices.insert(group.0);
-        for &tool_idx in &group.1 {
-            preserved_indices.insert(tool_idx);
-        }
-    }
-
-    // Compact messages
-    messages
-        .iter()
-        .enumerate()
-        .map(|(idx, msg)| {
-            // Never compact system or user messages
-            if msg.role == "system" || msg.role == "user" {
-                return msg.clone();
-            }
-
-            // Don't compact preserved indices
-            if preserved_indices.contains(&idx) {
-                return msg.clone();
-            }
-
-            // Compact assistant tool calls
-            if msg.role == "assistant"
-                && msg
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| !calls.is_empty())
-            {
-                return compact_assistant_tool_calls(msg);
-            }
-
-            // Compact assistant text-only messages with long content
-            if msg.role == "assistant" && msg.tool_calls.is_none() {
-                if let Some(ref content) = msg.content {
-                    let text = content.as_text();
-                    if text.len() > TOOL_ARGUMENT_COMPACT_THRESHOLD {
-                        let mut compacted = msg.clone();
-                        let preview = truncate_chars(&text, TOOL_RESULT_PREVIEW_CHARS);
-                        compacted.content = Some(MessageContent::Text(format!(
-                            "[RustFox compacted: previous assistant response with {} bytes]\n{}...",
-                            text.len(),
-                            preview
-                        )));
-                        return compacted;
-                    }
-                }
-            }
-
-            // Compact tool results
-            if msg.role == "tool" {
-                return compact_tool_result(msg);
-            }
-
-            msg.clone()
-        })
-        .collect()
+    bytes > threshold
+        && messages.len() > compact_min_message_count(context_window)
+        && meta.current_turn - meta.last_compact_turn >= COMPACT_TURN_GAP
+        && !meta.is_compact_agent
 }
 
-/// Public so `agent.rs` can detect regurgitated compaction markers.
-pub const COMPACTION_MARKER_PREFIX: &str = "[RustFox compacted:";
+/// Create the summary prompt content used for Tier 3 and Tier 4 LLM calls.
+/// Returns a system-role message instructing the LLM to summarize.
+pub fn build_compact_summary_prompt() -> ChatMessage {
+    let prompt_text = vec![
+        "Your task is to create a detailed summary of the conversation so far.",
+        "",
+        "Your summary must include these sections:",
+        "",
+        "1. Primary Request and Intent: What was the user's original request?",
+        "2. Key Technical Concepts: Technologies, frameworks, approaches discussed",
+        "3. Files and Code Sections: Files read, created, or modified",
+        "4. Errors and Fixes: Errors encountered and how they were fixed",
+        "5. All User Messages: List ALL user messages verbatim (not tool results)",
+        "6. Pending Tasks: What tasks were explicitly requested but not completed",
+        "7. Current Work: Exactly what was being worked on before this summary",
+        "8. Next Step: The next logical action based on the most recent user request",
+        "",
+        "IMPORTANT: Do NOT call any tools. Respond with text only.",
+    ]
+    .join("\n");
 
-/// Compact assistant message with tool calls by shortening long arguments.
-///
-/// Uses a plain-text marker instead of JSON to prevent the LLM from learning
-/// the format and regurgitating it as its own tool call arguments — the root
-/// cause of the "Missing skill" bug when a model copied the old JSON-shaped
-/// `{"_rustfox_compacted_arguments": true, …}` object verbatim.
-fn compact_assistant_tool_calls(msg: &ChatMessage) -> ChatMessage {
-    let mut compacted = msg.clone();
-
-    if let Some(tool_calls) = &mut compacted.tool_calls {
-        for call in tool_calls.iter_mut() {
-            let args_len = call.function.arguments.len();
-            if args_len > TOOL_ARGUMENT_COMPACT_THRESHOLD {
-                call.function.arguments = format!(
-                    "{} previous {} call with {} bytes of arguments]",
-                    COMPACTION_MARKER_PREFIX, call.function.name, args_len,
-                );
-            }
-        }
+    ChatMessage {
+        role: "system".to_string(),
+        content: Some(MessageContent::Text(prompt_text)),
+        tool_calls: None,
+        tool_call_id: None,
     }
-
-    compacted
 }
 
-/// Compact tool result message by truncating long content.
-///
-/// Preserves multi-modal structure: text parts are compacted, image parts
-/// pass through unchanged.
-fn compact_tool_result(msg: &ChatMessage) -> ChatMessage {
-    use crate::llm::ContentPart;
-
-    let mut compacted = msg.clone();
-
-    if let Some(content) = &compacted.content {
-        match content {
-            MessageContent::Text(ref text) => {
-                let text_len = text.len();
-                if text_len > TOOL_RESULT_COMPACT_THRESHOLD {
-                    let preview = truncate_chars(text, TOOL_RESULT_PREVIEW_CHARS);
-                    compacted.content = Some(MessageContent::Text(format!(
-                        "[rustfox compacted tool result: {} bytes]\n{}...",
-                        text_len, preview
-                    )));
-                }
-            }
-            MessageContent::Parts(ref parts) => {
-                let new_parts: Vec<ContentPart> = parts
-                    .iter()
-                    .map(|part| match part {
-                        ContentPart::Text { text }
-                            if text.len() > TOOL_RESULT_COMPACT_THRESHOLD =>
-                        {
-                            let preview = truncate_chars(text, TOOL_RESULT_PREVIEW_CHARS);
-                            ContentPart::Text {
-                                text: format!(
-                                    "[rustfox compacted tool result: {} bytes]\n{}...",
-                                    text.len(),
-                                    preview
-                                ),
-                            }
-                        }
-                        other => other.clone(),
-                    })
-                    .collect();
-                compacted.content = Some(MessageContent::Parts(new_parts));
-            }
-        }
+/// Build the compact boundary marker message (pre-compact stats).
+pub fn build_compact_boundary_marker(original_count: usize, compacted_count: usize) -> ChatMessage {
+    ChatMessage {
+        role: "system".to_string(),
+        content: Some(MessageContent::Text(format!(
+            "★ COMPACT SUMMARY — previous {} messages compressed into this summary (now {} messages) ★",
+            original_count, compacted_count,
+        ))),
+        tool_calls: None,
+        tool_call_id: None,
     }
-
-    compacted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{FunctionCall, MessageContent, ToolCall};
+    use crate::llm::{FunctionCall, ToolCall};
 
     #[test]
     fn estimate_prompt_bytes_counts_content_and_tool_arguments() {
         let messages = vec![
             ChatMessage {
                 role: "user".to_string(),
-                content: Some(MessageContent::Text("Hello".to_string())), // 5 chars
+                content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: Some(MessageContent::Text("Hi".to_string())), // 2 chars
+                content: Some(MessageContent::Text("Hi".to_string())),
                 tool_calls: Some(vec![ToolCall {
                     id: "call_1".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
                         name: "test_tool".to_string(),
-                        arguments: r#"{"arg":"value"}"#.to_string(), // 15 chars
+                        arguments: r#"{"arg":"value"}"#.to_string(),
                     },
                 }]),
                 tool_call_id: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
-                content: Some(MessageContent::Text("result".to_string())), // 6 chars
+                content: Some(MessageContent::Text("result".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
             },
         ];
 
         let total = estimate_prompt_bytes(&messages);
-        assert_eq!(total, 5 + 2 + 15 + 6); // 28 bytes
+        assert_eq!(total, 5 + 2 + 15 + 6);
     }
 
     #[test]
@@ -397,7 +560,6 @@ mod tests {
 
     #[test]
     fn prepare_messages_skips_compaction_for_short_prompts() {
-        // Less than 10 messages
         let messages: Vec<ChatMessage> = (0..5)
             .map(|i| ChatMessage {
                 role: "user".to_string(),
@@ -407,445 +569,373 @@ mod tests {
             })
             .collect();
 
-        let result = prepare_messages_for_llm(&messages);
+        let result = prepare_messages_for_llm(&messages, 512_000);
         assert!(!result.stats.compaction_applied);
         assert_eq!(result.messages.len(), messages.len());
-
-        // More than 10 messages but under char threshold
-        let short_messages: Vec<ChatMessage> = (0..15)
-            .map(|i| ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text(format!("msg{}", i))), // Very short
-                tool_calls: None,
-                tool_call_id: None,
-            })
-            .collect();
-
-        let result2 = prepare_messages_for_llm(&short_messages);
-        assert!(!result2.stats.compaction_applied);
     }
 
     #[test]
-    fn compaction_preserves_newest_two_tool_groups_and_compacts_older_group() {
-        // Build a conversation with 3 tool groups
+    fn observation_mask_replaces_old_tool_results_and_keeps_recent() {
+        let ctx = 2000;
         let mut messages = Vec::new();
 
-        // System message
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: Some(MessageContent::Text(
-                "You are a helpful assistant.".to_string(),
-            )),
+            content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
         });
-
-        // User message
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: Some(MessageContent::Text("Do task 1".to_string())),
+            content: Some(MessageContent::Text("hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
         });
 
-        // Old tool group 1 (should be compacted)
-        let long_args = "x".repeat(1500);
+        let old_args = "x".repeat(500);
         messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "old_call_1".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "old_tool".to_string(),
-                    arguments: long_args.clone(),
-                },
-            }]),
-            tool_call_id: None,
-        });
-
-        let long_result = "y".repeat(2500);
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text(long_result.clone())),
-            tool_calls: None,
-            tool_call_id: Some("old_call_1".to_string()),
-        });
-
-        // Recent tool group 1 (should be preserved)
-        messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "recent_call_1".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "recent_tool_1".to_string(),
-                    arguments: "x".repeat(1500),
-                },
-            }]),
-            tool_call_id: None,
-        });
-
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("y".repeat(2500))),
-            tool_calls: None,
-            tool_call_id: Some("recent_call_1".to_string()),
-        });
-
-        // Recent tool group 2 (should be preserved)
-        messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "recent_call_2".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "recent_tool_2".to_string(),
-                    arguments: "z".repeat(1500),
-                },
-            }]),
-            tool_call_id: None,
-        });
-
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("w".repeat(2500))),
-            tool_calls: None,
-            tool_call_id: Some("recent_call_2".to_string()),
-        });
-
-        let compacted = compact_tool_heavy_history(&messages);
-
-        // System and user messages should be unchanged
-        assert_eq!(compacted[0].role, "system");
-        assert_eq!(compacted[1].role, "user");
-
-        // Old tool group should be compacted
-        let old_assistant = &compacted[2];
-        assert_eq!(old_assistant.role, "assistant");
-        let old_args = &old_assistant.tool_calls.as_ref().unwrap()[0]
-            .function
-            .arguments;
-        assert!(old_args.contains("[RustFox compacted:"));
-        assert!(old_args.len() < long_args.len());
-
-        let old_tool = &compacted[3];
-        assert_eq!(old_tool.role, "tool");
-        let old_content = old_tool.content.as_ref().unwrap();
-        assert!(old_content
-            .as_text()
-            .contains("rustfox compacted tool result"));
-        assert!(old_content.as_text().len() < long_result.len());
-
-        // Recent tool groups should be preserved unchanged
-        let recent1_assistant = &compacted[4];
-        assert_eq!(
-            recent1_assistant.tool_calls.as_ref().unwrap()[0]
-                .function
-                .arguments
-                .len(),
-            1500
-        );
-
-        let recent1_tool = &compacted[5];
-        assert_eq!(recent1_tool.content.as_ref().unwrap().as_text().len(), 2500);
-
-        let recent2_assistant = &compacted[6];
-        assert_eq!(
-            recent2_assistant.tool_calls.as_ref().unwrap()[0]
-                .function
-                .arguments
-                .len(),
-            1500
-        );
-
-        let recent2_tool = &compacted[7];
-        assert_eq!(recent2_tool.content.as_ref().unwrap().as_text().len(), 2500);
-    }
-
-    #[test]
-    fn compacted_message_order_is_unchanged() {
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text("System".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("User 1".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_1".to_string(),
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name: "tool".to_string(),
-                        arguments: "x".repeat(1500),
-                    },
-                }]),
-                tool_call_id: None,
-            },
-            ChatMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("y".repeat(2500))),
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text("Final response".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
-
-        let compacted = compact_tool_heavy_history(&messages);
-
-        // Check that roles are in the same order
-        let original_roles: Vec<_> = messages.iter().map(|m| m.role.as_str()).collect();
-        let compacted_roles: Vec<_> = compacted.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(original_roles, compacted_roles);
-
-        // Check message count is unchanged
-        assert_eq!(messages.len(), compacted.len());
-    }
-
-    #[test]
-    fn truncate_chars_handles_unicode_safely() {
-        // ASCII text
-        assert_eq!(truncate_chars("hello world", 5), "hello");
-        assert_eq!(truncate_chars("hello", 10), "hello");
-
-        // Emoji (multi-byte UTF-8)
-        let emoji_text = "Hello 👋 World 🌍";
-        let truncated = truncate_chars(emoji_text, 8);
-        assert_eq!(truncated, "Hello 👋 ");
-        assert_eq!(truncated.chars().count(), 8);
-
-        // CJK characters
-        let cjk_text = "你好世界";
-        let truncated = truncate_chars(cjk_text, 2);
-        assert_eq!(truncated, "你好");
-        assert_eq!(truncated.chars().count(), 2);
-
-        // Mixed: emoji + CJK + ASCII
-        let mixed = "Test 测试 🎉 emoji 表情";
-        let truncated = truncate_chars(mixed, 11);
-        assert_eq!(truncated, "Test 测试 🎉 e");
-        assert_eq!(truncated.chars().count(), 11);
-    }
-
-    #[test]
-    fn compaction_handles_unicode_tool_arguments_safely() {
-        // Create a long tool argument with emoji and CJK that would panic with byte slicing
-        // This string has multi-byte UTF-8 characters; byte index 200 could fall mid-character
-        let long_args_with_unicode = format!(
-            "{{\"message\": \"{}测试🎉{}\"}}",
-            "x".repeat(900),
-            "y".repeat(200)
-        );
-        assert!(long_args_with_unicode.len() > TOOL_ARGUMENT_COMPACT_THRESHOLD);
-
-        let message = ChatMessage {
             role: "assistant".to_string(),
             content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
                 function: FunctionCall {
-                    name: "unicode_tool".to_string(),
-                    arguments: long_args_with_unicode.clone(),
+                    name: "old_tool".to_string(),
+                    arguments: old_args,
                 },
             }]),
             tool_call_id: None,
-        };
-
-        // This should not panic
-        let compacted = compact_assistant_tool_calls(&message);
-        let compacted_args = &compacted.tool_calls.as_ref().unwrap()[0].function.arguments;
-
-        // Verify it's been compacted — plain-text marker, no JSON
-        assert!(compacted_args.contains("[RustFox compacted:"));
-        assert!(compacted_args.contains("unicode_tool"));
-        assert!(compacted_args.contains("bytes of arguments"));
-    }
-
-    #[test]
-    fn compaction_handles_unicode_tool_results_safely() {
-        // Create a long tool result with emoji and CJK that would panic with byte slicing
-        let long_result_with_unicode =
-            format!("Result: {}🌟测试{}💯", "a".repeat(1000), "b".repeat(1500));
-        assert!(long_result_with_unicode.len() > TOOL_RESULT_COMPACT_THRESHOLD);
-
-        let message = ChatMessage {
+        });
+        messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some(MessageContent::Text(long_result_with_unicode.clone())),
+            content: Some(MessageContent::Text("y".repeat(800))),
             tool_calls: None,
             tool_call_id: Some("call_1".to_string()),
-        };
+        });
 
-        // This should not panic
-        let compacted = compact_tool_result(&message);
-        let compacted_content = compacted.content.as_ref().unwrap();
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_2".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "recent_tool".to_string(),
+                    arguments: "test".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        });
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text("recent result".to_string())),
+            tool_calls: None,
+            tool_call_id: Some("call_2".to_string()),
+        });
 
-        // Verify it's been compacted
-        assert!(compacted_content
-            .as_text()
-            .contains("rustfox compacted tool result"));
-        assert!(compacted_content.as_text().len() < long_result_with_unicode.len());
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_3".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "latest".to_string(),
+                    arguments: "tiny".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        });
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text("latest result".to_string())),
+            tool_calls: None,
+            tool_call_id: Some("call_3".to_string()),
+        });
 
-        // Verify the preview portion is valid UTF-8 and respects character boundaries
-        // The format is: "[rustfox compacted tool result: N chars]\n{preview}..."
-        let text = compacted_content.as_text();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        let preview_line = lines[1];
-        assert!(preview_line.ends_with("..."));
+        let result = observation_mask(&messages, ctx);
 
-        // Verify we can count characters without panicking (proves valid UTF-8)
-        let preview_without_ellipsis = preview_line.trim_end_matches("...");
-        let char_count = preview_without_ellipsis.chars().count();
-        assert!(char_count <= TOOL_RESULT_PREVIEW_CHARS);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
+
+        let old_content = result[3].content.as_ref().unwrap().as_text();
+        assert!(
+            old_content.contains("masked"),
+            "old tool result should be masked: {}",
+            old_content
+        );
+
+        let recent_content = result[5].content.as_ref().unwrap().as_text();
+        assert_eq!(recent_content, "recent result");
+
+        let latest_content = result[7].content.as_ref().unwrap().as_text();
+        assert_eq!(latest_content, "latest result");
+
+        assert_eq!(result.len(), messages.len());
     }
 
     #[test]
-    fn compaction_with_unicode_preserves_structure() {
-        // Test full compaction flow with Unicode content
-        let mut messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text("System prompt 系统提示".to_string())),
-                tool_calls: None,
+    fn collapse_context_removes_oldest_tool_groups_and_inserts_boundary_marker() {
+        let ctx = 5000;
+        let mut messages = Vec::new();
+
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text("user msg".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        for i in 0..4 {
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("c{}", i),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: format!("t{}", i),
+                        arguments: "x".repeat(500),
+                    },
+                }]),
                 tool_call_id: None,
-            },
-            ChatMessage {
+            });
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("y".repeat(800))),
+                tool_calls: None,
+                tool_call_id: Some(format!("c{}", i)),
+            });
+        }
+
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text("done".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let result = collapse_context(&messages, ctx);
+
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[1].role, "user");
+
+        let collapse_idx = result.iter().position(|m| {
+            m.role == "system" && m.content.as_ref().unwrap().as_text().contains("collapsed")
+        });
+        assert!(
+            collapse_idx.is_some(),
+            "should have collapse boundary marker"
+        );
+
+        let preserved_start = collapse_idx.unwrap() + 1;
+        assert!(
+            preserved_start < result.len(),
+            "should have messages after boundary"
+        );
+    }
+
+    #[test]
+    fn should_auto_compact_checks_bytes_turns_and_recursion_guard() {
+        let mut meta = ConversationMeta {
+            last_compact_turn: 0,
+            has_attempted_reactive_compact: false,
+            is_compact_agent: false,
+            current_turn: 10,
+        };
+
+        let small: Vec<ChatMessage> = (0..3)
+            .map(|_| ChatMessage {
                 role: "user".to_string(),
-                content: Some(MessageContent::Text(
-                    "User request with emoji 🚀".to_string(),
-                )),
+                content: Some(MessageContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
-            },
-        ];
+            })
+            .collect();
+        assert!(!should_auto_compact(&small, &meta, 512_000));
 
-        // Add an OLD tool group with Unicode content (this should be compacted)
-        let unicode_args = format!(
-            "{{\"data\": \"{}中文{}🎨{}\"}}",
-            "x".repeat(800),
-            "y".repeat(200),
-            "z".repeat(100)
-        );
+        let few_but_big: Vec<ChatMessage> = (0..5)
+            .map(|_| ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("x".repeat(100_000))),
+                tool_calls: None,
+                tool_call_id: None,
+            })
+            .collect();
+        assert!(!should_auto_compact(&few_but_big, &meta, 512_000));
+
+        let many_big: Vec<ChatMessage> = (0..23)
+            .map(|_| ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("x".repeat(50_000))),
+                tool_calls: None,
+                tool_call_id: None,
+            })
+            .collect();
+
+        meta.is_compact_agent = true;
+        assert!(!should_auto_compact(&many_big, &meta, 512_000));
+        meta.is_compact_agent = false;
+
+        meta.last_compact_turn = 8;
+        assert!(!should_auto_compact(&many_big, &meta, 512_000));
+        meta.last_compact_turn = 0;
+
+        assert!(should_auto_compact(&many_big, &meta, 512_000));
+    }
+
+    #[test]
+    fn find_tool_groups_detects_consecutive_tool_calls() {
+        let mut messages = Vec::new();
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        // Group 1
         messages.push(ChatMessage {
             role: "assistant".to_string(),
             content: None,
             tool_calls: Some(vec![ToolCall {
-                id: "old_call".to_string(),
+                id: "c1".to_string(),
                 call_type: "function".to_string(),
                 function: FunctionCall {
-                    name: "unicode_tool".to_string(),
-                    arguments: unicode_args,
+                    name: "t1".to_string(),
+                    arguments: "{}".to_string(),
                 },
             }]),
             tool_call_id: None,
         });
-
-        let unicode_result = format!("Result 结果: {}🌈{}", "a".repeat(1500), "b".repeat(1200));
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some(MessageContent::Text(unicode_result)),
+            content: Some(MessageContent::Text("r1".to_string())),
             tool_calls: None,
-            tool_call_id: Some("old_call".to_string()),
+            tool_call_id: Some("c1".to_string()),
         });
-
-        // Add recent tool group 1 (should be preserved)
+        // Group 2
         messages.push(ChatMessage {
             role: "assistant".to_string(),
             content: None,
             tool_calls: Some(vec![ToolCall {
-                id: "recent_call_1".to_string(),
+                id: "c2".to_string(),
                 call_type: "function".to_string(),
                 function: FunctionCall {
-                    name: "recent_tool_1".to_string(),
-                    arguments: "x".repeat(1500),
+                    name: "t2".to_string(),
+                    arguments: "{}".to_string(),
                 },
             }]),
             tool_call_id: None,
         });
-
         messages.push(ChatMessage {
             role: "tool".to_string(),
-            content: Some(MessageContent::Text("y".repeat(2500))),
+            content: Some(MessageContent::Text("r2".to_string())),
             tool_calls: None,
-            tool_call_id: Some("recent_call_1".to_string()),
+            tool_call_id: Some("c2".to_string()),
         });
 
-        // Add recent tool group 2 (should be preserved)
+        let groups = find_tool_groups(&messages);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].assistant_idx, 1);
+        assert_eq!(groups[0].tool_result_indices, vec![2]);
+        assert_eq!(groups[1].assistant_idx, 3);
+        assert_eq!(groups[1].tool_result_indices, vec![4]);
+    }
+
+    #[test]
+    fn should_auto_compact_needs_minimum_message_count() {
+        let meta = ConversationMeta::new();
+        let few: Vec<ChatMessage> = (0..5)
+            .map(|_| ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("x".repeat(100_000))),
+                tool_calls: None,
+                tool_call_id: None,
+            })
+            .collect();
+        assert!(!should_auto_compact(&few, &meta, 512_000));
+    }
+
+    #[test]
+    fn conversation_meta_defaults_to_zero() {
+        let meta = ConversationMeta::new();
+        assert_eq!(meta.last_compact_turn, 0);
+        assert!(!meta.has_attempted_reactive_compact);
+        assert!(!meta.is_compact_agent);
+        assert_eq!(meta.current_turn, 0);
+    }
+
+    #[test]
+    fn prepare_messages_applies_tier2_when_tier1_not_enough() {
+        let ctx = 50000;
+        let mut messages = Vec::new();
         messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "recent_call_2".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "recent_tool_2".to_string(),
-                    arguments: "z".repeat(1500),
-                },
-            }]),
+            role: "system".to_string(),
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
             tool_call_id: None,
         });
-
         messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("w".repeat(2500))),
+            role: "user".to_string(),
+            content: Some(MessageContent::Text("do things".to_string())),
             tool_calls: None,
-            tool_call_id: Some("recent_call_2".to_string()),
+            tool_call_id: None,
         });
+        for i in 0..6 {
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("c{}", i),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "x".repeat(8000),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("y".repeat(8000))),
+                tool_calls: None,
+                tool_call_id: Some(format!("c{}", i)),
+            });
+        }
+        for i in 6..8 {
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("c{}", i),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "short".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("preserved".to_string())),
+                tool_calls: None,
+                tool_call_id: Some(format!("c{}", i)),
+            });
+        }
 
-        // Compact and verify no panics
-        let compacted = compact_tool_heavy_history(&messages);
-
-        // Verify structure is preserved
-        assert_eq!(compacted.len(), messages.len());
-        assert_eq!(compacted[0].role, "system");
-        assert_eq!(compacted[1].role, "user");
-        assert_eq!(compacted[2].role, "assistant");
-        assert_eq!(compacted[3].role, "tool");
-
-        // Verify OLD tool group was compacted
-        let compacted_args = &compacted[2].tool_calls.as_ref().unwrap()[0]
-            .function
-            .arguments;
-        assert!(compacted_args.contains("[RustFox compacted:"));
-
-        let compacted_result = compacted[3].content.as_ref().unwrap();
-        assert!(compacted_result
-            .as_text()
-            .contains("rustfox compacted tool result"));
-
-        // Verify recent groups are preserved unchanged
-        assert_eq!(
-            compacted[4].tool_calls.as_ref().unwrap()[0]
-                .function
-                .arguments
-                .len(),
-            1500
-        );
-        assert_eq!(compacted[5].content.as_ref().unwrap().as_text().len(), 2500);
-        assert_eq!(
-            compacted[6].tool_calls.as_ref().unwrap()[0]
-                .function
-                .arguments
-                .len(),
-            1500
-        );
-        assert_eq!(compacted[7].content.as_ref().unwrap().as_text().len(), 2500);
+        let result = prepare_messages_for_llm(&messages, ctx);
+        assert!(result.stats.compaction_applied);
+        assert!(result.messages.len() < messages.len());
+        let has_boundary = result.messages.iter().any(|m| {
+            m.role == "system" && m.content.as_ref().unwrap().as_text().contains("collapsed")
+        });
+        assert!(has_boundary);
     }
 }
