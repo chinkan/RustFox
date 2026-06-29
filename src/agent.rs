@@ -702,7 +702,6 @@ impl Agent {
             }
 
             // Tiers 1-2: sync compaction
-            let context_window = self.registry.default_context_window();
             let base_prompt = prepare_messages_for_llm(&messages, context_window);
 
             loop {
