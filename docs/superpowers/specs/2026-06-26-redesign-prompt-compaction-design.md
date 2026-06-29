@@ -145,6 +145,70 @@ Emergency path, triggered when the API returns a 413 / prompt-too-long error. Li
 - One-attempt guard (`has_attempted_reactive_compact` bool) to prevent retry loops
 - On failure: surface error to user
 
+## Context Window Awareness
+
+不同模型有不同 context window，compaction thresholds 應該相對 model 嘅實際 window，而非硬編碼。
+
+### `ProviderConfig` 新增 field
+
+```rust
+pub struct ProviderConfig {
+    // ... existing fields ...
+    pub context_window: usize,  // in bytes (~4 bytes ≈ 1 token). Default: 128_000
+}
+```
+
+Config.toml 每個 provider section 可以 override：
+
+```toml
+[openrouter]
+model = "deepseek/deepseek-v4-flash"
+context_window = 200000  # bytes (optional, default 128000)
+```
+
+### `should_auto_compact()` 使用 context_window
+
+```rust
+pub fn should_auto_compact(
+    messages: &[ChatMessage],
+    meta: &ConversationMeta,
+    context_window: usize,  // NEW: from provider config
+) -> bool {
+    let bytes = estimate_prompt_bytes(messages);
+    let usage_pct = bytes as f64 / context_window as f64;
+
+    // 85% of actual model context window, not hardcoded 100K
+    usage_pct > 0.85
+        && messages.len() > 15
+        && meta.current_turn - meta.last_compact_turn >= COMPACT_TURN_GAP
+        && !meta.is_compact_agent
+}
+```
+
+所有 thresholds (`OBSERVATION_MASK_THRESHOLD`, `COLLAPSE_THRESHOLD`, etc.) 都改為基於 `context_window` 嘅百分比計算。Constants 表 update：
+
+| Constant | Value | Notes |
+|----------|-------|-------|
+| `OBSERVATION_MASK_PCT` | 0.20 (20% of context window) | Replaces hardcoded 20,000 bytes |
+| `COLLAPSE_PCT` | 0.60 (60% of context window) | Replaces hardcoded 60,000 bytes |
+| `COMPACT_PCT` | 0.85 (85% of context window) | Replaces hardcoded 85,000 bytes |
+| `REACTIVE_PCT` | 0.95 (95% of context window) | Replaces hardcoded 95,000 bytes |
+| `COMPACT_TURN_GAP` | 5 | Unchanged |
+
+### `agent.rs` 傳入 context_window
+
+```rust
+// agent.rs processing loop
+let provider = self.registry.resolve_model(&self.current_model);
+let context_window = provider.0.config().context_window;
+
+if should_auto_compact(&messages, &meta, context_window) {
+    messages = auto_compact_conversation(messages, &self.llm, context_window).await?;
+}
+
+let prompt = prepare_messages_for_llm(&messages, context_window);
+```
+
 ## State: ConversationMeta
 
 A new struct to hold per-conversation compaction state. Currently conversation is a bare `Vec<ChatMessage>`. The agent loop wraps it with this metadata:
@@ -170,11 +234,11 @@ pub struct ConversationMeta {
 
 | Constant | Value | Purpose | Notes |
 |----------|-------|---------|-------|
-| `OBSERVATION_MASK_THRESHOLD` | 20,000 bytes (20%) | Trigger Tier 1 | Same as old `COMPACTION_PROMPT_BYTE_THRESHOLD` for backward compat |
-| `COLLAPSE_THRESHOLD` | 60,000 bytes (60%) | Trigger Tier 2 | |
-| `COMPACT_THRESHOLD` | 85,000 bytes (85%) | Trigger Tier 3 | |
-| `REACTIVE_THRESHOLD` | 95,000 bytes (95%) | Trigger Tier 4 | |
-| `PROMPT_HARD_CAP_BYTES` | 100,000 bytes | Absolute limit | Unchanged |
+| `OBSERVATION_MASK_PCT` | 0.20 (20%) | Trigger Tier 1 | Applied to provider's actual context_window |
+| `COLLAPSE_PCT` | 0.60 (60%) | Trigger Tier 2 | |
+| `COMPACT_PCT` | 0.85 (85%) | Trigger Tier 3 | |
+| `REACTIVE_PCT` | 0.95 (95%) | Trigger Tier 4 | |
+| `PROMPT_HARD_CAP_BYTES` | 100,000 bytes | Absolute limit | Unchanged; safety net for very large context windows |
 | `COMPACT_TURN_GAP` | 5 | Minimum turns between compacts | |
 | `PRESERVED_TOOL_GROUPS` | 2 | Groups to keep verbatim | Unchanged |
 
@@ -192,11 +256,14 @@ Deprecated constants to remove:
 
 ### `src/agent_prompt.rs`
 - Remove `compact_tool_heavy_history()`, `compact_tool_heavy_history_with_preserved_groups()`, `compact_assistant_tool_calls()`, `compact_tool_result()`
-- Remove old threshold constants
-- Add `observation_mask(messages) → Vec<ChatMessage>` (Tier 1)
+- Remove old threshold constants (ratio-based replacements below)
+- Add `context_window: usize` parameter to `prepare_messages_for_llm(messages, context_window)` — all thresholds computed as `(context_window as f64 * PCT) as usize`
+- Add `observation_mask(messages, context_window) → Vec<ChatMessage>` (Tier 1)
+  - Trigger: estimate > context_window * OBSERVATION_MASK_PCT
   - For tool results older than PRESERVED_TOOL_GROUPS: replace content with `[previous tool result — masked]`
   - For old `[RustFox compacted:` markers in tool call arguments: replace with `[compacted]`
-- Add `collapse_context(messages) → Vec<ChatMessage>` (Tier 2)
+- Add `collapse_context(messages, context_window) → Vec<ChatMessage>` (Tier 2)
+  - Trigger: still > context_window * COLLAPSE_PCT after Tier 1
   - Identify tool groups via existing algorithm
   - Drop oldest 50% of non-preserved groups
   - Insert `[system] ★ earlier conversation collapsed ★` at collapse boundary
@@ -217,6 +284,11 @@ Deprecated constants to remove:
     - Set `meta.has_attempted_reactive_compact` to prevent retry loop
 - Wire LangSmith logging for Tier 3/4 events (tier, pre/post byte counts, message count delta)
 - Keep `is_compacted_regurgitation()` as safety net
+
+### `src/provider.rs`
+- Add `context_window: usize` field to `ProviderConfig` (default: 128_000)
+- Update `From<&ProviderSection>` to read `context_window` from config (default 128_000)
+- Expose `get_context_window(model: &str) -> usize` on `ProviderRegistry` (resolves model, returns its provider's context_window)
 
 ### `src/llm.rs`
 - Add `fn has_tool_calls(&self) -> bool` to `ChatMessage`:
