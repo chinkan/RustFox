@@ -10,8 +10,8 @@ use teloxide::types::{ChatId, InputFile};
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    estimate_prompt_bytes, prepare_messages_for_llm, recovery_nudge_for, should_auto_compact,
-    build_compact_summary_prompt, build_compact_boundary_marker, ConversationMeta,
+    build_compact_boundary_marker, build_compact_summary_prompt, estimate_prompt_bytes,
+    prepare_messages_for_llm, recovery_nudge_for, should_auto_compact, ConversationMeta,
     PreparedPrompt, PRESERVED_TOOL_GROUPS,
 };
 use crate::config::Config;
@@ -660,9 +660,9 @@ impl Agent {
                 let messages_before = messages.clone();
                 let messages_before_bytes = estimate_prompt_bytes(&messages_before);
 
-                if let Ok(compacted) = Self::auto_compact_conversation(
-                    &self.llm, &messages, context_window,
-                ).await {
+                if let Ok(compacted) =
+                    Self::auto_compact_conversation(&self.llm, &messages, context_window).await
+                {
                     conv_meta.last_compact_turn = iteration as usize;
                     messages = compacted;
                     info!(
@@ -814,7 +814,8 @@ impl Agent {
                         if is_413 && !conv_meta.has_attempted_reactive_compact {
                             conv_meta.has_attempted_reactive_compact = true;
                             let messages_before_compact = messages.len();
-                            match Self::reactive_compact(&self.llm, &messages, context_window).await {
+                            match Self::reactive_compact(&self.llm, &messages, context_window).await
+                            {
                                 Ok(compacted) => {
                                     let compacted_len = compacted.len();
                                     messages = compacted;
@@ -1326,7 +1327,11 @@ impl Agent {
 
         let summary_end = if preserved_groups_start > 0 {
             let last_summary = &tool_groups[preserved_groups_start - 1];
-            *last_summary.tool_result_indices.last().unwrap_or(&last_summary.assistant_idx) + 1
+            *last_summary
+                .tool_result_indices
+                .last()
+                .unwrap_or(&last_summary.assistant_idx)
+                + 1
         } else {
             return Ok(messages.to_vec());
         };
@@ -1335,7 +1340,7 @@ impl Agent {
         let preserved = &messages[summary_end..];
 
         let summary_prompt = build_compact_summary_prompt();
-        let mut compact_messages = Vec::with_capacity(2 + preserved.len() + 1);
+        let mut compact_messages = Vec::with_capacity(to_summarize.len() + 2);
         compact_messages.push(summary_prompt);
         compact_messages.push(ChatMessage {
             role: "user".to_string(),
@@ -1392,11 +1397,12 @@ impl Agent {
         messages: &[ChatMessage],
         _context_window: usize,
     ) -> Result<Vec<ChatMessage>> {
-        if messages.len() <= 4 {
+        const PRESERVE_COUNT: usize = 4;
+        if messages.len() <= PRESERVE_COUNT {
             anyhow::bail!("Too few messages for reactive compact");
         }
 
-        let split = messages.len().saturating_sub(4);
+        let split = messages.len().saturating_sub(PRESERVE_COUNT);
         let to_summarize = &messages[..split];
         let preserved = &messages[split..];
 
