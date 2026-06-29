@@ -882,7 +882,15 @@ impl Agent {
                 };
 
                 if recovered_from_413 {
-                    // Skip retry loop, restart outer for iteration
+                    // End the leaked llm_run before continuing
+                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                        id: llm_run_id,
+                        outputs: None,
+                        error: Some(
+                            "413 context exceeded — recovered via Tier 4 compact".to_string(),
+                        ),
+                        end_time: Self::now_iso8601_static(),
+                    });
                     continue;
                 }
 
