@@ -35,7 +35,7 @@ Tiers 1-2 live in `agent_prompt.rs` (sync, 0 LLM cost). Tiers 3-4 live in `agent
 ```
 agent.rs loop:
   │
-  ├─ 1. Call should_auto_compact(messages, turn_count)
+  ├─ 1. Call should_auto_compact(messages, &meta)
   │     │
   │     ├─ False → skip to step 2
   │     └─ True  → async auto_compact_conversation(messages, llm)
