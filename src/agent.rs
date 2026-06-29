@@ -10,7 +10,9 @@ use teloxide::types::{ChatId, InputFile};
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    estimate_prompt_bytes, prepare_messages_for_llm, recovery_nudge_for, PreparedPrompt,
+    estimate_prompt_bytes, prepare_messages_for_llm, recovery_nudge_for, should_auto_compact,
+    build_compact_summary_prompt, build_compact_boundary_marker, ConversationMeta,
+    PreparedPrompt, PRESERVED_TOOL_GROUPS,
 };
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
@@ -593,6 +595,9 @@ impl Agent {
         };
         messages.push(user_msg);
 
+        // Compaction state for this conversation session (persists across iterations)
+        let mut conv_meta = ConversationMeta::new();
+
         // Gather all tool definitions
         let mut all_tools: Vec<ToolDefinition> = tools::builtin_tool_definitions();
         all_tools.extend(self.mcp.tool_definitions());
@@ -630,6 +635,13 @@ impl Agent {
         self.soul_updated
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
+        // Resolve context_window once before the loop (can't .await inside the loop)
+        let context_window = {
+            let model = self.current_model.read().await;
+            let (provider, _) = self.registry.resolve_model(&model);
+            provider.config().context_window
+        };
+
         for iteration in 0..max_iterations {
             debug!(
                 "Trying iteration {}: messages length: {}",
@@ -641,7 +653,55 @@ impl Agent {
             let mut retry_count = 0u32;
             let response: ChatMessage;
 
-            // Prepare prompt with optional compaction (invariant across retries)
+            // Tier 3: auto-compact (async, LLM call) — before Tiers 1-2
+            conv_meta.current_turn = iteration as usize;
+            if should_auto_compact(&messages, &conv_meta, context_window) {
+                // Capture pre-compact metrics
+                let messages_before = messages.clone();
+                let messages_before_bytes = estimate_prompt_bytes(&messages_before);
+
+                if let Ok(compacted) = Self::auto_compact_conversation(
+                    &self.llm, &messages, context_window,
+                ).await {
+                    conv_meta.last_compact_turn = iteration as usize;
+                    messages = compacted;
+                    info!(
+                        "Tier 3 auto-compact applied: {} messages reduced",
+                        messages.len(),
+                    );
+
+                    // LangSmith logging for Tier 3
+                    let compacted_bytes = estimate_prompt_bytes(&messages);
+                    let compact_run_id = uuid::Uuid::new_v4().to_string();
+                    self.langsmith.start_run(crate::langsmith::RunParams {
+                        id: compact_run_id.clone(),
+                        name: "auto_compact".to_string(),
+                        run_type: crate::langsmith::RunType::Chain,
+                        parent_run_id: Some(chain_run_id.clone()),
+                        inputs: serde_json::json!({
+                            "tier": 3,
+                            "pre_bytes": messages_before_bytes,
+                            "post_bytes": compacted_bytes,
+                            "pre_count": messages_before.len(),
+                            "post_count": messages.len(),
+                        }),
+                        session_name: ls_project.clone(),
+                        start_time: Self::now_iso8601_static(),
+                    });
+                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                        id: compact_run_id,
+                        outputs: Some(serde_json::json!({
+                            "tier": 3,
+                            "delta_bytes": (messages_before_bytes as i64 - compacted_bytes as i64).max(0),
+                            "delta_messages": messages_before.len() as i64 - messages.len() as i64,
+                        })),
+                        error: None,
+                        end_time: Self::now_iso8601_static(),
+                    });
+                }
+            }
+
+            // Tiers 1-2: sync compaction
             let context_window = self.registry.default_context_window();
             let base_prompt = prepare_messages_for_llm(&messages, context_window);
 
@@ -742,24 +802,89 @@ impl Agent {
                 };
 
                 // Handle LLM transport/API errors
+                let mut recovered_from_413 = false;
+
                 let completion = match completion_result {
                     Ok(c) => c,
                     Err(e) => {
-                        self.langsmith.end_run(crate::langsmith::EndRunParams {
-                            id: llm_run_id,
-                            outputs: None,
-                            error: Some(format!("{:#}", e)),
-                            end_time: Self::now_iso8601_static(),
-                        });
-                        self.langsmith.end_run(crate::langsmith::EndRunParams {
-                            id: chain_run_id,
-                            outputs: None,
-                            error: Some(format!("{:#}", e)),
-                            end_time: Self::now_iso8601_static(),
-                        });
-                        return Err(e);
+                        let err_str = format!("{:#}", e);
+                        let is_413 = err_str.contains("413")
+                            || err_str.to_lowercase().contains("prompt too long")
+                            || err_str.to_lowercase().contains("context length")
+                            || err_str.to_lowercase().contains("maximum context");
+                        if is_413 && !conv_meta.has_attempted_reactive_compact {
+                            conv_meta.has_attempted_reactive_compact = true;
+                            let messages_before_compact = messages.len();
+                            match Self::reactive_compact(&self.llm, &messages, context_window).await {
+                                Ok(compacted) => {
+                                    let compacted_len = compacted.len();
+                                    messages = compacted;
+                                    recovered_from_413 = true;
+
+                                    // LangSmith logging for Tier 4
+                                    let compact_run_id = uuid::Uuid::new_v4().to_string();
+                                    self.langsmith.start_run(crate::langsmith::RunParams {
+                                        id: compact_run_id.clone(),
+                                        name: "reactive_compact".to_string(),
+                                        run_type: crate::langsmith::RunType::Chain,
+                                        parent_run_id: Some(chain_run_id.clone()),
+                                        inputs: serde_json::json!({
+                                            "tier": 4,
+                                            "reason": err_str,
+                                            "pre_count": messages_before_compact,
+                                        }),
+                                        session_name: ls_project.clone(),
+                                        start_time: Self::now_iso8601_static(),
+                                    });
+                                    self.langsmith.end_run(crate::langsmith::EndRunParams {
+                                        id: compact_run_id,
+                                        outputs: Some(serde_json::json!({
+                                            "tier": 4,
+                                            "post_count": compacted_len,
+                                        })),
+                                        error: None,
+                                        end_time: Self::now_iso8601_static(),
+                                    });
+                                }
+                                Err(compact_err) => {
+                                    warn!("Reactive compact failed: {}", compact_err);
+                                }
+                            }
+                        }
+                        if !recovered_from_413 {
+                            self.langsmith.end_run(crate::langsmith::EndRunParams {
+                                id: llm_run_id,
+                                outputs: None,
+                                error: Some(err_str.clone()),
+                                end_time: Self::now_iso8601_static(),
+                            });
+                            self.langsmith.end_run(crate::langsmith::EndRunParams {
+                                id: chain_run_id,
+                                outputs: None,
+                                error: Some(err_str),
+                                end_time: Self::now_iso8601_static(),
+                            });
+                            return Err(e);
+                        }
+                        // recovered_from_413 is true but the compiler can't see this;
+                        // return a dummy completion (never used because of continue below)
+                        crate::llm::ChatCompletion {
+                            message: ChatMessage {
+                                role: String::new(),
+                                content: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                            },
+                            finish_reason: None,
+                            model: String::new(),
+                        }
                     }
                 };
+
+                if recovered_from_413 {
+                    // Skip retry loop, restart outer for iteration
+                    continue;
+                }
 
                 // Check if response is empty (no content and no tool calls)
                 if is_empty_assistant_response(&completion.message) {
@@ -1187,6 +1312,144 @@ impl Agent {
         });
 
         Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
+    }
+
+    /// Tier 3: Auto-compact via LLM summarization.
+    async fn auto_compact_conversation(
+        llm: &LlmClient,
+        messages: &[ChatMessage],
+        _context_window: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        let tool_groups = crate::agent_prompt::find_tool_groups(messages);
+
+        let preserve_count = PRESERVED_TOOL_GROUPS.min(tool_groups.len());
+        let preserved_groups_start = tool_groups.len().saturating_sub(preserve_count);
+
+        let summary_end = if preserved_groups_start > 0 {
+            let last_summary = &tool_groups[preserved_groups_start - 1];
+            *last_summary.tool_result_indices.last().unwrap_or(&last_summary.assistant_idx) + 1
+        } else {
+            return Ok(messages.to_vec());
+        };
+
+        let to_summarize = &messages[..summary_end];
+        let preserved = &messages[summary_end..];
+
+        let summary_prompt = build_compact_summary_prompt();
+        let mut compact_messages = Vec::with_capacity(2 + preserved.len() + 1);
+        compact_messages.push(summary_prompt);
+        compact_messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "Summarize the following conversation portion ({} messages):",
+                to_summarize.len(),
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        compact_messages.extend(to_summarize.iter().cloned());
+
+        let summary_response = match llm.chat(&compact_messages, &[]).await {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("Auto-compact LLM call failed: {}", e),
+        };
+
+        let summary_text = summary_response
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+
+        if summary_text.is_empty() {
+            anyhow::bail!("Auto-compact returned empty summary");
+        }
+
+        let mut result: Vec<ChatMessage> = Vec::new();
+        let boundary = build_compact_boundary_marker(to_summarize.len(), 1);
+        result.push(boundary);
+
+        let summary_msg = ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "★ COMPACT SUMMARY ★\n\n{}",
+                summary_text
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        result.push(summary_msg);
+
+        result.extend(preserved.iter().cloned());
+
+        let nudge = recovery_nudge_for(&result);
+        result.push(nudge);
+
+        Ok(result)
+    }
+
+    /// Tier 4: Reactive compact — emergency 413 recovery.
+    async fn reactive_compact(
+        llm: &LlmClient,
+        messages: &[ChatMessage],
+        _context_window: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        if messages.len() <= 4 {
+            anyhow::bail!("Too few messages for reactive compact");
+        }
+
+        let split = messages.len().saturating_sub(4);
+        let to_summarize = &messages[..split];
+        let preserved = &messages[split..];
+
+        let summary_prompt = build_compact_summary_prompt();
+        let mut compact_msgs = Vec::with_capacity(to_summarize.len() + 2);
+        compact_msgs.push(summary_prompt);
+        compact_msgs.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "Summarize the following conversation portion ({} messages) — emergency compact:",
+                to_summarize.len(),
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        compact_msgs.extend(to_summarize.iter().cloned());
+
+        let summary_response = match llm.chat(&compact_msgs, &[]).await {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("Reactive compact LLM call failed: {}", e),
+        };
+
+        let summary_text = summary_response
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+
+        if summary_text.is_empty() {
+            anyhow::bail!("Reactive compact returned empty summary");
+        }
+
+        let boundary = build_compact_boundary_marker(to_summarize.len(), 1);
+        let summary_msg = ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "★ COMPACT SUMMARY (EMERGENCY) ★\n\n{}",
+                summary_text
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let mut result = Vec::with_capacity(3 + preserved.len());
+        result.push(boundary);
+        result.push(summary_msg);
+        result.extend(preserved.iter().cloned());
+
+        let nudge = recovery_nudge_for(&result);
+        result.push(nudge);
+
+        Ok(result)
     }
 
     /// Re-register all active scheduled tasks from the DB into the scheduler.
@@ -1919,7 +2182,11 @@ impl Agent {
             let response: ChatMessage;
 
             // Prepare prompt with optional compaction (invariant across retries)
-            let context_window = self.registry.default_context_window();
+            let context_window = {
+                let (provider, _) = self.registry.resolve_model(model);
+                provider.config().context_window
+            };
+            // TODO: consider adding Tier 3/4 to subagent loops in a follow-up
             let base_prompt = prepare_messages_for_llm(messages, context_window);
 
             loop {
