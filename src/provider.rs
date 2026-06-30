@@ -128,7 +128,6 @@ impl ProviderRegistry {
         format!("{}/{}", self.default_provider, provider.default_model())
     }
 
-
     /// Return the context window size of the default provider.
     pub fn default_context_window(&self) -> usize {
         let provider = &self.providers[&self.default_provider];
