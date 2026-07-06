@@ -75,6 +75,29 @@ async fn main() -> Result<()> {
         fallback_chain.len()
     );
 
+    // Spawn background task to warm context_window_cache for all providers
+    {
+        let registry_clone = Arc::clone(&registry);
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            for name in registry_clone.provider_names() {
+                if let Some(provider) = registry_clone.get_provider(&name) {
+                    let model = provider.default_model();
+                    if let Some(ctx) = provider.fetch_context_window(&client, model).await {
+                        let mut cache = provider.config().context_window_cache.write().await;
+                        *cache = Some(ctx);
+                        tracing::info!(
+                            "Context window cache: {} / {} = {} tokens",
+                            name,
+                            model,
+                            ctx
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     info!("Configuration loaded successfully");
     let default_provider_obj = registry
         .get_provider(registry.default_provider_name())
