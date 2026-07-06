@@ -316,10 +316,16 @@ async fn summarize_and_replace(
     summary_label: &str,
 ) -> Result<Vec<ChatMessage>> {
 
-    // NEW: RAG retrieval for compaction
-    let retrieved = memory::rag::retrieve_context_for_compaction(
-        memory, to_summarize, conversation_id, 5
-    ).await.unwrap_or(None);
+    // NEW: RAG retrieval for compaction (non-fatal — warn on error, continue)
+    let retrieved = match memory::rag::retrieve_context_for_compaction(
+        memory, to_summarize, preserved, conversation_id, 5
+    ).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("RAG retrieval for compaction failed: {}", e);
+            None
+        }
+    };
 
     // Build compact messages: summary prompt + retrieved context + truncated input
     let mut compact_msgs = Vec::new();
