@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -24,6 +25,10 @@ pub struct ProviderConfig {
     pub max_tokens: u32,
     pub discover_models: bool,
     pub context_window: usize,
+    /// Runtime cache for the current model's context window, populated
+    /// asynchronously from the provider API. When None, falls back to
+    /// `context_window`.
+    pub context_window_cache: Arc<RwLock<Option<usize>>>,
     /// Number of retries when the response is missing the `choices` field.
     /// Defaults to 3; set to 0 to disable.
     pub parse_retry_limit: u32,
@@ -41,6 +46,7 @@ impl From<&ProviderSection> for ProviderConfig {
             max_tokens: s.max_tokens,
             discover_models: s.discover_models,
             context_window: s.context_window,
+            context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0, // overwritten by build_registry
         }
     }
@@ -157,6 +163,16 @@ pub trait Provider: Send + Sync {
     ) -> Result<ChatCompletion>;
 
     async fn list_models(&self, client: &reqwest::Client) -> Result<Vec<String>>;
+
+    /// Fetch the context window for a given model from the provider API.
+    /// Returns None if the provider doesn't support runtime detection.
+    async fn fetch_context_window(
+        &self,
+        _client: &reqwest::Client,
+        _model: &str,
+    ) -> Option<usize> {
+        None  // default: no API-based detection
+    }
 }
 
 /// Holds the set of providers available to the agent and the default provider
@@ -226,6 +242,16 @@ impl ProviderRegistry {
     pub fn default_context_window(&self) -> usize {
         let provider = &self.providers[&self.default_provider];
         provider.config().context_window
+    }
+
+    /// Return the effective context window for a model: runtime cache
+    /// if populated, otherwise static config fallback.
+    pub fn effective_context_window(&self, model: &str) -> usize {
+        let (provider, _) = self.resolve_model(model);
+        let cached = provider.config().context_window_cache.try_read()
+            .ok()
+            .and_then(|c| *c);
+        cached.unwrap_or(provider.config().context_window)
     }
 }
 
@@ -381,6 +407,29 @@ impl Provider for OpenRouterProvider {
             .unwrap_or_default();
         Ok(models)
     }
+
+    async fn fetch_context_window(
+        &self,
+        client: &reqwest::Client,
+        model: &str,
+    ) -> Option<usize> {
+        let url = format!("{}/models", self.config.base_url);
+        let mut req = client.get(&url);
+        if let Some(ref key) = self.config.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        let response = req.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let list: serde_json::Value = response.json().await.ok()?;
+        let ctx = list["data"].as_array()?
+            .iter()
+            .find(|m| m["id"].as_str() == Some(model))?
+            .get("context_length")?
+            .as_u64()?;
+        Some(ctx as usize)
+    }
 }
 
 // === OpenAICompatibleProvider ===
@@ -483,6 +532,29 @@ impl Provider for OpenAICompatibleProvider {
             })
             .unwrap_or_default();
         Ok(models)
+    }
+
+    async fn fetch_context_window(
+        &self,
+        client: &reqwest::Client,
+        model: &str,
+    ) -> Option<usize> {
+        let url = format!("{}/models", self.config.base_url);
+        let mut req = client.get(&url);
+        if let Some(ref key) = self.config.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        let response = req.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let list: serde_json::Value = response.json().await.ok()?;
+        let ctx = list["data"].as_array()?
+            .iter()
+            .find(|m| m["id"].as_str() == Some(model))?
+            .get("context_length")?
+            .as_u64()?;
+        Some(ctx as usize)
     }
 }
 
@@ -746,6 +818,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);
@@ -764,6 +837,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);
@@ -782,6 +856,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);

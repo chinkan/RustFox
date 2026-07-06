@@ -385,6 +385,20 @@ impl Agent {
         Ok(())
     }
 
+    /// Fetch the context window size for the current model from the
+    /// provider API and cache it. Non-fatal — uses static fallback on
+    /// failure.
+    pub async fn refresh_context_window_cache(&self) {
+        let model = self.current_model.read().await.clone();
+        let (provider, actual_model) = self.registry.resolve_model(&model);
+        let client = reqwest::Client::new();
+        if let Some(ctx) = provider.fetch_context_window(&client, actual_model).await {
+            let mut cache = provider.config().context_window_cache.write().await;
+            *cache = Some(ctx);
+            tracing::info!("Context window for {}: {} tokens", actual_model, ctx);
+        }
+    }
+
     /// Process an incoming message and return the response text
     pub(crate) fn now_iso8601_static() -> String {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -638,8 +652,7 @@ impl Agent {
         // Resolve context_window once before the loop (can't .await inside the loop)
         let context_window = {
             let model = self.current_model.read().await;
-            let (provider, _) = self.registry.resolve_model(&model);
-            provider.config().context_window
+            self.registry.effective_context_window(&model)
         };
 
         for iteration in 0..max_iterations {
