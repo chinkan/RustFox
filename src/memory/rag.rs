@@ -2,6 +2,7 @@ use anyhow::Result;
 use tracing::debug;
 
 use super::MemoryStore;
+use crate::llm::ChatMessage;
 
 /// Auto-retrieve semantically relevant past messages from a conversation
 /// and format them as a `<retrieved_context>` block for the system prompt.
@@ -51,6 +52,62 @@ pub async fn auto_retrieve_context(
     block.push_str("</retrieved_context>");
     debug!(
         "RAG: injecting {} snippets for query: {:?}",
+        results.len(),
+        query
+    );
+    Ok(Some(block))
+}
+
+/// Retrieve context for compaction summarization.
+///
+/// Uses the most recent user message (from both to_summarize and preserved
+/// ranges) as a search query to find relevant historical context from the
+/// conversation. Returns formatted snippets that help the summarizer write
+/// a focused summary. Returns None when no suitable query is found or no
+/// results are returned.
+pub async fn retrieve_context_for_compaction(
+    store: &MemoryStore,
+    to_summarize: &[ChatMessage],
+    preserved: &[ChatMessage],
+    conversation_id: &str,
+    limit: usize,
+) -> Result<Option<String>> {
+    let query = preserved
+        .iter()
+        .rev()
+        .chain(to_summarize.iter().rev())
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_ref().map(|c| c.as_text()))
+        .unwrap_or_default();
+
+    if query.trim().len() < 5 {
+        return Ok(None);
+    }
+
+    let results = store
+        .search_messages_in_conversation(&query, conversation_id, limit)
+        .await?;
+
+    if results.is_empty() {
+        return Ok(None);
+    }
+
+    let mut block = String::from(
+        "<retrieved_context>\n\
+         Relevant context from conversation history for compaction:\n\n",
+    );
+
+    for msg in &results {
+        if let Some(content) = &msg.content {
+            let text = content.as_text();
+            let snippet = crate::utils::strings::truncate_chars(&text, 300);
+            block.push_str(&format!("[{}] {}\n", msg.role, snippet));
+        }
+    }
+
+    block.push_str("</retrieved_context>");
+    tracing::debug!(
+        "Compaction RAG: injected {} snippets for query: {:?}",
         results.len(),
         query
     );
