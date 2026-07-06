@@ -28,6 +28,10 @@ use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
 use crate::tools;
 
+/// Number of context snippets to retrieve from conversation history for
+/// compaction summarization.
+const COMPACTION_RAG_LIMIT: usize = 5;
+
 /// A request dispatched from a fire closure to the background job runner.
 pub struct ScheduledJobRequest {
     pub incoming: IncomingMessage,
@@ -1482,7 +1486,7 @@ impl Agent {
             to_summarize,
             preserved,
             conversation_id,
-            5,
+            COMPACTION_RAG_LIMIT,
         )
         .await
         {

@@ -314,11 +314,12 @@ impl MemoryStore {
                 FROM messages m
                 LEFT JOIN vec_matches vec ON m.rowid = vec.rowid
                 LEFT JOIN fts_matches fts ON m.rowid = fts.rowid
-                WHERE vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL
+                WHERE (vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL)
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
                 ORDER BY combined_rank DESC
                 LIMIT ?2
             ";
-
             let search_limit = (limit * 3) as i64;
             let rrf_k = self.config.rrf_k;
             let rrf_weight_fts = self.config.rrf_weight_fts;
@@ -347,6 +348,8 @@ impl MemoryStore {
                 FROM messages m
                 JOIN messages_fts fts ON m.rowid = fts.rowid
                 WHERE messages_fts MATCH ?1
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
                 ORDER BY fts.rank
                 LIMIT ?2
             ";

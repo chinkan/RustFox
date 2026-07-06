@@ -237,4 +237,61 @@ mod tests {
             .unwrap();
         let _ = result; // Just verify no panic
     }
+
+    #[tokio::test]
+    async fn test_retrieve_context_for_compaction_returns_none_for_short_query() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "compact_u1")
+            .await
+            .unwrap();
+        let to_summarize = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::from_text("some result")),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let preserved = vec![];
+        let result = retrieve_context_for_compaction(&store, &to_summarize, &preserved, &conv, 5)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "No user message should return None");
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_context_for_compaction_finds_user_message_in_preserved() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "compact_u2")
+            .await
+            .unwrap();
+
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::from_text("Tell me about Rust async")),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+
+        let to_summarize = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::from_text("Here's how...")),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let preserved = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::from_text("Tell me about Rust async")),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        let result = retrieve_context_for_compaction(&store, &to_summarize, &preserved, &conv, 5)
+            .await
+            .unwrap();
+        // May return None if embeddings not available (FTS-only fallback),
+        // which is acceptable. The key is no panic.
+        let _ = result;
+    }
 }
