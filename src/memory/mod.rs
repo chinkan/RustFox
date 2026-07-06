@@ -373,6 +373,29 @@ impl MemoryStore {
             }
         }
 
+        // Migration: add metadata columns (is_summarized, role) to vec0 tables
+        // for pre-filtering. ALTER TABLE is not supported for vec0, so we
+        // must DROP and recreate.
+        let has_meta = conn
+            .prepare("PRAGMA table_info(message_embeddings)")
+            .and_then(|mut stmt| {
+                let cols: Vec<String> = stmt
+                    .query_map([], |row| row.get(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(cols.contains(&"is_summarized".to_string()))
+            })
+            .unwrap_or(false);
+
+        if table_exists(conn, "message_embeddings") && !has_meta {
+            conn.execute_batch("DROP TABLE message_embeddings;")?;
+            conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE message_embeddings USING vec0(\
+                 embedding float[{}], is_summarized integer, role text);",
+                dims
+            ))?;
+            info!("Migrated message_embeddings with metadata columns (is_summarized, role)");
+        }
+
         Ok(())
     }
 }
