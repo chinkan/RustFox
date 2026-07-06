@@ -67,9 +67,42 @@ pub fn effective_context_window(&self, model: &str) -> usize {
 ```
 
 **Trigger points for cache update:**
-- At startup: spawn a background task to fetch and cache (no startup delay)
-- On model switch (`set_model()` in agent.rs:328): refresh cache
-- On `/model` command (platform layer): refresh cache
+
+1. **Startup** (`main.rs` after `build_registry`): Spawn a background task that iterates all registered providers, calling `fetch_context_window` for each provider's default model and writing results to `context_window_cache`. No startup delay — the static config value is used for the first LLM call.
+
+   ```rust
+   // In main.rs, after registry is built:
+   let registry_clone = Arc::clone(&registry);
+   tokio::spawn(async move {
+       let client = reqwest::Client::new();
+       for name in registry_clone.provider_names() {
+           if let Some(provider) = registry_clone.get_provider(&name) {
+               let model = provider.default_model();
+               if let Some(ctx) = provider.fetch_context_window(&client, model).await {
+                   // write to provider's context_window_cache (via ProviderConfig)
+                   let mut cache = provider.config().context_window_cache.write();
+                   *cache = Some(ctx);
+               }
+           }
+       }
+   });
+   ```
+
+2. **Model switch** (`set_model()` in agent.rs:328): `Agent` already holds `self.registry: Arc<ProviderRegistry>`. After persisting the new model to config, call `self.refresh_context_window_cache()` which resolves the new model through the registry and calls `fetch_context_window`:
+
+   ```rust
+   pub async fn refresh_context_window_cache(&self) {
+       let model = self.current_model.read().await.clone();
+       let (provider, actual_model) = self.registry.resolve_model(&model);
+       let client = reqwest::Client::new();
+       if let Some(ctx) = provider.fetch_context_window(&client, actual_model).await {
+           let mut cache = provider.config().context_window_cache.write();
+           *cache = Some(ctx);
+       }
+   }
+   ```
+
+3. **`/model` command handler**: Calls `agent.set_model(new_model).await` which internally calls `refresh_context_window_cache` (integrated into `set_model`).
 
 **Agent loop** (agent.rs:638-643): Replace:
 ```rust
@@ -224,18 +257,23 @@ pub fn build_compact_summary_prompt() -> ChatMessage {
 ```rust
 /// Retrieve context for compaction summarization.
 ///
-/// Uses the most recent user message as a search query to find relevant
-/// historical context from the conversation. Returns formatted snippets
-/// that help the summarizer write a focused summary.
+/// Uses the most recent user message (from both to_summarize and preserved
+/// ranges) as a search query to find relevant historical context from the
+/// conversation. Returns formatted snippets that help the summarizer write
+/// a focused summary.
 pub async fn retrieve_context_for_compaction(
     store: &MemoryStore,
     to_summarize: &[ChatMessage],
+    preserved: &[ChatMessage],
     conversation_id: &str,
     limit: usize,
 ) -> Result<Option<String>> {
-    // Find the most recent user message
-    let query = to_summarize.iter()
-        .rev()
+    // Find the most recent user message across both ranges.
+    // The most recent user message may be in `preserved` (the last few tool
+    // groups) if compaction fires right after the user spoke before any
+    // tool calls happened.
+    let query = preserved.iter().rev()
+        .chain(to_summarize.iter().rev())
         .find(|m| m.role == "user")
         .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
         .unwrap_or_default();
@@ -296,31 +334,60 @@ async fn summarize_and_replace(
         });
     }
 
-    // Truncated input: first 3 + last 8 messages (bookends + recent flow)
-    let bookend_count = 3;
-    let tail_count = 8.min(to_summarize.len().saturating_sub(bookend_count));
+    // Tool-group-aware truncation: keep the first N tool groups (conversation
+    // origin) and the last M tool groups (recent flow). This preserves the
+    // structural integrity of tool-call→result pairs — unlike raw-index
+    // truncation which could split a tool group and leave a dangling call
+    // with no result.
+    let groups = find_tool_groups(to_summarize);
+    let bookend_groups = 1usize;
+    let tail_groups = 3usize.min(groups.len().saturating_sub(bookend_groups));
+    
     let mut sampled: Vec<ChatMessage> = Vec::new();
+    let mut seen_indices = std::collections::HashSet::new();
     
-    // First messages (conversation origin)
-    sampled.extend(to_summarize.iter().take(bookend_count).cloned());
-    
-    // Truncation notice if we skip middle
-    if to_summarize.len() > bookend_count + tail_count {
-        sampled.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(MessageContent::Text(
-                format!("[... {} messages omitted, see retrieved_context above ...]",
-                    to_summarize.len() - bookend_count - tail_count)
-            )),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+    // First bookend groups (conversation origin)
+    for group in groups.iter().take(bookend_groups) {
+        seen_indices.insert(group.assistant_idx);
+        for &ti in &group.tool_result_indices {
+            seen_indices.insert(ti);
+        }
     }
     
-    // Tail messages (recent flow)
-    sampled.extend(to_summarize.iter()
-        .skip(to_summarize.len().saturating_sub(tail_count))
-        .cloned());
+    // Last tail groups (recent flow)
+    for group in groups.iter().rev().take(tail_groups) {
+        seen_indices.insert(group.assistant_idx);
+        for &ti in &group.tool_result_indices {
+            seen_indices.insert(ti);
+        }
+    }
+    
+    // Always include any non-assistant/non-tool messages at the beginning
+    // (conversation opening, user's first message, etc.)
+    for (idx, msg) in to_summarize.iter().enumerate() {
+        if msg.role != "assistant" && !msg.has_tool_calls() {
+            seen_indices.insert(idx);
+        }
+    }
+    
+    // Build sampled list in original order, inserting truncation notice
+    let mut inserted_notice = false;
+    for (idx, msg) in to_summarize.iter().enumerate() {
+        if seen_indices.contains(&idx) {
+            sampled.push(msg.clone());
+        } else if !inserted_notice {
+            sampled.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text(
+                    format!("[... {} messages omitted, see retrieved_context above ...]",
+                        to_summarize.len() - seen_indices.len())
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            inserted_notice = true;
+        }
+    }
 
     let user_prompt = format!("Summarize the following conversation (sampled from {} messages):", to_summarize.len());
     compact_msgs.push(ChatMessage {
@@ -357,7 +424,8 @@ async fn summarize_and_replace(
 - `to_summarize` has no user messages → `retrieve_context_for_compaction` returns `None`, compact uses full `to_summarize` (fallback)
 - Embeddings disabled (FTS5-only) → search falls back to FTS5-only, still works
 - Search returns duplicates of what's already in bookends → RRF naturally ranks them, deduplication by `rowid`
-- Empty retrieval + very small `to_summarize` (< 10 msgs) → don't use truncation, send all
+- `to_summarize` and `preserved` both lack a user message → `retrieve_context_for_compaction` returns `None`, fallback to no RAG context
+- Very small `to_summarize` (< 3 tool groups) → no truncation needed, send all
 
 ---
 
@@ -406,10 +474,37 @@ WHERE embedding MATCH ?1
 
 This avoids post-filtering where valid KNN results get discarded by the WHERE clause after distance calculation. Migration re-creates the table on dimension change (already handled).
 
+**Explicit migration** in `run_migrations` (mod.rs:350-374): Since `ALTER TABLE` is not supported for vec0 virtual tables, add a schema check on every startup:
+
+```rust
+// After the existing dimension-check migration block, add:
+let has_metadata_columns = conn
+    .prepare("PRAGMA table_info(message_embeddings)")
+    .and_then(|mut stmt| {
+        let cols: Vec<String> = stmt.query_map([], |row| row.get(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(cols.contains(&"is_summarized".to_string()))
+    })
+    .unwrap_or(false);
+
+if table_exists(conn, "message_embeddings") && !has_metadata_columns {
+    conn.execute_batch("DROP TABLE message_embeddings;")?;
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE message_embeddings USING vec0(\
+         embedding float[{}], is_summarized integer, role text);",
+        dims
+    ))?;
+    info!("Migrated message_embeddings with metadata columns");
+}
+```
+
+This is safe because `message_embeddings` is a derived index — dropping it loses no message data (messages are in the `messages` table). Embeddings will be regenerated on the next `save_message` call.
+
 **Why this is safe:**
-- Metadata columns are additive — existing data unaffected
-- The vec0 table is recreated on dimension change anyway
-- `is_summarized = 0` and `role IN ('user', 'assistant')` match existing WHERE clauses
+- `message_embeddings` is a derived index, not source-of-truth
+- Messages are stored in the `messages` table (persistent)
+- Vectors are regenerated on next `save_message` (mod.rs:67-75)
+- The migration runs once; subsequent startups skip it
 - Backward compatible with FTS5-only fallback
 
 ---
