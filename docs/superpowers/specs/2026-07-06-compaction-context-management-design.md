@@ -12,8 +12,10 @@ RustFox's compaction system (Tiers 1-4) currently drops the system prompt, sends
 | `src/agent.rs` | System prompt preservation in auto_compact/reactive_compact, RAG-aware compact flow |
 | `src/agent_prompt.rs` | Enhanced structured summary prompt |
 | `src/memory/rag.rs` | New `retrieve_context_for_compaction()` function |
-| `src/memory/conversations.rs` | Optional metadata columns on vec0, configurable RRF weights |
+| `src/memory/conversations.rs` | Configurable RRF weights |
+| `src/memory/mod.rs` | Optional metadata columns on vec0 (migration: DROP + recreate with `is_summarized`, `role`) |
 | `src/config.rs` | Add `rrf_k`, `rrf_weight_fts`, `rrf_weight_vec` to memory config |
+| `src/main.rs` | Background startup task to warm `context_window_cache` |
 
 ---
 
@@ -232,7 +234,7 @@ pub fn build_compact_summary_prompt() -> ChatMessage {
 
 **Update `build_compact_boundary_marker()`** (agent_prompt.rs:468):
 ```
-"★ COMPACT SUMMARY — previous {} msgs → YAML state + narrative (%d msgs) ★"
+"★ COMPACT SUMMARY — previous {} msgs → YAML state + narrative ({} msgs) ★"
 ```
 
 **Update `recovery_nudge_for()`** (agent_prompt.rs:105): Add a hint to read the STATE block:
