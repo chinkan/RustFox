@@ -251,6 +251,32 @@ pub struct MemoryConfig {
     /// Can be toggled per-user at runtime via the `/query-rewrite` command.
     #[serde(default)]
     pub query_rewriter_enabled: bool,
+    /// RRF (Reciprocal Rank Fusion) parameter `k` — the rank offset used to
+    /// smooth the combined score from full-text and vector search results.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f64,
+    /// Weight assigned to the full-text search (FTS) rank in RRF scoring.
+    /// Must be between 0.0 and 1.0.  The vector weight is derived from the
+    /// configured `rrf_weight_vec`.
+    #[serde(default = "default_rrf_weight_fts")]
+    pub rrf_weight_fts: f64,
+    /// Weight assigned to the vector-search rank in RRF scoring.
+    /// Must be between 0.0 and 1.0.  The FTS weight is derived from the
+    /// configured `rrf_weight_fts`.
+    #[serde(default = "default_rrf_weight_vec")]
+    pub rrf_weight_vec: f64,
+}
+
+fn default_rrf_k() -> f64 {
+    60.0
+}
+
+fn default_rrf_weight_fts() -> f64 {
+    0.5
+}
+
+fn default_rrf_weight_vec() -> f64 {
+    0.5
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -392,6 +418,9 @@ fn default_memory_config() -> MemoryConfig {
         summarize_threshold: default_summarize_threshold(),
         summarize_cron: default_summarize_cron(),
         query_rewriter_enabled: false,
+        rrf_k: default_rrf_k(),
+        rrf_weight_fts: default_rrf_weight_fts(),
+        rrf_weight_vec: default_rrf_weight_vec(),
     }
 }
 
