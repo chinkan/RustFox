@@ -106,9 +106,9 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
     let previous_is_tool = messages.last().is_some_and(|msg| msg.role == "tool");
 
     let content = if previous_is_tool {
-        "Continue from the tool result above. Either call the next required tool or provide a concise user-visible final answer.".to_string()
+        "Continue from the tool result above. Read the ## STATE block in the compact summary for context. Either call the next required tool or provide a final answer.".to_string()
     } else {
-        "Continue from the user's request above. Either call the next required tool or provide a concise user-visible final answer.".to_string()
+        "Continue from the user's request above. Read the ## STATE block in the compact summary for context. Either call the next required tool or provide a final answer.".to_string()
     };
 
     ChatMessage {
@@ -439,20 +439,33 @@ pub fn should_auto_compact(
 /// Returns a system-role message instructing the LLM to summarize.
 pub fn build_compact_summary_prompt() -> ChatMessage {
     let prompt_text = vec![
-        "Your task is to create a detailed summary of the conversation so far.",
+        "You are producing a compact state summary of the conversation below.",
         "",
-        "Your summary must include these sections:",
+        "OUTPUT FORMAT:",
         "",
-        "1. Primary Request and Intent: What was the user's original request?",
-        "2. Key Technical Concepts: Technologies, frameworks, approaches discussed",
-        "3. Files and Code Sections: Files read, created, or modified",
-        "4. Errors and Fixes: Errors encountered and how they were fixed",
-        "5. All User Messages: List ALL user messages verbatim (not tool results)",
-        "6. Pending Tasks: What tasks were explicitly requested but not completed",
-        "7. Current Work: Exactly what was being worked on before this summary",
-        "8. Next Step: The next logical action based on the most recent user request",
+        "## STATE",
+        "```yaml",
+        "stage: <problem_definition | investigation | implementation | review | complete>",
+        "decisions:",
+        "  - <decision made>",
+        "pending:",
+        "  - <still to do>",
+        "last_action: <tool call name + brief result>",
+        "last_action_result: <what happened>",
+        "conversation_phase: <summary of current focus>",
+        "```",
         "",
-        "IMPORTANT: Do NOT call any tools. Respond with text only.",
+        "## CONTEXT",
+        "- <bullet point of key fact, file, error, or finding>",
+        "- <bullet point>",
+        "- <bullet point>",
+        "",
+        "CRITICAL RULES:",
+        "- State must be precise enough for the LLM to continue without re-reading history",
+        "- Include ALL pending items the user explicitly requested",
+        "- Include ALL error messages and their resolutions",
+        "- Be specific with file paths and tool names",
+        "- Do NOT call any tools. Respond with text only.",
     ]
     .join("\n");
 
@@ -469,7 +482,7 @@ pub fn build_compact_boundary_marker(original_count: usize, compacted_count: usi
     ChatMessage {
         role: "system".to_string(),
         content: Some(MessageContent::Text(format!(
-            "★ COMPACT SUMMARY — previous {} messages compressed into this summary (now {} messages) ★",
+            "★ COMPACT SUMMARY — previous {} messages → YAML state + narrative ({} messages) ★",
             original_count, compacted_count,
         ))),
         tool_calls: None,
