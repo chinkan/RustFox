@@ -955,4 +955,22 @@ mod tests {
         });
         assert!(has_boundary);
     }
+
+    #[test]
+    fn compact_summary_prompt_contains_state_keywords() {
+        let msg = build_compact_summary_prompt();
+        let text = msg.content.as_ref().unwrap().as_text();
+        assert!(text.contains("## STATE"), "Should have STATE section");
+        assert!(text.contains("## CONTEXT"), "Should have CONTEXT section");
+        assert!(text.contains("decisions:"), "Should have decisions field");
+        assert!(text.contains("pending:"), "Should have pending field");
+        assert!(text.contains("last_action:"), "Should have last_action field");
+    }
+
+    #[test]
+    fn compact_boundary_marker_contains_state_hint() {
+        let msg = build_compact_boundary_marker(10, 1);
+        let text = msg.content.as_ref().unwrap().as_text();
+        assert!(text.contains("state"), "Should hint at state format");
+    }
 }

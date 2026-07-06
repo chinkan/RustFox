@@ -807,6 +807,35 @@ mod tests {
     }
 
     #[test]
+    fn effective_context_window_falls_back_to_static_when_cache_empty() {
+        let sections = vec![make_section(
+            "alpha",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-sonnet-4-6",
+        )];
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
+        let ctx = reg.effective_context_window("anthropic/claude-sonnet-4-6");
+        assert_eq!(ctx, 512_000); // static fallback from section
+    }
+
+    #[test]
+    fn effective_context_window_returns_cached_value_when_set() {
+        let sections = vec![make_section(
+            "alpha",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-sonnet-4-6",
+        )];
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
+        let provider = reg.get_provider("alpha").unwrap();
+        // Set cache manually
+        *provider.config().context_window_cache.try_write().unwrap() = Some(200_000);
+        let ctx = reg.effective_context_window("anthropic/claude-sonnet-4-6");
+        assert_eq!(ctx, 200_000);
+    }
+
+    #[test]
     fn ollama_discovery_url_strips_v1_suffix() {
         let cfg = ProviderConfig {
             name: "local".to_string(),
