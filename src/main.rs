@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config.build_providers();
     let registry = Arc::new(
-        provider::build_registry(&provider_sections, &default_provider)
+        provider::build_registry(&provider_sections, &default_provider, config.parse_retry_limit())
             .context("Failed to build LLM provider registry")?,
     );
     info!(

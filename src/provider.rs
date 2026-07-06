@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use crate::config::{ProviderSection, ProviderType};
 use crate::llm::{ChatCompletion, ChatMessage, ToolDefinition};
+use crate::llm::internal::{ChatResponse, Choice};
 
 /// Runtime configuration for a single LLM provider.
 ///
@@ -23,6 +24,9 @@ pub struct ProviderConfig {
     pub max_tokens: u32,
     pub discover_models: bool,
     pub context_window: usize,
+    /// Number of retries when the response is missing the `choices` field.
+    /// Defaults to 3; set to 0 to disable.
+    pub parse_retry_limit: u32,
 }
 
 impl From<&ProviderSection> for ProviderConfig {
@@ -37,8 +41,98 @@ impl From<&ProviderSection> for ProviderConfig {
             max_tokens: s.max_tokens,
             discover_models: s.discover_models,
             context_window: s.context_window,
+            parse_retry_limit: 0, // overwritten by build_registry
         }
     }
+}
+
+/// Internal helper: send a chat completion request with retry logic for
+/// missing/empty `choices` field. Returns the first valid `Choice` on success.
+///
+/// The request is re-sent on each retry (up to `parse_retry_limit` times) with
+/// exponential backoff (1s, 2s, 4s...). Only retries when the JSON response
+/// is valid but `choices` is missing or empty; other errors (network, HTTP
+/// status, JSON parse) are returned immediately.
+async fn chat_completion_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    request: &crate::llm::internal::ChatRequest,
+    api_key: Option<&str>,
+    provider_name: &str,
+    parse_retry_limit: u32,
+) -> Result<Choice> {
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 0..=parse_retry_limit {
+        let mut req = client.post(url).json(request);
+        if let Some(key) = api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(e).context("Failed to send request"),
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "{} API error ({}): {}",
+                provider_name,
+                status,
+                body
+            ));
+        }
+
+        let body = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => return Err(e).context("Failed to read response body"),
+        };
+
+        let value: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => return Err(e).context("Failed to parse JSON response"),
+        };
+
+        let has_choices = value
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .is_some_and(|c| !c.is_empty());
+
+        if has_choices {
+            let chat_response: ChatResponse = serde_json::from_value(value)?;
+            return chat_response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No response from {}", provider_name));
+        }
+
+        // Missing or empty choices
+        let backoff_s = 1u64 << attempt;
+        let err = anyhow::anyhow!(
+            "Response from {} missing or empty 'choices' field – attempt {}/{}, retry limit {}",
+            provider_name,
+            attempt + 1,
+            parse_retry_limit + 1,
+            parse_retry_limit
+        );
+        tracing::warn!(
+            "Retry {}/{}: {} - backing off {}s",
+            attempt + 1,
+            parse_retry_limit,
+            err,
+            backoff_s
+        );
+        last_error = Some(err);
+
+        if attempt < parse_retry_limit {
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_s)).await;
+        }
+    }
+
+    Err(last_error.unwrap())
 }
 
 /// Unified LLM provider abstraction.
@@ -139,11 +233,13 @@ impl ProviderRegistry {
 pub fn build_registry(
     sections: &[ProviderSection],
     default_name: &str,
+    parse_retry_limit: u32,
 ) -> Result<ProviderRegistry> {
     let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
 
     for section in sections {
-        let cfg: ProviderConfig = ProviderConfig::from(section);
+        let mut cfg: ProviderConfig = ProviderConfig::from(section);
+        cfg.parse_retry_limit = parse_retry_limit;
         let provider: Arc<dyn Provider> = match section.provider_type {
             ProviderType::OpenRouter => Arc::new(OpenRouterProvider::new(cfg)),
             ProviderType::OpenAICompatible => Arc::new(OpenAICompatibleProvider::new(cfg)),
@@ -223,32 +319,19 @@ impl Provider for OpenRouterProvider {
         };
 
         let url = format!("{}/chat/completions", self.config.base_url);
-        let mut req = client.post(&url).json(&request);
-        if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
+        let api_key = self.config.api_key.as_deref();
+        let provider_name = self.config.name.as_str();
+        let parse_retry_limit = self.config.parse_retry_limit;
 
-        let response = req
-            .send()
-            .await
-            .context("Failed to send request to OpenRouter")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error ({}): {}", status, body);
-        }
-
-        let chat_response: crate::llm::internal::ChatResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenRouter response")?;
-
-        let mut choice = chat_response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from OpenRouter")?;
+        let mut choice = chat_completion_with_retry(
+            client,
+            &url,
+            &request,
+            api_key,
+            provider_name,
+            parse_retry_limit,
+        )
+        .await?;
 
         // Kimi tool-call fallback
         let has_tool_calls = choice
@@ -349,34 +432,19 @@ impl Provider for OpenAICompatibleProvider {
         };
 
         let url = format!("{}/chat/completions", self.config.base_url);
-        let mut req = client.post(&url).json(&request);
-        if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
+        let api_key = self.config.api_key.as_deref();
+        let provider_name = self.config.name.as_str();
+        let parse_retry_limit = self.config.parse_retry_limit;
 
-        let response = req
-            .send()
-            .await
-            .context("Failed to send request to OpenAI-compatible provider")?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Provider '{}' error ({}): {}",
-                self.config.name,
-                status,
-                body
-            );
-        }
-
-        let chat_response: crate::llm::internal::ChatResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI-compatible provider response")?;
-        let choice =
-            chat_response.choices.into_iter().next().ok_or_else(|| {
-                anyhow::anyhow!("No response from provider '{}'", self.config.name)
-            })?;
+        let choice = chat_completion_with_retry(
+            client,
+            &url,
+            &request,
+            api_key,
+            provider_name,
+            parse_retry_limit,
+        )
+        .await?;
 
         Ok(ChatCompletion {
             message: choice.message,
@@ -544,6 +612,8 @@ mod tests {
         assert_eq!(cfg.default_model, "anthropic/claude-sonnet-4-6");
         assert_eq!(cfg.max_tokens, 1024);
         assert_eq!(cfg.context_window, 512_000);
+        // build_registry overwrites parse_retry_limit; From impl sets 0 as sentinel
+        assert_eq!(cfg.parse_retry_limit, 0);
     }
 
     #[test]
@@ -562,7 +632,7 @@ mod tests {
                 "llama3.1",
             ),
         ];
-        let reg = build_registry(&sections, "alpha").unwrap();
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
         assert_eq!(reg.provider_count(), 2);
         assert!(reg.get_provider("alpha").is_some());
         assert!(reg.get_provider("beta").is_some());
@@ -571,7 +641,7 @@ mod tests {
 
     #[test]
     fn build_registry_fails_with_no_providers() {
-        let result = build_registry(&[], "alpha");
+        let result = build_registry(&[], "alpha", 3);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No LLM providers"));
     }
@@ -584,7 +654,7 @@ mod tests {
             "https://openrouter.ai/api/v1",
             "anthropic/claude-sonnet-4-6",
         )];
-        let result = build_registry(&sections, "missing");
+        let result = build_registry(&sections, "missing", 3);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -608,7 +678,7 @@ mod tests {
                 "llama3.1",
             ),
         ];
-        let reg = build_registry(&sections, "alpha").unwrap();
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
         let (provider, model) = reg.resolve_model("beta/llama3.1:8b");
         assert_eq!(provider.name(), "beta");
         assert_eq!(model, "llama3.1:8b");
@@ -622,7 +692,7 @@ mod tests {
             "https://openrouter.ai/api/v1",
             "anthropic/claude-sonnet-4-6",
         )];
-        let reg = build_registry(&sections, "alpha").unwrap();
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
         let (provider, model) = reg.resolve_model("moonshotai/kimi-k2.5");
         assert_eq!(provider.name(), "alpha");
         assert_eq!(model, "moonshotai/kimi-k2.5");
@@ -636,7 +706,7 @@ mod tests {
             "https://openrouter.ai/api/v1",
             "anthropic/claude-sonnet-4-6",
         )];
-        let reg = build_registry(&sections, "alpha").unwrap();
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
         let (provider, model) = reg.resolve_model("claude-sonnet-4-6");
         assert_eq!(provider.name(), "alpha");
         assert_eq!(model, "claude-sonnet-4-6");
@@ -658,7 +728,7 @@ mod tests {
                 "llama3.1",
             ),
         ];
-        let reg = build_registry(&sections, "alpha").unwrap();
+        let reg = build_registry(&sections, "alpha", 3).unwrap();
         let mut names = reg.provider_names();
         names.sort();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
@@ -676,6 +746,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -693,6 +764,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -710,6 +782,7 @@ mod tests {
             max_tokens: 1024,
             discover_models: true,
             context_window: 512_000,
+            parse_retry_limit: 3,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");

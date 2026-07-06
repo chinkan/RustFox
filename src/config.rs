@@ -281,6 +281,8 @@ pub struct AgentConfig {
     pub max_iterations: u32,
     #[serde(default = "default_empty_response_retry_limit")]
     pub empty_response_retry_limit: u32,
+    #[serde(default = "default_parse_retry_limit")]
+    pub parse_retry_limit: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -413,10 +415,15 @@ fn default_empty_response_retry_limit() -> u32 {
     3
 }
 
+fn default_parse_retry_limit() -> u32 {
+    3
+}
+
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         max_iterations: default_max_iterations(),
         empty_response_retry_limit: default_empty_response_retry_limit(),
+        parse_retry_limit: default_parse_retry_limit(),
     }
 }
 
@@ -492,6 +499,11 @@ impl Config {
     /// Empty response retry limit (from [agent] empty_response_retry_limit, default 3).
     pub fn empty_response_retry_limit(&self) -> u32 {
         self.agent.empty_response_retry_limit
+    }
+
+    /// Parse retry limit for missing 'choices' field (from [agent] parse_retry_limit, default 3).
+    pub fn parse_retry_limit(&self) -> u32 {
+        self.agent.parse_retry_limit
     }
 
     /// Resolve the home root and every data path, create directories, and write
@@ -1000,6 +1012,40 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.agent.empty_response_retry_limit, 0);
         assert_eq!(cfg.empty_response_retry_limit(), 0);
+    }
+
+    #[test]
+    fn test_agent_parse_retry_limit_defaults_to_three() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.parse_retry_limit, 3);
+        assert_eq!(cfg.parse_retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_agent_parse_retry_limit_can_be_configured_to_zero() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent]
+            parse_retry_limit = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.parse_retry_limit, 0);
+        assert_eq!(cfg.parse_retry_limit(), 0);
     }
 
     #[test]
