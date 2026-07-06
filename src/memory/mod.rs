@@ -27,7 +27,11 @@ impl MemoryStore {
     /// Open or create the SQLite database at the given path.
     /// If `embedding_config` is provided, vector search is enabled alongside FTS5.
     /// If None, falls back to FTS5-only search.
-    pub fn open(path: &Path, embedding_config: Option<EmbeddingConfig>, memory_config: MemoryConfig) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        embedding_config: Option<EmbeddingConfig>,
+        memory_config: MemoryConfig,
+    ) -> Result<Self> {
         // Register sqlite-vec extension before opening any connection
         unsafe {
             type VecInitFn = unsafe extern "C" fn(

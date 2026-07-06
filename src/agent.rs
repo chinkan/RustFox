@@ -673,15 +673,14 @@ impl Agent {
                 let messages_before = messages.clone();
                 let messages_before_bytes = estimate_prompt_bytes(&messages_before);
 
-                if let Ok(compacted) =
-                    Self::auto_compact_conversation(
-                        &self.llm,
-                        &self.memory,
-                        &conversation_id,
-                        &messages,
-                        context_window,
-                    )
-                    .await
+                if let Ok(compacted) = Self::auto_compact_conversation(
+                    &self.llm,
+                    &self.memory,
+                    &conversation_id,
+                    &messages,
+                    context_window,
+                )
+                .await
                 {
                     conv_meta.last_compact_turn = iteration as usize;
                     messages = compacted;
@@ -1365,8 +1364,7 @@ impl Agent {
         let mut system_msgs: Vec<ChatMessage> = Vec::new();
         let non_system: Vec<ChatMessage> = messages
             .iter()
-            .cloned()
-            .filter(|msg| {
+            .filter(|&msg| {
                 if msg.role == "system" {
                     system_msgs.push(msg.clone());
                     false
@@ -1374,6 +1372,7 @@ impl Agent {
                     true
                 }
             })
+            .cloned()
             .collect();
 
         let tool_groups = crate::agent_prompt::find_tool_groups(&non_system);
@@ -1431,8 +1430,7 @@ impl Agent {
         let mut system_msgs: Vec<ChatMessage> = Vec::new();
         let non_system: Vec<ChatMessage> = messages
             .iter()
-            .cloned()
-            .filter(|msg| {
+            .filter(|&msg| {
                 if msg.role == "system" {
                     system_msgs.push(msg.clone());
                     false
@@ -1440,6 +1438,7 @@ impl Agent {
                     true
                 }
             })
+            .cloned()
             .collect();
 
         if non_system.len() <= PRESERVE_COUNT {

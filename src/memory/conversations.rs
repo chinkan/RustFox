@@ -238,7 +238,15 @@ impl MemoryStore {
             let mut stmt = conn.prepare(sql)?;
             let messages = stmt
                 .query_map(
-                    rusqlite::params![query_bytes, search_limit, query, conversation_id, rrf_k, rrf_weight_vec, rrf_weight_fts],
+                    rusqlite::params![
+                        query_bytes,
+                        search_limit,
+                        query,
+                        conversation_id,
+                        rrf_k,
+                        rrf_weight_vec,
+                        rrf_weight_fts
+                    ],
                     parse_message_row,
                 )?
                 .collect::<Result<Vec<_>, _>>()
@@ -318,8 +326,15 @@ impl MemoryStore {
             let mut stmt = conn.prepare(sql)?;
             let messages = stmt
                 .query_map(
-                    rusqlite::params![query_bytes, search_limit, query, rrf_k, rrf_weight_vec, rrf_weight_fts],
-                    |row| parse_message_row(row),
+                    rusqlite::params![
+                        query_bytes,
+                        search_limit,
+                        query,
+                        rrf_k,
+                        rrf_weight_vec,
+                        rrf_weight_fts
+                    ],
+                    parse_message_row,
                 )?
                 .collect::<Result<Vec<_>, _>>()
                 .context("Failed to hybrid-search messages")?;

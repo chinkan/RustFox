@@ -964,7 +964,10 @@ mod tests {
         assert!(text.contains("## CONTEXT"), "Should have CONTEXT section");
         assert!(text.contains("decisions:"), "Should have decisions field");
         assert!(text.contains("pending:"), "Should have pending field");
-        assert!(text.contains("last_action:"), "Should have last_action field");
+        assert!(
+            text.contains("last_action:"),
+            "Should have last_action field"
+        );
     }
 
     #[test]

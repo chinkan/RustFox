@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::config::{ProviderSection, ProviderType};
-use crate::llm::{ChatCompletion, ChatMessage, ToolDefinition};
 use crate::llm::internal::{ChatResponse, Choice};
+use crate::llm::{ChatCompletion, ChatMessage, ToolDefinition};
 
 /// Runtime configuration for a single LLM provider.
 ///
@@ -166,12 +166,8 @@ pub trait Provider: Send + Sync {
 
     /// Fetch the context window for a given model from the provider API.
     /// Returns None if the provider doesn't support runtime detection.
-    async fn fetch_context_window(
-        &self,
-        _client: &reqwest::Client,
-        _model: &str,
-    ) -> Option<usize> {
-        None  // default: no API-based detection
+    async fn fetch_context_window(&self, _client: &reqwest::Client, _model: &str) -> Option<usize> {
+        None // default: no API-based detection
     }
 }
 
@@ -248,7 +244,10 @@ impl ProviderRegistry {
     /// if populated, otherwise static config fallback.
     pub fn effective_context_window(&self, model: &str) -> usize {
         let (provider, _) = self.resolve_model(model);
-        let cached = provider.config().context_window_cache.try_read()
+        let cached = provider
+            .config()
+            .context_window_cache
+            .try_read()
             .ok()
             .and_then(|c| *c);
         cached.unwrap_or(provider.config().context_window)
@@ -408,11 +407,7 @@ impl Provider for OpenRouterProvider {
         Ok(models)
     }
 
-    async fn fetch_context_window(
-        &self,
-        client: &reqwest::Client,
-        model: &str,
-    ) -> Option<usize> {
+    async fn fetch_context_window(&self, client: &reqwest::Client, model: &str) -> Option<usize> {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
@@ -423,7 +418,8 @@ impl Provider for OpenRouterProvider {
             return None;
         }
         let list: serde_json::Value = response.json().await.ok()?;
-        let ctx = list["data"].as_array()?
+        let ctx = list["data"]
+            .as_array()?
             .iter()
             .find(|m| m["id"].as_str() == Some(model))?
             .get("context_length")?
@@ -534,11 +530,7 @@ impl Provider for OpenAICompatibleProvider {
         Ok(models)
     }
 
-    async fn fetch_context_window(
-        &self,
-        client: &reqwest::Client,
-        model: &str,
-    ) -> Option<usize> {
+    async fn fetch_context_window(&self, client: &reqwest::Client, model: &str) -> Option<usize> {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
@@ -549,7 +541,8 @@ impl Provider for OpenAICompatibleProvider {
             return None;
         }
         let list: serde_json::Value = response.json().await.ok()?;
-        let ctx = list["data"].as_array()?
+        let ctx = list["data"]
+            .as_array()?
             .iter()
             .find(|m| m["id"].as_str() == Some(model))?
             .get("context_length")?
