@@ -267,6 +267,22 @@ pub struct MemoryConfig {
     pub rrf_weight_vec: f64,
 }
 
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            database_path: PathBuf::new(),
+            rag_limit: default_rag_limit(),
+            max_raw_messages: default_max_raw_messages(),
+            summarize_threshold: default_summarize_threshold(),
+            summarize_cron: default_summarize_cron(),
+            query_rewriter_enabled: false,
+            rrf_k: default_rrf_k(),
+            rrf_weight_fts: default_rrf_weight_fts(),
+            rrf_weight_vec: default_rrf_weight_vec(),
+        }
+    }
+}
+
 fn default_rrf_k() -> f64 {
     60.0
 }

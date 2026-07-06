@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::config::MemoryConfig;
 use crate::memory::embeddings::{EmbeddingConfig, EmbeddingEngine};
 
 /// Thread-safe SQLite memory store with hybrid vector+FTS5 search
@@ -19,13 +20,14 @@ use crate::memory::embeddings::{EmbeddingConfig, EmbeddingEngine};
 pub struct MemoryStore {
     conn: Arc<Mutex<Connection>>,
     pub embeddings: Arc<EmbeddingEngine>,
+    pub config: MemoryConfig,
 }
 
 impl MemoryStore {
     /// Open or create the SQLite database at the given path.
     /// If `embedding_config` is provided, vector search is enabled alongside FTS5.
     /// If None, falls back to FTS5-only search.
-    pub fn open(path: &Path, embedding_config: Option<EmbeddingConfig>) -> Result<Self> {
+    pub fn open(path: &Path, embedding_config: Option<EmbeddingConfig>, memory_config: MemoryConfig) -> Result<Self> {
         // Register sqlite-vec extension before opening any connection
         unsafe {
             type VecInitFn = unsafe extern "C" fn(
@@ -57,6 +59,7 @@ impl MemoryStore {
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             embeddings: Arc::new(embeddings),
+            config: memory_config,
         };
 
         info!("Memory store initialized at: {}", path.display());
@@ -89,6 +92,7 @@ impl MemoryStore {
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             embeddings: Arc::new(embeddings),
+            config: MemoryConfig::default(),
         };
         Ok(store)
     }

@@ -115,8 +115,12 @@ async fn main() -> Result<()> {
             });
 
     // Initialize memory store (SQLite + vector embeddings)
-    let memory = MemoryStore::open(&config.memory.database_path, embedding_config)
-        .context("Failed to initialize memory store")?;
+    let memory = MemoryStore::open(
+        &config.memory.database_path,
+        embedding_config,
+        config.memory.clone(),
+    )
+    .context("Failed to initialize memory store")?;
     info!("  Database: {}", config.memory.database_path.display());
 
     // Refresh any expiring OAuth tokens before connecting to MCP servers
