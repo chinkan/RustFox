@@ -22,6 +22,7 @@ pub struct ProviderConfig {
     pub supports_vision: bool,
     pub max_tokens: u32,
     pub discover_models: bool,
+    pub context_window: usize,
 }
 
 impl From<&ProviderSection> for ProviderConfig {
@@ -35,6 +36,7 @@ impl From<&ProviderSection> for ProviderConfig {
             supports_vision: s.supports_vision,
             max_tokens: s.max_tokens,
             discover_models: s.discover_models,
+            context_window: s.context_window,
         }
     }
 }
@@ -124,6 +126,12 @@ impl ProviderRegistry {
     pub fn default_qualified_model(&self) -> String {
         let provider = &self.providers[&self.default_provider];
         format!("{}/{}", self.default_provider, provider.default_model())
+    }
+
+    /// Return the context window size of the default provider.
+    pub fn default_context_window(&self) -> usize {
+        let provider = &self.providers[&self.default_provider];
+        provider.config().context_window
     }
 }
 
@@ -516,6 +524,7 @@ mod tests {
             supports_vision: false,
             max_tokens: 1024,
             discover_models: false,
+            context_window: 512_000,
         }
     }
 
@@ -534,6 +543,7 @@ mod tests {
         assert_eq!(cfg.api_key.as_deref(), Some("test-key"));
         assert_eq!(cfg.default_model, "anthropic/claude-sonnet-4-6");
         assert_eq!(cfg.max_tokens, 1024);
+        assert_eq!(cfg.context_window, 512_000);
     }
 
     #[test]
@@ -665,6 +675,7 @@ mod tests {
             supports_vision: false,
             max_tokens: 1024,
             discover_models: true,
+            context_window: 512_000,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -681,6 +692,7 @@ mod tests {
             supports_vision: false,
             max_tokens: 1024,
             discover_models: true,
+            context_window: 512_000,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -697,6 +709,7 @@ mod tests {
             supports_vision: false,
             max_tokens: 1024,
             discover_models: true,
+            context_window: 512_000,
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");

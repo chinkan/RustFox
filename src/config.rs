@@ -166,6 +166,8 @@ pub struct ProviderSection {
     pub max_tokens: u32,
     #[serde(default)]
     pub discover_models: bool,
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -439,6 +441,10 @@ fn default_ocr_config() -> OcrConfig {
     }
 }
 
+fn default_context_window() -> usize {
+    512_000
+}
+
 fn default_true() -> bool {
     true
 }
@@ -611,6 +617,7 @@ impl Config {
                 supports_vision: self.openrouter.supports_vision,
                 max_tokens: self.openrouter.max_tokens,
                 discover_models: false,
+                context_window: default_context_window(),
             });
         }
 

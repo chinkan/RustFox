@@ -75,6 +75,14 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
 }
 
+impl ChatMessage {
+    pub fn has_tool_calls(&self) -> bool {
+        self.tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
