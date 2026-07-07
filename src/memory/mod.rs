@@ -381,27 +381,50 @@ impl MemoryStore {
             }
         }
 
-        // Migration: add metadata columns (is_summarized, role) to vec0 tables
-        // for pre-filtering. ALTER TABLE is not supported for vec0, so we
-        // must DROP and recreate.
-        let has_meta = conn
-            .prepare("PRAGMA table_info(message_embeddings)")
-            .and_then(|mut stmt| {
-                let cols: Vec<String> = stmt
-                    .query_map([], |row| row.get(1))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(cols.contains(&"is_summarized".to_string()))
-            })
-            .unwrap_or(false);
+        // Migration: ensure message_embeddings has metadata columns (is_summarized, role)
+        // for pre-filtering, and no existing rows with NULL metadata.
+        // ALTER TABLE is not supported for vec0, so we must DROP and recreate.
+        if table_exists(conn, "message_embeddings") {
+            let cols: Vec<String> = conn
+                .prepare("PRAGMA table_info(message_embeddings)")
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| row.get(1))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap_or_default();
 
-        if table_exists(conn, "message_embeddings") && !has_meta {
-            conn.execute_batch("DROP TABLE message_embeddings;")?;
-            conn.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE message_embeddings USING vec0(\
-                 embedding float[{}], is_summarized integer, role text);",
-                dims
-            ))?;
-            info!("Migrated message_embeddings with metadata columns (is_summarized, role)");
+            let has_meta = cols.contains(&"is_summarized".to_string());
+
+            let needs_recreate = if has_meta {
+                // Columns exist but old rows may have NULL metadata because the
+                // original INSERT didn't write metadata columns. Check for NULLs.
+                conn.query_row(
+                    "SELECT COUNT(*) FROM message_embeddings WHERE is_summarized IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .unwrap_or(false)
+            } else {
+                true
+            };
+
+            if needs_recreate {
+                conn.execute_batch("DROP TABLE message_embeddings;")?;
+                conn.execute_batch(&format!(
+                    "CREATE VIRTUAL TABLE message_embeddings USING vec0(\
+                     embedding float[{}], is_summarized integer, role text);",
+                    dims
+                ))?;
+                info!(
+                    "Migrated message_embeddings with metadata columns (is_summarized, role){}",
+                    if has_meta {
+                        " and rebuilt existing data"
+                    } else {
+                        ""
+                    }
+                );
+            }
         }
 
         Ok(())

@@ -102,8 +102,8 @@ impl MemoryStore {
         if let Some(ref emb) = embedding {
             let embedding_bytes = f32_slice_to_bytes(emb);
             conn.execute(
-                "INSERT INTO message_embeddings (rowid, embedding) VALUES (?1, ?2)",
-                rusqlite::params![rowid, embedding_bytes],
+                "INSERT INTO message_embeddings (rowid, embedding, is_summarized, role) VALUES (?1, ?2, 0, ?3)",
+                rusqlite::params![rowid, embedding_bytes, &message.role],
             )?;
         }
 
