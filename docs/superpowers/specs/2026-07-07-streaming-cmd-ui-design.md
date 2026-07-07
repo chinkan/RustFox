@@ -57,7 +57,7 @@ Replace the blocking `.output()` call with an interactive flow that:
 
 ```rust
 // Added to Agent struct (src/agent.rs)
-pub running_commands: Arc<Mutex<HashMap<String, RunningCommand>>>,
+pub running_commands: Arc<tokio::sync::Mutex<HashMap<String, RunningCommand>>>,
 
 pub struct RunningCommand {
     pub cancel_tx: oneshot::Sender<()>,
@@ -138,7 +138,7 @@ fn format_command_message(command: &str, output: &str, status: CmdStatus) -> Str
 }
 ```
 
-`truncate_tail(s, limit)`: If `s` exceeds `limit` chars, keep the last `limit` chars and prepend `"...(truncated)\n"`.
+`truncate_tail(s, limit)`: If `s` exceeds `limit` chars, keep the last `limit` chars and prepend `"...(truncated)\n"`. Lives in `src/utils/strings.rs` alongside existing `truncate_chars`.
 
 #### Callback handler (src/platform/telegram.rs)
 
@@ -146,7 +146,7 @@ Extend `handle_model_callback` to handle `cancel_cmd:*`:
 
 ```rust
 if let Some(cmd_id) = data.strip_prefix("cancel_cmd:") {
-    let mut map = agent.running_commands.lock().await;
+    let mut map = agent.running_commands.lock().await; // tokio::sync::Mutex
     if let Some(cmd) = map.remove(&cmd_id.to_string()) {
         let _ = cmd.cancel_tx.send(());
         bot.answer_callback_query(callback_id)
@@ -174,7 +174,19 @@ Add an explicit arm in `execute_tool` for `"execute_command"` (currently it fall
 
 #### New method: `Agent::execute_command_interactive`
 
-This is where the interactive flow lives. It does NOT delegate to `tools::execute_builtin_tool`.
+```rust
+async fn execute_command_interactive(
+    &self,
+    arguments: &Value,
+    user_id: &str,
+    chat_id: ChatId,
+) -> String {
+    // Uses self.bot (Arc<Bot>), self.config.sandbox.allowed_directory,
+    // and self.running_commands (Arc<tokio::sync::Mutex<HashMap<...>>>)
+}
+```
+
+This does NOT delegate to `tools::execute_builtin_tool`. The tool definition entry for `execute_command` in `tools.rs` (line 169) stays — it's needed for the LLM to see the tool. Execution is intercepted in `agent.rs`.
 
 #### Edge cases
 
@@ -185,7 +197,7 @@ This is where the interactive flow lives. It does NOT delegate to `tools::execut
 | Output exceeds 3500 chars | Keep tail; prepend "...(truncated)\n" |
 | Cancel button clicked but process already exited | Registry entry cleaned up; answer callback "Already finished" |
 | Multiple commands running | Each has its own message + cmd_id. Independently cancellable |
-| Agent loop times out (max_iterations) | The tool is still awaited, so timeout won't fire until command completes. Improve: use tokio::time::timeout on the entire select loop |
+| Agent loop times out (max_iterations) | The tool is still awaited, so timeout won't fire until command completes. Wrap the entire select loop in `tokio::time::timeout(300s, ...)`. On timeout: kill child, return `"⚠️ Command timed out (300s)"` to LLM |
 
 ---
 
@@ -281,8 +293,8 @@ If the full list exceeds ~4000 UTF-16 units, truncate and append:
 
 Add support in `src/utils/markdown_entities.rs` for:
 
-- **Blockquotes** (`Tag::BlockQuote`): Prefix contained text with `> ` in plain text
-- **Tables** (`Tag::Table`, `Tag::TableHead`, `Tag::TableRow`, `Tag::TableCell`): Render as plain text with aligned spacing
+- **Blockquotes** (`Tag::BlockQuote`): Prefix contained text with `> ` in plain text (cosmetic only — Telegram has no native blockquote entity for the entity-based send path)
+- **Tables** (`Tag::Table`, `Tag::TableHead`, `Tag::TableRow`, `Tag::TableCell`): Render as plain text with columns padded to max width per column
 
 These are handled by adding `Event::Start` / `Event::End` arms in the pulldown-cmark parser loop.
 
@@ -297,7 +309,8 @@ These are handled by adding `Event::Start` / `Event::End` arms in the pulldown-c
 | `src/platform/tool_notifier.rs` | F1 | Remove `"command"` from `is_sensitive_key()` |
 | `src/platform/telegram.rs` | F2, F3 | Add `cancel_cmd:*` handler to `handle_model_callback`; entity-based command responses; retroactive split-msg formatting; track `sent_msg_ids` in stream_handle |
 | `src/utils/markdown_entities.rs` | F3 | Add blockquote and table support |
-| `src/utils/telegram_markdown.rs` | F3 | No change needed (entity approach replaces most callers) |
+| `src/utils/telegram_markdown.rs` | F3 | Minimal or no change (entity approach replaces most callers) |
+| `src/platform/telegram.rs` (test) | F3 | Update `test_command_responses_use_escape_text` — after migration `markdown_to_entities` replaces `escape_text` in command responses |
 
 ## Verification
 
