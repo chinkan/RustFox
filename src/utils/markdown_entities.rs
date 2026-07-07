@@ -53,12 +53,31 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
     // Track UTF-16 length incrementally to avoid O(n²) rescanning
     let mut plain_utf16_len = 0usize;
 
+    // State for blockquote and table rendering
+    let mut in_blockquote = false;
+    let mut in_table_cell = false;
+    let mut table_cell_texts: Vec<String> = Vec::new();
+
     for event in parser {
         match event {
             // --- Text content ---
             Event::Text(text) => {
-                plain.push_str(&text);
-                plain_utf16_len += text.encode_utf16().count();
+                if in_blockquote {
+                    let quoted: String = text
+                        .lines()
+                        .map(|line| format!("> {}", line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    plain.push_str(&quoted);
+                    plain_utf16_len += quoted.encode_utf16().count();
+                } else if in_table_cell {
+                    table_cell_texts.push(text.to_string());
+                    plain.push_str(&text);
+                    plain_utf16_len += text.encode_utf16().count();
+                } else {
+                    plain.push_str(&text);
+                    plain_utf16_len += text.encode_utf16().count();
+                }
             }
             Event::Code(text) => {
                 // Inline code: emit as a Code entity
@@ -110,6 +129,18 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         CodeBlockKind::Indented => None,
                     };
                     stack.push((StackTag::CodeBlock(lang), plain_utf16_len));
+                }
+                Tag::BlockQuote(_) => {
+                    in_blockquote = true;
+                }
+                Tag::Table(_) => {
+                    table_cell_texts.clear();
+                }
+                Tag::TableHead | Tag::TableRow => {
+                    table_cell_texts.clear();
+                }
+                Tag::TableCell => {
+                    in_table_cell = true;
                 }
                 // Paragraph, list, etc. — no entity emitted on start.
                 _ => {}
@@ -190,6 +221,27 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         plain_utf16_len += 2;
                     }
                     TagEnd::Item => {
+                        plain.push('\n');
+                        plain_utf16_len += 1;
+                    }
+                    TagEnd::BlockQuote(_) => {
+                        in_blockquote = false;
+                        if !plain.ends_with('\n') {
+                            plain.push('\n');
+                            plain_utf16_len += 1;
+                        }
+                    }
+                    TagEnd::TableCell => {
+                        in_table_cell = false;
+                        plain.push_str(" | ");
+                        plain_utf16_len += 3;
+                    }
+                    TagEnd::TableHead | TagEnd::TableRow => {
+                        // Remove trailing " | " and add newline
+                        if plain.ends_with(" | ") {
+                            plain.truncate(plain.len() - 3);
+                            plain_utf16_len = plain_utf16_len.saturating_sub(3);
+                        }
                         plain.push('\n');
                         plain_utf16_len += 1;
                     }
@@ -594,5 +646,32 @@ mod tests {
             0,
             "first chunk bold must start at offset 0"
         );
+    }
+
+    // --- Blockquotes ---
+
+    #[test]
+    fn test_blockquote_prefixes_with_gt() {
+        let (text, _) = markdown_to_entities("> This is a quote");
+        assert!(
+            text.contains("> "),
+            "blockquote must be prefixed with '> ': {text}"
+        );
+        assert!(
+            text.contains("This is a quote"),
+            "blockquote text must be present: {text}"
+        );
+    }
+
+    // --- Tables ---
+
+    #[test]
+    fn test_table_renders_columns() {
+        let input = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let (text, _) = markdown_to_entities(input);
+        assert!(text.contains('A'), "column A must be in output: {text}");
+        assert!(text.contains('B'), "column B must be in output: {text}");
+        assert!(text.contains('1'), "row 1 col 1 must be in output: {text}");
+        assert!(text.contains('2'), "row 1 col 2 must be in output: {text}");
     }
 }

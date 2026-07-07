@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info, warn};
 
-use teloxide::payloads::SendDocumentSetters;
+use teloxide::payloads::{SendDocumentSetters, SendMessageSetters};
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, InputFile};
 use teloxide::Bot;
@@ -27,6 +27,9 @@ use crate::scheduler::reminders::ScheduledTaskStore;
 use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
 use crate::tools;
+use std::collections::HashMap;
+use tokio::process::Command as TokioCommand;
+use tokio::sync::oneshot;
 
 /// Number of context snippets to retrieve from conversation history for
 /// compaction summarization.
@@ -39,6 +42,11 @@ pub struct ScheduledJobRequest {
     pub task_id: String,
     pub is_recurring: bool,
     pub task_store: ScheduledTaskStore,
+}
+
+/// A running shell command that can be cancelled by the user via a callback button.
+pub struct RunningCommand {
+    pub cancel_tx: oneshot::Sender<()>,
 }
 
 /// The core agent that processes messages through LLM + tools.
@@ -64,6 +72,7 @@ pub struct Agent {
     pub soul_updated: AtomicBool,
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
+    pub running_commands: Arc<tokio::sync::Mutex<HashMap<String, RunningCommand>>>,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -140,6 +149,7 @@ impl Agent {
             soul_updated: AtomicBool::new(false),
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
+            running_commands: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2472,6 +2482,178 @@ impl Agent {
         tools::validate_home_path(home, &path.to_string_lossy())
     }
 
+    async fn execute_command_interactive(
+        &self,
+        arguments: &serde_json::Value,
+        _user_id: &str,
+        chat_id: ChatId,
+    ) -> String {
+        use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+        use std::time::Instant;
+        use tokio::io::AsyncReadExt;
+
+        let command = match arguments["command"].as_str() {
+            Some(c) => c,
+            None => return "Error: Missing 'command' argument".to_string(),
+        };
+
+        let cmd_id = format!("cmd_{}", uuid::Uuid::new_v4());
+        let sandbox_dir = &self.config.sandbox.allowed_directory;
+
+        let mut child = match TokioCommand::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(sandbox_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => return format!("Error: Failed to spawn command: {}", e),
+        };
+
+        let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
+
+        // Send initial message with cancel button
+        let keyboard = InlineKeyboardMarkup::new([[
+            InlineKeyboardButton::callback("Cancel", format!("cancel_cmd:{}", cmd_id)),
+        ]]);
+
+        let msg = match self
+            .bot
+            .send_message(
+                chat_id,
+                format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd),
+            )
+            .reply_markup(keyboard)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = child.kill().await;
+                return format!("Error: Failed to send command message: {}", e);
+            }
+        };
+
+        // Set up cancel channel
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+        // Register in running_commands
+        {
+            let mut map = self.running_commands.lock().await;
+            map.insert(cmd_id.clone(), RunningCommand { cancel_tx });
+        }
+
+        // Capture Arc for cleanup
+        let running_commands = self.running_commands.clone();
+        let cmd_id_clone = cmd_id.clone();
+
+        // Output streaming
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
+        let output_tx2 = output_tx.clone();
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            while let Some(stream) = child_stdout.as_mut() {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if output_tx
+                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            while let Some(stream) = child_stderr.as_mut() {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if output_tx2
+                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Main select loop
+        let mut output_buffer = String::new();
+        let mut last_edit = Instant::now();
+        tokio::pin!(cancel_rx);
+
+        let result = loop {
+            tokio::select! {
+                Some(chunk) = output_rx.recv() => {
+                    output_buffer.push_str(&chunk);
+                    if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
+                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                        let body = format!("```\n{}\n```", capped);
+                        let text = format!("💻 Running: `{}`\n\n{}", escaped_cmd, body);
+                        self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+                        last_edit = Instant::now();
+                    }
+                }
+                status = child.wait() => {
+                    let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                    let (icon, label) = if exit_code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
+                    let body = if output_buffer.is_empty() {
+                        "Command completed with no output.".to_string()
+                    } else {
+                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                        format!("```\n{}\n```", capped)
+                    };
+                    let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body);
+                    self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+
+                    let mut result = String::new();
+                    if !output_buffer.is_empty() {
+                        result.push_str(output_buffer.trim_end());
+                        result.push('\n');
+                    }
+                    result.push_str(&format!("Exit code: {}", exit_code));
+                    break result;
+                }
+                _ = &mut cancel_rx => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let body = if output_buffer.is_empty() {
+                        String::new()
+                    } else {
+                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                        format!("```\n{}\n```", capped)
+                    };
+                    let text = if body.is_empty() {
+                        format!("❌ Cancelled: `{}`", escaped_cmd)
+                    } else {
+                        format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, body)
+                    };
+                    self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+                    break "⚠️ User cancelled the command".to_string();
+                }
+            }
+        };
+
+        // Cleanup registry
+        let mut map = running_commands.lock().await;
+        map.remove(&cmd_id_clone);
+
+        result
+    }
+
     /// Execute a tool call by routing to the right handler
     async fn execute_tool(
         &self,
@@ -3436,6 +3618,9 @@ impl Agent {
                     Ok(_) => format!("{} restored from backup.", file_name),
                     Err(e) => format!("Failed to restore backup: {}", e),
                 }
+            }
+            "execute_command" => {
+                self.execute_command_interactive(arguments, user_id, chat_id).await
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
                 Ok(result) => result,

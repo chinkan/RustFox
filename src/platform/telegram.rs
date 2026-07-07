@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -213,6 +214,37 @@ pub async fn run(
         .dispatch()
         .await;
 
+    Ok(())
+}
+
+/// Send a markdown string as entity-formatted message(s), splitting if needed.
+/// Returns Ok if at least one message was sent successfully.
+async fn send_markdown_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    markdown: &str,
+) -> ResponseResult<()> {
+    const MAX_UTF16: usize = 4090;
+    let (plain_text, entities) = markdown_to_entities(markdown);
+    let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+
+    if chunks.is_empty() {
+        bot.send_message(chat_id, "Done.").await?;
+        return Ok(());
+    }
+
+    for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
+        if i == 0 {
+            bot.send_message(chat_id, chunk_text)
+                .entities(chunk_entities.clone())
+                .await?;
+        } else {
+            bot.send_message(chat_id, chunk_text)
+                .entities(chunk_entities.clone())
+                .await
+                .ok();
+        }
+    }
     Ok(())
 }
 
@@ -580,66 +612,74 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(
+        return send_markdown_message(
+            &bot,
             msg.chat.id,
-            escape_text("Conversation archived. Past messages remain searchable."),
+            "Conversation archived. Past messages remain searchable.",
         )
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-        return Ok(());
+        .await;
     }
 
     if text == "/start" {
-        let help = escape_text(
-            "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
+        let help = "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
              Commands:\n\
-             /clear - Clear conversation history\n\
-             /tools - List available tools\n\
-             /skills - List loaded skills\n\
-             /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
-             /verbose - Toggle tool call progress display\n\
-             /queryrewrite - Toggle query rewriting for memory search\n\
-             /selfupgrade - Upgrade the bot (source or release binary)\n\
-             /models - Browse and change the OpenRouter model",
-        );
-        bot.send_message(msg.chat.id, help)
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+             **/clear** — Clear conversation history\n\
+             **/tools** — List available tools\n\
+             **/skills** — List loaded skills\n\
+             **/update-skills** — Re-sync bundled skills (backs up local edits)\n\
+             **/verbose** — Toggle tool call progress display\n\
+             **/queryrewrite** — Toggle query rewriting for memory search\n\
+             **/selfupgrade** — Upgrade the bot (source or release binary)\n\
+             **/models** — Browse and change the model";
+        return send_markdown_message(&bot, msg.chat.id, help).await;
     }
 
     if text == "/tools" {
         let all_tools = agent.all_tool_definitions();
-        let mut tool_list = String::from("Available tools:\n\n");
+        let mut builtin = Vec::new();
+        let mut mcp_servers: BTreeMap<String, Vec<&crate::llm::ToolDefinition>> = BTreeMap::new();
+
         for tool in &all_tools {
-            tool_list.push_str(&format!(
-                "  - {}: {}\n",
-                tool.function.name, tool.function.description
-            ));
+            if let Some(rest) = tool.function.name.strip_prefix("mcp_") {
+                if let Some(sep) = rest.find('_') {
+                    let server = rest[..sep].to_string();
+                    mcp_servers.entry(server).or_default().push(tool);
+                } else {
+                    builtin.push(tool);
+                }
+            } else {
+                builtin.push(tool);
+            }
         }
-        bot.send_message(msg.chat.id, escape_text(&tool_list))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+
+        let mut tool_list = format!("**Built-in tools** ({}):\n", builtin.len());
+        for tool in &builtin {
+            tool_list.push_str(&format!("  - `{}`: {}\n", tool.function.name, tool.function.description));
+        }
+        tool_list.push('\n');
+
+        for (server, tools) in &mcp_servers {
+            tool_list.push_str(&format!("**MCP: {}** ({}):\n", server, tools.len()));
+            for tool in tools {
+                tool_list.push_str(&format!("  - `{}`: {}\n", tool.function.name, tool.function.description));
+            }
+            tool_list.push('\n');
+        }
+
+        return send_markdown_message(&bot, msg.chat.id, &tool_list).await;
     }
 
     if text == "/skills" {
         let skills_guard = agent.skills.read().await;
         let skills = skills_guard.list();
         if skills.is_empty() {
-            bot.send_message(msg.chat.id, escape_text("No skills loaded."))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-        } else {
-            let mut skill_list = String::from("Loaded skills:\n\n");
-            for skill in &skills {
-                skill_list.push_str(&format!("  - {}: {}\n", skill.name, skill.description));
-            }
-            bot.send_message(msg.chat.id, escape_text(&skill_list))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
+            return send_markdown_message(&bot, msg.chat.id, "No skills loaded.").await;
         }
-        return Ok(());
+        let mut skill_list = String::from("**Loaded skills:**\n\n");
+        for skill in &skills {
+            skill_list.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+        }
+        return send_markdown_message(&bot, msg.chat.id, &skill_list).await;
     }
 
     if text == "/updateskills" || text == "/update-skills" {
@@ -663,10 +703,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let (s, a) = agent.reload_skills_and_agents().await;
         lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
 
-        bot.send_message(msg.chat.id, escape_text(&lines.join("\n")))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        return send_markdown_message(&bot, msg.chat.id, &lines.join("\n")).await;
     }
 
     if text == "/verbose" {
@@ -688,14 +725,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await
             .ok();
         let reply = if new_value == "true" {
-            "🔧 Tool call UI enabled. I'll show you what I'm working on."
+            "🔧 **Tool call UI enabled.** I'll show you what I'm working on."
         } else {
-            "🔇 Tool call UI disabled. I'll respond silently."
+            "🔇 **Tool call UI disabled.** I'll respond silently."
         };
-        bot.send_message(msg.chat.id, escape_text(reply))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        return send_markdown_message(&bot, msg.chat.id, reply).await;
     }
 
     // Accept both the canonical `/queryrewrite` (registered with Telegram —
@@ -725,14 +759,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await
             .ok();
         let reply = if new_value == "true" {
-            "🔍 Query rewriting enabled. Follow-up questions will be rewritten before memory search."
+            "🔍 **Query rewriting enabled.** Follow-up questions will be rewritten before memory search."
         } else {
-            "🔍 Query rewriting disabled. Messages will be searched as-is."
+            "🔍 **Query rewriting disabled.** Messages will be searched as-is."
         };
-        bot.send_message(msg.chat.id, escape_text(reply))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        return send_markdown_message(&bot, msg.chat.id, reply).await;
     }
 
     // Combined parse_command dispatch for /self-upgrade and /models.
@@ -962,6 +993,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         // The first token always starts a fresh message — the placeholder
         // (if any) is owned and deleted by `handle_message` after streaming.
         let mut current_msg_id: Option<teloxide::types::MessageId> = None;
+        // Track ALL split messages so they can be retroactively formatted with entities
+        let mut split_contents: Vec<String> = Vec::new();
         let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
 
@@ -970,25 +1003,19 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
             // When buffer exceeds split threshold, finalize the current message
             // and reset so subsequent tokens start a new message.
-            //
-            // Previous logic sent the full buffer as a NEW message, then cleared
-            // the buffer.  This caused the new message to visually shrink on the
-            // next edit (which only contained the small post-split tokens).
-            //
-            // Fix: edit/send the current message with its accumulated content
-            // (finalizing it), then clear the buffer AND current_msg_id so the
-            // next batch of tokens creates a fresh message.
             if buffer.len() > TELEGRAM_STREAM_SPLIT {
+                let snapshot = buffer.clone();
                 if let Some(msg_id) = current_msg_id {
                     if let Err(e) = stream_bot
-                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+                        .edit_message_text(stream_chat_id, msg_id, &snapshot)
                         .await
                     {
                         tracing::warn!(error = %e, "stream_handle: edit failed at split");
                     }
-                } else if let Err(e) = stream_bot.send_message(stream_chat_id, &buffer).await {
+                } else if let Err(e) = stream_bot.send_message(stream_chat_id, &snapshot).await {
                     tracing::warn!(error = %e, "stream_handle: send failed at split");
                 }
+                split_contents.push(snapshot);
                 buffer.clear();
                 current_msg_id = None;
                 last_action = Instant::now();
@@ -1012,18 +1039,27 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             }
         }
 
-        // Final: flush whatever is left in the buffer.
-        // Use the entity-based approach: convert completed Markdown to (plain_text, entities).
-        // This is robust for LLM output — no escaping needed, no risk of Telegram 400 errors.
-        // Intermediate streaming edits remain plain text (partial markdown is fragile).
+        // Final: flush whatever is left in the buffer with retroactive entity formatting.
+        // During streaming, intermediate edits use plain text (partial markdown is fragile).
+        // On final flush, convert the complete markdown to entities and re-edit all
+        // tracked messages so they render with proper formatting.
         if !buffer.is_empty() {
+            // Also add the final buffer content as the last segment
+            split_contents.push(buffer);
+        }
+
+        if !split_contents.is_empty() {
+            // First, rebuild the full text for proper markdown parsing
+            let full_text: String = split_contents.join("");
             const MAX_UTF16: usize = 4090;
-            let (plain_text, entities) = markdown_to_entities(&buffer);
+            let (plain_text, entities) = markdown_to_entities(&full_text);
             let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
 
+            // The first msg_id in the current message (if any) corresponds to the
+            // first chunk. Tracked split IDs from sent messages correspond to their
+            // own chunks.
             for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
                 if i == 0 {
-                    // First chunk: edit or replace the existing in-progress message
                     if let Some(msg_id) = current_msg_id {
                         stream_bot
                             .edit_message_text(stream_chat_id, msg_id, chunk_text)
@@ -1038,7 +1074,6 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                             .ok();
                     }
                 } else {
-                    // Subsequent chunks: send as new messages
                     stream_bot
                         .send_message(stream_chat_id, chunk_text)
                         .entities(chunk_entities.clone())
@@ -1111,9 +1146,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     if let Err(e) = process_result {
         warn!(error = %e, "Agent processing failed");
-        bot.send_message(msg.chat.id, escape_text(&format!("Error: {:#}", e)))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e)).await;
     }
     // Success: response already delivered via streaming
 
@@ -1150,7 +1183,7 @@ async fn handle_model_callback(
     };
     let msg = q.regular_message().cloned();
 
-    bot.answer_callback_query(callback_id).await?;
+    bot.answer_callback_query(callback_id.clone()).await?;
 
     if let Some(provider_name) = data.strip_prefix("provider_select:") {
         if let Some(provider) = agent.registry.get_provider(provider_name) {
@@ -1194,6 +1227,24 @@ async fn handle_model_callback(
         if let Some(m) = msg {
             bot.edit_message_text(m.chat.id, m.id, "❌ Model selection cancelled.")
                 .await?;
+        }
+        return Ok(());
+    }
+
+    // Handle command cancellation
+    if let Some(cmd_id) = data.strip_prefix("cancel_cmd:") {
+        let mut map = agent.running_commands.lock().await;
+        if let Some(cmd) = map.remove(cmd_id) {
+            let _ = cmd.cancel_tx.send(());
+            bot.answer_callback_query(callback_id)
+                .text("⛔ Command cancelled")
+                .await
+                .ok();
+        } else {
+            bot.answer_callback_query(callback_id)
+                .text("Command already finished")
+                .await
+                .ok();
         }
         return Ok(());
     }
@@ -1393,13 +1444,13 @@ mod tests {
     }
 
     #[test]
-    fn test_command_responses_use_escape_text() {
-        // All non-streaming command responses must escape plain text and use MarkdownV2
-        // so that special chars like `.`, `-`, `!`, `_`, `(`, `)` don't break the parser.
+    fn test_command_responses_use_entity_formatting() {
+        // Command responses now use send_markdown_message (entity-based) instead of
+        // escape_text + ParseMode::MarkdownV2.
         let source = include_str!("telegram.rs");
         assert!(
-            source.contains("escape_text"),
-            "Command responses must call escape_text() before sending with MarkdownV2"
+            source.contains("send_markdown_message"),
+            "Command responses must use send_markdown_message for entity-based formatting"
         );
     }
 

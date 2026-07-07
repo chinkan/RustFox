@@ -389,7 +389,6 @@ fn is_sensitive_key(key: &str) -> bool {
         "private_key",
         "cookie",
         "content",
-        "command",
         "prompt",
         "message",
         "text",
@@ -406,7 +405,7 @@ pub fn format_args_preview(args_json: &str) -> String {
     // - Only render a compact allowlist of safe keys when present
     // - Never render nested objects/arrays in full
 
-    const SAFE_KEYS: [&str; 13] = [
+    const SAFE_KEYS: [&str; 14] = [
         "query",
         "path",
         "url",
@@ -420,6 +419,7 @@ pub fn format_args_preview(args_json: &str) -> String {
         "language",
         "technology",
         "name",
+        "command",
     ];
 
     let Ok(val) = serde_json::from_str::<JsonValue>(args_json) else {
@@ -612,8 +612,8 @@ mod tests {
     }
 
     #[test]
-    fn test_format_args_preview_suppresses_command_content_and_prompt() {
-        let j = r#"{"command":"rm -rf /", "prompt":"write me a secret"}"#;
+    fn test_format_args_preview_suppresses_content_and_prompt() {
+        let j = r#"{"sensitive":"data", "prompt":"write me a secret"}"#;
         // multi-key but all sensitive — should suppress to empty
         let out = format_args_preview(j);
         assert!(
@@ -621,6 +621,14 @@ mod tests {
             "sensitive multi-key should be empty: {}",
             out
         );
+    }
+
+    #[test]
+    fn test_format_args_preview_shows_command_single_arg() {
+        let j = r#"{"command":"rm -rf /"}"#;
+        let out = format_args_preview(j);
+        assert!(!out.is_empty(), "command should be visible: {out}");
+        assert!(out.contains("rm -rf /"), "command content must be in output: {out}");
     }
 
     #[test]
