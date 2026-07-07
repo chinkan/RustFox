@@ -65,8 +65,12 @@ async fn main() -> Result<()> {
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config.build_providers();
     let registry = Arc::new(
-        provider::build_registry(&provider_sections, &default_provider)
-            .context("Failed to build LLM provider registry")?,
+        provider::build_registry(
+            &provider_sections,
+            &default_provider,
+            config.parse_retry_limit(),
+        )
+        .context("Failed to build LLM provider registry")?,
     );
     info!(
         "  Providers: {} (default: {}, fallback: {} model(s))",
@@ -74,6 +78,29 @@ async fn main() -> Result<()> {
         registry.default_provider_name(),
         fallback_chain.len()
     );
+
+    // Spawn background task to warm context_window_cache for all providers
+    {
+        let registry_clone = Arc::clone(&registry);
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            for name in registry_clone.provider_names() {
+                if let Some(provider) = registry_clone.get_provider(&name) {
+                    let model = provider.default_model();
+                    if let Some(ctx) = provider.fetch_context_window(&client, model).await {
+                        let mut cache = provider.config().context_window_cache.write().await;
+                        *cache = Some(ctx);
+                        tracing::info!(
+                            "Context window cache: {} / {} = {} tokens",
+                            name,
+                            model,
+                            ctx
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     info!("Configuration loaded successfully");
     let default_provider_obj = registry
@@ -115,8 +142,12 @@ async fn main() -> Result<()> {
             });
 
     // Initialize memory store (SQLite + vector embeddings)
-    let memory = MemoryStore::open(&config.memory.database_path, embedding_config)
-        .context("Failed to initialize memory store")?;
+    let memory = MemoryStore::open(
+        &config.memory.database_path,
+        embedding_config,
+        config.memory.clone(),
+    )
+    .context("Failed to initialize memory store")?;
     info!("  Database: {}", config.memory.database_path.display());
 
     // Refresh any expiring OAuth tokens before connecting to MCP servers

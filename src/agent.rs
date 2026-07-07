@@ -28,6 +28,10 @@ use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
 use crate::tools;
 
+/// Number of context snippets to retrieve from conversation history for
+/// compaction summarization.
+const COMPACTION_RAG_LIMIT: usize = 5;
+
 /// A request dispatched from a fire closure to the background job runner.
 pub struct ScheduledJobRequest {
     pub incoming: IncomingMessage,
@@ -385,6 +389,20 @@ impl Agent {
         Ok(())
     }
 
+    /// Fetch the context window size for the current model from the
+    /// provider API and cache it. Non-fatal — uses static fallback on
+    /// failure.
+    pub async fn refresh_context_window_cache(&self) {
+        let model = self.current_model.read().await.clone();
+        let (provider, actual_model) = self.registry.resolve_model(&model);
+        let client = reqwest::Client::new();
+        if let Some(ctx) = provider.fetch_context_window(&client, actual_model).await {
+            let mut cache = provider.config().context_window_cache.write().await;
+            *cache = Some(ctx);
+            tracing::info!("Context window for {}: {} tokens", actual_model, ctx);
+        }
+    }
+
     /// Process an incoming message and return the response text
     pub(crate) fn now_iso8601_static() -> String {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -638,8 +656,7 @@ impl Agent {
         // Resolve context_window once before the loop (can't .await inside the loop)
         let context_window = {
             let model = self.current_model.read().await;
-            let (provider, _) = self.registry.resolve_model(&model);
-            provider.config().context_window
+            self.registry.effective_context_window(&model)
         };
 
         for iteration in 0..max_iterations {
@@ -660,8 +677,14 @@ impl Agent {
                 let messages_before = messages.clone();
                 let messages_before_bytes = estimate_prompt_bytes(&messages_before);
 
-                if let Ok(compacted) =
-                    Self::auto_compact_conversation(&self.llm, &messages, context_window).await
+                if let Ok(compacted) = Self::auto_compact_conversation(
+                    &self.llm,
+                    &self.memory,
+                    &conversation_id,
+                    &messages,
+                    context_window,
+                )
+                .await
                 {
                     conv_meta.last_compact_turn = iteration as usize;
                     messages = compacted;
@@ -814,7 +837,14 @@ impl Agent {
                         if is_413 && !conv_meta.has_attempted_reactive_compact {
                             conv_meta.has_attempted_reactive_compact = true;
                             let messages_before_compact = messages.len();
-                            match Self::reactive_compact(&self.llm, &messages, context_window).await
+                            match Self::reactive_compact(
+                                &self.llm,
+                                &self.memory,
+                                &conversation_id,
+                                &messages,
+                                context_window,
+                            )
+                            .await
                             {
                                 Ok(compacted) => {
                                     let compacted_len = compacted.len();
@@ -1329,10 +1359,27 @@ impl Agent {
     /// split decisions internally.
     async fn auto_compact_conversation(
         llm: &LlmClient,
+        memory: &MemoryStore,
+        conversation_id: &str,
         messages: &[ChatMessage],
         _context_window: usize,
     ) -> Result<Vec<ChatMessage>> {
-        let tool_groups = crate::agent_prompt::find_tool_groups(messages);
+        // 1. Separate system messages from the rest
+        let mut system_msgs: Vec<ChatMessage> = Vec::new();
+        let non_system: Vec<ChatMessage> = messages
+            .iter()
+            .filter(|&msg| {
+                if msg.role == "system" {
+                    system_msgs.push(msg.clone());
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        let tool_groups = crate::agent_prompt::find_tool_groups(&non_system);
 
         let preserve_count = PRESERVED_TOOL_GROUPS.min(tool_groups.len());
         let preserved_groups_start = tool_groups.len().saturating_sub(preserve_count);
@@ -1348,17 +1395,25 @@ impl Agent {
             return Ok(messages.to_vec());
         };
 
-        let to_summarize = &messages[..summary_end];
-        let preserved = &messages[summary_end..];
+        let to_summarize = &non_system[..summary_end];
+        let preserved = &non_system[summary_end..];
 
-        Self::summarize_and_replace(
+        // 2. Summarize with RAG-aware compaction
+        let mut compacted = Self::summarize_and_replace(
             llm,
+            memory,
+            conversation_id,
             to_summarize,
             preserved,
             "Auto-compact",
             "★ COMPACT SUMMARY ★",
         )
-        .await
+        .await?;
+
+        // 3. Prepend system messages back
+        let mut result = system_msgs;
+        result.append(&mut compacted);
+        Ok(result)
     }
 
     /// Tier 4: Reactive compact — emergency 413 recovery.
@@ -1368,50 +1423,159 @@ impl Agent {
     /// split decisions internally.
     async fn reactive_compact(
         llm: &LlmClient,
+        memory: &MemoryStore,
+        conversation_id: &str,
         messages: &[ChatMessage],
         _context_window: usize,
     ) -> Result<Vec<ChatMessage>> {
         const PRESERVE_COUNT: usize = 4;
-        if messages.len() <= PRESERVE_COUNT {
-            anyhow::bail!("Too few messages for reactive compact");
+
+        // 1. Separate system messages
+        let mut system_msgs: Vec<ChatMessage> = Vec::new();
+        let non_system: Vec<ChatMessage> = messages
+            .iter()
+            .filter(|&msg| {
+                if msg.role == "system" {
+                    system_msgs.push(msg.clone());
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        if non_system.len() <= PRESERVE_COUNT {
+            anyhow::bail!("Too few non-system messages for reactive compact");
         }
 
-        let split = messages.len().saturating_sub(PRESERVE_COUNT);
-        let to_summarize = &messages[..split];
-        let preserved = &messages[split..];
+        let split = non_system.len().saturating_sub(PRESERVE_COUNT);
+        let to_summarize = &non_system[..split];
+        let preserved = &non_system[split..];
 
-        Self::summarize_and_replace(
+        let mut compacted = Self::summarize_and_replace(
             llm,
+            memory,
+            conversation_id,
             to_summarize,
             preserved,
             "Reactive compact",
             "★ COMPACT SUMMARY (EMERGENCY) ★",
         )
-        .await
+        .await?;
+
+        let mut result = system_msgs;
+        result.append(&mut compacted);
+        Ok(result)
     }
 
     /// Shared helper for Tiers 3 and 4: send messages to LLM for
     /// summarization, then assemble the compacted result.
     async fn summarize_and_replace(
         llm: &LlmClient,
+        memory: &MemoryStore,
+        conversation_id: &str,
         to_summarize: &[ChatMessage],
         preserved: &[ChatMessage],
         error_label: &str,
         summary_label: &str,
     ) -> Result<Vec<ChatMessage>> {
-        let summary_prompt = build_compact_summary_prompt();
-        let mut compact_msgs = Vec::with_capacity(to_summarize.len() + 2);
-        compact_msgs.push(summary_prompt);
+        // NEW: RAG retrieval for compaction (non-fatal — warn on error, continue)
+        let retrieved = match crate::memory::rag::retrieve_context_for_compaction(
+            memory,
+            to_summarize,
+            preserved,
+            conversation_id,
+            COMPACTION_RAG_LIMIT,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("RAG retrieval for compaction failed: {}", e);
+                None
+            }
+        };
+
+        // Build compact messages: summary prompt + optional retrieved context + truncated input
+        let mut compact_msgs = Vec::new();
+        compact_msgs.push(build_compact_summary_prompt());
+
+        if let Some(ref ctx) = retrieved {
+            compact_msgs.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text(ctx.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        // Tool-group-aware truncation
+        let groups = crate::agent_prompt::find_tool_groups(to_summarize);
+        let bookend_groups = 1usize;
+        let tail_groups = 3usize.min(groups.len().saturating_sub(bookend_groups));
+
+        let mut seen_indices = std::collections::HashSet::new();
+
+        // First bookend groups (conversation origin)
+        for group in groups.iter().take(bookend_groups) {
+            seen_indices.insert(group.assistant_idx);
+            for &ti in &group.tool_result_indices {
+                seen_indices.insert(ti);
+            }
+        }
+
+        // Last tail groups (recent flow)
+        for group in groups.iter().rev().take(tail_groups) {
+            seen_indices.insert(group.assistant_idx);
+            for &ti in &group.tool_result_indices {
+                seen_indices.insert(ti);
+            }
+        }
+
+        // Always include non-assistant/non-tool messages
+        for (idx, msg) in to_summarize.iter().enumerate() {
+            if msg.role != "assistant" && !msg.has_tool_calls() {
+                seen_indices.insert(idx);
+            }
+        }
+
+        // Build sampled list in original order with truncation notice
+        let mut sampled: Vec<ChatMessage> = Vec::new();
+        let mut inserted_notice = false;
+        for (idx, msg) in to_summarize.iter().enumerate() {
+            if seen_indices.contains(&idx) {
+                sampled.push(msg.clone());
+            } else if !inserted_notice {
+                sampled.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(MessageContent::Text(format!(
+                        "[... {} messages omitted, see retrieved_context above ...]",
+                        to_summarize.len() - seen_indices.len()
+                    ))),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                inserted_notice = true;
+            }
+        }
+
+        // If no truncation happened, use the full to_summarize
+        if sampled.is_empty() {
+            sampled = to_summarize.to_vec();
+        }
+
+        let user_prompt = format!(
+            "Summarize the following conversation (sampled from {} messages):",
+            to_summarize.len()
+        );
         compact_msgs.push(ChatMessage {
             role: "user".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "Summarize the following conversation portion ({} messages):",
-                to_summarize.len(),
-            ))),
+            content: Some(MessageContent::Text(user_prompt)),
             tool_calls: None,
             tool_call_id: None,
         });
-        compact_msgs.extend(to_summarize.iter().cloned());
+        compact_msgs.extend(sampled);
 
         let summary_response = match llm.chat(&compact_msgs, &[]).await {
             Ok(c) => c,

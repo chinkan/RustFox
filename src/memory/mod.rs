@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::config::MemoryConfig;
 use crate::memory::embeddings::{EmbeddingConfig, EmbeddingEngine};
 
 /// Thread-safe SQLite memory store with hybrid vector+FTS5 search
@@ -19,13 +20,18 @@ use crate::memory::embeddings::{EmbeddingConfig, EmbeddingEngine};
 pub struct MemoryStore {
     conn: Arc<Mutex<Connection>>,
     pub embeddings: Arc<EmbeddingEngine>,
+    pub config: MemoryConfig,
 }
 
 impl MemoryStore {
     /// Open or create the SQLite database at the given path.
     /// If `embedding_config` is provided, vector search is enabled alongside FTS5.
     /// If None, falls back to FTS5-only search.
-    pub fn open(path: &Path, embedding_config: Option<EmbeddingConfig>) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        embedding_config: Option<EmbeddingConfig>,
+        memory_config: MemoryConfig,
+    ) -> Result<Self> {
         // Register sqlite-vec extension before opening any connection
         unsafe {
             type VecInitFn = unsafe extern "C" fn(
@@ -57,6 +63,7 @@ impl MemoryStore {
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             embeddings: Arc::new(embeddings),
+            config: memory_config,
         };
 
         info!("Memory store initialized at: {}", path.display());
@@ -89,6 +96,7 @@ impl MemoryStore {
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             embeddings: Arc::new(embeddings),
+            config: MemoryConfig::default(),
         };
         Ok(store)
     }
@@ -370,6 +378,52 @@ impl MemoryStore {
                         [dims.to_string()],
                     )?;
                 }
+            }
+        }
+
+        // Migration: ensure message_embeddings has metadata columns (is_summarized, role)
+        // for pre-filtering, and no existing rows with NULL metadata.
+        // ALTER TABLE is not supported for vec0, so we must DROP and recreate.
+        if table_exists(conn, "message_embeddings") {
+            let cols: Vec<String> = conn
+                .prepare("PRAGMA table_info(message_embeddings)")
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| row.get(1))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap_or_default();
+
+            let has_meta = cols.contains(&"is_summarized".to_string());
+
+            let needs_recreate = if has_meta {
+                // Columns exist but old rows may have NULL metadata because the
+                // original INSERT didn't write metadata columns. Check for NULLs.
+                conn.query_row(
+                    "SELECT COUNT(*) FROM message_embeddings WHERE is_summarized IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .unwrap_or(false)
+            } else {
+                true
+            };
+
+            if needs_recreate {
+                conn.execute_batch("DROP TABLE message_embeddings;")?;
+                conn.execute_batch(&format!(
+                    "CREATE VIRTUAL TABLE message_embeddings USING vec0(\
+                     embedding float[{}], is_summarized integer, role text);",
+                    dims
+                ))?;
+                info!(
+                    "Migrated message_embeddings with metadata columns (is_summarized, role){}",
+                    if has_meta {
+                        " and rebuilt existing data"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
 

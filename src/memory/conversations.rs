@@ -102,8 +102,8 @@ impl MemoryStore {
         if let Some(ref emb) = embedding {
             let embedding_bytes = f32_slice_to_bytes(emb);
             conn.execute(
-                "INSERT INTO message_embeddings (rowid, embedding) VALUES (?1, ?2)",
-                rusqlite::params![rowid, embedding_bytes],
+                "INSERT INTO message_embeddings (rowid, embedding, is_summarized, role) VALUES (?1, ?2, 0, ?3)",
+                rusqlite::params![rowid, embedding_bytes, &message.role],
             )?;
         }
 
@@ -205,6 +205,8 @@ impl MemoryStore {
                            row_number() OVER (ORDER BY distance) as rank_number
                     FROM message_embeddings
                     WHERE embedding MATCH ?1
+                      AND is_summarized = 0
+                      AND role IN ('user', 'assistant')
                     ORDER BY distance
                     LIMIT ?2
                 ),
@@ -216,8 +218,8 @@ impl MemoryStore {
                     LIMIT ?2
                 )
                 SELECT m.role, m.content, m.tool_calls, m.tool_call_id,
-                       coalesce(1.0 / (60 + fts.rank_number), 0.0) * 0.5
-                       + coalesce(1.0 / (60 + vec.rank_number), 0.0) * 0.5 as combined_rank
+                       coalesce(1.0 / (?5 + fts.rank_number), 0.0) * ?7
+                       + coalesce(1.0 / (?5 + vec.rank_number), 0.0) * ?6 as combined_rank
                 FROM messages m
                 LEFT JOIN vec_matches vec ON m.rowid = vec.rowid
                 LEFT JOIN fts_matches fts ON m.rowid = fts.rowid
@@ -230,10 +232,21 @@ impl MemoryStore {
             ";
 
             let search_limit = (limit * 3) as i64;
+            let rrf_k = self.config.rrf_k;
+            let rrf_weight_fts = self.config.rrf_weight_fts;
+            let rrf_weight_vec = self.config.rrf_weight_vec;
             let mut stmt = conn.prepare(sql)?;
             let messages = stmt
                 .query_map(
-                    rusqlite::params![query_bytes, search_limit, query, conversation_id],
+                    rusqlite::params![
+                        query_bytes,
+                        search_limit,
+                        query,
+                        conversation_id,
+                        rrf_k,
+                        rrf_weight_vec,
+                        rrf_weight_fts
+                    ],
                     parse_message_row,
                 )?
                 .collect::<Result<Vec<_>, _>>()
@@ -283,6 +296,8 @@ impl MemoryStore {
                            row_number() OVER (ORDER BY distance) as rank_number
                     FROM message_embeddings
                     WHERE embedding MATCH ?1
+                      AND is_summarized = 0
+                      AND role IN ('user', 'assistant')
                     ORDER BY distance
                     LIMIT ?2
                 ),
@@ -294,22 +309,34 @@ impl MemoryStore {
                     LIMIT ?2
                 )
                 SELECT m.role, m.content, m.tool_calls, m.tool_call_id,
-                       coalesce(1.0 / (60 + fts.rank_number), 0.0) * 0.5
-                       + coalesce(1.0 / (60 + vec.rank_number), 0.0) * 0.5 as combined_rank
+                       coalesce(1.0 / (?4 + fts.rank_number), 0.0) * ?6
+                       + coalesce(1.0 / (?4 + vec.rank_number), 0.0) * ?5 as combined_rank
                 FROM messages m
                 LEFT JOIN vec_matches vec ON m.rowid = vec.rowid
                 LEFT JOIN fts_matches fts ON m.rowid = fts.rowid
-                WHERE vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL
+                WHERE (vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL)
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
                 ORDER BY combined_rank DESC
                 LIMIT ?2
             ";
-
             let search_limit = (limit * 3) as i64;
+            let rrf_k = self.config.rrf_k;
+            let rrf_weight_fts = self.config.rrf_weight_fts;
+            let rrf_weight_vec = self.config.rrf_weight_vec;
             let mut stmt = conn.prepare(sql)?;
             let messages = stmt
-                .query_map(rusqlite::params![query_bytes, search_limit, query], |row| {
-                    parse_message_row(row)
-                })?
+                .query_map(
+                    rusqlite::params![
+                        query_bytes,
+                        search_limit,
+                        query,
+                        rrf_k,
+                        rrf_weight_vec,
+                        rrf_weight_fts
+                    ],
+                    parse_message_row,
+                )?
                 .collect::<Result<Vec<_>, _>>()
                 .context("Failed to hybrid-search messages")?;
 
@@ -321,6 +348,8 @@ impl MemoryStore {
                 FROM messages m
                 JOIN messages_fts fts ON m.rowid = fts.rowid
                 WHERE messages_fts MATCH ?1
+                  AND m.role IN ('user', 'assistant')
+                  AND (m.is_summarized IS NULL OR m.is_summarized = 0)
                 ORDER BY fts.rank
                 LIMIT ?2
             ";
