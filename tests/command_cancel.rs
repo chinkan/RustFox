@@ -18,9 +18,8 @@ async fn test_process_group_killpg_terminates_tree() {
 
     // The child should have its own PGID equal to its PID
     // (process_group(0) calls setpgid(0, 0) in the child)
-    let child_pgid =
-        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32)))
-            .expect("child should have a process group");
+    let child_pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32)))
+        .expect("child should have a process group");
     assert_eq!(
         child_pgid,
         nix::unistd::Pid::from_raw(pid as i32),

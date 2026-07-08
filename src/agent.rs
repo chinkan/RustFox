@@ -459,10 +459,7 @@ impl Agent {
 
     /// Remove cancel token for a user (called on process_message exit).
     pub async fn clear_cancel_token(&self, user_id: &str) {
-        self.cancel_token_registry
-            .lock()
-            .await
-            .remove(user_id);
+        self.cancel_token_registry.lock().await.remove(user_id);
     }
 
     /// Fetch the context window size for the current model from the
@@ -770,10 +767,13 @@ impl Agent {
                     tool_call_id: None,
                 };
                 // Save to persistent memory
-                self.memory
+                if let Err(e) = self
+                    .memory
                     .save_message(&conversation_id, &inject_msg)
                     .await
-                    .ok();
+                {
+                    warn!("Failed to persist injected message: {}", e);
+                }
                 messages.push(inject_msg);
             }
 
@@ -2823,7 +2823,11 @@ impl Agent {
 
         fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
             if buf.is_empty() {
-                if no_output_msg.is_empty() { None } else { Some(no_output_msg.to_owned()) }
+                if no_output_msg.is_empty() {
+                    None
+                } else {
+                    Some(no_output_msg.to_owned())
+                }
             } else {
                 let capped = crate::utils::strings::truncate_tail(buf, 3500);
                 Some(format!("```\n{}\n```", capped))
@@ -2842,9 +2846,19 @@ impl Agent {
             }
             "⚠️ User cancelled the command".to_string()
         } else if let Some(code) = exit_code {
-            let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
+            let (icon, label) = if code == 0 {
+                ("✅", "Completed")
+            } else {
+                ("❌", "Failed")
+            };
             let body = format_body(&output_buffer, "Command completed with no output.");
-            let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body.unwrap_or_default());
+            let text = format!(
+                "{} {}: `{}`\n\n{}",
+                icon,
+                label,
+                escaped_cmd,
+                body.unwrap_or_default()
+            );
             if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
                 warn!("Failed to update completed message: {e}");
             }
