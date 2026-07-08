@@ -7,7 +7,10 @@ pub fn truncate_tail(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     let prefix = "...(truncated)\n";
-    let tail: String = s.chars().skip(char_count.saturating_sub(max_chars)).collect();
+    let tail: String = s
+        .chars()
+        .skip(char_count.saturating_sub(max_chars))
+        .collect();
     format!("{}{}", prefix, tail)
 }
 

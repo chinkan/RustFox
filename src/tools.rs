@@ -457,37 +457,9 @@ pub async fn execute_builtin_tool(
                 Ok(entries.join("\n"))
             }
         }
-        "execute_command" => {
-            let command = arguments["command"]
-                .as_str()
-                .context("Missing 'command' argument")?;
-
-            info!("Executing command in sandbox: {}", command);
-
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(sandbox_dir)
-                .output()
-                .await
-                .with_context(|| format!("Failed to execute command: {}", command))?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            let mut result = String::new();
-            if !stdout.is_empty() {
-                result.push_str(&format!("STDOUT:\n{}\n", stdout));
-            }
-            if !stderr.is_empty() {
-                result.push_str(&format!("STDERR:\n{}\n", stderr));
-            }
-            result.push_str(&format!(
-                "Exit code: {}",
-                output.status.code().unwrap_or(-1)
-            ));
-            Ok(result)
-        }
+        // NOTE: execute_command is handled by Agent::execute_command_interactive
+        // (src/agent.rs) before reaching this fallback. The tool definition lives
+        // here so the LLM knows the tool exists.
         "plan_create" => {
             let title = arguments["title"]
                 .as_str()

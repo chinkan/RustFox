@@ -53,10 +53,8 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
     // Track UTF-16 length incrementally to avoid O(n²) rescanning
     let mut plain_utf16_len = 0usize;
 
-    // State for blockquote and table rendering
+    // State for blockquote rendering
     let mut in_blockquote = false;
-    let mut in_table_cell = false;
-    let mut table_cell_texts: Vec<String> = Vec::new();
 
     for event in parser {
         match event {
@@ -70,10 +68,6 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         .join("\n");
                     plain.push_str(&quoted);
                     plain_utf16_len += quoted.encode_utf16().count();
-                } else if in_table_cell {
-                    table_cell_texts.push(text.to_string());
-                    plain.push_str(&text);
-                    plain_utf16_len += text.encode_utf16().count();
                 } else {
                     plain.push_str(&text);
                     plain_utf16_len += text.encode_utf16().count();
@@ -134,14 +128,10 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     in_blockquote = true;
                 }
                 Tag::Table(_) => {
-                    table_cell_texts.clear();
+                    // Table alignment metadata is discarded — rendered as plain text
                 }
-                Tag::TableHead | Tag::TableRow => {
-                    table_cell_texts.clear();
-                }
-                Tag::TableCell => {
-                    in_table_cell = true;
-                }
+                Tag::TableHead | Tag::TableRow => {}
+                Tag::TableCell => {}
                 // Paragraph, list, etc. — no entity emitted on start.
                 _ => {}
             },
@@ -232,7 +222,6 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         }
                     }
                     TagEnd::TableCell => {
-                        in_table_cell = false;
                         plain.push_str(" | ");
                         plain_utf16_len += 3;
                     }

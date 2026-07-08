@@ -219,11 +219,7 @@ pub async fn run(
 
 /// Send a markdown string as entity-formatted message(s), splitting if needed.
 /// Returns Ok if at least one message was sent successfully.
-async fn send_markdown_message(
-    bot: &Bot,
-    chat_id: ChatId,
-    markdown: &str,
-) -> ResponseResult<()> {
+async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
     const MAX_UTF16: usize = 4090;
     let (plain_text, entities) = markdown_to_entities(markdown);
     let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
@@ -639,13 +635,38 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let mut builtin = Vec::new();
         let mut mcp_servers: BTreeMap<String, Vec<&crate::llm::ToolDefinition>> = BTreeMap::new();
 
+        // Known MCP server names (same list as friendly_tool_name in tool_notifier.rs)
+        // Sorted by length descending to match longest first (handles server names with underscores)
+        const KNOWN_MCP_SERVERS: [&str; 14] = [
+            "google-workspace",
+            "google_workspace",
+            "brave-search",
+            "brave_search",
+            "filesystem",
+            "puppeteer",
+            "github",
+            "sqlite",
+            "threads",
+            "notion",
+            "fetch",
+            "git",
+            "context7",
+            "qdrant",
+        ];
+
         for tool in &all_tools {
             if let Some(rest) = tool.function.name.strip_prefix("mcp_") {
-                if let Some(sep) = rest.find('_') {
-                    let server = rest[..sep].to_string();
-                    mcp_servers.entry(server).or_default().push(tool);
-                } else {
-                    builtin.push(tool);
+                let server = KNOWN_MCP_SERVERS
+                    .iter()
+                    .find(|server| rest.starts_with(&format!("{}_", server)))
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        // Unknown server: split on first underscore
+                        rest.find('_').map(|sep| rest[..sep].to_string())
+                    });
+                match server {
+                    Some(s) => mcp_servers.entry(s).or_default().push(tool),
+                    None => builtin.push(tool),
                 }
             } else {
                 builtin.push(tool);
@@ -654,14 +675,20 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
         let mut tool_list = format!("**Built-in tools** ({}):\n", builtin.len());
         for tool in &builtin {
-            tool_list.push_str(&format!("  - `{}`: {}\n", tool.function.name, tool.function.description));
+            tool_list.push_str(&format!(
+                "  - `{}`: {}\n",
+                tool.function.name, tool.function.description
+            ));
         }
         tool_list.push('\n');
 
         for (server, tools) in &mcp_servers {
             tool_list.push_str(&format!("**MCP: {}** ({}):\n", server, tools.len()));
             for tool in tools {
-                tool_list.push_str(&format!("  - `{}`: {}\n", tool.function.name, tool.function.description));
+                tool_list.push_str(&format!(
+                    "  - `{}`: {}\n",
+                    tool.function.name, tool.function.description
+                ));
             }
             tool_list.push('\n');
         }
@@ -979,7 +1006,10 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Streaming: set up token channel for progressive message display
-    const TELEGRAM_STREAM_SPLIT: usize = 3800;
+    // Split threshold: use UTF-16 code units (Telegram's limit is 4096).
+    // Streaming uses a conservative 3500 to leave room for mid-split growth.
+    // The final flush uses markdown_to_entities + split_entities with MAX_UTF16=4090.
+    const TELEGRAM_STREAM_SPLIT_UTF16: usize = 3500;
 
     let (stream_token_tx, stream_token_rx) = tokio::sync::mpsc::channel::<String>(128);
 
@@ -997,13 +1027,15 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let mut split_contents: Vec<String> = Vec::new();
         let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
+        let mut buffer_utf16_len: usize = 0;
 
         while let Some(token) = rx.recv().await {
             buffer.push_str(&token);
+            buffer_utf16_len += token.encode_utf16().count();
 
             // When buffer exceeds split threshold, finalize the current message
             // and reset so subsequent tokens start a new message.
-            if buffer.len() > TELEGRAM_STREAM_SPLIT {
+            if buffer_utf16_len > TELEGRAM_STREAM_SPLIT_UTF16 {
                 let snapshot = buffer.clone();
                 if let Some(msg_id) = current_msg_id {
                     if let Err(e) = stream_bot
@@ -1017,6 +1049,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 }
                 split_contents.push(snapshot);
                 buffer.clear();
+                buffer_utf16_len = 0;
                 current_msg_id = None;
                 last_action = Instant::now();
                 continue;

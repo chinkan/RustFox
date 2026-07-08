@@ -2488,8 +2488,8 @@ impl Agent {
         _user_id: &str,
         chat_id: ChatId,
     ) -> String {
-        use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
         use std::time::Instant;
+        use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
         use tokio::io::AsyncReadExt;
 
         let command = match arguments["command"].as_str() {
@@ -2515,9 +2515,10 @@ impl Agent {
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
         // Send initial message with cancel button
-        let keyboard = InlineKeyboardMarkup::new([[
-            InlineKeyboardButton::callback("Cancel", format!("cancel_cmd:{}", cmd_id)),
-        ]]);
+        let keyboard = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
+            "Cancel",
+            format!("cancel_cmd:{}", cmd_id),
+        )]]);
 
         let msg = match self
             .bot
@@ -2554,7 +2555,7 @@ impl Agent {
         let mut child_stdout = child.stdout.take();
         let mut child_stderr = child.stderr.take();
 
-        tokio::spawn(async move {
+        let stdout_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             while let Some(stream) = child_stdout.as_mut() {
                 match stream.read(&mut buf).await {
@@ -2572,7 +2573,7 @@ impl Agent {
             }
         });
 
-        tokio::spawn(async move {
+        let stderr_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             while let Some(stream) = child_stderr.as_mut() {
                 match stream.read(&mut buf).await {
@@ -2590,15 +2591,24 @@ impl Agent {
             }
         });
 
-        // Main select loop
+        // Cap accumulated output to prevent unbounded memory growth
+        const MAX_BUFFER_CHARS: usize = 100_000;
+
         let mut output_buffer = String::new();
         let mut last_edit = Instant::now();
+
+        // Main select loop — only determines exit reason
+        let mut exit_code: Option<i32> = None;
+        let mut cancelled = false;
         tokio::pin!(cancel_rx);
 
-        let result = loop {
+        loop {
             tokio::select! {
                 Some(chunk) = output_rx.recv() => {
                     output_buffer.push_str(&chunk);
+                    if output_buffer.chars().count() > MAX_BUFFER_CHARS {
+                        output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
+                    }
                     if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
                         let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
                         let body = format!("```\n{}\n```", capped);
@@ -2608,8 +2618,8 @@ impl Agent {
                     }
                 }
                 status = child.wait() => {
-                    let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-                    let (icon, label) = if exit_code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
+                    exit_code = Some(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1));
+                    let (icon, label) = if exit_code == Some(0) { ("✅", "Completed") } else { ("❌", "Failed") };
                     let body = if output_buffer.is_empty() {
                         "Command completed with no output.".to_string()
                     } else {
@@ -2618,16 +2628,10 @@ impl Agent {
                     };
                     let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body);
                     self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
-
-                    let mut result = String::new();
-                    if !output_buffer.is_empty() {
-                        result.push_str(output_buffer.trim_end());
-                        result.push('\n');
-                    }
-                    result.push_str(&format!("Exit code: {}", exit_code));
-                    break result;
+                    break;
                 }
                 _ = &mut cancel_rx => {
+                    cancelled = true;
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     let body = if output_buffer.is_empty() {
@@ -2642,9 +2646,62 @@ impl Agent {
                         format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, body)
                     };
                     self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
-                    break "⚠️ User cancelled the command".to_string();
+                    break;
                 }
             }
+        }
+
+        // Post-loop: wait for readers to finish, drain remaining output
+        // Timeout is a safety net — readers finish promptly after pipe EOF.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            async { let _ = tokio::join!(stdout_handle, stderr_handle); },
+        ).await;
+        while let Ok(chunk) = output_rx.try_recv() {
+            output_buffer.push_str(&chunk);
+        }
+        // Re-cap buffer after drain (defensive — drain may push past limit)
+        if output_buffer.chars().count() > MAX_BUFFER_CHARS {
+            output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
+        }
+
+        // Build the final result with complete output
+        let result = if cancelled {
+            // Update display with final (complete) output
+            let body = if output_buffer.is_empty() {
+                String::new()
+            } else {
+                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                format!("```\n{}\n```", capped)
+            };
+            let text = if body.is_empty() {
+                format!("❌ Cancelled: `{}`", escaped_cmd)
+            } else {
+                format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, body)
+            };
+            self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+            "⚠️ User cancelled the command".to_string()
+        } else if let Some(code) = exit_code {
+            // Update display with final (complete) output
+            let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
+            let body = if output_buffer.is_empty() {
+                "Command completed with no output.".to_string()
+            } else {
+                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                format!("```\n{}\n```", capped)
+            };
+            let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body);
+            self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+
+            let mut result = String::new();
+            if !output_buffer.is_empty() {
+                result.push_str(output_buffer.trim_end());
+                result.push('\n');
+            }
+            result.push_str(&format!("Exit code: {}", code));
+            result
+        } else {
+            "Error: command exited with unknown state".to_string()
         };
 
         // Cleanup registry
@@ -3620,7 +3677,8 @@ impl Agent {
                 }
             }
             "execute_command" => {
-                self.execute_command_interactive(arguments, user_id, chat_id).await
+                self.execute_command_interactive(arguments, user_id, chat_id)
+                    .await
             }
             _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
                 Ok(result) => result,

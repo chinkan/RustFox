@@ -628,7 +628,10 @@ mod tests {
         let j = r#"{"command":"rm -rf /"}"#;
         let out = format_args_preview(j);
         assert!(!out.is_empty(), "command should be visible: {out}");
-        assert!(out.contains("rm -rf /"), "command content must be in output: {out}");
+        assert!(
+            out.contains("rm -rf /"),
+            "command content must be in output: {out}"
+        );
     }
 
     #[test]
