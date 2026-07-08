@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use teloxide::payloads::{SendDocumentSetters, SendMessageSetters};
@@ -73,6 +74,12 @@ pub struct Agent {
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
     pub running_commands: Arc<tokio::sync::Mutex<HashMap<String, RunningCommand>>>,
+    /// Per-user CancellationTokens for /stop — created at process_message entry,
+    /// removed on exit. Checked at each iteration boundary.
+    pub cancel_token_registry: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
+    /// Per-user pending injection messages (Steer/Inject), max 10 per user.
+    /// When a non-command message arrives while processing is active, it's queued here.
+    pub pending_injections: Arc<tokio::sync::Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -150,6 +157,8 @@ impl Agent {
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
             running_commands: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cancel_token_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_injections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
