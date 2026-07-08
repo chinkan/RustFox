@@ -628,7 +628,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              **/verbose** — Toggle tool call progress display\n\
              **/queryrewrite** — Toggle query rewriting for memory search\n\
              **/selfupgrade** — Upgrade the bot (source or release binary)\n\
-             **/models** — Browse and change the model";
+             **/models** — Browse and change the model\n\
+             **/stop** — Cancel the current processing gracefully\n\
+             **/btw** — Ask a parallel question while the bot is busy";
         return send_markdown_message(&bot, msg.chat.id, help).await;
     }
 
@@ -805,12 +807,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .to_string();
 
         // Reply immediately, then answer in background
-        let _ = send_markdown_message(
-            &bot,
-            msg.chat.id,
-            "⏳ **BTW question sent to subagent...**",
-        )
-        .await;
+        let _ = send_markdown_message(&bot, msg.chat.id, "⏳ **BTW question sent to subagent...**")
+            .await;
 
         let agent_clone = agent.clone();
         let bot_clone = bot.clone();
@@ -978,10 +976,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     // Handle /stop command
     if text == "/stop" {
-        if agent
-            .cancel_processing(&user_id.to_string())
-            .await
-        {
+        if agent.cancel_processing(&user_id.to_string()).await {
             return send_markdown_message(
                 &bot,
                 msg.chat.id,
@@ -989,21 +984,14 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             )
             .await;
         } else {
-            return send_markdown_message(
-                &bot,
-                msg.chat.id,
-                "Nothing is currently processing.",
-            )
-            .await;
+            return send_markdown_message(&bot, msg.chat.id, "Nothing is currently processing.")
+                .await;
         }
     }
 
     // CHECK: if user is currently being processed, queue non-command messages as injection
     if !text.starts_with('/') && agent.is_processing(&user_id.to_string()).await {
-        if agent
-            .queue_injection(&user_id.to_string(), &text)
-            .await
-        {
+        if agent.queue_injection(&user_id.to_string(), &text).await {
             info!("Queued '{}' as injection for user {}", text, user_id);
             return send_markdown_message(
                 &bot,
