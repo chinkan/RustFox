@@ -2693,6 +2693,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-cron-scheduler",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
