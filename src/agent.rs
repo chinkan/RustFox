@@ -729,18 +729,51 @@ impl Agent {
         self.soul_updated
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
+        // Register cancel token for /stop support
+        let cancel_token = self.register_cancel_token(user_id).await;
+
         // Resolve context_window once before the loop (can't .await inside the loop)
         let context_window = {
             let model = self.current_model.read().await;
             self.registry.effective_context_window(&model)
         };
 
-        for iteration in 0..max_iterations {
+        'outer: for iteration in 0..max_iterations {
             debug!(
                 "Trying iteration {}: messages length: {}",
                 iteration,
                 messages.len()
             );
+
+            // CHECK: cancelled by /stop?
+            if cancel_token.is_cancelled() {
+                info!(
+                    user_id = %user_id,
+                    iteration,
+                    "Processing cancelled by user via /stop"
+                );
+                break;
+            }
+
+            // CHECK: pending injections from user?
+            let injections = self.drain_injections(user_id).await;
+            for text in &injections {
+                let inject_msg = ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(MessageContent::from_text(format!(
+                        "**[User injected mid-processing]:** {}",
+                        text
+                    ))),
+                    tool_calls: None,
+                    tool_call_id: None,
+                };
+                // Save to persistent memory
+                self.memory
+                    .save_message(&conversation_id, &inject_msg)
+                    .await
+                    .ok();
+                messages.push(inject_msg);
+            }
 
             // --- Empty response recovery: retry loop ---
             let mut retry_count = 0u32;
@@ -804,6 +837,12 @@ impl Agent {
             let base_prompt = prepare_messages_for_llm(&messages, context_window);
 
             loop {
+                // CHECK: cancelled while retrying?
+                if cancel_token.is_cancelled() {
+                    info!("Cancelled during retry loop — breaking");
+                    break 'outer;
+                }
+
                 // Clone the base prompt for this retry attempt
                 let mut prompt = base_prompt.clone();
 
@@ -970,6 +1009,7 @@ impl Agent {
                                 error: Some(err_str),
                                 end_time: Self::now_iso8601_static(),
                             });
+                            self.clear_cancel_token(user_id).await;
                             return Err(e);
                         }
                         // recovered_from_413 is true but the compiler can't see this;
@@ -1043,6 +1083,7 @@ impl Agent {
                             end_time: Self::now_iso8601_static(),
                         });
 
+                        self.clear_cancel_token(user_id).await;
                         return Err(anyhow::anyhow!(
                             "Unable to get a valid response from the AI model after {} attempts. \
                              Your conversation history has been saved. Please try rephrasing your \
@@ -1406,6 +1447,7 @@ impl Agent {
                 }
             }
 
+            self.clear_cancel_token(user_id).await;
             return Ok(final_content);
         }
 
@@ -1425,6 +1467,7 @@ impl Agent {
             end_time: Self::now_iso8601_static(),
         });
 
+        self.clear_cancel_token(user_id).await;
         Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
     }
 
@@ -2181,7 +2224,7 @@ impl Agent {
     /// directly with a default sandbox tool whitelist. The system_prompt is augmented
     /// with ambient system context (timestamp, user model, location) via
     /// `build_subagent_system_prompt`.
-    async fn run_subagent(
+    pub(crate) async fn run_subagent(
         &self,
         skill_name: Option<&str>,
         system_prompt: &str,
@@ -2250,6 +2293,7 @@ impl Agent {
                     &model,
                     max_iter,
                     "_ad_hoc_",
+                    None,
                 )
                 .await;
         }
@@ -2397,12 +2441,14 @@ impl Agent {
             &resolved_model,
             max_iter,
             skill_name,
+            None,
         )
         .await
     }
 
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
+    #[allow(clippy::too_many_arguments)]
     async fn run_subagent_loop(
         &self,
         messages: &mut Vec<ChatMessage>,
@@ -2411,10 +2457,17 @@ impl Agent {
         model: &str,
         max_iter: u32,
         label: &str,
+        cancel_token: Option<CancellationToken>,
     ) -> String {
         let empty_response_retry_limit = self.config.empty_response_retry_limit();
 
         for _iteration in 0..max_iter {
+            // CHECK: cancelled by /stop?
+            if let Some(ref token) = cancel_token {
+                if token.is_cancelled() {
+                    return format!("Subagent '{}' cancelled by user.", label);
+                }
+            }
             // --- Empty response recovery: retry loop ---
             let mut retry_count = 0u32;
             let response: ChatMessage;
@@ -2522,6 +2575,34 @@ impl Agent {
             "Subagent '{}' reached the maximum number of iterations ({}).",
             label, max_iter
         )
+    }
+
+    /// Ask a parallel question while the main agent is processing.
+    /// Spawns an isolated ad-hoc subagent with timestamp/location context.
+    /// Returns the subagent's answer or an error message.
+    pub async fn ask_parallel(&self, question: &str) -> Result<String> {
+        let answer = self
+            .run_subagent(
+                None,
+                "Answer the user's follow-up question concisely and accurately using your knowledge.",
+                question,
+                None,
+                None,
+            )
+            .await;
+        // Detect error patterns from run_subagent/run_subagent_loop:
+        // - "Subagent '...' error: ..." (API error)
+        // - "Subagent '...' reached the maximum number of iterations" (max iterations)
+        // - "Subagent '...' returned an empty response after ... attempts" (empty response)
+        if answer.starts_with("Subagent '")
+            && (answer.contains("error")
+                || answer.contains("reached the maximum")
+                || answer.contains("empty response"))
+        {
+            Err(anyhow::anyhow!("{}", answer))
+        } else {
+            Ok(answer)
+        }
     }
 
     /// Get the path for a soul file by name.
