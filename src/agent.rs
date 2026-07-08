@@ -731,6 +731,7 @@ impl Agent {
 
         // Register cancel token for /stop support
         let cancel_token = self.register_cancel_token(user_id).await;
+        let mut was_cancelled = false;
 
         // Resolve context_window once before the loop (can't .await inside the loop)
         let context_window = {
@@ -747,6 +748,7 @@ impl Agent {
 
             // CHECK: cancelled by /stop?
             if cancel_token.is_cancelled() {
+                was_cancelled = true;
                 info!(
                     user_id = %user_id,
                     iteration,
@@ -839,7 +841,8 @@ impl Agent {
             loop {
                 // CHECK: cancelled while retrying?
                 if cancel_token.is_cancelled() {
-                    info!("Cancelled during retry loop — breaking");
+                    was_cancelled = true;
+                    info!("Cancelled during retry loop — breaking out of outer iteration loop");
                     break 'outer;
                 }
 
@@ -1451,6 +1454,25 @@ impl Agent {
             return Ok(final_content);
         }
 
+        // Clear cancel token before handling termination
+        self.clear_cancel_token(user_id).await;
+
+        if was_cancelled {
+            info!(
+                user_id = %user_id,
+                iteration_count,
+                "Processing cancelled by user — returning partial result"
+            );
+            // --- LangSmith: end chain run (cancelled) ---
+            self.langsmith.end_run(crate::langsmith::EndRunParams {
+                id: chain_run_id,
+                outputs: None,
+                error: Some("Cancelled by user".to_string()),
+                end_time: Self::now_iso8601_static(),
+            });
+            return Ok("Processing was cancelled.".to_string());
+        }
+
         // Reached max iterations
         warn!(
             user_id = %user_id,
@@ -1467,7 +1489,6 @@ impl Agent {
             end_time: Self::now_iso8601_static(),
         });
 
-        self.clear_cancel_token(user_id).await;
         Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
     }
 
