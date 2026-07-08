@@ -1216,9 +1216,13 @@ async fn handle_model_callback(
     };
     let msg = q.regular_message().cloned();
 
-    bot.answer_callback_query(callback_id.clone()).await?;
+    // Remove the old unconditional answer_callback_query that had no text.
+    // Each branch below now answers with the appropriate text (or silently)
+    // exactly once. A second answer for the same callback_id is ignored by
+    // Telegram, which previously swallowed the "⛔ Command cancelled" toast.
 
     if let Some(provider_name) = data.strip_prefix("provider_select:") {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(provider) = agent.registry.get_provider(provider_name) {
             if let Some(ref m) = msg {
                 let user_id = q.from.id.0.to_string();
@@ -1237,6 +1241,7 @@ async fn handle_model_callback(
     }
 
     if data == "model_search_prompt" {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(m) = msg {
             let prompt = "Send me a model name or ID to search for. Examples: claude, kimi, gpt, or a full model ID like openrouter/o3-mini.";
             bot.edit_message_text(m.chat.id, m.id, prompt).await?;
@@ -1257,6 +1262,7 @@ async fn handle_model_callback(
     }
 
     if data == "model_select:cancel" {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(m) = msg {
             bot.edit_message_text(m.chat.id, m.id, "❌ Model selection cancelled.")
                 .await?;
@@ -1299,6 +1305,7 @@ async fn handle_model_callback(
         }
     }
 
+    bot.answer_callback_query(callback_id).await.ok();
     Ok(())
 }
 

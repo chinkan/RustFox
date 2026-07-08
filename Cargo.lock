@@ -2674,6 +2674,7 @@ dependencies = [
  "image",
  "include_dir",
  "infer",
+ "nix",
  "ocrs",
  "pdf-extract",
  "pulldown-cmark",

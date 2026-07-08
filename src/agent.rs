@@ -2506,6 +2506,7 @@ impl Agent {
             .current_dir(sandbox_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .process_group(0)
             .spawn()
         {
             Ok(c) => c,
@@ -2613,7 +2614,9 @@ impl Agent {
                         let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
                         let body = format!("```\n{}\n```", capped);
                         let text = format!("💻 Running: `{}`\n\n{}", escaped_cmd, body);
-                        self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+                        if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
+                            warn!("Failed to update running message: {e}");
+                        }
                         last_edit = Instant::now();
                     }
                 }
@@ -2623,6 +2626,13 @@ impl Agent {
                 }
                 _ = &mut cancel_rx => {
                     cancelled = true;
+                    // Kill child + its process group so sh -c grandchildren are stopped
+                    if let Some(pid) = child.id() {
+                        let _ = nix::sys::signal::killpg(
+                            nix::unistd::Pid::from_raw(pid as i32),
+                            nix::sys::signal::Signal::SIGKILL,
+                        );
+                    }
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     break;
@@ -2659,13 +2669,17 @@ impl Agent {
                 None => format!("❌ Cancelled: `{}`", escaped_cmd),
                 Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
             };
-            self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+            if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
+                warn!("Failed to update cancelled message: {e}");
+            }
             "⚠️ User cancelled the command".to_string()
         } else if let Some(code) = exit_code {
             let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
             let body = format_body(&output_buffer, "Command completed with no output.");
             let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body.unwrap_or_default());
-            self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
+            if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
+                warn!("Failed to update completed message: {e}");
+            }
 
             let mut result = String::new();
             if !output_buffer.is_empty() {

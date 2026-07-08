@@ -808,6 +808,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn find_tool_groups_detects_consecutive_tool_calls() {
         let mut messages = Vec::new();
         messages.push(ChatMessage {

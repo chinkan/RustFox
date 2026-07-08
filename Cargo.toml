@@ -91,6 +91,9 @@ regex = "1"
 # OS home-directory resolution for the persistent home dir (~/.rustfox)
 dirs = "5"
 
+# Unix process group management (kill child process trees)
+nix = { version = "0.31", features = ["signal"] }
+
 [lib]
 name = "rustfox"
 path = "src/lib.rs"
