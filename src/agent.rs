@@ -2619,44 +2619,22 @@ impl Agent {
                 }
                 status = child.wait() => {
                     exit_code = Some(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1));
-                    let (icon, label) = if exit_code == Some(0) { ("✅", "Completed") } else { ("❌", "Failed") };
-                    let body = if output_buffer.is_empty() {
-                        "Command completed with no output.".to_string()
-                    } else {
-                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
-                        format!("```\n{}\n```", capped)
-                    };
-                    let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body);
-                    self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
                     break;
                 }
                 _ = &mut cancel_rx => {
                     cancelled = true;
                     let _ = child.kill().await;
                     let _ = child.wait().await;
-                    let body = if output_buffer.is_empty() {
-                        String::new()
-                    } else {
-                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
-                        format!("```\n{}\n```", capped)
-                    };
-                    let text = if body.is_empty() {
-                        format!("❌ Cancelled: `{}`", escaped_cmd)
-                    } else {
-                        format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, body)
-                    };
-                    self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
                     break;
                 }
             }
         }
 
-        // Post-loop: wait for readers to finish, drain remaining output
-        // Timeout is a safety net — readers finish promptly after pipe EOF.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            async { let _ = tokio::join!(stdout_handle, stderr_handle); },
-        ).await;
+        // Post-loop: wait for readers to finish, drain remaining output.
+        // Readers finish promptly after pipe EOF (child has exited), so this
+        // join resolves within microseconds. No timeout needed — it would
+        // reintroduce a race window where try_recv could miss late chunks.
+        let _ = tokio::join!(stdout_handle, stderr_handle);
         while let Ok(chunk) = output_rx.try_recv() {
             output_buffer.push_str(&chunk);
         }
@@ -2665,32 +2643,28 @@ impl Agent {
             output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
         }
 
+        fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
+            if buf.is_empty() {
+                if no_output_msg.is_empty() { None } else { Some(no_output_msg.to_owned()) }
+            } else {
+                let capped = crate::utils::strings::truncate_tail(buf, 3500);
+                Some(format!("```\n{}\n```", capped))
+            }
+        }
+
         // Build the final result with complete output
         let result = if cancelled {
-            // Update display with final (complete) output
-            let body = if output_buffer.is_empty() {
-                String::new()
-            } else {
-                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
-                format!("```\n{}\n```", capped)
-            };
-            let text = if body.is_empty() {
-                format!("❌ Cancelled: `{}`", escaped_cmd)
-            } else {
-                format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, body)
+            let body = format_body(&output_buffer, "");
+            let text = match body {
+                None => format!("❌ Cancelled: `{}`", escaped_cmd),
+                Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
             };
             self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
             "⚠️ User cancelled the command".to_string()
         } else if let Some(code) = exit_code {
-            // Update display with final (complete) output
             let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
-            let body = if output_buffer.is_empty() {
-                "Command completed with no output.".to_string()
-            } else {
-                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
-                format!("```\n{}\n```", capped)
-            };
-            let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body);
+            let body = format_body(&output_buffer, "Command completed with no output.");
+            let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body.unwrap_or_default());
             self.bot.edit_message_text(chat_id, msg.id, &text).await.ok();
 
             let mut result = String::new();
@@ -2701,7 +2675,7 @@ impl Agent {
             result.push_str(&format!("Exit code: {}", code));
             result
         } else {
-            "Error: command exited with unknown state".to_string()
+            unreachable!("select loop always sets either cancelled or exit_code")
         };
 
         // Cleanup registry
