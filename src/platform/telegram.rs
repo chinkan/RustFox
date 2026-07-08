@@ -92,6 +92,8 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "Upgrade the bot to the latest version (source or release binary)",
         ),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
+        BotCommand::new("stop", "Cancel the current processing gracefully"),
+        BotCommand::new("btw", "Ask a parallel question while the bot is busy"),
     ]
 }
 
@@ -793,6 +795,45 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         return send_markdown_message(&bot, msg.chat.id, reply).await;
     }
 
+    // Handle /btw <text> for parallel question via isolated subagent
+    if text == "/btw" || text.starts_with("/btw ") {
+        let btw_text = text
+            .strip_prefix("/btw")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("What are you doing?")
+            .to_string();
+
+        // Reply immediately, then answer in background
+        let _ = send_markdown_message(
+            &bot,
+            msg.chat.id,
+            "⏳ **BTW question sent to subagent...**",
+        )
+        .await;
+
+        let agent_clone = agent.clone();
+        let bot_clone = bot.clone();
+        let chat_id = msg.chat.id;
+        tokio::spawn(async move {
+            match agent_clone.ask_parallel(&btw_text).await {
+                Ok(answer) => {
+                    let _ = send_markdown_message(&bot_clone, chat_id, &answer).await;
+                }
+                Err(e) => {
+                    let _ = send_markdown_message(
+                        &bot_clone,
+                        chat_id,
+                        &format!("**BTW error:** {}", e),
+                    )
+                    .await;
+                }
+            }
+        });
+
+        return Ok(());
+    }
+
     // Combined parse_command dispatch for /self-upgrade and /models.
     if let Some((cmd, arg)) = parse_command(&text) {
         match cmd.as_str() {
@@ -932,6 +973,51 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                 return Ok(());
             }
             _ => {} // ignore unknown commands for now
+        }
+    }
+
+    // Handle /stop command
+    if text == "/stop" {
+        if agent
+            .cancel_processing(&user_id.to_string())
+            .await
+        {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "⏹ **Processing cancelled.** Accumulated state has been saved.",
+            )
+            .await;
+        } else {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "Nothing is currently processing.",
+            )
+            .await;
+        }
+    }
+
+    // CHECK: if user is currently being processed, queue non-command messages as injection
+    if !text.starts_with('/') && agent.is_processing(&user_id.to_string()).await {
+        if agent
+            .queue_injection(&user_id.to_string(), &text)
+            .await
+        {
+            info!("Queued '{}' as injection for user {}", text, user_id);
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "📨 **Message queued** — will inject into current processing at the next step.",
+            )
+            .await;
+        } else {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "⚠️ **Injection queue full** (max 10). Please wait for current processing to finish.",
+            )
+            .await;
         }
     }
 
