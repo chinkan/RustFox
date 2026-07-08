@@ -408,6 +408,63 @@ impl Agent {
         Ok(())
     }
 
+    /// Register a CancellationToken for the given user_id before processing starts.
+    /// Called at the start of process_message. Returns the token for cancellation checks.
+    pub async fn register_cancel_token(&self, user_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.cancel_token_registry
+            .lock()
+            .await
+            .insert(user_id.to_string(), token.clone());
+        token
+    }
+
+    /// Cancel processing for a user. Returns true if there was an active token.
+    pub async fn cancel_processing(&self, user_id: &str) -> bool {
+        let mut map = self.cancel_token_registry.lock().await;
+        if let Some(token) = map.remove(user_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a user has active processing.
+    pub async fn is_processing(&self, user_id: &str) -> bool {
+        self.cancel_token_registry
+            .lock()
+            .await
+            .contains_key(user_id)
+    }
+
+    /// Queue an injection message for a user. Returns false if queue is full (max 10).
+    pub async fn queue_injection(&self, user_id: &str, text: &str) -> bool {
+        const MAX_INJECTIONS: usize = 10;
+        let mut map = self.pending_injections.lock().await;
+        let queue = map.entry(user_id.to_string()).or_default();
+        if queue.len() >= MAX_INJECTIONS {
+            false
+        } else {
+            queue.push(text.to_string());
+            true
+        }
+    }
+
+    /// Drain all pending injection messages for a user.
+    pub async fn drain_injections(&self, user_id: &str) -> Vec<String> {
+        let mut map = self.pending_injections.lock().await;
+        map.remove(user_id).unwrap_or_default()
+    }
+
+    /// Remove cancel token for a user (called on process_message exit).
+    pub async fn clear_cancel_token(&self, user_id: &str) {
+        self.cancel_token_registry
+            .lock()
+            .await
+            .remove(user_id);
+    }
+
     /// Fetch the context window size for the current model from the
     /// provider API and cache it. Non-fatal — uses static fallback on
     /// failure.
