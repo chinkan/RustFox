@@ -12,6 +12,7 @@ use crate::agent::{Agent, MidRunMode};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
+use crate::utils::rich_sender;
 use crate::utils::telegram_markdown::escape_text;
 use std::sync::OnceLock;
 
@@ -228,31 +229,45 @@ pub async fn run(
     Ok(())
 }
 
-/// Send a markdown string as entity-formatted message(s), splitting if needed.
-/// Returns Ok if at least one message was sent successfully.
+/// Send a markdown string as a rich message via sendRichMessage, falling back
+/// to entity-formatted sendMessage on failure.
 async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
-    const MAX_UTF16: usize = 4090;
-    let (plain_text, entities) = markdown_to_entities(markdown);
-    let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+    let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
 
-    if chunks.is_empty() {
-        bot.send_message(chat_id, "Done.").await?;
-        return Ok(());
-    }
+    let entity_sender = || async {
+        let (text, entities) = markdown_to_entities(markdown);
+        let chunks = split_entities(&text, &entities, 4090);
+        if chunks.is_empty() {
+            return Ok::<_, teloxide::RequestError>(());
+        }
+        for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
+            if i == 0 {
+                bot.send_message(chat_id, chunk_text)
+                    .entities(chunk_entities.clone())
+                    .await?;
+            } else {
+                bot.send_message(chat_id, chunk_text)
+                    .entities(chunk_entities.clone())
+                    .await
+                    .ok();
+            }
+        }
+        Ok(())
+    };
 
-    for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
-        if i == 0 {
-            bot.send_message(chat_id, chunk_text)
-                .entities(chunk_entities.clone())
-                .await?;
-        } else {
-            bot.send_message(chat_id, chunk_text)
-                .entities(chunk_entities.clone())
-                .await
-                .ok();
+    match rich_sender::try_send_rich_fallback(token, chat_id.0, markdown, &entity_sender).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // try_send_rich_fallback already handled BadMarkdown by calling
+            // entity_sender internally. If that fallback also failed (or the
+            // rich path had a network error), propagate the error — retrying
+            // the entity path here would re-send already-delivered chunks.
+            warn!("send_rich_message all paths failed: {e}");
+            Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
+                format!("{e}"),
+            ))))
         }
     }
-    Ok(())
 }
 
 fn is_verbose_enabled(value: Option<&str>) -> bool {
