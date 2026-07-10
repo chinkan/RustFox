@@ -821,7 +821,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         return send_markdown_message(&bot, msg.chat.id, reply).await;
     }
 
-    // Handle /btw <text> for parallel question via isolated subagent
+    // Handle /btw <text> for context-forked side question
     if text == "/btw" || text.starts_with("/btw ") {
         let btw_text = text
             .strip_prefix("/btw")
@@ -834,13 +834,38 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let _ = send_markdown_message(&bot, msg.chat.id, "⏳ **BTW question sent to subagent...**")
             .await;
 
+        // Load current conversation messages for context fork
+        let conversation_id = agent
+            .memory
+            .get_or_create_conversation("telegram", &user_id.to_string())
+            .await;
+        let conversation_id = match conversation_id {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = send_markdown_message(&bot, msg.chat.id, &format!("**BTW error:** {}", e))
+                    .await;
+                return Ok(());
+            }
+        };
+        let messages = agent
+            .memory
+            .load_messages_with_limit(&conversation_id, agent.config.memory.max_raw_messages)
+            .await
+            .unwrap_or_default();
+
         let agent_clone = agent.clone();
         let bot_clone = bot.clone();
         let chat_id = msg.chat.id;
         tokio::spawn(async move {
-            match agent_clone.ask_parallel_lightweight(&btw_text).await {
-                Ok(answer) => {
-                    let _ = send_markdown_message(&bot_clone, chat_id, &answer).await;
+            let forked = crate::agent::build_btw_context(&messages, &btw_text);
+            match agent_clone.llm.chat(&forked, &[]).await {
+                Ok(response) => {
+                    let text = response
+                        .content
+                        .as_ref()
+                        .map(|c| c.as_text())
+                        .unwrap_or_default();
+                    let _ = send_markdown_message(&bot_clone, chat_id, &text).await;
                 }
                 Err(e) => {
                     let _ = send_markdown_message(

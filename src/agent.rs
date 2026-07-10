@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::langsmith::LangSmithClient;
 use crate::llm::{
     is_empty_assistant_response, ChatMessage, ContentPart, FunctionDefinition, LlmClient,
-    MessageContent, ToolDefinition,
+    MessageContent, ToolCall, ToolDefinition,
 };
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
@@ -2686,38 +2686,6 @@ impl Agent {
         )
     }
 
-    /// Ask a parallel question while the main agent is processing.
-    /// Single LLM call, no tools, no DB access — truly parallel, zero lock contention.
-    /// Answer is ephemeral and NOT saved to conversation history.
-    pub async fn ask_parallel_lightweight(&self, question: &str) -> Result<String> {
-        let system = format!(
-            "Answer the user's side question concisely from your knowledge. \
-             You have NO tools available. Respond in a single message. \
-             Current time: {}",
-            self.build_system_context().await,
-        );
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::from_text(system)),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::from_text(question.to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
-        let response = self.llm.chat(&messages, &[]).await?;
-        Ok(response
-            .content
-            .as_ref()
-            .map(|c| c.as_text())
-            .unwrap_or_default())
-    }
-
     /// Get the path for a soul file by name.
     fn soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
         let home = self
@@ -3962,6 +3930,83 @@ impl Agent {
     }
 }
 
+/// Build a context-forked message list for a /btw side question.
+///
+/// Follows Claude Code's pattern: fork the current conversation messages,
+/// strip orphaned tool_use blocks (no matching tool_result), and append a
+/// strict system-reminder that constrains the model to answer from context
+/// only, with no tools and no follow-up turns.
+///
+/// The returned messages are ephemeral — they are NOT saved to conversation
+/// history and the /btw response is sent asynchronously.
+///
+/// This is a free function (not a method) because it only uses its arguments.
+pub fn build_btw_context(messages: &[ChatMessage], question: &str) -> Vec<ChatMessage> {
+    // 1. Collect all tool_call_ids that have a matching tool_result.
+    let mut resolved_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for msg in messages.iter().rev() {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                resolved_ids.insert(id.as_str());
+            }
+        }
+    }
+
+    // 2. Walk messages and strip orphaned tool_use blocks from assistant messages.
+    let forked: Vec<ChatMessage> = messages
+        .iter()
+        .map(|msg| {
+            if msg.role == "assistant" {
+                if let Some(ref calls) = msg.tool_calls {
+                    let kept: Vec<ToolCall> = calls
+                        .iter()
+                        .filter(|tc| resolved_ids.contains(tc.id.as_str()))
+                        .cloned()
+                        .collect();
+                    if kept.len() != calls.len() {
+                        let mut stripped = msg.clone();
+                        if kept.is_empty() {
+                            stripped.tool_calls = None;
+                        } else {
+                            stripped.tool_calls = Some(kept);
+                        }
+                        return stripped;
+                    }
+                }
+            }
+            msg.clone()
+        })
+        .collect();
+
+    // 3. Append strict system-reminder with the question.
+    let reminder = format!(
+        r#"<system-reminder>
+This is a side question from the user. You must answer this question directly in a single response.
+
+CRITICAL CONSTRAINTS:
+- You have NO tools available — you cannot read files, run commands, search, or take any actions
+- This is a one-off response — there will be no follow-up turns
+- You can ONLY provide information based on what you already know from the conversation context
+- NEVER say things like "Let me try...", "I'll now...", "Let me check...", or promise to take any action
+- If you don't know the answer, say so — do not offer to look it up or investigate
+
+Simply answer the question with the information you have.
+</system-reminder>
+
+{}"#,
+        question
+    );
+
+    let mut result = forked;
+    result.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(MessageContent::from_text(reminder)),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    result
+}
+
 /// Parse an ISO 8601 datetime string and return the Duration until it fires.
 /// Returns Err if the string is invalid or the time is in the past.
 fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
@@ -4481,5 +4526,90 @@ mod tests {
             section.contains(&shared),
             "section should embed the shared preamble exactly"
         );
+    }
+
+    #[test]
+    fn test_build_btw_context_removes_orphaned_tool_use() {
+        use crate::llm::{FunctionCall, ToolCall};
+        let assistant = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "orphaned_call".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"x"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let msgs = vec![assistant];
+        let result = build_btw_context(&msgs, "test question");
+        let forked = &result[..result.len() - 1];
+        for msg in forked {
+            if let Some(ref calls) = msg.tool_calls {
+                assert!(calls.is_empty(), "orphaned tool_use should be stripped");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_btw_context_preserves_matched_tool_calls() {
+        use crate::llm::{FunctionCall, ToolCall};
+        let tool_msg = ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::from_text("result")),
+            tool_calls: None,
+            tool_call_id: Some("call_1".into()),
+        };
+        let assistant = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"x"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let msgs = vec![tool_msg, assistant];
+        let result = build_btw_context(&msgs, "test question");
+        let forked = &result[..result.len() - 1];
+        let has_tool_calls = forked
+            .iter()
+            .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
+        assert!(has_tool_calls, "matched tool_use should be preserved");
+    }
+
+    #[test]
+    fn test_build_btw_context_text_only_messages_unchanged() {
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::from_text("hello")),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let result = build_btw_context(&msgs, "question");
+        assert!(result.len() > msgs.len(), "should append question");
+        assert_eq!(
+            result[0].content.as_ref().map(|c| c.as_text()),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_btw_context_empty_list() {
+        let result = build_btw_context(&[], "question");
+        assert_eq!(result.len(), 1, "only the question message");
+        assert!(result[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default()
+            .contains("question"));
     }
 }
