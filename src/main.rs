@@ -208,6 +208,8 @@ async fn main() -> Result<()> {
     // Create Bot early so it can be passed to Agent
     let bot = Arc::new(teloxide::Bot::new(&config.telegram.bot_token));
 
+    rustfox::platform::telegram::init_bot_token(config.telegram.bot_token.clone());
+
     // Channel for dispatching scheduled job work from fire closures to background runner
     let (job_tx, mut job_rx) =
         tokio::sync::mpsc::unbounded_channel::<rustfox::agent::ScheduledJobRequest>();

@@ -13,6 +13,14 @@ use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::telegram_markdown::escape_text;
+use std::sync::OnceLock;
+
+static BOT_TOKEN: OnceLock<String> = OnceLock::new();
+
+/// Must be called once at startup after the Bot is created.
+pub fn init_bot_token(token: String) {
+    BOT_TOKEN.set(token).ok();
+}
 
 /// Split long messages for Telegram's 4096 char limit
 #[cfg(test)]
