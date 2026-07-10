@@ -37,18 +37,57 @@ send_rich_message()  ──►  POST /sendRichMessage
     │                              ├─ success (200) → native Telegram rendering
     │                              │   (RichBlockTable, rich text, lists, etc.)
     │                              │
-    │                              └─ HTTP 400 ──► sendMessage(entities) fallback
+    │                              └─ RichSenderError::BadMarkdown(400)
+    │                                   ──► sendMessage(entities) fallback
     │
     ▼
-edit_rich_message()  ──►  POST /editMessageText { rich_message }
+edit_rich_message()  ──►  POST /editMessageText { message_id, rich_message }
                             (streaming final flush only)
+
+Error type:
+  RichSenderError::BadMarkdown(StatusCode)  → triggers fallback
+  RichSenderError::Network(String)          → propagated to caller (fatal)
 ```
 
-### New components
+### `src/utils/rich_sender.rs` — new module
 
-#### `src/utils/rich_sender.rs` — 3 public functions
+#### Rust structs for JSON serialization
 
-##### `send_rich_message(bot_token, chat_id, markdown) -> Result<Message>`
+```rust
+#[derive(Serialize)]
+struct InputRichMessage {
+    markdown: String,
+    #[serde(rename = "skip_entity_detection")]
+    skip_entity_detection: bool,
+}
+
+#[derive(Serialize)]
+struct SendRichMessagePayload {
+    chat_id: i64,
+    rich_message: InputRichMessage,
+}
+
+#[derive(Serialize)]
+struct EditRichMessagePayload {
+    chat_id: i64,
+    message_id: i32,
+    rich_message: InputRichMessage,
+}
+```
+
+#### `RichSenderError` enum
+
+```rust
+#[derive(Debug)]
+pub enum RichSenderError {
+    /// HTTP 400 from Telegram — bad markdown, triggers entity fallback.
+    BadMarkdown(String),
+    /// HTTP 5xx, network error, etc. — propagated as fatal.
+    Network(anyhow::Error),
+}
+```
+
+#### `send_rich_message(token, chat_id, markdown) -> Result<Message, RichSenderError>`
 
 Single message via `POST /bot{token}/sendRichMessage` with payload:
 
@@ -62,39 +101,75 @@ Single message via `POST /bot{token}/sendRichMessage` with payload:
 }
 ```
 
-- Pre-processes markdown using existing `preprocess_markdown()` (spoiler/underline)
-- Returns the `Message` on success
-- Returns `Err` on HTTP 400 (parse failure triggers fallback) or network errors
+- Pre-processes markdown using `preprocess_markdown()` (made `pub(crate)` in `markdown_entities.rs`)
+- Returns `Message` deserialized from Telegram's response on success
+- Returns `RichSenderError::BadMarkdown` on HTTP 400
+- Returns `RichSenderError::Network` on 5xx, timeout, connection failure
 
-##### `edit_rich_message(bot_token, chat_id, msg_id, markdown) -> Result<Message>`
+#### `edit_rich_message(token, chat_id, msg_id, markdown) -> Result<Message, RichSenderError>`
 
-Edit existing message via `POST /bot{token}/editMessageText` with `rich_message` parameter.
-Same payload shape minus `chat_id`/`message_id`.
+Edit existing message via `POST /bot{token}/editMessageText` with payload:
 
-##### `send_rich_messages(bot_token, chat_id, markdown) -> Result<()>`
+```json
+{
+  "chat_id": 12345,
+  "message_id": 678,
+  "rich_message": {
+    "markdown": "...",
+    "skip_entity_detection": true
+  }
+}
+```
 
-Auto-chunks long markdown content at `\n` boundaries (max 4000 UTF-16 code units).
-Sends chunks sequentially via `send_rich_message`. Returns error if the first chunk
-fails (subsequent chunk errors are logged but ignored, matching current behaviour).
+Note: `editMessageText` requires both `chat_id` AND `message_id`.
+The `rich_message` field is an additional parameter alongside the existing fields.
 
-#### `try_send_rich_fallback(bot_token, chat_id, markdown, entity_sender)` — fallback helper
+#### `send_rich_messages(token, chat_id, markdown) -> Result<(), RichSenderError>`
 
-1. Pre-process markdown
+Auto-chunks long markdown content at `\n` boundaries (max 4090 UTF-16 code units —
+matching the existing entity split limit for consistency). Sends chunks sequentially
+via `send_rich_message`. Returns error if the first chunk fails (subsequent chunk
+errors are logged but ignored).
+
+#### `try_send_rich_fallback(token, chat_id, markdown, entity_sender) -> Result<()>`
+
+Helper that implements the try-rich-then-fallback pattern:
+
+1. Pre-process markdown via `preprocess_markdown()`
 2. Try `send_rich_messages`
-3. On HTTP 400: call `entity_sender` closure (the existing entity pipeline)
-4. On network error: propagate error
+3. On `RichSenderError::BadMarkdown`: call `entity_sender` closure with original markdown
+4. On `RichSenderError::Network`: propagate to caller (fatal)
 
 ### Changes to existing files
 
+#### `src/utils/markdown_entities.rs`
+
+- Change `preprocess_markdown()` from private `fn` to `pub(crate) fn` so `rich_sender.rs` can call it.
+- `postprocess_entities()`, `markdown_to_entities()`, `split_entities()` — unchanged (used by fallback path).
+
 #### `src/platform/telegram.rs`
+
+**Token storage:**
+
+Add a module-level `OnceLock<String>` to store the bot token at startup:
+
+```rust
+use std::sync::OnceLock;
+
+static BOT_TOKEN: OnceLock<String> = OnceLock::new();
+
+pub fn init_bot_token(token: String) {
+    BOT_TOKEN.set(token).ok();
+}
+```
+
+Called once during `run_bot()` in `main.rs` after `Bot::new(&config.telegram.bot_token)`.
 
 **`send_markdown_message()` (line 225):**
 
-Replace current entity-only implementation with:
-
 ```rust
 async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
-    let token = bot.inner().token();  // or passed from main
+    let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
     let entity_sender = |md: &str| {
         let (text, entities) = markdown_to_entities(md);
         let chunks = split_entities(&text, &entities, 4090);
@@ -105,67 +180,96 @@ async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> Re
                 bot.send_message(chat_id, t).entities(e.clone()).await.ok();
             }
         }
-        Ok(())
+        Ok::<_, teloxide::RequestError>(())
     };
-    try_send_rich_fallback(token, chat_id, markdown, entity_sender).await?;
-    Ok(())
+    match try_send_rich_fallback(token, chat_id, markdown, &entity_sender).await {
+        Ok(()) => Ok(()),
+        Err(RichSenderError::Network(e)) => {
+            tracing::warn!(error = %e, "send_rich_message network error, fallback skipped");
+            // entity_sender already called inside try_send_rich_fallback on BadMarkdown;
+            // Network errors mean we propagate
+            entity_sender(markdown).await.map_err(|_| {
+                teloxide::request::RequestError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })
+        }
+    }
 }
 ```
 
 **Streaming final flush (lines 1214-1241):**
 
-On final flush, for the first chunk (which has an existing `msg_id` from streaming):
+On final flush, for the first chunk (existing `msg_id` from streaming):
 ```rust
-edit_rich_message(token, chat_id, msg_id, chunk_markdown).await.ok()
+if let Some(msg_id) = current_msg_id {
+    if edit_rich_message(token, stream_chat_id, msg_id.0 as i32, &chunk_markdown).await.is_err() {
+        // fallback to entity edit
+        stream_bot.edit_message_text(stream_chat_id, msg_id, chunk_text)
+            .entities(chunk_entities.clone()).await.ok();
+    }
+}
 ```
-Fall back to current entity-based edit on failure.
 
 For trailing chunks (new messages):
 ```rust
-send_rich_message(token, chat_id, chunk_markdown).await.ok()
+if send_rich_message(token, stream_chat_id, &chunk_markdown).await.is_err() {
+    stream_bot.send_message(stream_chat_id, chunk_text)
+        .entities(chunk_entities.clone()).await.ok();
+}
 ```
 
-The streaming path pre-processes the full accumulated markdown.
+#### `src/main.rs`
 
-#### `src/utils/markdown_entities.rs`
+After `let bot = Arc::new(teloxide::Bot::new(&config.telegram.bot_token));`, add:
 
-No changes needed — entity pipeline is retained as the fallback path.
+```rust
+rustfox::platform::telegram::init_bot_token(config.telegram.bot_token.clone());
+```
 
 ### Data flow
 
 1. LLM produces markdown (may include `| A | B |\n|---|---|\n| 1 | 2 |` tables)
 2. `send_markdown_message` receives the markdown string
 3. `preprocess_markdown()` converts `||spoiler||` and `<u>underline</u>` (same as today)
-4. `send_rich_messages` chunks at `\n` boundaries, max 4000 UTF-16 per chunk
+4. `send_rich_messages` chunks at `\n` boundaries, max 4090 UTF-16 per chunk
 5. Each chunk POSTed to `/sendRichMessage` with `InputRichMessage { markdown, skip_entity_detection: true }`
 6. Telegram server parses markdown into RichBlock tree — tables become `RichBlockTable`
-7. On HTTP 400: retry with `markdown_to_entities` + `sendMessage(entities)` path
+7. On `RichSenderError::BadMarkdown`: retry with `markdown_to_entities` + `sendMessage(entities)` path
+8. On `RichSenderError::Network`: log warning, try entity fallback as last resort
 
 ### Error handling
 
 | Scenario | Behaviour |
 |----------|-----------|
-| `sendRichMessage` returns 400 (bad markdown) | Fall back to entity-based `sendMessage` |
-| `sendRichMessage` returns 5xx or network error | Propagate to caller (same as current) |
-| First chunk fails | Return error to caller |
-| Subsequent chunk fails | Log warning, skip chunk (same as current entity split) |
-| `edit_rich_message` fails (streaming flush) | Fall back to entity-based edit |
+| `sendRichMessage` returns 400 (bad markdown) | Fall back to entity-based `sendMessage` for full content |
+| `sendRichMessage` returns 5xx or network error | Log warning, attempt entity fallback |
+| First chunk fails (any error) | Full content retried via entity fallback (entire message falls back) |
+| Subsequent chunk fails after rich success | Log warning, skip chunk (degradation: part of message lost) |
+| `edit_rich_message` fails (streaming flush) | Fall back to entity-based edit for that chunk |
+| Bot API server too old (no `sendRichMessage`) | Every call returns 400, all messages fall back to entities |
+| `preprocess_markdown` is called on original markdown (not pre-processed) for entity fallback | Entities handle spoiler/underline independently via their own pipeline |
 
 ### Testing
 
-- **Unit test `test_rich_sender_chunking`**: verify markdown is split at newline boundaries, max 4000 UTF-16
-- **Integration test `test_rich_sender_api`**: mock HTTP responses for sendRichMessage
+- **Unit test `test_rich_sender_chunking`**: verify markdown is split at newline boundaries, max 4090 UTF-16
+- **Unit test `test_rich_sender_error_type`**: verify `RichSenderError` variants match expected discriminator
+- **Integration test `test_rich_sender_api`**: mock HTTP responses for sendRichMessage (400 vs 200)
 - **Existing entity tests unchanged**: entity path still works as fallback
 
 ### Dependencies
 
 No new crate dependencies. `reqwest` already in `Cargo.toml` (used by `llm.rs`).
 `serde_json` already in `Cargo.toml` (used everywhere).
+`once_cell` already in dependency tree (transitive from teloxide); prefer `std::sync::OnceLock` (Rust 1.70+).
 
 ### Implementation order
 
-1. Create `src/utils/rich_sender.rs` with `send_rich_message`, `send_rich_messages`, `edit_rich_message`, `try_send_rich_fallback`
-2. Modify `src/platform/telegram.rs` — replace `send_markdown_message` to try rich first
-3. Modify streaming final flush to try rich message for edits
-4. Add unit tests for chunking + API error fallback
-5. Build, lint, test
+1. Make `preprocess_markdown` `pub(crate)` in `markdown_entities.rs`
+2. Create `src/utils/rich_sender.rs` with structs, `RichSenderError`, `send_rich_message`, `send_rich_messages`, `edit_rich_message`, `try_send_rich_fallback`
+3. Add `init_bot_token()` and `BOT_TOKEN` static to `telegram.rs`; wire in `main.rs`
+4. Modify `send_markdown_message()` in `telegram.rs` — try rich first, fall back to entities
+5. Modify streaming final flush to try rich message for edits (new messages too)
+6. Add unit tests for chunking + API error fallback
+7. `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
