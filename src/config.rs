@@ -325,6 +325,45 @@ pub struct AgentConfig {
     pub empty_response_retry_limit: u32,
     #[serde(default = "default_parse_retry_limit")]
     pub parse_retry_limit: u32,
+    #[serde(default)]
+    pub loop_detection: LoopDetectionConfig,
+}
+
+/// Tunables for the agentic-loop repetition detector. When `enabled` is true
+/// and the model emits the same tool call (same tool name + identical
+/// arguments) at least `threshold` times within a sliding window, the loop
+/// detector surfaces a `LoopDetected` event to the agent loop so the user
+/// can be notified and choose to break the cycle.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoopDetectionConfig {
+    #[serde(default = "default_loop_detection_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_loop_detection_threshold")]
+    pub threshold: usize,
+    #[serde(default = "default_loop_detection_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for LoopDetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_detection_enabled(),
+            threshold: default_loop_detection_threshold(),
+            timeout_seconds: default_loop_detection_timeout_seconds(),
+        }
+    }
+}
+
+fn default_loop_detection_enabled() -> bool {
+    true
+}
+
+fn default_loop_detection_threshold() -> usize {
+    3
+}
+
+fn default_loop_detection_timeout_seconds() -> u64 {
+    120
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -469,6 +508,7 @@ fn default_agent_config() -> AgentConfig {
         max_iterations: default_max_iterations(),
         empty_response_retry_limit: default_empty_response_retry_limit(),
         parse_retry_limit: default_parse_retry_limit(),
+        loop_detection: LoopDetectionConfig::default(),
     }
 }
 
@@ -549,6 +589,13 @@ impl Config {
     /// Parse retry limit for missing 'choices' field (from [agent] parse_retry_limit, default 3).
     pub fn parse_retry_limit(&self) -> u32 {
         self.agent.parse_retry_limit
+    }
+
+    /// Loop detection tunables (from [agent.loop_detection], defaults: enabled,
+    /// threshold 3, timeout 120s). Used by the agent loop to short-circuit
+    /// exact-repetition cycles and surface a `LoopDetected` event to the user.
+    pub fn loop_detection_config(&self) -> &LoopDetectionConfig {
+        &self.agent.loop_detection
     }
 
     /// Resolve the home root and every data path, create directories, and write
@@ -1091,6 +1138,75 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.agent.parse_retry_limit, 0);
         assert_eq!(cfg.parse_retry_limit(), 0);
+    }
+
+    #[test]
+    fn test_loop_detection_defaults_when_agent_section_omitted() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let ld = cfg.loop_detection_config();
+        assert!(ld.enabled, "loop_detection.enabled must default to true");
+        assert_eq!(
+            ld.threshold, 3,
+            "loop_detection.threshold must default to 3"
+        );
+        assert_eq!(
+            ld.timeout_seconds, 120,
+            "loop_detection.timeout_seconds must default to 120"
+        );
+    }
+
+    #[test]
+    fn test_loop_detection_can_be_overridden() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent.loop_detection]
+            enabled = false
+            threshold = 5
+            timeout_seconds = 30
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let ld = cfg.loop_detection_config();
+        assert!(!ld.enabled);
+        assert_eq!(ld.threshold, 5);
+        assert_eq!(ld.timeout_seconds, 30);
+    }
+
+    #[test]
+    fn test_loop_detection_partial_override_uses_defaults_for_rest() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent.loop_detection]
+            threshold = 7
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let ld = cfg.loop_detection_config();
+        assert!(
+            ld.enabled,
+            "enabled should keep its default when only threshold is set"
+        );
+        assert_eq!(ld.threshold, 7);
+        assert_eq!(ld.timeout_seconds, 120);
     }
 
     #[test]

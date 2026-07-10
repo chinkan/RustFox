@@ -103,6 +103,11 @@ Be concise and helpful."""
 # empty_response_retry_limit = 3   # Recovery attempts for empty model responses (default 3; 0 = fail immediately)
 # parse_retry_limit = 3            # Retries when API response is missing 'choices' field (default 3; 0 = fail immediately; exponential backoff: 1s, 2s, 4s...)
 
+# [agent.loop_detection]
+# enabled = true          # Detect exact tool-call repetition inside the agent loop (default true)
+# threshold = 3           # Repetitions of the same tool+args before a loop is flagged (default 3)
+# timeout_seconds = 120   # Idle window for the loop detector; tool calls older than this don't count (default 120)
+
 # LangSmith observability (optional)
 # Traces every LLM call and tool execution for debugging in the LangSmith UI.
 # Get your API key at https://smith.langchain.com → Settings → API Keys
