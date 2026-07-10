@@ -59,6 +59,14 @@ impl MidRunMode {
     }
 }
 
+/// User's choice when a loop is detected and an inline keyboard is shown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoopCallbackChoice {
+    Continue,
+    Stop,
+    AddInstruction,
+}
+
 /// Number of context snippets to retrieve from conversation history for
 /// compaction summarization.
 const COMPACTION_RAG_LIMIT: usize = 5;
@@ -107,6 +115,15 @@ pub struct Agent {
     /// Per-user pending injection messages (Steer/Inject), max 10 per user.
     /// When a non-command message arrives while processing is active, it's queued here.
     pub pending_injections: Arc<tokio::sync::Mutex<HashMap<String, Vec<String>>>>,
+    /// One-shot senders for loop detection callbacks, keyed by user_id.
+    /// The agent loop creates a oneshot channel, stores the sender here,
+    /// then awaits the receiver. The Telegram callback handler resolves
+    /// the sender with the user's choice.
+    pub pending_loop_callbacks: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, tokio::sync::oneshot::Sender<LoopCallbackChoice>>,
+        >,
+    >,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -186,6 +203,9 @@ impl Agent {
             running_commands: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_injections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_loop_callbacks: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -482,6 +502,27 @@ impl Agent {
     pub async fn drain_injections(&self, user_id: &str) -> Vec<String> {
         let mut map = self.pending_injections.lock().await;
         map.remove(user_id).unwrap_or_default()
+    }
+
+    /// Register a oneshot sender for a user's loop detection callback.
+    /// Returns the old sender if one was already registered (should not happen
+    /// in practice since one user has one active process_message).
+    pub async fn register_loop_callback(
+        &self,
+        user_id: &str,
+        sender: tokio::sync::oneshot::Sender<LoopCallbackChoice>,
+    ) -> Option<tokio::sync::oneshot::Sender<LoopCallbackChoice>> {
+        let mut map = self.pending_loop_callbacks.lock().await;
+        map.insert(user_id.to_string(), sender)
+    }
+
+    /// Take the loop callback sender for a user, if any.
+    pub async fn take_loop_callback(
+        &self,
+        user_id: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<LoopCallbackChoice>> {
+        let mut map = self.pending_loop_callbacks.lock().await;
+        map.remove(user_id)
     }
 
     /// Get the current MidRunMode for a user. Defaults to Steer.
