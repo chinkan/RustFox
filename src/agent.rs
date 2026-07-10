@@ -1383,6 +1383,35 @@ impl Agent {
                         messages.push(tool_msg);
                     }
 
+                    // --- Steer injection: drain pending messages between iterations ---
+                    // Without this, a steer sent during tool execution is only visible
+                    // after the next LLM call completes (the drain at line 869 fires
+                    // after the LLM call starts the next iteration).
+                    let inject_mode = self.get_mid_run_mode(user_id).await;
+                    let injections = self.drain_injections(user_id).await;
+                    if !injections.is_empty() {
+                        for text in &injections {
+                            let label = if inject_mode == MidRunMode::Steer {
+                                "**[Steer]:** "
+                            } else {
+                                "**[User injected mid-processing]:** "
+                            };
+                            let msg = ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(MessageContent::from_text(format!("{}{}", label, text))),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            };
+                            if inject_mode == MidRunMode::Queue {
+                                if let Err(e) = self.memory.save_message(&conversation_id, &msg).await {
+                                    warn!("Failed to persist queued injection: {}", e);
+                                }
+                            }
+                            messages.push(msg);
+                        }
+                    }
+                    // --- End steer injection ---
+
                     iteration_count = iteration + 1;
                     continue;
                 }
