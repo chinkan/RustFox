@@ -32,6 +32,33 @@ use std::collections::HashMap;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::oneshot;
 
+/// Mid-run mode determines how a user's message is handled when the agent
+/// is already processing a previous turn. `Steer` injects the message into
+/// the active run (interrupt the current trajectory). `Queue` stores it for
+/// the next run instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MidRunMode {
+    Steer,
+    Queue,
+}
+
+impl MidRunMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MidRunMode::Steer => "steer",
+            MidRunMode::Queue => "queue",
+        }
+    }
+
+    pub fn from_mode_str(s: &str) -> Option<Self> {
+        match s {
+            "steer" => Some(MidRunMode::Steer),
+            "queue" => Some(MidRunMode::Queue),
+            _ => None,
+        }
+    }
+}
+
 /// Number of context snippets to retrieve from conversation history for
 /// compaction summarization.
 const COMPACTION_RAG_LIMIT: usize = 5;
@@ -457,6 +484,33 @@ impl Agent {
         map.remove(user_id).unwrap_or_default()
     }
 
+    /// Get the current MidRunMode for a user. Defaults to Steer.
+    pub async fn get_mid_run_mode(&self, user_id: &str) -> MidRunMode {
+        let key = format!("mid_run_mode_{}", user_id);
+        self.memory
+            .recall("settings", &key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| MidRunMode::from_mode_str(&v))
+            .unwrap_or(MidRunMode::Steer)
+    }
+
+    /// Set the MidRunMode for a user.
+    pub async fn set_mid_run_mode(&self, user_id: &str, mode: MidRunMode) {
+        let key = format!("mid_run_mode_{}", user_id);
+        self.memory
+            .remember("settings", &key, mode.as_str(), None)
+            .await
+            .ok();
+    }
+
+    /// Delete the MidRunMode for a user (resets to default).
+    pub async fn delete_mid_run_mode(&self, user_id: &str) {
+        let key = format!("mid_run_mode_{}", user_id);
+        self.memory.forget("settings", &key).await.ok();
+    }
+
     /// Remove cancel token for a user (called on process_message exit).
     pub async fn clear_cancel_token(&self, user_id: &str) {
         self.cancel_token_registry.lock().await.remove(user_id);
@@ -754,29 +808,6 @@ impl Agent {
                 break;
             }
 
-            // CHECK: pending injections from user?
-            let injections = self.drain_injections(user_id).await;
-            for text in &injections {
-                let inject_msg = ChatMessage {
-                    role: "user".to_string(),
-                    content: Some(MessageContent::from_text(format!(
-                        "**[User injected mid-processing]:** {}",
-                        text
-                    ))),
-                    tool_calls: None,
-                    tool_call_id: None,
-                };
-                // Save to persistent memory
-                if let Err(e) = self
-                    .memory
-                    .save_message(&conversation_id, &inject_msg)
-                    .await
-                {
-                    warn!("Failed to persist injected message: {}", e);
-                }
-                messages.push(inject_msg);
-            }
-
             // --- Empty response recovery: retry loop ---
             let mut retry_count = 0u32;
             let response: ChatMessage;
@@ -832,6 +863,31 @@ impl Agent {
                         error: None,
                         end_time: Self::now_iso8601_static(),
                     });
+                }
+            }
+
+            // CHECK: pending injections from user (steer or queue based on mode)
+            let inject_mode = self.get_mid_run_mode(user_id).await;
+            let injections = self.drain_injections(user_id).await;
+            if !injections.is_empty() {
+                let label = if inject_mode == MidRunMode::Steer {
+                    "**[Steer]:** "
+                } else {
+                    "**[User injected mid-processing]:** "
+                };
+                for text in &injections {
+                    let msg = ChatMessage {
+                        role: "user".to_string(),
+                        content: Some(MessageContent::from_text(format!("{}{}", label, text))),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    };
+                    if inject_mode == MidRunMode::Queue {
+                        if let Err(e) = self.memory.save_message(&conversation_id, &msg).await {
+                            warn!("Failed to persist queued injection: {}", e);
+                        }
+                    }
+                    messages.push(msg);
                 }
             }
 
@@ -1871,7 +1927,10 @@ impl Agent {
 
     /// Clear conversation history for a user
     pub async fn clear_conversation(&self, platform: &str, user_id: &str) -> Result<()> {
-        self.memory.clear_conversation(platform, user_id).await
+        self.memory.clear_conversation(platform, user_id).await?;
+        // Reset mid-run mode to default (Steer)
+        self.delete_mid_run_mode(user_id).await;
+        Ok(())
     }
 
     /// Get all tool definitions for display
@@ -2599,31 +2658,35 @@ impl Agent {
     }
 
     /// Ask a parallel question while the main agent is processing.
-    /// Spawns an isolated ad-hoc subagent with timestamp/location context.
-    /// Returns the subagent's answer or an error message.
-    pub async fn ask_parallel(&self, question: &str) -> Result<String> {
-        let answer = self
-            .run_subagent(
-                None,
-                "Answer the user's follow-up question concisely and accurately using your knowledge.",
-                question,
-                None,
-                None,
-            )
-            .await;
-        // Detect error patterns from run_subagent/run_subagent_loop:
-        // - "Subagent '...' error: ..." (API error)
-        // - "Subagent '...' reached the maximum number of iterations" (max iterations)
-        // - "Subagent '...' returned an empty response after ... attempts" (empty response)
-        if answer.starts_with("Subagent '")
-            && (answer.contains("error")
-                || answer.contains("reached the maximum")
-                || answer.contains("empty response"))
-        {
-            Err(anyhow::anyhow!("{}", answer))
-        } else {
-            Ok(answer)
-        }
+    /// Single LLM call, no tools, no DB access — truly parallel, zero lock contention.
+    /// Answer is ephemeral and NOT saved to conversation history.
+    pub async fn ask_parallel_lightweight(&self, question: &str) -> Result<String> {
+        let system = format!(
+            "Answer the user's side question concisely from your knowledge. \
+             You have NO tools available. Respond in a single message. \
+             Current time: {}",
+            self.build_system_context().await,
+        );
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text(system)),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text(question.to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let response = self.llm.chat(&messages, &[]).await?;
+        Ok(response
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default())
     }
 
     /// Get the path for a soul file by name.

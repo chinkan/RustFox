@@ -8,7 +8,7 @@ use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, MidRunMode};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
@@ -92,6 +92,7 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "Upgrade the bot to the latest version (source or release binary)",
         ),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
+        BotCommand::new("mode", "Set steer/queue mode for mid-processing messages"),
         BotCommand::new("stop", "Cancel the current processing gracefully"),
         BotCommand::new("btw", "Ask a parallel question while the bot is busy"),
     ]
@@ -814,7 +815,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let bot_clone = bot.clone();
         let chat_id = msg.chat.id;
         tokio::spawn(async move {
-            match agent_clone.ask_parallel(&btw_text).await {
+            match agent_clone.ask_parallel_lightweight(&btw_text).await {
                 Ok(answer) => {
                     let _ = send_markdown_message(&bot_clone, chat_id, &answer).await;
                 }
@@ -974,6 +975,50 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         }
     }
 
+    // Handle /mode command
+    if text.starts_with("/mode") {
+        let parts: Vec<&str> = text.splitn(2, |c: char| c.is_whitespace()).collect();
+        let sub = parts.get(1).copied().unwrap_or("");
+        if sub == "steer" {
+            agent
+                .set_mid_run_mode(&user_id.to_string(), MidRunMode::Steer)
+                .await;
+            return send_markdown_message(
+                &bot, msg.chat.id,
+                "🔄 **Mode set to steer.** Mid-processing messages will be injected as steering context.",
+            ).await;
+        } else if sub == "queue" {
+            agent
+                .set_mid_run_mode(&user_id.to_string(), MidRunMode::Queue)
+                .await;
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "🔄 **Mode set to queue.** Mid-processing messages will wait for the next turn.",
+            )
+            .await;
+        } else if sub.is_empty() {
+            let current = agent.get_mid_run_mode(&user_id.to_string()).await;
+            let mode_str = current.as_str();
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                &format!(
+                    "Current mode: **{}**\n\nUse `/mode steer` or `/mode queue` to change.",
+                    mode_str
+                ),
+            )
+            .await;
+        } else {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "Unknown mode. Use `/mode steer` or `/mode queue`.",
+            )
+            .await;
+        }
+    }
+
     // Handle /stop command
     if text == "/stop" {
         if agent.cancel_processing(&user_id.to_string()).await {
@@ -991,15 +1036,9 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     // CHECK: if user is currently being processed, queue non-command messages as injection
     if !text.starts_with('/') && agent.is_processing(&user_id.to_string()).await {
-        if agent.queue_injection(&user_id.to_string(), &text).await {
-            info!("Queued '{}' as injection for user {}", text, user_id);
-            return send_markdown_message(
-                &bot,
-                msg.chat.id,
-                "📨 **Message queued** — will inject into current processing at the next step.",
-            )
-            .await;
-        } else {
+        let current_mode = agent.get_mid_run_mode(&user_id.to_string()).await;
+        let maxed = !agent.queue_injection(&user_id.to_string(), &text).await;
+        if maxed {
             return send_markdown_message(
                 &bot,
                 msg.chat.id,
@@ -1007,6 +1046,19 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             )
             .await;
         }
+        info!(
+            "Queued '{}' as injection for user {} (mode: {:?})",
+            text, user_id, current_mode
+        );
+        let confirm = match current_mode {
+            MidRunMode::Steer => {
+                "📨 **Steer queued** — will inject into current processing at next step."
+            }
+            MidRunMode::Queue => {
+                "📨 **Message queued** — will process after current task completes."
+            }
+        };
+        return send_markdown_message(&bot, msg.chat.id, confirm).await;
     }
 
     // Send "typing" indicator

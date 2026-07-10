@@ -19,8 +19,91 @@
 //! characters whose UTF-16 representation differs from UTF-8.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use teloxide::types::MessageEntity;
+use teloxide::types::{MessageEntity, MessageEntityKind};
 use tracing::warn;
+
+/// Private Use Area sentinels for Telegram-specific inline formatting.
+const SPOILER_START: char = '\u{E000}';
+const SPOILER_END: char = '\u{E001}';
+const UL_START: char = '\u{E002}';
+const UL_END: char = '\u{E003}';
+
+fn preprocess_markdown(md: &str) -> String {
+    let ul_open: String = [UL_START, 'U'].iter().collect();
+    let ul_close: String = [UL_END, '/', 'u'].iter().collect();
+    let spoiler_open: String = [SPOILER_START, 'S'].iter().collect();
+    let spoiler_close: String = [SPOILER_END, '/', 's'].iter().collect();
+
+    let md = md.replace("<u>", &ul_open).replace("</u>", &ul_close);
+    let re = regex::Regex::new(r"\|\|(.*?)\|\|").unwrap();
+    re.replace_all(&md, format!("{spoiler_open}$1{spoiler_close}"))
+        .to_string()
+}
+
+fn postprocess_entities(plain: &mut String, entities: &mut Vec<MessageEntity>) {
+    let mut utf16_offset = 0usize;
+    let mut out = String::new();
+    let mut stack: Vec<(MessageEntityKind, usize)> = Vec::new();
+    let chars: Vec<char> = plain.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        match chars[i] {
+            c if c == SPOILER_START && i + 1 < chars.len() && chars[i + 1] == 'S' => {
+                stack.push((MessageEntityKind::Spoiler, utf16_offset));
+                i += 2;
+                continue;
+            }
+            c if c == SPOILER_END
+                && i + 2 < chars.len()
+                && chars[i + 1] == '/'
+                && chars[i + 2] == 's' =>
+            {
+                if let Some(idx) = stack
+                    .iter()
+                    .rposition(|(k, _)| *k == MessageEntityKind::Spoiler)
+                {
+                    let (_, start) = stack.remove(idx);
+                    let len = utf16_offset - start;
+                    if len > 0 {
+                        entities.push(MessageEntity::spoiler(start, len));
+                    }
+                }
+                i += 3;
+                continue;
+            }
+            c if c == UL_START && i + 1 < chars.len() && chars[i + 1] == 'U' => {
+                stack.push((MessageEntityKind::Underline, utf16_offset));
+                i += 2;
+                continue;
+            }
+            c if c == UL_END
+                && i + 2 < chars.len()
+                && chars[i + 1] == '/'
+                && chars[i + 2] == 'u' =>
+            {
+                if let Some(idx) = stack
+                    .iter()
+                    .rposition(|(k, _)| *k == MessageEntityKind::Underline)
+                {
+                    let (_, start) = stack.remove(idx);
+                    let len = utf16_offset - start;
+                    if len > 0 {
+                        entities.push(MessageEntity::underline(start, len));
+                    }
+                }
+                i += 3;
+                continue;
+            }
+            _ => {
+                out.push(chars[i]);
+                utf16_offset += chars[i].len_utf16();
+                i += 1;
+            }
+        }
+    }
+    *plain = out;
+}
 
 /// Convert `markdown` to a `(plain_text, entities)` pair ready to pass to Telegram.
 ///
@@ -41,7 +124,8 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_GFM);
 
-    let parser = Parser::new_ext(markdown, options);
+    let processed = preprocess_markdown(markdown);
+    let parser = Parser::new_ext(&processed, options);
 
     let mut plain = String::new();
     let mut entities: Vec<MessageEntity> = Vec::new();
@@ -53,25 +137,32 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
     // Track UTF-16 length incrementally to avoid O(n²) rescanning
     let mut plain_utf16_len = 0usize;
 
-    // State for blockquote rendering
-    let mut in_blockquote = false;
+    // State for blockquote entity
+    let mut blockquote_start: Option<usize> = None;
+
+    // State for list rendering: None = unordered, Some(n) = ordered starting at n
+    let mut list_counter: Option<usize> = None;
+    let mut needs_list_prefix = false;
 
     for event in parser {
         match event {
             // --- Text content ---
             Event::Text(text) => {
-                if in_blockquote {
-                    let quoted: String = text
-                        .lines()
-                        .map(|line| format!("> {}", line))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    plain.push_str(&quoted);
-                    plain_utf16_len += quoted.encode_utf16().count();
-                } else {
-                    plain.push_str(&text);
-                    plain_utf16_len += text.encode_utf16().count();
+                if needs_list_prefix {
+                    let prefix: String = match list_counter {
+                        None => "\u{2022} ".to_string(),
+                        Some(ref mut n) => {
+                            let p = format!("{}. ", n);
+                            *n += 1;
+                            p
+                        }
+                    };
+                    plain.push_str(&prefix);
+                    plain_utf16_len += prefix.encode_utf16().count();
+                    needs_list_prefix = false;
                 }
+                plain.push_str(&text);
+                plain_utf16_len += text.encode_utf16().count();
             }
             Event::Code(text) => {
                 // Inline code: emit as a Code entity
@@ -125,13 +216,19 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                     stack.push((StackTag::CodeBlock(lang), plain_utf16_len));
                 }
                 Tag::BlockQuote(_) => {
-                    in_blockquote = true;
+                    blockquote_start = Some(plain_utf16_len);
                 }
                 Tag::Table(_) => {
                     // Table alignment metadata is discarded — rendered as plain text
                 }
                 Tag::TableHead | Tag::TableRow => {}
                 Tag::TableCell => {}
+                Tag::List(start) => {
+                    list_counter = start.map(|n| n as usize);
+                }
+                Tag::Item => {
+                    needs_list_prefix = true;
+                }
                 // Paragraph, list, etc. — no entity emitted on start.
                 _ => {}
             },
@@ -215,7 +312,16 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         plain_utf16_len += 1;
                     }
                     TagEnd::BlockQuote(_) => {
-                        in_blockquote = false;
+                        if let Some(start) = blockquote_start.take() {
+                            let length = plain_utf16_len.saturating_sub(start);
+                            if length > 0 {
+                                entities.push(MessageEntity {
+                                    kind: MessageEntityKind::Blockquote,
+                                    offset: start,
+                                    length,
+                                });
+                            }
+                        }
                         if !plain.ends_with('\n') {
                             plain.push('\n');
                             plain_utf16_len += 1;
@@ -234,6 +340,10 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
                         plain.push('\n');
                         plain_utf16_len += 1;
                     }
+                    TagEnd::List(_) => {
+                        list_counter = None;
+                        needs_list_prefix = false;
+                    }
                     _ => {}
                 }
             }
@@ -248,6 +358,8 @@ pub fn markdown_to_entities(markdown: &str) -> (String, Vec<MessageEntity>) {
         plain.pop();
         plain_utf16_len -= 1;
     }
+
+    postprocess_entities(&mut plain, &mut entities);
 
     (plain, entities)
 }
@@ -640,15 +752,22 @@ mod tests {
     // --- Blockquotes ---
 
     #[test]
-    fn test_blockquote_prefixes_with_gt() {
-        let (text, _) = markdown_to_entities("> This is a quote");
-        assert!(
-            text.contains("> "),
-            "blockquote must be prefixed with '> ': {text}"
-        );
+    fn test_blockquote_emits_entity() {
+        let (text, entities) = markdown_to_entities("> This is a quote");
         assert!(
             text.contains("This is a quote"),
             "blockquote text must be present: {text}"
+        );
+        assert!(
+            !text.contains("> "),
+            "blockquote must NOT have '> ' prefix when entity is used"
+        );
+        let blockquote = entities
+            .iter()
+            .find(|e| matches!(e.kind, MessageEntityKind::Blockquote));
+        assert!(
+            blockquote.is_some(),
+            "blockquote must produce a Blockquote entity"
         );
     }
 
@@ -662,5 +781,68 @@ mod tests {
         assert!(text.contains('B'), "column B must be in output: {text}");
         assert!(text.contains('1'), "row 1 col 1 must be in output: {text}");
         assert!(text.contains('2'), "row 1 col 2 must be in output: {text}");
+    }
+
+    // --- Spoilers and Underline ---
+
+    #[test]
+    fn test_spoiler_converts_to_entity() {
+        let (text, entities) = markdown_to_entities("||hidden||");
+        assert_eq!(text, "hidden");
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e.kind, MessageEntityKind::Spoiler)));
+    }
+
+    #[test]
+    fn test_underline_converts_to_entity() {
+        let (text, entities) = markdown_to_entities("<u>underlined</u>");
+        assert_eq!(text, "underlined");
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e.kind, MessageEntityKind::Underline)));
+    }
+
+    #[test]
+    fn test_spoiler_with_bold() {
+        let (text, entities) = markdown_to_entities("**bold** and ||spoiler||");
+        assert!(text.contains("bold"));
+        assert!(text.contains("spoiler"));
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e.kind, MessageEntityKind::Bold)));
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e.kind, MessageEntityKind::Spoiler)));
+    }
+
+    // --- Lists ---
+
+    #[test]
+    fn test_unordered_list_renders_with_bullets() {
+        let input = "- item one\n- item two";
+        let (text, _) = markdown_to_entities(input);
+        assert!(
+            text.contains("\u{2022} item one"),
+            "unordered list must use bullet: {text}"
+        );
+        assert!(
+            text.contains("\u{2022} item two"),
+            "second item must also have bullet: {text}"
+        );
+    }
+
+    #[test]
+    fn test_ordered_list_renders_with_numbers() {
+        let input = "1. first\n2. second";
+        let (text, _) = markdown_to_entities(input);
+        assert!(
+            text.contains("1. first"),
+            "ordered list must use number: {text}"
+        );
+        assert!(
+            text.contains("2. second"),
+            "second item must use next number: {text}"
+        );
     }
 }
