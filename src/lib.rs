@@ -8,6 +8,7 @@ pub mod home;
 pub mod langsmith;
 pub mod learning;
 pub mod llm;
+pub mod loop_detector;
 pub mod mcp;
 pub mod memory;
 pub mod platform;
