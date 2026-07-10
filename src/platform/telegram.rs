@@ -1231,36 +1231,69 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         }
 
         if !split_contents.is_empty() {
-            // First, rebuild the full text for proper markdown parsing
             let full_text: String = split_contents.join("");
             const MAX_UTF16: usize = 4090;
-            let (plain_text, entities) = markdown_to_entities(&full_text);
-            let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
 
-            // The first msg_id in the current message (if any) corresponds to the
-            // first chunk. Tracked split IDs from sent messages correspond to their
-            // own chunks.
-            for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
-                if i == 0 {
-                    if let Some(msg_id) = current_msg_id {
-                        stream_bot
-                            .edit_message_text(stream_chat_id, msg_id, chunk_text)
-                            .entities(chunk_entities.clone())
+            // Pre-process markdown for spoiler/underline
+            let processed = crate::utils::markdown_entities::preprocess_markdown(&full_text);
+
+            // For the rich path: split pre-processed markdown at newline boundaries.
+            // For the entity fallback: compute entities from the raw markdown.
+            let (plain_text, entities) = markdown_to_entities(&full_text);
+            let entity_chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+            let total_utf16 = processed.encode_utf16().count();
+            let rich_chunks = rich_sender::split_markdown_at_newlines(&processed, MAX_UTF16);
+
+            // Helper: try rich first, fall back to entity chunk i on failure
+            let try_rich_or_fallback = |i: usize, msg_id: Option<teloxide::types::MessageId>| {
+                let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized").clone();
+                let rich_chunks_ref = &rich_chunks;
+                let entity_chunks_ref = &entity_chunks;
+                let stream_bot_ref = &stream_bot;
+                async move {
+                    if let Some(chunk_md) = rich_chunks_ref.get(i) {
+                        let result = if let Some(mid) = msg_id {
+                            rich_sender::edit_rich_message(
+                                &token,
+                                stream_chat_id.0,
+                                mid.0,
+                                chunk_md,
+                            )
                             .await
-                            .ok();
-                    } else {
-                        stream_bot
-                            .send_message(stream_chat_id, chunk_text)
-                            .entities(chunk_entities.clone())
-                            .await
-                            .ok();
+                        } else {
+                            rich_sender::send_rich_message(&token, stream_chat_id.0, chunk_md).await
+                        };
+                        if result.is_err() {
+                            // Fallback: use entity chunk i
+                            if let Some((ct, ce)) = entity_chunks_ref.get(i) {
+                                if let Some(mid) = msg_id {
+                                    stream_bot_ref
+                                        .edit_message_text(stream_chat_id, mid, ct)
+                                        .entities(ce.clone())
+                                        .await
+                                        .ok();
+                                } else {
+                                    stream_bot_ref
+                                        .send_message(stream_chat_id, ct)
+                                        .entities(ce.clone())
+                                        .await
+                                        .ok();
+                                }
+                            }
+                        }
                     }
-                } else {
-                    stream_bot
-                        .send_message(stream_chat_id, chunk_text)
-                        .entities(chunk_entities.clone())
-                        .await
-                        .ok();
+                }
+            };
+
+            if total_utf16 <= MAX_UTF16 {
+                try_rich_or_fallback(0, current_msg_id).await;
+            } else {
+                for (i, _chunk_md) in rich_chunks.iter().enumerate() {
+                    if i == 0 {
+                        try_rich_or_fallback(0, current_msg_id).await;
+                    } else {
+                        try_rich_or_fallback(i, None).await;
+                    }
                 }
             }
         }
