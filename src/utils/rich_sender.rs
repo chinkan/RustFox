@@ -242,3 +242,72 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_markdown_short_text_not_split() {
+        let chunks = split_markdown_at_newlines("hello", 4090);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "hello");
+    }
+
+    #[test]
+    fn test_split_markdown_at_newline_boundary() {
+        let text = "A".repeat(2000) + "\n" + &"B".repeat(2000);
+        let chunks = split_markdown_at_newlines(&text, 3000);
+        assert!(chunks.len() >= 2, "should split into at least 2 chunks");
+        assert!(
+            chunks[0].ends_with('\n'),
+            "first chunk should end with newline"
+        );
+        assert!(
+            !chunks[1].starts_with('\n'),
+            "second chunk should not start with newline"
+        );
+    }
+
+    #[test]
+    fn test_split_markdown_utf16_cjk() {
+        // Each CJK char = 1 UTF-16 unit, "你好" = 2 units
+        let text = "你好".repeat(3000); // 6000 UTF-16 units
+        let chunks = split_markdown_at_newlines(&text, 4090);
+        assert!(chunks.len() > 1, "long CJK text must be split");
+        for chunk in &chunks {
+            let utf16_len = chunk.encode_utf16().count();
+            assert!(
+                utf16_len <= 4090,
+                "chunk must not exceed max_utf16: {utf16_len} > 4090"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preprocess_markdown_pub() {
+        // Verify preprocess_markdown is accessible
+        let result = crate::utils::markdown_entities::preprocess_markdown("**bold**");
+        assert!(
+            result.contains("**bold**"),
+            "preprocess should pass through normal markdown"
+        );
+    }
+
+    #[test]
+    fn test_split_markdown_exact_small() {
+        let chunks = split_markdown_at_newlines("short", 10);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "short");
+    }
+
+    #[test]
+    fn test_rich_sender_error_type() {
+        let bad_md = RichSenderError::BadMarkdown("bad".into());
+        let net = RichSenderError::Network(anyhow::anyhow!("timeout"));
+        assert!(matches!(bad_md, RichSenderError::BadMarkdown(_)));
+        assert!(matches!(net, RichSenderError::Network(_)));
+        assert!(!matches!(bad_md, RichSenderError::Network(_)));
+        assert!(!matches!(net, RichSenderError::BadMarkdown(_)));
+    }
+}
