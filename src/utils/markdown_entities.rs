@@ -28,7 +28,7 @@ const SPOILER_END: char = '\u{E001}';
 const UL_START: char = '\u{E002}';
 const UL_END: char = '\u{E003}';
 
-fn preprocess_markdown(md: &str) -> String {
+pub(crate) fn preprocess_markdown(md: &str) -> String {
     let ul_open: String = [UL_START, 'U'].iter().collect();
     let ul_close: String = [UL_END, '/', 'u'].iter().collect();
     let spoiler_open: String = [SPOILER_START, 'S'].iter().collect();
