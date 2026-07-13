@@ -25,7 +25,7 @@ The background runner (`main.rs:268-275`) sends response text via `bot.send_mess
 ## Architecture
 
 ```
-  schedule_task tool fire
+  schedule_task tool fire / restore_scheduled_tasks()
          │
          ▼
   fire closure creates IncomingMessage
@@ -40,20 +40,23 @@ The background runner (`main.rs:268-275`) sends response text via `bot.send_mess
   job_tx.send(ScheduledJobRequest)
          │
          ▼
-  Background runner (tokio::spawn)
+  Background runner (main.rs tokio::spawn)
   ┌──────────────────────────────────────┐
-  │ 1. process_message()                 │
+  │ 1. Persist run record (status=running)│
+  │    → capture run_at = fire time      │
+  │                                      │
+  │ 2. process_message()                 │
   │    → dedicated SQLite conversation   │
   │    → no cancel token for real user   │
   │    → no steer injection from user    │
   │                                      │
-  │ 2. Send response via                 │
+  │ 3. Update run record (status=done)   │
+  │    → store response / error          │
+  │                                      │
+  │ 4. Send response via                 │
   │    send_markdown_message()           │
   │    → tries sendRichMessage first     │
   │    → falls back to entity sender     │
-  │                                      │
-  │ 3. INSERT INTO scheduled_task_runs   │
-  │    → persist execution result        │
   └──────────────────────────────────────┘
 ```
 
@@ -114,9 +117,14 @@ Fetches the task from DB, creates a new one-shot job with 0-second delay (fires 
   - `get_scheduled_task_history`: query `scheduled_task_runs` for task_id, format as text
   - `rerun_scheduled_task`: fetch scheduled_task, build fire closure + dispatch one-shot
 
-**Background runner in `restore_scheduled_tasks()`** (line 2022):
+**`restore_scheduled_tasks()`** (line 2022):
 
-- No changes needed — the fire closures built here already use `job_tx.send()`, which routes through the same background runner. The fix is in the fire closure itself (platform + user_id).
+- Apply the same `IncomingMessage` changes to the fire closure inside `restore_scheduled_tasks()` (lines 2053-2060):
+  - `platform: "scheduled_task".to_string()` (was `"telegram"`)
+  - `user_id: format!("{uid}:{tid}")` (was `uid` directly)
+- **Do NOT skip this function** — it builds identical fire closures for tasks restored after bot restart. Without these changes, restored tasks would still share conversation context even though newly-created tasks from `schedule_task` handler are fixed.
+
+> **Design note:** Both `schedule_task` (line 3295) and `restore_scheduled_tasks()` (line 2043) contain nearly identical fire closure code. Consider extracting a shared helper method to prevent future divergence.
 
 #### `src/platform/telegram.rs`
 
@@ -128,7 +136,16 @@ Fetches the task from DB, creates a new one-shot job with 0-second delay (fires 
 
 **Background runner** (line 238):
 
-- After `process_message` returns, persist execution result via `req.task_store.insert_run()`
+- BEFORE calling `process_message`, capture `run_at` timestamp and persist a run record with `status = 'running'`:
+  ```rust
+  let run_id = uuid::Uuid::new_v4().to_string();
+  let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+  let _ = req.task_store.insert_run(&run_id, &req.task_id, &run_at, None, None, "running").await;
+  ```
+- AFTER `process_message` completes (both success and error), update the run record:
+  ```rust
+  let _ = req.task_store.update_run(&run_id, &response, error_opt, "completed").await;
+  ```
 - Replace raw `bot.send_message(chat, &chunk).await` loop with:
   ```rust
   let chat = teloxide::types::ChatId(chat_id_val);
@@ -136,13 +153,12 @@ Fetches the task from DB, creates a new one-shot job with 0-second delay (fires 
       tracing::error!("Failed to send scheduled response: {}", e);
   }
   ```
+  Note: `send_markdown_message` returns `ResponseResult<()>` (teloxide error type), not `anyhow::Result`. The `if let Err(e)` pattern handles this correctly.
 
-- Error path: set status to "failed", insert run record with error, send error via `send_markdown_message`
+- Error path: update run record with `status = "failed"` and error text, send error via `send_markdown_message`
 
 #### `src/scheduler/reminders.rs`
 
-- Add `insert_run(task_id, run_at, response, error, status)` method to `ScheduledTaskStore` for persisting execution results. Creates new UUID for run id.
-- Add `get_task_runs(task_id, limit)` method returning `Vec<ScheduledTaskRun>` for history queries
 - Add `ScheduledTaskRun` struct:
   ```rust
   #[derive(Debug, Clone)]
@@ -156,6 +172,9 @@ Fetches the task from DB, creates a new one-shot job with 0-second delay (fires 
       pub created_at: String,
   }
   ```
+- Add `insert_run(id, task_id, run_at, response, error, status)` method — creates a new run row with given id
+- Add `update_run(id, response, error, status)` method — updates an existing run record
+- Add `get_task_runs(task_id, limit)` method returning `Vec<ScheduledTaskRun>` ordered by `run_at DESC`
 
 ### Error handling
 
@@ -171,7 +190,7 @@ Fetches the task from DB, creates a new one-shot job with 0-second delay (fires 
 
 - No existing tests for scheduled task execution; manual verification recommended
 - Unit test for `ScheduledTaskStore.insert_run()` and `get_task_runs()` in `reminders.rs`
-- Unit test for new tool definitions parsing
+- `friendly_tool_name()` entries for the two new tools must be added to `tool_notifier.rs` so they show human-friendly labels when verbose tool UI is enabled
 
 ### Dependencies
 
