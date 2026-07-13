@@ -8,7 +8,7 @@ use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use tracing::{error, info, warn};
 
-use crate::agent::{Agent, MidRunMode};
+use crate::agent::{Agent, LoopCallbackChoice, MidRunMode};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
@@ -212,9 +212,23 @@ pub async fn run(
         })
         .endpoint(handle_model_callback);
 
+    let loop_callback_handler = Update::filter_callback_query()
+        .filter_map(|q: CallbackQuery| {
+            if q.data
+                .as_deref()
+                .is_some_and(|d| d.contains(r#""type":"loop""#))
+            {
+                Some(q)
+            } else {
+                None
+            }
+        })
+        .endpoint(handle_loop_callback);
+
     let handler = dptree::entry()
         .branch(message_handler)
-        .branch(callback_handler);
+        .branch(callback_handler)
+        .branch(loop_callback_handler);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![agent])
@@ -1407,6 +1421,37 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         });
     }
 
+    Ok(())
+}
+
+/// Handle callback query from loop detection inline keyboard.
+/// Resolves the oneshot sender so the suspended agent loop can continue.
+async fn handle_loop_callback(bot: Bot, q: CallbackQuery, agent: Arc<Agent>) -> ResponseResult<()> {
+    let user_id = q.from.id.to_string();
+    let data = match q.data {
+        Some(ref d) => d.clone(),
+        None => return Ok(()),
+    };
+
+    // Parse the user's choice from callback data
+    let choice = if data.contains(r#""action":"continue""#) {
+        LoopCallbackChoice::Continue
+    } else if data.contains(r#""action":"stop""#) {
+        LoopCallbackChoice::Stop
+    } else if data.contains(r#""action":"add_instruction""#) {
+        LoopCallbackChoice::AddInstruction
+    } else {
+        // Unknown action — answer and ignore
+        bot.answer_callback_query(q.id).await.ok();
+        return Ok(());
+    };
+
+    // Send the choice to the waiting agent loop (if any)
+    if let Some(sender) = agent.take_loop_callback(&user_id).await {
+        let _ = sender.send(choice);
+    }
+
+    bot.answer_callback_query(q.id).await.ok();
     Ok(())
 }
 
