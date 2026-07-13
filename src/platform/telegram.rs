@@ -245,7 +245,7 @@ pub async fn run(
 
 /// Send a markdown string as a rich message via sendRichMessage, falling back
 /// to entity-formatted sendMessage on failure.
-async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
+pub async fn send_markdown_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
     let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
 
     let entity_sender = || async {
