@@ -2748,6 +2748,14 @@ impl Agent {
     ) -> String {
         let empty_response_retry_limit = self.config.empty_response_retry_limit();
 
+        let loop_config = self.config.loop_detection_config();
+        let sub_threshold = if loop_config.enabled {
+            loop_config.threshold
+        } else {
+            usize::MAX
+        };
+        let mut loop_detector_sub = crate::loop_detector::LoopDetector::new(sub_threshold);
+
         for _iteration in 0..max_iter {
             // CHECK: cancelled by /stop?
             if let Some(ref token) = cancel_token {
@@ -2808,6 +2816,39 @@ impl Agent {
                 response = completion.message;
                 break;
             }
+
+            // --- Subagent loop detection: auto-recover with nudge ---
+            if loop_config.enabled {
+                if let Some(ref tool_calls) = response.tool_calls {
+                    loop_detector_sub.record(tool_calls, _iteration as usize);
+                    if let Some(loop_info) = loop_detector_sub.detect_loop() {
+                        warn!(
+                            subagent = %label,
+                            tool = %loop_info.tool_name,
+                            count = loop_info.call_count,
+                            "Subagent loop detected — injecting recovery nudge"
+                        );
+
+                        // Inject recovery message as a tool result
+                        let nudge_text = format!(
+                            "Error: You have called {} {} times with the same arguments. \
+                             The result has not changed. Try a different approach.",
+                            loop_info.tool_name,
+                            loop_info.call_count,
+                        );
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(MessageContent::from_text(nudge_text)),
+                            tool_calls: None,
+                            tool_call_id: Some("loop_recovery_nudge".to_string()),
+                        });
+
+                        loop_detector_sub.clear();
+                        continue;
+                    }
+                }
+            }
+            // --- End subagent loop detection ---
 
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
