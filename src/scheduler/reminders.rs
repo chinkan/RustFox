@@ -344,4 +344,66 @@ mod tests {
         let tasks = store.list_all_active().await.unwrap();
         assert_eq!(tasks[0].scheduler_job_id.as_deref(), Some("sched-uuid-123"));
     }
+
+    #[tokio::test]
+    async fn test_insert_and_get_task_runs() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        // Create parent task first for FOREIGN KEY
+        let task = make_task("task-1", "user-1", "one_shot");
+        store.create(&task).await.unwrap();
+
+        store
+            .insert_run("run-1", "task-1", "2026-07-13T10:00:00", Some("hello"), None, "completed")
+            .await
+            .unwrap();
+        store
+            .insert_run("run-2", "task-1", "2026-07-13T11:00:00", None, Some("error"), "failed")
+            .await
+            .unwrap();
+
+        let runs = store.get_task_runs("task-1", 10).await.unwrap();
+        assert_eq!(runs.len(), 2);
+        // Most recent first
+        assert_eq!(runs[0].id, "run-2");
+        assert_eq!(runs[1].id, "run-1");
+        assert_eq!(runs[0].response, None);
+        assert_eq!(runs[0].error.as_deref(), Some("error"));
+        assert_eq!(runs[1].response.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_get_task_runs_empty() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let runs = store.get_task_runs("nonexistent", 10).await.unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_run() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        // Create parent task first for FOREIGN KEY
+        let task = make_task("task-x", "user-1", "one_shot");
+        store.create(&task).await.unwrap();
+
+        store
+            .insert_run("run-x", "task-x", "2026-07-13T12:00:00", None, None, "running")
+            .await
+            .unwrap();
+
+        store
+            .update_run("run-x", Some("result"), None, "completed")
+            .await
+            .unwrap();
+
+        let runs = store.get_task_runs("task-x", 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].response.as_deref(), Some("result"));
+        assert_eq!(runs[0].status, "completed");
+    }
 }
