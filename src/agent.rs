@@ -2264,6 +2264,34 @@ impl Agent {
                     }),
                 },
             },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "get_scheduled_task_history".to_string(),
+                    description: "Retrieve execution history for a scheduled task, including run timestamps, status, and response text.".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "The task ID from list_scheduled_tasks" }
+                        },
+                        "required": ["task_id"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "rerun_scheduled_task".to_string(),
+                    description: "Execute a scheduled task immediately, regardless of its normal schedule. Does not cancel future occurrences.".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "The task ID to execute now" }
+                        },
+                        "required": ["task_id"]
+                    }),
+                },
+            },
         ]
     }
 
@@ -3396,6 +3424,94 @@ impl Agent {
                 match self.task_store.set_status(&task_id, "cancelled").await {
                     Ok(()) => format!("Task '{}' ({}) cancelled.", task_id, task.description),
                     Err(e) => format!("Failed to update task status: {}", e),
+                }
+            }
+            "get_scheduled_task_history" => {
+                let task_id = match arguments["task_id"].as_str() {
+                    Some(id) => id.to_string(),
+                    None => return "Missing task_id".to_string(),
+                };
+                match self.task_store.get_task_runs(&task_id, 20).await {
+                    Ok(runs) if runs.is_empty() => {
+                        format!("No execution history for task '{}'.", task_id)
+                    }
+                    Ok(runs) => {
+                        let mut out = format!("Execution history for task '{}' ({} runs):\n\n", task_id, runs.len());
+                        for r in &runs {
+                            let resp = r.response.as_deref().unwrap_or("(no response)");
+                            let err = r.error.as_deref().map(|e| format!("\nError: {}", e)).unwrap_or_default();
+                            let truncated = crate::utils::strings::truncate_chars(resp, 2000);
+                            out.push_str(&format!(
+                                "Run at: {} | Status: {}\n{}{}\n\n",
+                                r.run_at, r.status, truncated, err
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Failed to query task history: {}", e),
+                }
+            }
+            "rerun_scheduled_task" => {
+                let task_id = match arguments["task_id"].as_str() {
+                    Some(id) => id.to_string(),
+                    None => return "Missing task_id".to_string(),
+                };
+                let task = match self.task_store.get_by_id(&task_id).await {
+                    Ok(Some(t)) => t,
+                    Ok(None) => return format!("Task '{}' not found.", task_id),
+                    Err(e) => return format!("Failed to look up task: {}", e),
+                };
+                // Build fire closure (same pattern as schedule_task handler)
+                let job_tx = self.job_tx.clone();
+                let bot_clone = Arc::clone(&self.bot);
+                let store_clone = self.task_store.clone();
+                let tid = task.id.clone();
+                let uid = task.user_id.clone();
+                let cid = task.chat_id.clone();
+                let prompt_cap = task.prompt.clone();
+                let is_recurring = false;
+
+                let fire = move || {
+                    let tx = job_tx.clone();
+                    let bot = bot_clone.clone();
+                    let store = store_clone.clone();
+                    let tid = tid.clone();
+                    let uid = uid.clone();
+                    let cid = cid.clone();
+                    let prompt = prompt_cap.clone();
+                    Box::pin(async move {
+                        let incoming = crate::platform::IncomingMessage {
+                            platform: "scheduled_task".to_string(),
+                            user_id: format!("{uid}:{tid}"),
+                            chat_id: cid,
+                            user_name: String::new(),
+                            text: prompt,
+                            attachments: vec![],
+                        };
+                        let req = crate::agent::ScheduledJobRequest {
+                            incoming,
+                            bot,
+                            task_id: tid,
+                            is_recurring,
+                            task_store: store,
+                        };
+                        if let Err(e) = tx.send(req) {
+                            tracing::error!("Failed to dispatch rerun scheduled job: {}", e);
+                        }
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                };
+
+                // Fire immediately with 0-second delay (fires on next scheduler tick)
+                match self.scheduler.add_one_shot_job(
+                    std::time::Duration::ZERO,
+                    &format!("rerun-{}", task.description),
+                    fire,
+                ).await {
+                    Ok(_sched_id) => {
+                        format!("Task '{}' scheduled for immediate re-execution.", task_id)
+                    }
+                    Err(e) => format!("Failed to re-run task: {}", e),
                 }
             }
             "read_skill_file" => {
