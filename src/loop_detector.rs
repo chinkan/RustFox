@@ -23,16 +23,21 @@ pub struct LoopInfo {
 ///
 /// Maintains a rolling FIFO window of recent tool calls. A loop is declared
 /// when the last N entries all have the same (tool_name, args_hash).
+/// When `enabled` is false, `record` and `detect_loop` are no-ops and no
+/// memory is allocated for the window.
 pub struct LoopDetector {
     window: VecDeque<ToolCallRecord>,
     threshold: usize,
+    enabled: bool,
 }
 
 impl LoopDetector {
-    pub fn new(threshold: usize) -> Self {
+    pub fn new(threshold: usize, enabled: bool) -> Self {
+        let capacity = if enabled { threshold + 1 } else { 0 };
         Self {
-            window: VecDeque::with_capacity(threshold + 1),
+            window: VecDeque::with_capacity(capacity),
             threshold,
+            enabled,
         }
     }
 
@@ -58,6 +63,9 @@ impl LoopDetector {
 
     /// Record a batch of tool calls from one iteration.
     pub fn record(&mut self, tool_calls: &[ToolCall], iteration: usize) {
+        if !self.enabled {
+            return;
+        }
         for tc in tool_calls {
             let hash = Self::compute_hash(&tc.function.name, &tc.function.arguments);
             self.window.push_back(ToolCallRecord {
@@ -76,7 +84,7 @@ impl LoopDetector {
     /// Returns `Some(LoopInfo)` when the last N entries all share the same
     /// (tool_name, args_hash), where N == threshold.
     pub fn detect_loop(&self) -> Option<LoopInfo> {
-        if self.window.len() < self.threshold {
+        if !self.enabled || self.window.len() < self.threshold {
             return None;
         }
 
@@ -168,15 +176,28 @@ mod tests {
     }
 
     #[test]
+    fn test_disabled_never_detects() {
+        let mut d = LoopDetector::new(3, false);
+        let tc = make_tool_call("read", r#"{"path":"x"}"#);
+        d.record(std::slice::from_ref(&tc), 0);
+        d.record(std::slice::from_ref(&tc), 1);
+        d.record(std::slice::from_ref(&tc), 2);
+        assert!(
+            d.detect_loop().is_none(),
+            "disabled detector should not detect"
+        );
+    }
+
+    #[test]
     fn test_detect_below_threshold_returns_none() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         d.record(&[make_tool_call("read", r#"{"path":"x"}"#)], 0);
         assert!(d.detect_loop().is_none());
     }
 
     #[test]
     fn test_detect_exact_threshold_detects() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
         d.record(std::slice::from_ref(&tc), 0);
         d.record(std::slice::from_ref(&tc), 1);
@@ -188,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_detect_three_different_returns_none() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         d.record(&[make_tool_call("a", r#"{"path":"x"}"#)], 0);
         d.record(&[make_tool_call("b", r#"{"path":"x"}"#)], 1);
         d.record(&[make_tool_call("c", r#"{"path":"x"}"#)], 2);
@@ -197,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_clear_resets_detection() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
         d.record(std::slice::from_ref(&tc), 0);
         d.record(std::slice::from_ref(&tc), 1);
@@ -209,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_detects_across_multiple_calls_per_iteration() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
         // Two identical calls in iteration 0, one in iteration 1 = 3 total
         d.record(&[tc.clone(), tc.clone()], 0);
@@ -220,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_diff_tool_same_args_not_detected() {
-        let mut d = LoopDetector::new(3);
+        let mut d = LoopDetector::new(3, true);
         let tc_a = make_tool_call("read", r#"{"path":"x"}"#);
         let tc_b = make_tool_call("write", r#"{"path":"x"}"#);
         d.record(&[tc_a], 0);

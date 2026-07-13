@@ -518,12 +518,9 @@ impl Agent {
         user_id: &str,
         conversation_id: &str,
         messages: &mut Vec<ChatMessage>,
-    ) -> bool {
+    ) {
         let inject_mode = self.get_mid_run_mode(user_id).await;
         let injections = self.drain_injections(user_id).await;
-        if injections.is_empty() {
-            return false;
-        }
         for text in &injections {
             let label = if inject_mode == MidRunMode::Steer {
                 "**[Steer]:** "
@@ -543,7 +540,6 @@ impl Agent {
             }
             messages.push(msg);
         }
-        true
     }
 
     /// Register a oneshot sender for a user's loop detection callback.
@@ -875,12 +871,8 @@ impl Agent {
 
         // Loop detection state (cross-turn, resets each process_message call)
         let loop_config = self.config.loop_detection_config();
-        let loop_threshold = if loop_config.enabled {
-            loop_config.threshold
-        } else {
-            usize::MAX // when disabled, a threshold that never triggers
-        };
-        let mut loop_detector = crate::loop_detector::LoopDetector::new(loop_threshold);
+        let mut loop_detector =
+            crate::loop_detector::LoopDetector::new(loop_config.threshold, loop_config.enabled);
         let loop_timeout = std::time::Duration::from_secs(loop_config.timeout_seconds);
 
         'outer: for iteration in 0..max_iterations {
@@ -2757,14 +2749,10 @@ impl Agent {
         let empty_response_retry_limit = self.config.empty_response_retry_limit();
 
         let loop_config = self.config.loop_detection_config();
-        let sub_threshold = if loop_config.enabled {
-            loop_config.threshold
-        } else {
-            usize::MAX
-        };
-        let mut loop_detector_sub = crate::loop_detector::LoopDetector::new(sub_threshold);
+        let mut loop_detector_sub =
+            crate::loop_detector::LoopDetector::new(loop_config.threshold, loop_config.enabled);
 
-        for _iteration in 0..max_iter {
+        for iteration in 0..max_iter {
             // CHECK: cancelled by /stop?
             if let Some(ref token) = cancel_token {
                 if token.is_cancelled() {
@@ -2828,7 +2816,7 @@ impl Agent {
             // --- Subagent loop detection: auto-recover with nudge ---
             if loop_config.enabled {
                 if let Some(ref tool_calls) = response.tool_calls {
-                    loop_detector_sub.record(tool_calls, _iteration as usize);
+                    loop_detector_sub.record(tool_calls, iteration as usize);
                     if let Some(loop_info) = loop_detector_sub.detect_loop() {
                         warn!(
                             subagent = %label,
