@@ -219,6 +219,21 @@ impl MemoryStore {
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
                 ON scheduled_tasks(user_id, status);
 
+            -- Scheduled task execution history
+            CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+                id          TEXT PRIMARY KEY,
+                task_id     TEXT NOT NULL,
+                run_at      TEXT NOT NULL,
+                response    TEXT,
+                error       TEXT,
+                status      TEXT NOT NULL DEFAULT 'completed',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
+                ON scheduled_task_runs(task_id, run_at);
+
             -- Supervisor: tasks
             CREATE TABLE IF NOT EXISTS sup_tasks (
                 id              TEXT PRIMARY KEY,
