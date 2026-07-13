@@ -290,6 +290,8 @@ pub fn friendly_tool_name(name: &str) -> String {
         "schedule_task" => return "🗓️ Scheduling a task".to_string(),
         "list_scheduled_tasks" => return "🗓️ Checking scheduled tasks".to_string(),
         "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
+        "get_scheduled_task_history" => return "📋 Checking task history".to_string(),
+        "rerun_scheduled_task" => return "🔄 Re-running scheduled task".to_string(),
         "invoke_agent" => return "🤖 Calling a specialist".to_string(),
         "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
         "read_skill_file" => return "📖 Reading skill".to_string(),
@@ -1132,6 +1134,22 @@ mod tests {
         assert!(
             !friendly.contains("query_"),
             "verb prefix should be stripped: {friendly}"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_get_scheduled_task_history() {
+        assert_eq!(
+            friendly_tool_name("get_scheduled_task_history"),
+            "📋 Checking task history"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_rerun_scheduled_task() {
+        assert_eq!(
+            friendly_tool_name("rerun_scheduled_task"),
+            "🔄 Re-running scheduled task"
         );
     }
 }
