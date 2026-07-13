@@ -2833,8 +2833,7 @@ impl Agent {
                         let nudge_text = format!(
                             "Error: You have called {} {} times with the same arguments. \
                              The result has not changed. Try a different approach.",
-                            loop_info.tool_name,
-                            loop_info.call_count,
+                            loop_info.tool_name, loop_info.call_count,
                         );
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
