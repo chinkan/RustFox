@@ -2051,8 +2051,8 @@ impl Agent {
                 let recurring = is_recurring;
                 Box::pin(async move {
                     let incoming = crate::platform::IncomingMessage {
-                        platform: "telegram".to_string(),
-                        user_id: uid,
+                        platform: "scheduled_task".to_string(),
+                        user_id: format!("{uid}:{tid}"),
                         chat_id: cid,
                         user_name: String::new(),
                         text: prompt,
@@ -3303,8 +3303,8 @@ impl Agent {
                     let recurring = is_recurring;
                     Box::pin(async move {
                         let incoming = crate::platform::IncomingMessage {
-                            platform: "telegram".to_string(),
-                            user_id: uid,
+                            platform: "scheduled_task".to_string(),
+                            user_id: format!("{uid}:{tid}"),
                             chat_id: cid,
                             user_name: String::new(),
                             text: prompt,
