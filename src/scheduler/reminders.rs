@@ -20,6 +20,18 @@ pub struct ScheduledTask {
     pub next_run_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ScheduledTaskRun {
+    pub id: String,
+    pub task_id: String,
+    pub run_at: String,
+    pub response: Option<String>,
+    pub error: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct ScheduledTaskStore {
@@ -134,6 +146,70 @@ impl ScheduledTaskStore {
         )
         .context("Failed to update next_run_at")?;
         Ok(())
+    }
+
+    pub async fn insert_run(
+        &self,
+        id: &str,
+        task_id: &str,
+        run_at: &str,
+        response: Option<&str>,
+        error: Option<&str>,
+        status: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO scheduled_task_runs (id, task_id, run_at, response, error, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, task_id, run_at, response, error, status],
+        )
+        .context("Failed to insert scheduled task run")?;
+        Ok(())
+    }
+
+    pub async fn update_run(
+        &self,
+        id: &str,
+        response: Option<&str>,
+        error: Option<&str>,
+        status: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE scheduled_task_runs SET response = ?1, error = ?2, status = ?3 WHERE id = ?4",
+            rusqlite::params![response, error, status, id],
+        )
+        .context("Failed to update scheduled task run")?;
+        Ok(())
+    }
+
+    pub async fn get_task_runs(&self, task_id: &str, limit: usize) -> Result<Vec<ScheduledTaskRun>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, run_at, response, error, status, created_at
+                 FROM scheduled_task_runs
+                 WHERE task_id = ?1
+                 ORDER BY run_at DESC
+                 LIMIT ?2",
+            )
+            .context("Failed to prepare get_task_runs query")?;
+        let runs = stmt
+            .query_map(rusqlite::params![task_id, limit as i64], |row| {
+                Ok(ScheduledTaskRun {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    run_at: row.get(2)?,
+                    response: row.get(3)?,
+                    error: row.get(4)?,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .context("Failed to map rows")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to collect rows")?;
+        Ok(runs)
     }
 
     // Private helper — executes SELECT with a WHERE clause fragment.
