@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use teloxide::payloads::{SendDocumentSetters, SendMessageSetters};
 use teloxide::prelude::Requester;
-use teloxide::types::{ChatId, InputFile};
+use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile};
 use teloxide::Bot;
 
 use crate::agent_prompt::{
@@ -831,6 +831,16 @@ impl Agent {
             self.registry.effective_context_window(&model)
         };
 
+        // Loop detection state (cross-turn, resets each process_message call)
+        let loop_config = self.config.loop_detection_config();
+        let loop_threshold = if loop_config.enabled {
+            loop_config.threshold
+        } else {
+            usize::MAX // when disabled, a threshold that never triggers
+        };
+        let mut loop_detector = crate::loop_detector::LoopDetector::new(loop_threshold);
+        let loop_timeout = std::time::Duration::from_secs(loop_config.timeout_seconds);
+
         'outer: for iteration in 0..max_iterations {
             debug!(
                 "Trying iteration {}: messages length: {}",
@@ -1222,6 +1232,128 @@ impl Agent {
                 break;
             }
 
+            // --- Loop detection: record tool calls and check for repetition ---
+            if loop_config.enabled {
+                if let Some(ref tool_calls) = response.tool_calls {
+                    loop_detector.record(tool_calls, iteration as usize);
+                    if let Some(loop_info) = loop_detector.detect_loop() {
+                        info!(
+                            user_id = %user_id,
+                            tool = %loop_info.tool_name,
+                            count = loop_info.call_count,
+                            "Loop detected — pausing for user approval"
+                        );
+
+                        // Build preview: tool name + first argument snippet
+                        let preview = if let Some(first) =
+                            response.tool_calls.as_ref().and_then(|c| c.first())
+                        {
+                            let preview = &first.function.arguments;
+                            let preview = if preview.len() > 80 {
+                                format!("{}...", &preview[..80])
+                            } else {
+                                preview.to_string()
+                            };
+                            format!("{}({})", loop_info.tool_name, preview)
+                        } else {
+                            loop_info.tool_name.clone()
+                        };
+
+                        // Create oneshot channel for the callback
+                        let (cb_tx, cb_rx) = tokio::sync::oneshot::channel::<LoopCallbackChoice>();
+
+                        // Register callback sender
+                        self.register_loop_callback(user_id, cb_tx).await;
+
+                        // Send Telegram inline keyboard
+                        let keyboard = InlineKeyboardMarkup::new(vec![
+                            vec![
+                                InlineKeyboardButton::callback(
+                                    "Continue",
+                                    r#"{"type":"loop","action":"continue"}"#,
+                                ),
+                                InlineKeyboardButton::callback(
+                                    "Stop",
+                                    r#"{"type":"loop","action":"stop"}"#,
+                                ),
+                            ],
+                            vec![InlineKeyboardButton::callback(
+                                "Add instruction",
+                                r#"{"type":"loop","action":"add_instruction"}"#,
+                            )],
+                        ]);
+                        let bot_for_msg = self.bot.clone();
+                        let chat_id_for_msg = parsed_chat_id;
+                        let _ = bot_for_msg
+                            .send_message(
+                                chat_id_for_msg,
+                                format!(
+                                    "I seem to be calling the same tool repeatedly:\n  {} called {} times",
+                                    preview,
+                                    loop_info.call_count,
+                                ),
+                            )
+                            .reply_markup(keyboard)
+                            .await;
+
+                        // Await user's choice (with timeout)
+                        match tokio::time::timeout(loop_timeout, cb_rx).await {
+                            Ok(Ok(LoopCallbackChoice::Continue)) => {
+                                info!("User approved — continuing loop");
+                                loop_detector.clear();
+                                // `continue` targets the 'outer for loop — starts a
+                                // fresh iteration (re-invokes the LLM), skipping any
+                                // remaining tool execution from this iteration.
+                                continue;
+                            }
+                            Ok(Ok(LoopCallbackChoice::Stop)) => {
+                                info!("User requested stop — breaking loop");
+                                was_cancelled = true;
+                                break 'outer;
+                            }
+                            Ok(Ok(LoopCallbackChoice::AddInstruction)) => {
+                                info!("User requested add instruction — waiting for input");
+                                let _ = bot_for_msg
+                                    .send_message(
+                                        chat_id_for_msg,
+                                        "Please type your instruction as your next message. \
+                                         Then tap Continue to resume.",
+                                    )
+                                    .reply_markup(InlineKeyboardMarkup::new(vec![vec![
+                                        InlineKeyboardButton::callback(
+                                            "Continue",
+                                            r#"{"type":"loop","action":"continue"}"#,
+                                        ),
+                                    ]]))
+                                    .await;
+
+                                // Wait for second callback
+                                let (cb2_tx, cb2_rx) =
+                                    tokio::sync::oneshot::channel::<LoopCallbackChoice>();
+                                self.register_loop_callback(user_id, cb2_tx).await;
+                                match tokio::time::timeout(loop_timeout, cb2_rx).await {
+                                    Ok(Ok(LoopCallbackChoice::Continue)) => {
+                                        loop_detector.clear();
+                                        continue;
+                                    }
+                                    _ => {
+                                        was_cancelled = true;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Timeout or channel closed — auto-stop
+                                warn!("Loop callback timed out — stopping");
+                                was_cancelled = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+            // --- End loop detection ---
+
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
                     tool_call_count += tool_calls.len() as u32;
@@ -1439,12 +1571,17 @@ impl Agent {
                             };
                             let msg = ChatMessage {
                                 role: "user".to_string(),
-                                content: Some(MessageContent::from_text(format!("{}{}", label, text))),
+                                content: Some(MessageContent::from_text(format!(
+                                    "{}{}",
+                                    label, text
+                                ))),
                                 tool_calls: None,
                                 tool_call_id: None,
                             };
                             if inject_mode == MidRunMode::Queue {
-                                if let Err(e) = self.memory.save_message(&conversation_id, &msg).await {
+                                if let Err(e) =
+                                    self.memory.save_message(&conversation_id, &msg).await
+                                {
                                     warn!("Failed to persist queued injection: {}", e);
                                 }
                             }
