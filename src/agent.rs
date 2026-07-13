@@ -504,6 +504,48 @@ impl Agent {
         map.remove(user_id).unwrap_or_default()
     }
 
+    /// Drain pending steer/queue injections for the given user and push them
+    /// into `messages`. Returns `true` when at least one injection was applied.
+    ///
+    /// Used both at the start of each outer iteration (before the LLM call)
+    /// and right after a tool batch commits (so steer traffic that arrives
+    /// during a long tool batch is still visible on the next turn).
+    ///
+    /// `Queue` mode additionally persists the message into conversation memory
+    /// so it survives a process_message boundary.
+    pub async fn drain_and_inject_steer(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        messages: &mut Vec<ChatMessage>,
+    ) -> bool {
+        let inject_mode = self.get_mid_run_mode(user_id).await;
+        let injections = self.drain_injections(user_id).await;
+        if injections.is_empty() {
+            return false;
+        }
+        for text in &injections {
+            let label = if inject_mode == MidRunMode::Steer {
+                "**[Steer]:** "
+            } else {
+                "**[User injected mid-processing]:** "
+            };
+            let msg = ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text(format!("{}{}", label, text))),
+                tool_calls: None,
+                tool_call_id: None,
+            };
+            if inject_mode == MidRunMode::Queue {
+                if let Err(e) = self.memory.save_message(conversation_id, &msg).await {
+                    warn!("Failed to persist queued injection: {}", e);
+                }
+            }
+            messages.push(msg);
+        }
+        true
+    }
+
     /// Register a oneshot sender for a user's loop detection callback.
     /// Returns the old sender if one was already registered (should not happen
     /// in practice since one user has one active process_message).
@@ -918,29 +960,8 @@ impl Agent {
             }
 
             // CHECK: pending injections from user (steer or queue based on mode)
-            let inject_mode = self.get_mid_run_mode(user_id).await;
-            let injections = self.drain_injections(user_id).await;
-            if !injections.is_empty() {
-                let label = if inject_mode == MidRunMode::Steer {
-                    "**[Steer]:** "
-                } else {
-                    "**[User injected mid-processing]:** "
-                };
-                for text in &injections {
-                    let msg = ChatMessage {
-                        role: "user".to_string(),
-                        content: Some(MessageContent::from_text(format!("{}{}", label, text))),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    };
-                    if inject_mode == MidRunMode::Queue {
-                        if let Err(e) = self.memory.save_message(&conversation_id, &msg).await {
-                            warn!("Failed to persist queued injection: {}", e);
-                        }
-                    }
-                    messages.push(msg);
-                }
-            }
+            self.drain_and_inject_steer(user_id, &conversation_id, &mut messages)
+                .await;
 
             // Tiers 1-2: sync compaction
             let base_prompt = prepare_messages_for_llm(&messages, context_window);
@@ -1250,7 +1271,13 @@ impl Agent {
                         {
                             let preview = &first.function.arguments;
                             let preview = if preview.len() > 80 {
-                                format!("{}...", &preview[..80])
+                                // Safe UTF-8 boundary truncation
+                                let boundary = preview
+                                    .char_indices()
+                                    .nth(80)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(preview.len());
+                                format!("{}...", &preview[..boundary])
                             } else {
                                 preview.to_string()
                             };
@@ -1300,6 +1327,13 @@ impl Agent {
                         match tokio::time::timeout(loop_timeout, cb_rx).await {
                             Ok(Ok(LoopCallbackChoice::Continue)) => {
                                 info!("User approved — continuing loop");
+                                // Save the looping assistant message so the LLM
+                                // sees what was detected on the next iteration.
+                                self.memory
+                                    .save_message(&conversation_id, &response)
+                                    .await
+                                    .ok();
+                                messages.push(response.clone());
                                 loop_detector.clear();
                                 // `continue` targets the 'outer for loop — starts a
                                 // fresh iteration (re-invokes the LLM), skipping any
@@ -1558,36 +1592,10 @@ impl Agent {
 
                     // --- Steer injection: drain pending messages between iterations ---
                     // Without this, a steer sent during tool execution is only visible
-                    // after the next LLM call completes (the drain at line 869 fires
-                    // after the LLM call starts the next iteration).
-                    let inject_mode = self.get_mid_run_mode(user_id).await;
-                    let injections = self.drain_injections(user_id).await;
-                    if !injections.is_empty() {
-                        for text in &injections {
-                            let label = if inject_mode == MidRunMode::Steer {
-                                "**[Steer]:** "
-                            } else {
-                                "**[User injected mid-processing]:** "
-                            };
-                            let msg = ChatMessage {
-                                role: "user".to_string(),
-                                content: Some(MessageContent::from_text(format!(
-                                    "{}{}",
-                                    label, text
-                                ))),
-                                tool_calls: None,
-                                tool_call_id: None,
-                            };
-                            if inject_mode == MidRunMode::Queue {
-                                if let Err(e) =
-                                    self.memory.save_message(&conversation_id, &msg).await
-                                {
-                                    warn!("Failed to persist queued injection: {}", e);
-                                }
-                            }
-                            messages.push(msg);
-                        }
-                    }
+                    // after the next LLM call completes (the drain at the top of the
+                    // outer loop fires after the LLM call starts the next iteration).
+                    self.drain_and_inject_steer(user_id, &conversation_id, &mut messages)
+                        .await;
                     // --- End steer injection ---
 
                     iteration_count = iteration + 1;
@@ -2829,17 +2837,24 @@ impl Agent {
                             "Subagent loop detected — injecting recovery nudge"
                         );
 
-                        // Inject recovery message as a tool result
+                        // Persist the assistant tool-call message so the LLM sees it
+                        // on the next iteration — required because a `tool`-role
+                        // nudge without a preceding assistant tool_use would be
+                        // an orphan message that APIs reject.
+                        messages.push(response.clone());
+
+                        // Inject recovery message as a user-role turn so it
+                        // doesn't depend on a matching tool_call_id.
                         let nudge_text = format!(
                             "Error: You have called {} {} times with the same arguments. \
                              The result has not changed. Try a different approach.",
                             loop_info.tool_name, loop_info.call_count,
                         );
                         messages.push(ChatMessage {
-                            role: "tool".to_string(),
+                            role: "user".to_string(),
                             content: Some(MessageContent::from_text(nudge_text)),
                             tool_calls: None,
-                            tool_call_id: Some("loop_recovery_nudge".to_string()),
+                            tool_call_id: None,
                         });
 
                         loop_detector_sub.clear();
@@ -4766,9 +4781,10 @@ mod tests {
         let result = build_btw_context(&msgs, "test question");
         let forked = &result[..result.len() - 1];
         for msg in forked {
-            if let Some(ref calls) = msg.tool_calls {
-                assert!(calls.is_empty(), "orphaned tool_use should be stripped");
-            }
+            assert!(
+                msg.tool_calls.as_ref().is_none_or(|c| c.is_empty()),
+                "orphaned tool_use should be stripped"
+            );
         }
     }
 

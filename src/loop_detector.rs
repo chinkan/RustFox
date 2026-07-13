@@ -178,9 +178,9 @@ mod tests {
     fn test_detect_exact_threshold_detects() {
         let mut d = LoopDetector::new(3);
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
-        d.record(&[tc.clone()], 0);
-        d.record(&[tc.clone()], 1);
-        d.record(&[tc.clone()], 2);
+        d.record(std::slice::from_ref(&tc), 0);
+        d.record(std::slice::from_ref(&tc), 1);
+        d.record(std::slice::from_ref(&tc), 2);
         let info = d.detect_loop().expect("loop should be detected");
         assert_eq!(info.tool_name, "read");
         assert_eq!(info.call_count, 3);
@@ -199,9 +199,9 @@ mod tests {
     fn test_clear_resets_detection() {
         let mut d = LoopDetector::new(3);
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
-        d.record(&[tc.clone()], 0);
-        d.record(&[tc.clone()], 1);
-        d.record(&[tc.clone()], 2);
+        d.record(std::slice::from_ref(&tc), 0);
+        d.record(std::slice::from_ref(&tc), 1);
+        d.record(std::slice::from_ref(&tc), 2);
         assert!(d.detect_loop().is_some());
         d.clear();
         assert!(d.detect_loop().is_none());
@@ -213,7 +213,7 @@ mod tests {
         let tc = make_tool_call("read", r#"{"path":"x"}"#);
         // Two identical calls in iteration 0, one in iteration 1 = 3 total
         d.record(&[tc.clone(), tc.clone()], 0);
-        d.record(&[tc.clone()], 1);
+        d.record(std::slice::from_ref(&tc), 1);
         let info = d.detect_loop().expect("cross-turn loop detected");
         assert_eq!(info.tool_name, "read");
     }
