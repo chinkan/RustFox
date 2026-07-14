@@ -289,7 +289,10 @@ async fn main() -> Result<()> {
                     let chat = teloxide::types::ChatId(chat_id_val);
                     let error_msg = format!("**Scheduled task failed:** {}", e);
                     let _ = rustfox::platform::telegram::send_markdown_message(
-                        &req.bot, chat, &error_msg, rustfox::platform::telegram::MessageFormat::Auto,
+                        &req.bot,
+                        chat,
+                        &error_msg,
+                        rustfox::platform::telegram::MessageFormat::Auto,
                     )
                     .await;
                     continue;
@@ -308,8 +311,13 @@ async fn main() -> Result<()> {
                 }
             };
             let chat = teloxide::types::ChatId(chat_id_val);
-            if let Err(e) =
-                rustfox::platform::telegram::send_markdown_message(&req.bot, chat, &response, rustfox::platform::telegram::MessageFormat::Auto).await
+            if let Err(e) = rustfox::platform::telegram::send_markdown_message(
+                &req.bot,
+                chat,
+                &response,
+                rustfox::platform::telegram::MessageFormat::Auto,
+            )
+            .await
             {
                 tracing::error!("Failed to send scheduled response: {}", e);
             }

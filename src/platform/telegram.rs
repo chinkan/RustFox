@@ -54,10 +54,7 @@ impl MessageFormat {
 }
 
 /// Load the user's preferred message format from memory.
-async fn load_message_format(
-    memory: &crate::memory::MemoryStore,
-    user_id: &str,
-) -> MessageFormat {
+async fn load_message_format(memory: &crate::memory::MemoryStore, user_id: &str) -> MessageFormat {
     let raw = memory
         .recall("settings", &format!("message_format_{}", user_id))
         .await
@@ -284,13 +281,16 @@ pub async fn run(
             let is_cmd = match &upd.kind {
                 UpdateKind::Message(m)
                 | UpdateKind::EditedMessage(m)
-                | UpdateKind::ChannelPost(m) => m
-                    .text()
-                    .map(|t| t.starts_with('/'))
-                    .unwrap_or(false),
+                | UpdateKind::ChannelPost(m) => {
+                    m.text().map(|t| t.starts_with('/')).unwrap_or(false)
+                }
                 _ => false,
             };
-            if is_cmd { None } else { upd.chat().map(|c| c.id) }
+            if is_cmd {
+                None
+            } else {
+                upd.chat().map(|c| c.id)
+            }
         })
         .default_handler(|upd| async move {
             warn!("Unhandled update: {:?}", upd.id);
@@ -304,11 +304,7 @@ pub async fn run(
 }
 
 /// Send entities-only fallback (no rich path).
-async fn send_entities_message(
-    bot: &Bot,
-    chat_id: ChatId,
-    markdown: &str,
-) -> ResponseResult<()> {
+async fn send_entities_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
     let (text, entities) = markdown_to_entities(markdown);
     let chunks = split_entities(&text, &entities, 4090);
     if chunks.is_empty() {
@@ -351,18 +347,17 @@ pub async fn send_markdown_message(
         MessageFormat::Auto => {
             let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
 
-            let entity_sender = || async {
-                send_entities_message(bot, chat_id, markdown).await
-            };
+            let entity_sender = || async { send_entities_message(bot, chat_id, markdown).await };
 
-            match rich_sender::try_send_rich_fallback(token, chat_id.0, markdown, &entity_sender).await
+            match rich_sender::try_send_rich_fallback(token, chat_id.0, markdown, &entity_sender)
+                .await
             {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     warn!("send_markdown_message all paths failed: {e}");
-                    Err(teloxide::RequestError::Io(Arc::new(
-                        std::io::Error::other(format!("{e}")),
-                    )))
+                    Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
+                        format!("{e}"),
+                    ))))
                 }
             }
         }
@@ -1173,12 +1168,10 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                         "✅ **Format changed to {}.** {}",
                         sub,
                         match fmt {
-                            MessageFormat::Rich =>
-                                "Using sendRichMessage (Telegram native only).",
+                            MessageFormat::Rich => "Using sendRichMessage (Telegram native only).",
                             MessageFormat::Markdown =>
                                 "Using entity-formatted sendMessage (works everywhere).",
-                            MessageFormat::Auto =>
-                                "Try rich, fall back to entities on failure.",
+                            MessageFormat::Auto => "Try rich, fall back to entities on failure.",
                         }
                     ),
                     msg_format,
@@ -1273,7 +1266,10 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await;
         } else {
             return send_markdown_message(
-                &bot, msg.chat.id, "Nothing is currently processing.", msg_format,
+                &bot,
+                msg.chat.id,
+                "Nothing is currently processing.",
+                msg_format,
             )
             .await;
         }
@@ -1418,9 +1414,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
                         .await
                         .ok();
                     Some(mid)
-                } else if let Ok(sent) =
-                    stream_bot.send_message(stream_chat_id, &snapshot).await
-                {
+                } else if let Ok(sent) = stream_bot.send_message(stream_chat_id, &snapshot).await {
                     Some(sent.id)
                 } else {
                     None
@@ -1476,10 +1470,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let full_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
 
         // Collect all message IDs for cleanup.
-        let old_ids: Vec<teloxide::types::MessageId> = chunks
-            .iter()
-            .filter_map(|c| c.msg_id)
-            .collect();
+        let old_ids: Vec<teloxide::types::MessageId> =
+            chunks.iter().filter_map(|c| c.msg_id).collect();
 
         const MAX_UTF16: usize = 4090;
 
@@ -1596,7 +1588,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     if let Err(e) = process_result {
         warn!(error = %e, "Agent processing failed");
-        return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e), msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e), msg_format)
+            .await;
     }
     // Success: response already delivered via streaming
 
