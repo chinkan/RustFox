@@ -3436,10 +3436,18 @@ impl Agent {
                         format!("No execution history for task '{}'.", task_id)
                     }
                     Ok(runs) => {
-                        let mut out = format!("Execution history for task '{}' ({} runs):\n\n", task_id, runs.len());
+                        let mut out = format!(
+                            "Execution history for task '{}' ({} runs):\n\n",
+                            task_id,
+                            runs.len()
+                        );
                         for r in &runs {
                             let resp = r.response.as_deref().unwrap_or("(no response)");
-                            let err = r.error.as_deref().map(|e| format!("\nError: {}", e)).unwrap_or_default();
+                            let err = r
+                                .error
+                                .as_deref()
+                                .map(|e| format!("\nError: {}", e))
+                                .unwrap_or_default();
                             let truncated = crate::utils::strings::truncate_chars(resp, 2000);
                             out.push_str(&format!(
                                 "Run at: {} | Status: {}\n{}{}\n\n",
@@ -3503,11 +3511,15 @@ impl Agent {
                 };
 
                 // Fire immediately with 0-second delay (fires on next scheduler tick)
-                match self.scheduler.add_one_shot_job(
-                    std::time::Duration::ZERO,
-                    &format!("rerun-{}", task.description),
-                    fire,
-                ).await {
+                match self
+                    .scheduler
+                    .add_one_shot_job(
+                        std::time::Duration::ZERO,
+                        &format!("rerun-{}", task.description),
+                        fire,
+                    )
+                    .await
+                {
                     Ok(_sched_id) => {
                         format!("Task '{}' scheduled for immediate re-execution.", task_id)
                     }

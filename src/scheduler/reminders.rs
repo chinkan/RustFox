@@ -183,7 +183,11 @@ impl ScheduledTaskStore {
         Ok(())
     }
 
-    pub async fn get_task_runs(&self, task_id: &str, limit: usize) -> Result<Vec<ScheduledTaskRun>> {
+    pub async fn get_task_runs(
+        &self,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScheduledTaskRun>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
@@ -355,11 +359,25 @@ mod tests {
         store.create(&task).await.unwrap();
 
         store
-            .insert_run("run-1", "task-1", "2026-07-13T10:00:00", Some("hello"), None, "completed")
+            .insert_run(
+                "run-1",
+                "task-1",
+                "2026-07-13T10:00:00",
+                Some("hello"),
+                None,
+                "completed",
+            )
             .await
             .unwrap();
         store
-            .insert_run("run-2", "task-1", "2026-07-13T11:00:00", None, Some("error"), "failed")
+            .insert_run(
+                "run-2",
+                "task-1",
+                "2026-07-13T11:00:00",
+                None,
+                Some("error"),
+                "failed",
+            )
             .await
             .unwrap();
 
@@ -392,7 +410,14 @@ mod tests {
         store.create(&task).await.unwrap();
 
         store
-            .insert_run("run-x", "task-x", "2026-07-13T12:00:00", None, None, "running")
+            .insert_run(
+                "run-x",
+                "task-x",
+                "2026-07-13T12:00:00",
+                None,
+                None,
+                "running",
+            )
             .await
             .unwrap();
 

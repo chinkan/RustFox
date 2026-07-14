@@ -242,17 +242,21 @@ async fn main() -> Result<()> {
             // Persist run record BEFORE processing (capture fire time)
             let run_id = uuid::Uuid::new_v4().to_string();
             let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-            if let Err(e) = req.task_store.insert_run(
-                &run_id, &req.task_id, &run_at, None, None, "running",
-            ).await {
+            if let Err(e) = req
+                .task_store
+                .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
+                .await
+            {
                 tracing::warn!("Failed to persist scheduled task run record: {}", e);
             }
 
             let response = match agent.process_message(&req.incoming, None, None).await {
                 Ok(r) => {
-                    if let Err(e) = req.task_store.update_run(
-                        &run_id, Some(&r), None, "completed",
-                    ).await {
+                    if let Err(e) = req
+                        .task_store
+                        .update_run(&run_id, Some(&r), None, "completed")
+                        .await
+                    {
                         tracing::warn!("Failed to update scheduled task run record: {}", e);
                     }
                     r
@@ -260,9 +264,11 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
                     let err_str = format!("{:#}", e);
-                    if let Err(e) = req.task_store.update_run(
-                        &run_id, None, Some(&err_str), "failed",
-                    ).await {
+                    if let Err(e) = req
+                        .task_store
+                        .update_run(&run_id, None, Some(&err_str), "failed")
+                        .await
+                    {
                         tracing::warn!("Failed to update failed scheduled task run record: {}", e);
                     }
                     if !req.is_recurring {
@@ -282,7 +288,10 @@ async fn main() -> Result<()> {
                     };
                     let chat = teloxide::types::ChatId(chat_id_val);
                     let error_msg = format!("**Scheduled task failed:** {}", e);
-                    let _ = rustfox::platform::telegram::send_markdown_message(&req.bot, chat, &error_msg).await;
+                    let _ = rustfox::platform::telegram::send_markdown_message(
+                        &req.bot, chat, &error_msg,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -299,7 +308,9 @@ async fn main() -> Result<()> {
                 }
             };
             let chat = teloxide::types::ChatId(chat_id_val);
-            if let Err(e) = rustfox::platform::telegram::send_markdown_message(&req.bot, chat, &response).await {
+            if let Err(e) =
+                rustfox::platform::telegram::send_markdown_message(&req.bot, chat, &response).await
+            {
                 tracing::error!("Failed to send scheduled response: {}", e);
             }
         }
