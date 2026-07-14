@@ -227,8 +227,8 @@ pub async fn run(
 
     let handler = dptree::entry()
         .branch(message_handler)
-        .branch(callback_handler)
-        .branch(loop_callback_handler);
+        .branch(loop_callback_handler)
+        .branch(callback_handler);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![agent])
@@ -1430,7 +1430,11 @@ async fn handle_loop_callback(bot: Bot, q: CallbackQuery, agent: Arc<Agent>) -> 
     let user_id = q.from.id.to_string();
     let data = match q.data {
         Some(ref d) => d.clone(),
-        None => return Ok(()),
+        None => {
+            // Even if there's no data, we must answer the callback query
+            bot.answer_callback_query(q.id).await.ok();
+            return Ok(());
+        }
     };
 
     // Parse the user's choice from callback data
@@ -1464,7 +1468,11 @@ async fn handle_model_callback(
     let callback_id = q.id.clone();
     let data = match q.data {
         Some(ref d) => d.clone(),
-        None => return Ok(()),
+        None => {
+            // Even if there's no data, we must answer the callback query
+            bot.answer_callback_query(callback_id).await.ok();
+            return Ok(());
+        }
     };
     let msg = q.regular_message().cloned();
 
