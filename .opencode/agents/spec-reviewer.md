@@ -1,7 +1,7 @@
 ---
 description: Verifies that an implementation matches its specification exactly — nothing more, nothing less. Dispatch after an implementer completes work.
 mode: subagent
-# model: opencode-go/minimax-m3
+model: opencode-go/kimi-k2.7-code
 permission:
   read: allow
   glob: allow

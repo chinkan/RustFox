@@ -1,7 +1,7 @@
 ---
 description: Implements spec-defined tasks from plans. Writes tests, implements features, verifies work, and commits. Best for mechanical implementation with clear specs.
 mode: subagent
-# model: opencode-go/minimax-m3
+model: opencode-go/deepseek-v4-flash
 permission:
   read: allow
   write: allow

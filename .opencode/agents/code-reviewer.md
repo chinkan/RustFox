@@ -1,7 +1,7 @@
 ---
 description: Reviews completed project steps against original plans, coding standards, and best practices. Use when a major project step has been completed and needs review.
 mode: subagent
-# model: opencode-go/minimax-m3
+model: opencode-go/minimax-m3
 permission:
   read: allow
   glob: allow
