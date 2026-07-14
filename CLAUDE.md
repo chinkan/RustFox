@@ -356,3 +356,17 @@ and `result` (Reporter Markdown summary).
 | `sup_artifacts`   | Index of files written under `artifacts_dir` (`task_id`, `job_id`, `kind`, `path`, `sha256`, `bytes`) |
 
 All four tables are created idempotently in `MemoryStore` at startup.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context. See `docs/agents/domain.md`.
