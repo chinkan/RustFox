@@ -398,7 +398,7 @@ impl LlmClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<ChatMessage> {
-        let default_model = self.registry.default_provider_name().to_string();
+        let default_model = self.registry.default_qualified_model();
         self.chat_completion_with_model(messages, tools, &default_model)
             .await
             .map(|c| c.message)

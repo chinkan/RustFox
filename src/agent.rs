@@ -1,18 +1,18 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
-use teloxide::payloads::{SendDocumentSetters, SendMessageSetters};
+use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::Requester;
-use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile};
+use teloxide::types::ChatId;
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    build_compact_boundary_marker, build_compact_summary_prompt, estimate_prompt_bytes,
-    prepare_messages_for_llm, recovery_nudge_for, should_auto_compact, ConversationMeta,
+    build_compact_boundary_marker, build_compact_summary_prompt,
+    prepare_messages_for_llm, recovery_nudge_for, ConversationMeta,
     PreparedPrompt, PRESERVED_TOOL_GROUPS,
 };
 use crate::config::Config;
@@ -27,6 +27,9 @@ use crate::platform::IncomingMessage;
 use crate::scheduler::reminders::ScheduledTaskStore;
 use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
+use crate::cancel_registry::CancelRegistry;
+use crate::tool_registry::{ToolContext, ToolRegistry};
+use crate::platform::sender::PlatformSender;
 use crate::tools;
 use std::collections::HashMap;
 use tokio::process::Command as TokioCommand;
@@ -69,6 +72,7 @@ pub enum LoopCallbackChoice {
 
 /// Number of context snippets to retrieve from conversation history for
 /// compaction summarization.
+#[allow(dead_code)]
 const COMPACTION_RAG_LIMIT: usize = 5;
 
 /// A request dispatched from a fire closure to the background job runner.
@@ -109,6 +113,9 @@ pub struct Agent {
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
     pub running_commands: Arc<tokio::sync::Mutex<HashMap<String, RunningCommand>>>,
+    pub cancel_registry: Arc<CancelRegistry>,
+    pub tool_registry: ToolRegistry,
+    pub sender: Arc<dyn PlatformSender>,
     /// Per-user CancellationTokens for /stop — created at process_message entry,
     /// removed on exit. Checked at each iteration boundary.
     pub cancel_token_registry: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
@@ -127,6 +134,7 @@ pub struct Agent {
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
+#[allow(dead_code)]
 struct AdHocTask {
     system_prompt: String,
     prompt: String,
@@ -179,6 +187,9 @@ impl Agent {
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
         langsmith: Arc<LangSmithClient>,
         config_path: PathBuf,
+        cancel_registry: Arc<CancelRegistry>,
+        tool_registry: ToolRegistry,
+        sender: Arc<dyn PlatformSender>,
     ) -> Self {
         let llm = LlmClient::new(registry.clone());
         let initial_model = registry.default_qualified_model();
@@ -201,6 +212,9 @@ impl Agent {
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
             running_commands: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cancel_registry,
+            tool_registry,
+            sender,
             cancel_token_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_injections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_loop_callbacks: Arc::new(tokio::sync::Mutex::new(
@@ -344,6 +358,7 @@ impl Agent {
 
     /// Build the system prompt for an ad-hoc subagent by prepending system context
     /// (timestamp, user model, location) to the agent's specific instructions.
+    #[allow(dead_code)]
     async fn build_subagent_system_prompt(&self, agent_instructions: &str) -> String {
         let mut prompt = self.build_system_context().await;
         prompt.push_str("\n\n");
@@ -353,6 +368,7 @@ impl Agent {
 
     /// Resolve the base directory for a skill/agent by checking the registry.
     /// Falls back to the configured directory if not found (for newly-created skills).
+#[allow(dead_code)]
     fn resolve_skill_base_dir(
         &self,
         name: &str,
@@ -615,6 +631,7 @@ impl Agent {
     }
 
     /// Build LangSmith outputs for an LLM run, including completion metadata and prompt stats.
+    #[allow(dead_code)]
     fn llm_run_outputs(
         completion: Option<&crate::llm::ChatCompletion>,
         prompt: &PreparedPrompt,
@@ -655,7 +672,7 @@ impl Agent {
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
-        let parsed_chat_id: ChatId = incoming
+        let _parsed_chat_id: ChatId = incoming
             .chat_id
             .parse::<i64>()
             .map(ChatId)
@@ -667,41 +684,25 @@ impl Agent {
             .get_or_create_conversation(platform, user_id)
             .await?;
 
-        // Load existing messages from memory
-        let mut messages = self
-            .memory
-            .load_messages_with_limit(&conversation_id, self.config.memory.max_raw_messages)
-            .await?;
-
         // Always build the system prompt from the live registry.
-        // For new conversations: save to DB and push.
-        // For existing conversations: refresh messages[0] in-memory only
-        //   (DB keeps the historical system message intact).
         let current_system_prompt = self.build_system_prompt().await;
-        if messages.is_empty() {
-            let system_msg = ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::from_text(current_system_prompt)),
-                tool_calls: None,
-                tool_call_id: None,
-            };
-            self.memory
-                .save_message(&conversation_id, &system_msg)
-                .await?;
-            messages.push(system_msg);
-        } else {
-            // Refresh in-memory: new skills loaded by reload_skills take effect
-            // on the very next message without restarting the bot.
-            // Find the system message by role (defensive: don't assume messages[0] is system).
-            if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
-                system_msg.content = Some(MessageContent::from_text(current_system_prompt));
-            }
-        }
+
+        // Use ConversationManager for message construction and management
+        let skills = self.skills.read().await;
+        let mut cmgr = crate::conversation::ConversationManager::new(
+            &self.memory,
+            platform,
+            user_id,
+            current_system_prompt.clone(),
+            &skills,
+            &self.config,
+        )
+        .await?;
+        drop(skills);
 
         // RAG: auto-retrieve relevant past messages and inject into system prompt
         if !incoming.text.is_empty() {
-            // Take last 6 messages for rewrite context (skip system messages)
-            let filtered_msgs: Vec<_> = messages
+            let filtered_msgs: Vec<_> = cmgr.messages()
                 .iter()
                 .filter(|m| m.role == "user" || m.role == "assistant")
                 .cloned()
@@ -709,7 +710,6 @@ impl Agent {
             let rewrite_start = filtered_msgs.len().saturating_sub(6);
             let recent_for_rewrite = filtered_msgs[rewrite_start..].to_vec();
 
-            // Determine if query rewriting is enabled: per-user setting overrides config default.
             let per_user_setting = self
                 .memory
                 .recall(
@@ -739,95 +739,45 @@ impl Agent {
             )
             .await
             {
-                if let Some(system_msg) = messages.iter_mut().find(|m| m.role == "system") {
-                    if let Some(MessageContent::Text(ref mut s)) = system_msg.content {
-                        s.push_str("\n\n");
-                        s.push_str(&rag_block);
-                    }
-                }
+                cmgr.inject_rag_context(&rag_block);
             }
         }
 
-        // Process attachments (images → vision parts or OCR text; PDFs/DOCXs → extracted text)
+        // Process attachments
         let supports_vision = {
             let current = self.current_model.read().await;
             let (provider, _) = self.registry.resolve_model(&current);
             provider.supports_vision()
         };
 
-        let (attachment_text, image_parts) = if !incoming.attachments.is_empty() {
-            crate::file_processor::process_attachments(
-                &incoming.attachments,
-                &incoming.text,
-                &self.config,
-                &self.memory,
-                supports_vision, // NEW parameter
-            )
-            .await
-        } else {
-            (String::new(), vec![])
-        };
+        let image_parts = cmgr.add_incoming(incoming, &self.config, supports_vision).await?;
 
         // Build user message content
         let user_msg_content = if image_parts.is_empty() {
-            // Text-only path: combine user text with any extracted document text
-            let mut combined = incoming.text.clone();
-            if !attachment_text.is_empty() {
-                combined.push_str("\n\n");
-                combined.push_str(&attachment_text);
-            }
-            MessageContent::from_text(combined)
+            MessageContent::from_text(incoming.text.clone())
         } else {
-            // Multi-modal path: text part + image content parts
             let mut parts: Vec<ContentPart> = Vec::new();
-            let mut text_content = incoming.text.clone();
-            if !attachment_text.is_empty() {
-                text_content.push_str("\n\n");
-                text_content.push_str(&attachment_text);
-            }
-            if !text_content.is_empty() {
-                parts.push(ContentPart::Text { text: text_content });
+            if !incoming.text.is_empty() {
+                parts.push(ContentPart::Text { text: incoming.text.clone() });
             }
             parts.extend(image_parts);
             MessageContent::Parts(parts)
         };
 
-        // Save a text-only version to DB (avoid storing base64 image data in message history)
-        let db_content = if incoming.attachments.is_empty() {
-            user_msg_content.clone()
-        } else {
-            let mut db_text = incoming.text.clone();
-            if !attachment_text.is_empty() {
-                db_text.push_str("\n\n[Attachment processed]");
-            }
-            MessageContent::from_text(db_text)
-        };
-        let db_msg = ChatMessage {
-            role: "user".to_string(),
-            content: Some(db_content),
-            tool_calls: None,
-            tool_call_id: None,
-        };
-        self.memory.save_message(&conversation_id, &db_msg).await?;
-
-        // Push the full message (with image parts if any) to in-memory context
+        // Push the user message to in-memory context
         let user_msg = ChatMessage {
             role: "user".to_string(),
             content: Some(user_msg_content),
             tool_calls: None,
             tool_call_id: None,
         };
-        messages.push(user_msg);
+        cmgr.add_user_turn(user_msg);
 
         // Compaction state for this conversation session (persists across iterations)
-        let mut conv_meta = ConversationMeta::new();
-
-        // Gather all tool definitions
-        let mut all_tools: Vec<ToolDefinition> = tools::builtin_tool_definitions();
+        let _conv_meta = ConversationMeta::new();
+// Gather all tool definitions
+        let mut all_tools: Vec<ToolDefinition> = self.tool_registry.all_definitions();
         all_tools.extend(self.mcp.tool_definitions());
-        all_tools.extend(self.memory_tool_definitions());
-        all_tools.extend(self.scheduling_tool_definitions());
-        all_tools.extend(self.skill_tool_definitions());
 
         // --- LangSmith: start root chain run ---
         let chain_run_id = uuid::Uuid::new_v4().to_string();
@@ -849,910 +799,126 @@ impl Agent {
             start_time: Self::now_iso8601_static(),
         });
 
-        // Agentic loop — keep calling LLM until we get a non-tool response
-        let max_iterations = self.config.max_iterations();
-        let empty_response_retry_limit = self.config.empty_response_retry_limit();
-        let mut iteration_count = 0u32;
-        let mut tool_call_count = 0u32;
-
         // Reset soul-update flag for this session
         self.soul_updated
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
         // Register cancel token for /stop support
         let cancel_token = self.register_cancel_token(user_id).await;
-        let mut was_cancelled = false;
 
-        // Resolve context_window once before the loop (can't .await inside the loop)
-        let context_window = {
-            let model = self.current_model.read().await;
-            self.registry.effective_context_window(&model)
+        // Build make_ctx closure for ToolContext construction
+        let make_ctx = {
+            let sandbox_dir = self.config.sandbox.allowed_directory.clone();
+            let home_dir = self.config.resolved_home.clone();
+            let sender = self.sender.clone();
+            let cancel_registry = self.cancel_registry.clone();
+            move |_user_id: &str, _chat_id: &str| ToolContext {
+                sandbox_dir: sandbox_dir.clone(),
+                home_dir: home_dir.clone(),
+                sender: sender.clone(),
+                cancel_registry: cancel_registry.clone(),
+                user_id: _user_id.to_string(),
+                chat_id: _chat_id.to_string(),
+            }
         };
 
-        // Loop detection state (cross-turn, resets each process_message call)
-        let loop_config = self.config.loop_detection_config();
-        let mut loop_detector =
-            crate::loop_detector::LoopDetector::new(loop_config.threshold, loop_config.enabled);
-        let loop_timeout = std::time::Duration::from_secs(loop_config.timeout_seconds);
+        let loop_config = crate::loop_runner::LoopConfig {
+            max_iterations: self.config.max_iterations(),
+            empty_response_retry_limit: self.config.empty_response_retry_limit(),
+            compaction_enabled: true,
+            loop_detection_enabled: true,
+            interactive_loop_callback: true,
+            allowed_tools: None,
+            langsmith_project: Some(ls_project.clone()),
+            tool_event_tx,
+            stream_token_tx,
+        };
 
-        'outer: for iteration in 0..max_iterations {
-            debug!(
-                "Trying iteration {}: messages length: {}",
-                iteration,
-                messages.len()
-            );
+        let outcome = crate::loop_runner::AgenticLoop::new(
+            &self.llm,
+            &self.tool_registry,
+            &self.mcp,
+            &loop_config,
+            Some(cancel_token.clone()),
+            Some(chain_run_id.clone()),
+            Some(&self.langsmith),
+            self.sender.as_ref() as &dyn PlatformSender,
+            Box::new(make_ctx),
+        )
+        .run(
+            &mut crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr)),
+            user_id,
+            &incoming.chat_id,
+        )
+        .await;
 
-            // CHECK: cancelled by /stop?
-            if cancel_token.is_cancelled() {
-                was_cancelled = true;
-                info!(
-                    user_id = %user_id,
-                    iteration,
-                    "Processing cancelled by user via /stop"
-                );
-                break;
-            }
-
-            // --- Empty response recovery: retry loop ---
-            let mut retry_count = 0u32;
-            let response: ChatMessage;
-
-            // Tier 3: auto-compact (async, LLM call) — before Tiers 1-2
-            conv_meta.current_turn = iteration as usize;
-            if should_auto_compact(&messages, &conv_meta, context_window) {
-                // Capture pre-compact metrics
-                let messages_before = messages.clone();
-                let messages_before_bytes = estimate_prompt_bytes(&messages_before);
-
-                if let Ok(compacted) = Self::auto_compact_conversation(
-                    &self.llm,
-                    &self.memory,
-                    &conversation_id,
-                    &messages,
-                    context_window,
-                )
-                .await
-                {
-                    conv_meta.last_compact_turn = iteration as usize;
-                    messages = compacted;
-                    info!(
-                        "Tier 3 auto-compact applied: {} messages reduced",
-                        messages.len(),
-                    );
-
-                    // LangSmith logging for Tier 3
-                    let compacted_bytes = estimate_prompt_bytes(&messages);
-                    let compact_run_id = uuid::Uuid::new_v4().to_string();
-                    self.langsmith.start_run(crate::langsmith::RunParams {
-                        id: compact_run_id.clone(),
-                        name: "auto_compact".to_string(),
-                        run_type: crate::langsmith::RunType::Chain,
-                        parent_run_id: Some(chain_run_id.clone()),
-                        inputs: serde_json::json!({
-                            "tier": 3,
-                            "pre_bytes": messages_before_bytes,
-                            "post_bytes": compacted_bytes,
-                            "pre_count": messages_before.len(),
-                            "post_count": messages.len(),
-                        }),
-                        session_name: ls_project.clone(),
-                        start_time: Self::now_iso8601_static(),
-                    });
-                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                        id: compact_run_id,
-                        outputs: Some(serde_json::json!({
-                            "tier": 3,
-                            "delta_bytes": (messages_before_bytes as i64 - compacted_bytes as i64).max(0),
-                            "delta_messages": messages_before.len() as i64 - messages.len() as i64,
-                        })),
-                        error: None,
-                        end_time: Self::now_iso8601_static(),
-                    });
-                }
-            }
-
-            // CHECK: pending injections from user (steer or queue based on mode)
-            self.drain_and_inject_steer(user_id, &conversation_id, &mut messages)
-                .await;
-
-            // Tiers 1-2: sync compaction
-            let base_prompt = prepare_messages_for_llm(&messages, context_window);
-
-            loop {
-                // CHECK: cancelled while retrying?
-                if cancel_token.is_cancelled() {
-                    was_cancelled = true;
-                    info!("Cancelled during retry loop — breaking out of outer iteration loop");
-                    break 'outer;
-                }
-
-                // Clone the base prompt for this retry attempt
-                let mut prompt = base_prompt.clone();
-
-                // On retry, append recovery nudge to in-memory prompt only
-                if retry_count > 0 {
-                    let nudge = recovery_nudge_for(&messages);
-                    prompt.messages.push(nudge);
-                    // Recompute stats after adding nudge
-                    prompt.stats.prepared_message_count = prompt.messages.len();
-                    prompt.stats.prepared_prompt_chars = estimate_prompt_bytes(&prompt.messages);
-                }
-
-                // Log prompt compaction if applied
-                if prompt.stats.compaction_applied {
-                    info!(
-                        original_message_count = prompt.stats.original_message_count,
-                        prepared_message_count = prompt.stats.prepared_message_count,
-                        original_prompt_chars = prompt.stats.original_prompt_chars,
-                        prepared_prompt_chars = prompt.stats.prepared_prompt_chars,
-                        "Prompt compaction applied"
-                    );
-                }
-
-                // --- LangSmith: start llm run (child of chain) ---
-                let llm_run_id = uuid::Uuid::new_v4().to_string();
-                let llm_start = Self::now_iso8601_static();
-                self.langsmith.start_run(crate::langsmith::RunParams {
-                    id: llm_run_id.clone(),
-                    name: "llm_call".to_string(),
-                    run_type: crate::langsmith::RunType::Llm,
-                    parent_run_id: Some(chain_run_id.clone()),
-                    inputs: serde_json::json!({
-                        "messages": prompt.messages,
-                        "metadata": {
-                            "retry_count": retry_count,
-                            "message_count": prompt.stats.prepared_message_count,
-                            "prompt_chars": prompt.stats.prepared_prompt_chars,
-                        }
-                    }),
-                    session_name: ls_project.clone(),
-                    start_time: llm_start,
-                });
-
-                // Call LLM with prepared prompt (with fallback chain)
-                let model = self.current_model.read().await.clone();
-                let fallback_chain = &self.config.fallback.chain;
-                let mut last_error = None;
-
-                let completion_result = 'fallback: {
-                    for attempt in 0..=fallback_chain.len() {
-                        let current_model = if attempt == 0 {
-                            model.clone()
-                        } else {
-                            fallback_chain[attempt - 1].clone()
-                        };
-
-                        match self
-                            .llm
-                            .chat_completion_with_model(
-                                &prompt.messages,
-                                &all_tools,
-                                &current_model,
-                            )
-                            .await
-                        {
-                            Ok(c) => {
-                                if attempt > 0 {
-                                    tracing::info!(
-                                        "Fallback succeeded: switched from '{}' to '{}'",
-                                        model,
-                                        current_model
-                                    );
-                                    *self.current_model.write().await = current_model.clone();
-                                }
-                                break 'fallback Ok(c);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Model '{}' failed (attempt {}/{}): {}",
-                                    current_model,
-                                    attempt,
-                                    fallback_chain.len(),
-                                    e
-                                );
-                                last_error = Some(e);
-                                if attempt == fallback_chain.len() {
-                                    break 'fallback Err(last_error.unwrap());
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    Err(last_error.unwrap())
+        match outcome {
+            Ok(crate::loop_runner::LoopOutcome::FinalResponse(final_content)) => {
+                // Save the delivered content to persistent memory
+                let save_msg = ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(MessageContent::from_text(final_content.clone())),
+                    tool_calls: None,
+                    tool_call_id: None,
                 };
+                self.memory
+                    .save_message(&conversation_id, &save_msg)
+                    .await?;
 
-                // Handle LLM transport/API errors
-                let mut recovered_from_413 = false;
-
-                let completion = match completion_result {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let err_str = format!("{:#}", e);
-                        let is_413 = err_str.contains("413")
-                            || err_str.to_lowercase().contains("prompt too long")
-                            || err_str.to_lowercase().contains("context length")
-                            || err_str.to_lowercase().contains("maximum context");
-                        if is_413 && !conv_meta.has_attempted_reactive_compact {
-                            conv_meta.has_attempted_reactive_compact = true;
-                            let messages_before_compact = messages.len();
-                            match Self::reactive_compact(
-                                &self.llm,
-                                &self.memory,
-                                &conversation_id,
-                                &messages,
-                                context_window,
-                            )
-                            .await
-                            {
-                                Ok(compacted) => {
-                                    let compacted_len = compacted.len();
-                                    messages = compacted;
-                                    recovered_from_413 = true;
-
-                                    // LangSmith logging for Tier 4
-                                    let compact_run_id = uuid::Uuid::new_v4().to_string();
-                                    self.langsmith.start_run(crate::langsmith::RunParams {
-                                        id: compact_run_id.clone(),
-                                        name: "reactive_compact".to_string(),
-                                        run_type: crate::langsmith::RunType::Chain,
-                                        parent_run_id: Some(chain_run_id.clone()),
-                                        inputs: serde_json::json!({
-                                            "tier": 4,
-                                            "reason": err_str,
-                                            "pre_count": messages_before_compact,
-                                        }),
-                                        session_name: ls_project.clone(),
-                                        start_time: Self::now_iso8601_static(),
-                                    });
-                                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                                        id: compact_run_id,
-                                        outputs: Some(serde_json::json!({
-                                            "tier": 4,
-                                            "post_count": compacted_len,
-                                        })),
-                                        error: None,
-                                        end_time: Self::now_iso8601_static(),
-                                    });
-                                }
-                                Err(compact_err) => {
-                                    warn!("Reactive compact failed: {}", compact_err);
-                                }
-                            }
-                        }
-                        if !recovered_from_413 {
-                            self.langsmith.end_run(crate::langsmith::EndRunParams {
-                                id: llm_run_id,
-                                outputs: None,
-                                error: Some(err_str.clone()),
-                                end_time: Self::now_iso8601_static(),
-                            });
-                            self.langsmith.end_run(crate::langsmith::EndRunParams {
-                                id: chain_run_id,
-                                outputs: None,
-                                error: Some(err_str),
-                                end_time: Self::now_iso8601_static(),
-                            });
-                            self.clear_cancel_token(user_id).await;
-                            return Err(e);
-                        }
-                        // recovered_from_413 is true but the compiler can't see this;
-                        // return a dummy completion (never used because of continue below)
-                        crate::llm::ChatCompletion {
-                            message: ChatMessage {
-                                role: String::new(),
-                                content: None,
-                                tool_calls: None,
-                                tool_call_id: None,
-                            },
-                            finish_reason: None,
-                            model: String::new(),
-                        }
-                    }
-                };
-
-                if recovered_from_413 {
-                    // End the leaked llm_run before continuing
-                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                        id: llm_run_id,
-                        outputs: None,
-                        error: Some(
-                            "413 context exceeded — recovered via Tier 4 compact".to_string(),
-                        ),
-                        end_time: Self::now_iso8601_static(),
-                    });
-                    continue;
-                }
-
-                // Check if response is empty (no content and no tool calls)
-                if is_empty_assistant_response(&completion.message) {
-                    warn!(
-                        user_id = %user_id,
-                        iteration,
-                        retry_count,
-                        "LLM returned empty content with no tool calls"
-                    );
-
-                    // End LLM run with error and diagnostic outputs
-                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                        id: llm_run_id,
-                        outputs: Some(Self::llm_run_outputs(
-                            Some(&completion),
-                            &prompt,
-                            retry_count,
-                        )),
-                        error: Some(
-                            "Empty assistant response (no content and no tool calls)".to_string(),
-                        ),
-                        end_time: Self::now_iso8601_static(),
-                    });
-
-                    // Check retry limit
-                    if retry_count >= empty_response_retry_limit {
-                        warn!(
-                            user_id = %user_id,
-                            retry_count,
-                            limit = empty_response_retry_limit,
-                            "Exhausted empty response retry limit"
-                        );
-
-                        // End chain run with error
-                        self.langsmith.end_run(crate::langsmith::EndRunParams {
-                            id: chain_run_id,
-                            outputs: None,
-                            error: Some(format!(
-                                "Unable to get valid response after {} attempts",
-                                retry_count + 1
-                            )),
-                            end_time: Self::now_iso8601_static(),
-                        });
-
-                        self.clear_cancel_token(user_id).await;
-                        return Err(anyhow::anyhow!(
-                            "Unable to get a valid response from the AI model after {} attempts. \
-                             Your conversation history has been saved. Please try rephrasing your \
-                             request or continue from where we left off.",
-                            retry_count + 1
-                        ));
-                    }
-
-                    // Retry
-                    retry_count += 1;
-                    continue;
-                }
-
-                // Valid response received
-                if retry_count > 0 {
-                    info!(
-                        user_id = %user_id,
-                        retry_count,
-                        "Recovered from empty response after retry"
-                    );
-                }
-
-                // --- LangSmith: end llm run (success) ---
+                // --- LangSmith: end chain run (success) ---
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
-                    id: llm_run_id,
-                    outputs: Some(Self::llm_run_outputs(
-                        Some(&completion),
-                        &prompt,
-                        retry_count,
-                    )),
+                    id: chain_run_id,
+                    outputs: Some(serde_json::json!({
+                        "response": final_content,
+                        "iterations": 0,
+                    })),
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
 
-                response = completion.message;
-                break;
+                self.clear_cancel_token(user_id).await;
+                Ok(final_content)
             }
-
-            // --- Loop detection: record tool calls and check for repetition ---
-            if loop_config.enabled {
-                if let Some(ref tool_calls) = response.tool_calls {
-                    loop_detector.record(tool_calls, iteration as usize);
-                    if let Some(loop_info) = loop_detector.detect_loop() {
-                        info!(
-                            user_id = %user_id,
-                            tool = %loop_info.tool_name,
-                            count = loop_info.call_count,
-                            "Loop detected — pausing for user approval"
-                        );
-
-                        // Build preview: tool name + first argument snippet
-                        let preview = if let Some(first) =
-                            response.tool_calls.as_ref().and_then(|c| c.first())
-                        {
-                            let preview = &first.function.arguments;
-                            let preview = if preview.len() > 80 {
-                                // Safe UTF-8 boundary truncation
-                                let boundary = preview
-                                    .char_indices()
-                                    .nth(80)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(preview.len());
-                                format!("{}...", &preview[..boundary])
-                            } else {
-                                preview.to_string()
-                            };
-                            format!("{}({})", loop_info.tool_name, preview)
-                        } else {
-                            loop_info.tool_name.clone()
-                        };
-
-                        // Create oneshot channel for the callback
-                        let (cb_tx, cb_rx) = tokio::sync::oneshot::channel::<LoopCallbackChoice>();
-
-                        // Register callback sender
-                        self.register_loop_callback(user_id, cb_tx).await;
-
-                        // Send Telegram inline keyboard
-                        let keyboard = InlineKeyboardMarkup::new(vec![
-                            vec![
-                                InlineKeyboardButton::callback(
-                                    "Continue",
-                                    r#"{"type":"loop","action":"continue"}"#,
-                                ),
-                                InlineKeyboardButton::callback(
-                                    "Stop",
-                                    r#"{"type":"loop","action":"stop"}"#,
-                                ),
-                            ],
-                            vec![InlineKeyboardButton::callback(
-                                "Add instruction",
-                                r#"{"type":"loop","action":"add_instruction"}"#,
-                            )],
-                        ]);
-                        let bot_for_msg = self.bot.clone();
-                        let chat_id_for_msg = parsed_chat_id;
-                        let _ = bot_for_msg
-                            .send_message(
-                                chat_id_for_msg,
-                                format!(
-                                    "I seem to be calling the same tool repeatedly:\n  {} called {} times",
-                                    preview,
-                                    loop_info.call_count,
-                                ),
-                            )
-                            .reply_markup(keyboard)
-                            .await;
-
-                        // Await user's choice (with timeout)
-                        match tokio::time::timeout(loop_timeout, cb_rx).await {
-                            Ok(Ok(LoopCallbackChoice::Continue)) => {
-                                info!("User approved — continuing loop");
-                                // Save the looping assistant message so the LLM
-                                // sees what was detected on the next iteration.
-                                self.memory
-                                    .save_message(&conversation_id, &response)
-                                    .await
-                                    .ok();
-                                messages.push(response.clone());
-                                loop_detector.clear();
-                                // `continue` targets the 'outer for loop — starts a
-                                // fresh iteration (re-invokes the LLM), skipping any
-                                // remaining tool execution from this iteration.
-                                continue;
-                            }
-                            Ok(Ok(LoopCallbackChoice::Stop)) => {
-                                info!("User requested stop — breaking loop");
-                                was_cancelled = true;
-                                break 'outer;
-                            }
-                            Ok(Ok(LoopCallbackChoice::AddInstruction)) => {
-                                info!("User requested add instruction — waiting for input");
-                                let _ = bot_for_msg
-                                    .send_message(
-                                        chat_id_for_msg,
-                                        "Please type your instruction as your next message. \
-                                         Then tap Continue to resume.",
-                                    )
-                                    .reply_markup(InlineKeyboardMarkup::new(vec![vec![
-                                        InlineKeyboardButton::callback(
-                                            "Continue",
-                                            r#"{"type":"loop","action":"continue"}"#,
-                                        ),
-                                    ]]))
-                                    .await;
-
-                                // Wait for second callback
-                                let (cb2_tx, cb2_rx) =
-                                    tokio::sync::oneshot::channel::<LoopCallbackChoice>();
-                                self.register_loop_callback(user_id, cb2_tx).await;
-                                match tokio::time::timeout(loop_timeout, cb2_rx).await {
-                                    Ok(Ok(LoopCallbackChoice::Continue)) => {
-                                        loop_detector.clear();
-                                        continue;
-                                    }
-                                    _ => {
-                                        was_cancelled = true;
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Timeout or channel closed — auto-stop
-                                warn!("Loop callback timed out — stopping");
-                                was_cancelled = true;
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
+            Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
+                info!(
+                    user_id = %user_id,
+                    "Processing cancelled by user — returning partial result"
+                );
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some("Cancelled by user".to_string()),
+                    end_time: Self::now_iso8601_static(),
+                });
+                self.clear_cancel_token(user_id).await;
+                Ok("Processing was cancelled.".to_string())
             }
-            // --- End loop detection ---
-
-            if let Some(tool_calls) = &response.tool_calls {
-                if !tool_calls.is_empty() {
-                    tool_call_count += tool_calls.len() as u32;
-                    info!(
-                        "LLM requested {} tool call(s) (iteration {})",
-                        tool_calls.len(),
-                        iteration
-                    );
-
-                    // Save assistant message with tool calls
-                    self.memory
-                        .save_message(&conversation_id, &response)
-                        .await?;
-                    messages.push(response.clone());
-
-                    // --- Parallel-aware tool execution ---
-                    // Clone tool call data to avoid lifetime issues in async move blocks
-                    let tool_call_data: Vec<(usize, String, serde_json::Value, String)> =
-                        tool_calls
-                            .iter()
-                            .enumerate()
-                            .map(|(i, tc)| {
-                                let name = tc.function.name.clone();
-                                let args = serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                                let id = tc.id.clone();
-                                (i, name, args, id)
-                            })
-                            .collect();
-
-                    // Classify: agent-spawning calls run in parallel, others sequential
-                    let is_agent_tool =
-                        |name: &str| -> bool { matches!(name, "spawn_agents" | "invoke_agent") };
-
-                    let mut agent_group: Vec<(usize, String, serde_json::Value, String)> =
-                        Vec::new();
-                    let mut other_group: Vec<(usize, String, serde_json::Value, String)> =
-                        Vec::new();
-
-                    for (i, name, args, id) in tool_call_data {
-                        if is_agent_tool(&name) {
-                            agent_group.push((i, name, args, id));
-                        } else {
-                            other_group.push((i, name, args, id));
-                        }
-                    }
-
-                    let mut all_results: Vec<(usize, ChatMessage)> = Vec::new();
-
-                    // --- Run subagent-spawning calls in PARALLEL ---
-                    if !agent_group.is_empty() {
-                        let futs: Vec<_> = agent_group
-                            .into_iter()
-                            .map(|(idx, name, args, id)| {
-                                let chain_run_id = chain_run_id.clone();
-                                let ls_project = ls_project.clone();
-                                let tool_event_tx = tool_event_tx.clone();
-                                async move {
-                                    let tool_run_id = uuid::Uuid::new_v4().to_string();
-                                    self.langsmith.start_run(crate::langsmith::RunParams {
-                                        id: tool_run_id.clone(),
-                                        name: name.clone(),
-                                        run_type: crate::langsmith::RunType::Tool,
-                                        parent_run_id: Some(chain_run_id.clone()),
-                                        inputs: serde_json::json!({ "arguments": args }),
-                                        session_name: ls_project.clone(),
-                                        start_time: Self::now_iso8601_static(),
-                                    });
-
-                                    if let Some(ref tx) = tool_event_tx {
-                                        let args_preview =
-                                            crate::platform::tool_notifier::format_args_preview(
-                                                &args.to_string(),
-                                            );
-                                        let _ = tx.try_send(
-                                            crate::platform::tool_notifier::ToolEvent::Started {
-                                                name: name.clone(),
-                                                args_preview,
-                                                arguments_json: args.to_string(),
-                                            },
-                                        );
-                                    }
-
-                                    let result = self
-                                        .execute_tool(&name, &args, user_id, parsed_chat_id)
-                                        .await;
-
-                                    if let Some(ref tx) = tool_event_tx {
-                                        let success = !result.starts_with("Error");
-                                        let _ = tx.try_send(
-                                            crate::platform::tool_notifier::ToolEvent::Completed {
-                                                name: name.clone(),
-                                                success,
-                                            },
-                                        );
-                                    }
-
-                                    self.langsmith.end_run(crate::langsmith::EndRunParams {
-                                        id: tool_run_id,
-                                        outputs: Some(serde_json::json!({ "result": result })),
-                                        error: None,
-                                        end_time: Self::now_iso8601_static(),
-                                    });
-
-                                    (
-                                        idx,
-                                        ChatMessage {
-                                            role: "tool".to_string(),
-                                            content: Some(MessageContent::from_text(result)),
-                                            tool_calls: None,
-                                            tool_call_id: Some(id),
-                                        },
-                                    )
-                                }
-                            })
-                            .collect();
-                        let parallel_results = futures::future::join_all(futs).await;
-                        all_results.extend(parallel_results);
-                    }
-
-                    // --- Non-agent tool calls run SEQUENTIALLY ---
-                    for (idx, name, args, id) in other_group {
-                        // Compaction regurgitation check
-                        if is_compacted_regurgitation(&args.to_string(), &args) {
-                            let tool_msg = ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some(MessageContent::from_text(REGURGITATION_ERROR_MSG)),
-                                tool_calls: None,
-                                tool_call_id: Some(id),
-                            };
-                            all_results.push((idx, tool_msg));
-                            continue;
-                        }
-
-                        // LangSmith: start tool run
-                        let tool_run_id = uuid::Uuid::new_v4().to_string();
-                        self.langsmith.start_run(crate::langsmith::RunParams {
-                            id: tool_run_id.clone(),
-                            name: name.clone(),
-                            run_type: crate::langsmith::RunType::Tool,
-                            parent_run_id: Some(chain_run_id.clone()),
-                            inputs: serde_json::json!({ "arguments": args }),
-                            session_name: ls_project.clone(),
-                            start_time: Self::now_iso8601_static(),
-                        });
-
-                        // Notify tool start
-                        if let Some(ref tx) = tool_event_tx {
-                            let args_preview = crate::platform::tool_notifier::format_args_preview(
-                                &args.to_string(),
-                            );
-                            let _ =
-                                tx.try_send(crate::platform::tool_notifier::ToolEvent::Started {
-                                    name: name.clone(),
-                                    args_preview,
-                                    arguments_json: args.to_string(),
-                                });
-                        }
-
-                        let result = self
-                            .execute_tool(&name, &args, user_id, parsed_chat_id)
-                            .await;
-
-                        // Notify tool completion
-                        if let Some(ref tx) = tool_event_tx {
-                            let success = !result.starts_with("Error");
-                            let _ =
-                                tx.try_send(crate::platform::tool_notifier::ToolEvent::Completed {
-                                    name: name.clone(),
-                                    success,
-                                });
-                        }
-
-                        info!("Tool '{}' result length: {} chars", name, result.len());
-                        debug!("Tool '{}' result: {}", name, result);
-
-                        // LangSmith: end tool run
-                        self.langsmith.end_run(crate::langsmith::EndRunParams {
-                            id: tool_run_id,
-                            outputs: Some(serde_json::json!({ "result": result })),
-                            error: None,
-                            end_time: Self::now_iso8601_static(),
-                        });
-
-                        let tool_msg = ChatMessage {
-                            role: "tool".to_string(),
-                            content: Some(MessageContent::from_text(result)),
-                            tool_calls: None,
-                            tool_call_id: Some(id),
-                        };
-                        all_results.push((idx, tool_msg));
-                    }
-
-                    // Sort results by original index and push to memory + messages
-                    all_results.sort_by_key(|(i, _)| *i);
-                    for (_idx, tool_msg) in all_results {
-                        self.memory
-                            .save_message(&conversation_id, &tool_msg)
-                            .await?;
-                        messages.push(tool_msg);
-                    }
-
-                    // --- Steer injection: drain pending messages between iterations ---
-                    // Without this, a steer sent during tool execution is only visible
-                    // after the next LLM call completes (the drain at the top of the
-                    // outer loop fires after the LLM call starts the next iteration).
-                    self.drain_and_inject_steer(user_id, &conversation_id, &mut messages)
-                        .await;
-                    // --- End steer injection ---
-
-                    iteration_count = iteration + 1;
-                    continue;
-                }
+            Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                warn!(
+                    user_id = %user_id,
+                    max_iterations = self.config.max_iterations(),
+                    "Reached max iterations without final text response"
+                );
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some(format!("Reached max iterations ({})", self.config.max_iterations())),
+                    end_time: Self::now_iso8601_static(),
+                });
+                self.clear_cancel_token(user_id).await;
+                Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
             }
-
-            // Final response — no tool calls
-            let content = response
-                .content
-                .as_ref()
-                .map(|c| c.as_text())
-                .unwrap_or_default();
-
-            // Stream the final response directly from the already-complete content.
-            // Previously this made a second chat_stream() API call, which could return
-            // Ok(partial) if the SSE connection was dropped mid-generation (e.g. after an
-            // 11-minute kimi-k2.5 response), silently saving a truncated reply.
-            // Now we pipe the guaranteed-complete content through the channel in small
-            // chunks so Telegram still sees tokens arrive progressively.
-            let final_content = if let Some(tx) = stream_token_tx {
-                LlmClient::stream_text(content.clone(), tx).await.ok();
-                content.clone()
-            } else {
-                content.clone()
-            };
-
-            // Save the delivered content to persistent memory
-            let save_msg = crate::llm::ChatMessage {
-                role: response.role.clone(),
-                content: Some(crate::llm::MessageContent::Text(final_content.clone())),
-                tool_calls: response.tool_calls.clone(),
-                tool_call_id: response.tool_call_id.clone(),
-            };
-            self.memory
-                .save_message(&conversation_id, &save_msg)
-                .await?;
-
-            // --- LangSmith: end chain run (success) ---
-            self.langsmith.end_run(crate::langsmith::EndRunParams {
-                id: chain_run_id,
-                outputs: Some(serde_json::json!({
-                    "response": final_content,
-                    "iterations": iteration,
-                })),
-                error: None,
-                end_time: Self::now_iso8601_static(),
-            });
-
-            // --- Self-learning: post-task skill extraction (background) ---
-            if self.config.learning.skill_extraction_enabled
-                && tool_call_count >= self.config.learning.skill_extraction_threshold
-            {
-                if let Some(agent) = self.self_weak.upgrade() {
-                    let msgs_clone = messages.clone();
-                    tokio::spawn(async move {
-                        let _extraction_result = tokio::time::timeout(
-                            std::time::Duration::from_secs(60),
-                            crate::learning::post_task_skill_extractor(
-                                &agent.llm,
-                                &agent.config.skills.directory,
-                                &agent.skills,
-                                &msgs_clone,
-                                tool_call_count,
-                            ),
-                        )
-                        .await;
-                    });
-                }
+            Err(e) => {
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some(format!("{:#}", e)),
+                    end_time: Self::now_iso8601_static(),
+                });
+                self.clear_cancel_token(user_id).await;
+                Err(e)
             }
-
-            // --- Self-learning: session-end soul reflection (background) ---
-            if !self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Some(agent) = self.self_weak.upgrade() {
-                    let msgs = messages.clone();
-                    let uid = user_id.to_string();
-                    let cid = parsed_chat_id;
-                    tokio::spawn(async move {
-                        let mut reflection_messages = msgs;
-                        reflection_messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: Some(MessageContent::Text(
-                                "Review the conversation above. Did you learn anything about the \
-                                 user or yourself that should be recorded in SOUL.md, AGENTS.md, \
-                                 or USER.md? If yes, respond with EXACTLY:\n\
-                                 UPDATE_SOUL: <file_name>\n\
-                                 CONTENT:\n\
-                                 <content to append>\n\n\
-                                 If nothing worth recording, respond with: NO_UPDATE"
-                                    .to_string(),
-                            )),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
-
-                        if let Ok(reflection_response) =
-                            agent.llm.chat(&reflection_messages, &[]).await
-                        {
-                            if let Some(content) = reflection_response.content {
-                                let text = content.as_text();
-                                if let Some(rest) = text.strip_prefix("UPDATE_SOUL:") {
-                                    let parts: Vec<&str> = rest.splitn(2, '\n').collect();
-                                    if parts.len() == 2 {
-                                        let file_name = parts[0].trim();
-                                        let append_content = parts[1]
-                                            .strip_prefix("CONTENT:\n")
-                                            .or_else(|| parts[1].strip_prefix("CONTENT:"))
-                                            .unwrap_or(parts[1])
-                                            .trim();
-                                        let args = serde_json::json!({
-                                            "file_name": file_name,
-                                            "content": append_content,
-                                            "mode": "append"
-                                        });
-                                        let _ = agent
-                                            .execute_tool("update_soul_file", &args, &uid, cid)
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-
-            self.clear_cancel_token(user_id).await;
-            return Ok(final_content);
         }
-
-        // Clear cancel token before handling termination
-        self.clear_cancel_token(user_id).await;
-
-        if was_cancelled {
-            info!(
-                user_id = %user_id,
-                iteration_count,
-                "Processing cancelled by user — returning partial result"
-            );
-            // --- LangSmith: end chain run (cancelled) ---
-            self.langsmith.end_run(crate::langsmith::EndRunParams {
-                id: chain_run_id,
-                outputs: None,
-                error: Some("Cancelled by user".to_string()),
-                end_time: Self::now_iso8601_static(),
-            });
-            return Ok("Processing was cancelled.".to_string());
-        }
-
-        // Reached max iterations
-        warn!(
-            user_id = %user_id,
-            max_iterations = max_iterations,
-            iteration_count = iteration_count,
-            "Reached max iterations without final text response"
-        );
-
-        // --- LangSmith: end chain run (max iterations) ---
-        self.langsmith.end_run(crate::langsmith::EndRunParams {
-            id: chain_run_id,
-            outputs: None,
-            error: Some(format!("Reached max iterations ({})", max_iterations)),
-            end_time: Self::now_iso8601_static(),
-        });
-
-        Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
     }
 
     /// Tier 3: Auto-compact via LLM summarization.
@@ -1760,6 +926,7 @@ impl Agent {
     /// `_context_window` is reserved for future threshold-based
     /// split-point calculation — the summarization LLM handles
     /// split decisions internally.
+    #[allow(dead_code)]
     async fn auto_compact_conversation(
         llm: &LlmClient,
         memory: &MemoryStore,
@@ -1824,6 +991,7 @@ impl Agent {
     /// `_context_window` is reserved for future threshold-based
     /// split-point calculation — the summarization LLM handles
     /// split decisions internally.
+    #[allow(dead_code)]
     async fn reactive_compact(
         llm: &LlmClient,
         memory: &MemoryStore,
@@ -1874,6 +1042,7 @@ impl Agent {
 
     /// Shared helper for Tiers 3 and 4: send messages to LLM for
     /// summarization, then assemble the compacted result.
+    #[allow(dead_code)]
     async fn summarize_and_replace(
         llm: &LlmClient,
         memory: &MemoryStore,
@@ -2539,6 +1708,7 @@ impl Agent {
     /// directly with a default sandbox tool whitelist. The system_prompt is augmented
     /// with ambient system context (timestamp, user model, location) via
     /// `build_subagent_system_prompt`.
+    #[allow(dead_code)]
     pub(crate) async fn run_subagent(
         &self,
         skill_name: Option<&str>,
@@ -2763,6 +1933,7 @@ impl Agent {
 
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     async fn run_subagent_loop(
         &self,
@@ -2936,6 +2107,7 @@ impl Agent {
     }
 
     /// Get the path for a soul file by name.
+#[allow(dead_code)]
     fn soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
         let home = self
             .config
@@ -2950,6 +2122,7 @@ impl Agent {
     }
 
     /// Validate that a soul file path is within the home directory.
+#[allow(dead_code)]
     async fn validate_soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
         let home = self
             .config
@@ -2959,6 +2132,7 @@ impl Agent {
         tools::validate_home_path(home, &path.to_string_lossy())
     }
 
+#[allow(dead_code)]
     async fn execute_command_interactive(
         &self,
         arguments: &serde_json::Value,
@@ -3191,6 +2365,7 @@ impl Agent {
     }
 
     /// Execute a tool call by routing to the right handler
+    #[allow(dead_code)]
     async fn execute_tool(
         &self,
         name: &str,
@@ -3198,449 +2373,12 @@ impl Agent {
         user_id: &str,
         chat_id: ChatId,
     ) -> String {
+        if name.starts_with("mcp_") {
+            return self.mcp.call_tool(name, arguments).await
+                .unwrap_or_else(|e| format!("Error: {e}"));
+        }
         match name {
-            "remember" => {
-                let category = arguments["category"].as_str().unwrap_or("general");
-                let key = arguments["key"].as_str().unwrap_or("");
-                let value = arguments["value"].as_str().unwrap_or("");
-                match self.memory.remember(category, key, value, None).await {
-                    Ok(()) => format!("Remembered: [{}] {} = {}", category, key, value),
-                    Err(e) => format!("Failed to remember: {}", e),
-                }
-            }
-            "recall" => {
-                let category = arguments["category"].as_str().unwrap_or("general");
-                let key = arguments["key"].as_str().unwrap_or("");
-                match self.memory.recall(category, key).await {
-                    Ok(Some(value)) => value,
-                    Ok(None) => format!("No knowledge found for [{}] {}", category, key),
-                    Err(e) => format!("Failed to recall: {}", e),
-                }
-            }
-            "search_memory" => {
-                let query = arguments["query"].as_str().unwrap_or("");
-                let limit = arguments["limit"].as_u64().unwrap_or(5) as usize;
-
-                let mut results = Vec::new();
-
-                // Search conversations (hybrid vector + FTS5)
-                if let Ok(msgs) = self.memory.search_messages(query, limit).await {
-                    for msg in msgs {
-                        if let Some(content) = &msg.content {
-                            results.push(format!("[{}]: {}", msg.role, content.as_text()));
-                        }
-                    }
-                }
-
-                // Search knowledge (hybrid vector + FTS5)
-                if let Ok(entries) = self.memory.search_knowledge(query, limit).await {
-                    for entry in entries {
-                        results.push(format!(
-                            "[knowledge:{}] {} = {}",
-                            entry.category, entry.key, entry.value
-                        ));
-                    }
-                }
-
-                if results.is_empty() {
-                    "No results found.".to_string()
-                } else {
-                    results.join("\n\n")
-                }
-            }
-            "schedule_task" => {
-                let trigger_type = match arguments["trigger_type"].as_str() {
-                    Some(t) => t.to_string(),
-                    None => return "Missing trigger_type".to_string(),
-                };
-                let trigger_value = match arguments["trigger_value"].as_str() {
-                    Some(v) => v.to_string(),
-                    None => return "Missing trigger_value".to_string(),
-                };
-                let prompt_text = match arguments["prompt"].as_str() {
-                    Some(p) => p.to_string(),
-                    None => return "Missing prompt".to_string(),
-                };
-                let description = match arguments["description"].as_str() {
-                    Some(d) => d.to_string(),
-                    None => return "Missing description".to_string(),
-                };
-
-                // Validate trigger and compute delay for one-shot
-                let delay = if trigger_type == "one_shot" {
-                    match parse_one_shot_delay(&trigger_value) {
-                        Ok(d) => Some(d),
-                        Err(e) => return format!("Invalid trigger: {}", e),
-                    }
-                } else if trigger_type == "recurring" {
-                    if let Err(e) = validate_cron_expr(&trigger_value) {
-                        return format!("Invalid cron expression: {}", e);
-                    }
-                    None
-                } else {
-                    return format!(
-                        "Unknown trigger_type '{}'. Use 'one_shot' or 'recurring'.",
-                        trigger_type
-                    );
-                };
-
-                let next_run_at = trigger_value.clone();
-
-                // Persist to DB
-                let task_id = uuid::Uuid::new_v4().to_string();
-                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                let task = crate::scheduler::reminders::ScheduledTask {
-                    id: task_id.clone(),
-                    scheduler_job_id: None,
-                    user_id: user_id.to_string(),
-                    chat_id: chat_id.to_string(),
-                    platform: "telegram".to_string(),
-                    trigger_type: trigger_type.clone(),
-                    trigger_value: trigger_value.clone(),
-                    prompt: prompt_text.clone(),
-                    description: description.clone(),
-                    status: "active".to_string(),
-                    created_at: now,
-                    next_run_at: Some(next_run_at),
-                };
-                if let Err(e) = self.task_store.create(&task).await {
-                    return format!("Failed to save task: {}", e);
-                }
-
-                // Build closure captures — fire closure dispatches to background runner
-                // via a channel so it can be `Send` without requiring process_message to be Send.
-                let job_tx = self.job_tx.clone();
-                let bot_clone = Arc::clone(&self.bot);
-                let store_clone = self.task_store.clone();
-                let tid = task_id.clone();
-                let uid = user_id.to_string();
-                let cid = chat_id.to_string();
-                let prompt_cap = prompt_text.clone();
-                let desc_cap = description.clone();
-                let is_recurring = trigger_type == "recurring";
-                let tv = trigger_value.clone();
-
-                let fire = move || {
-                    let tx = job_tx.clone();
-                    let bot = bot_clone.clone();
-                    let store = store_clone.clone();
-                    let tid = tid.clone();
-                    let uid = uid.clone();
-                    let cid = cid.clone();
-                    let prompt = prompt_cap.clone();
-                    let recurring = is_recurring;
-                    Box::pin(async move {
-                        let incoming = crate::platform::IncomingMessage {
-                            platform: "scheduled_task".to_string(),
-                            user_id: format!("{uid}:{tid}"),
-                            chat_id: cid,
-                            user_name: String::new(),
-                            text: prompt,
-                            attachments: vec![],
-                        };
-                        let req = ScheduledJobRequest {
-                            incoming,
-                            bot,
-                            task_id: tid,
-                            is_recurring: recurring,
-                            task_store: store,
-                        };
-                        if let Err(e) = tx.send(req) {
-                            tracing::error!("Failed to dispatch scheduled job: {}", e);
-                        }
-                    })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                };
-
-                // Register with scheduler
-                let sched_result = if let Some(d) = delay {
-                    self.scheduler.add_one_shot_job(d, &desc_cap, fire).await
-                } else {
-                    self.scheduler.add_cron_job(&tv, &desc_cap, fire).await
-                };
-
-                match sched_result {
-                    Ok(sched_id) => {
-                        if let Err(e) = self
-                            .task_store
-                            .update_scheduler_job_id(&task_id, &sched_id.to_string())
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to persist scheduler_job_id for task {}: {}",
-                                task_id,
-                                e
-                            );
-                        }
-                        format!(
-                            "Task scheduled! ID: {} — {} ({})",
-                            task_id, description, trigger_value
-                        )
-                    }
-                    Err(e) => {
-                        let _ = self.task_store.set_status(&task_id, "failed").await;
-                        format!("Failed to register task with scheduler: {}", e)
-                    }
-                }
-            }
-            "list_scheduled_tasks" => match self.task_store.list_active_for_user(user_id).await {
-                Ok(tasks) if tasks.is_empty() => "No active scheduled tasks.".to_string(),
-                Ok(tasks) => {
-                    let mut out = format!("Active scheduled tasks ({}):\n\n", tasks.len());
-                    for t in tasks {
-                        out.push_str(&format!(
-                            "ID: {}\nDescription: {}\nType: {} | Trigger: {}\nPrompt: {}\n\n",
-                            t.id, t.description, t.trigger_type, t.trigger_value, t.prompt
-                        ));
-                    }
-                    out
-                }
-                Err(e) => format!("Failed to list tasks: {}", e),
-            },
-            "cancel_scheduled_task" => {
-                let task_id = match arguments["task_id"].as_str() {
-                    Some(id) => id.to_string(),
-                    None => return "Missing task_id".to_string(),
-                };
-                // Fetch task to get scheduler_job_id
-                let task = match self.task_store.get_by_id(&task_id).await {
-                    Ok(Some(t)) => t,
-                    Ok(None) => return format!("Task '{}' not found.", task_id),
-                    Err(e) => return format!("Failed to look up task: {}", e),
-                };
-                // Remove from scheduler
-                if let Some(ref sched_id_str) = task.scheduler_job_id {
-                    if let Ok(sched_uuid) = sched_id_str.parse::<uuid::Uuid>() {
-                        if let Err(e) = self.scheduler.remove_job(sched_uuid).await {
-                            tracing::warn!(
-                                "Failed to remove scheduler job for task {}: {}",
-                                task_id,
-                                e
-                            );
-                        }
-                    }
-                }
-                // Mark cancelled in DB
-                match self.task_store.set_status(&task_id, "cancelled").await {
-                    Ok(()) => format!("Task '{}' ({}) cancelled.", task_id, task.description),
-                    Err(e) => format!("Failed to update task status: {}", e),
-                }
-            }
-            "get_scheduled_task_history" => {
-                let task_id = match arguments["task_id"].as_str() {
-                    Some(id) => id.to_string(),
-                    None => return "Missing task_id".to_string(),
-                };
-                match self.task_store.get_task_runs(&task_id, 20).await {
-                    Ok(runs) if runs.is_empty() => {
-                        format!("No execution history for task '{}'.", task_id)
-                    }
-                    Ok(runs) => {
-                        let mut out = format!(
-                            "Execution history for task '{}' ({} runs):\n\n",
-                            task_id,
-                            runs.len()
-                        );
-                        for r in &runs {
-                            let resp = r.response.as_deref().unwrap_or("(no response)");
-                            let err = r
-                                .error
-                                .as_deref()
-                                .map(|e| format!("\nError: {}", e))
-                                .unwrap_or_default();
-                            let truncated = crate::utils::strings::truncate_chars(resp, 2000);
-                            out.push_str(&format!(
-                                "Run at: {} | Status: {}\n{}{}\n\n",
-                                r.run_at, r.status, truncated, err
-                            ));
-                        }
-                        out
-                    }
-                    Err(e) => format!("Failed to query task history: {}", e),
-                }
-            }
-            "rerun_scheduled_task" => {
-                let task_id = match arguments["task_id"].as_str() {
-                    Some(id) => id.to_string(),
-                    None => return "Missing task_id".to_string(),
-                };
-                let task = match self.task_store.get_by_id(&task_id).await {
-                    Ok(Some(t)) => t,
-                    Ok(None) => return format!("Task '{}' not found.", task_id),
-                    Err(e) => return format!("Failed to look up task: {}", e),
-                };
-                // Build fire closure (same pattern as schedule_task handler)
-                let job_tx = self.job_tx.clone();
-                let bot_clone = Arc::clone(&self.bot);
-                let store_clone = self.task_store.clone();
-                let tid = task.id.clone();
-                let uid = task.user_id.clone();
-                let cid = task.chat_id.clone();
-                let prompt_cap = task.prompt.clone();
-                let is_recurring = false;
-
-                let fire = move || {
-                    let tx = job_tx.clone();
-                    let bot = bot_clone.clone();
-                    let store = store_clone.clone();
-                    let tid = tid.clone();
-                    let uid = uid.clone();
-                    let cid = cid.clone();
-                    let prompt = prompt_cap.clone();
-                    Box::pin(async move {
-                        let incoming = crate::platform::IncomingMessage {
-                            platform: "scheduled_task".to_string(),
-                            user_id: format!("{uid}:{tid}"),
-                            chat_id: cid,
-                            user_name: String::new(),
-                            text: prompt,
-                            attachments: vec![],
-                        };
-                        let req = crate::agent::ScheduledJobRequest {
-                            incoming,
-                            bot,
-                            task_id: tid,
-                            is_recurring,
-                            task_store: store,
-                        };
-                        if let Err(e) = tx.send(req) {
-                            tracing::error!("Failed to dispatch rerun scheduled job: {}", e);
-                        }
-                    })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                };
-
-                // Fire immediately with 0-second delay (fires on next scheduler tick)
-                match self
-                    .scheduler
-                    .add_one_shot_job(
-                        std::time::Duration::ZERO,
-                        &format!("rerun-{}", task.description),
-                        fire,
-                    )
-                    .await
-                {
-                    Ok(_sched_id) => {
-                        format!("Task '{}' scheduled for immediate re-execution.", task_id)
-                    }
-                    Err(e) => format!("Failed to re-run task: {}", e),
-                }
-            }
-            "read_skill_file" => {
-                let skill_name = match arguments["skill_name"].as_str() {
-                    Some(n) => n.to_string(),
-                    None => return "Missing skill_name".to_string(),
-                };
-                let relative_path = match arguments["relative_path"].as_str() {
-                    Some(p) => p.to_string(),
-                    None => return "Missing relative_path".to_string(),
-                };
-
-                if let Err(e) = validate_skill_name(&skill_name) {
-                    return format!("Invalid skill_name: {}", e);
-                }
-                if let Err(e) = validate_skill_path(&relative_path) {
-                    return format!("Invalid path: {}", e);
-                }
-
-                // Resolve via registry (instance shadows bundled)
-                let skills_lock = self.skills.read().await;
-                let base_dir = self.resolve_skill_base_dir(
-                    &skill_name,
-                    &self.config.skills.directory,
-                    &skills_lock,
-                );
-                let target = base_dir.join(&skill_name).join(&relative_path);
-
-                // Canonicalize check against the resolved base dir
-                if let Ok(base_canonical) = base_dir.canonicalize() {
-                    if let Ok(target_canonical) = target.canonicalize() {
-                        if !target_canonical.starts_with(&base_canonical) {
-                            return format!(
-                                "Access denied: path '{}' resolves outside the skills directory",
-                                target.display()
-                            );
-                        }
-                    }
-                }
-                // Drop the read lock before awaiting the file read
-                drop(skills_lock);
-
-                match tokio::fs::read_to_string(&target).await {
-                    Ok(content) => content,
-                    Err(e) => format!(
-                        "Failed to read skill file '{}/{}': {}",
-                        skill_name, relative_path, e
-                    ),
-                }
-            }
-            "write_skill_file" => {
-                let skill_name = match arguments["skill_name"].as_str() {
-                    Some(n) => n.to_string(),
-                    None => return "Missing skill_name".to_string(),
-                };
-                let relative_path = match arguments["relative_path"].as_str() {
-                    Some(p) => p.to_string(),
-                    None => return "Missing relative_path".to_string(),
-                };
-                let content = arguments["content"].as_str().unwrap_or("").to_string();
-
-                if let Err(e) = validate_skill_name(&skill_name) {
-                    return format!("Invalid skill_name: {}", e);
-                }
-                if let Err(e) = validate_skill_path(&relative_path) {
-                    return format!("Invalid relative_path: {}", e);
-                }
-
-                let target = self
-                    .config
-                    .skills
-                    .directory
-                    .join(&skill_name)
-                    .join(&relative_path);
-
-                if let Some(parent) = target.parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        return format!("Failed to create directories: {}", e);
-                    }
-                }
-
-                match tokio::fs::write(&target, &content).await {
-                    Ok(()) => {
-                        info!("Skill file written: {}", target.display());
-
-                        // After writing, reload skills
-                        let instance_dir = self.config.skills.directory.clone();
-                        use crate::skills::loader::load_skills_from_dir;
-                        if let Ok(new_reg) =
-                            load_skills_from_dir(&instance_dir, instance_dir.clone()).await
-                        {
-                            let mut skills = self.skills.write().await;
-                            *skills = new_reg;
-                        }
-
-                        format!("Written: {}", target.display())
-                    }
-                    Err(e) => format!("Failed to write skill file: {}", e),
-                }
-            }
-            "reload_skills" => {
-                use crate::skills::loader::load_skills_from_dir;
-
-                let skills_dir = self.config.skills.directory.clone();
-                match load_skills_from_dir(&skills_dir, skills_dir.clone()).await {
-                    Ok(new_reg) => {
-                        let count = new_reg.len();
-                        let mut skills = self.skills.write().await;
-                        *skills = new_reg;
-                        info!("Skills reloaded: {} skill(s) active", count);
-                        format!("Skills reloaded. {} skill(s) now active.", count)
-                    }
-                    Err(e) => format!("Failed to reload skills: {}", e),
-                }
-            }
             "invoke_agent" => {
-                // Accepts `agent` parameter; falls back to `skill` for compat
                 let agent = match arguments["agent"]
                     .as_str()
                     .or_else(|| arguments["skill"].as_str())
@@ -3658,23 +2396,20 @@ impl Agent {
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect::<Vec<_>>()
                 });
-
                 info!(
                     "Invoking agent '{}' (model_override: {:?})",
                     agent, model_override
                 );
-
                 Box::pin(self.run_subagent(
-                    Some(&agent), // skill_name: predefined agent from registry
-                    "",           // system_prompt: empty (read from AGENT.md for predefined)
-                    &prompt,      // user_prompt
+                    Some(&agent),
+                    "",
+                    &prompt,
                     model_override.as_deref(),
                     tools_override,
                 ))
                 .await
             }
             "spawn_agents" => {
-                // --- Validate tasks first, before creating any futures ---
                 let parsed_tasks: Vec<AdHocTask> = if let Some(tasks) =
                     arguments["tasks"].as_array()
                 {
@@ -3704,24 +2439,14 @@ impl Agent {
                     }
                     parsed
                 } else {
-                    // Single ad-hoc subagent (shorthand fields)
                     let system_prompt = match arguments["system_prompt"].as_str() {
                         Some(s) => s.to_string(),
-                        None => {
-                            return "Missing tasks: provide either 'tasks' array or system_prompt+prompt"
-                                .to_string()
-                        }
+                        None => return "Missing system_prompt or tasks".to_string(),
                     };
-                    if system_prompt.is_empty() {
-                        return "system_prompt cannot be empty".to_string();
-                    }
                     let prompt = match arguments["prompt"].as_str() {
                         Some(p) => p.to_string(),
                         None => return "Missing prompt".to_string(),
                     };
-                    if prompt.is_empty() {
-                        return "prompt cannot be empty".to_string();
-                    }
                     vec![AdHocTask {
                         system_prompt,
                         prompt,
@@ -3733,547 +2458,47 @@ impl Agent {
                         }),
                     }]
                 };
-
-                // All validation passed — now build and run futures
-                let futs: Vec<_> = parsed_tasks
+                let futures: Vec<_> = parsed_tasks
                     .into_iter()
                     .map(|task| {
-                        let sp = task.system_prompt;
-                        let pr = task.prompt;
-                        let mo = task.model;
-                        let to = task.tools;
+                        let sp = task.system_prompt.clone();
+                        let p = task.prompt.clone();
+                        let m = task.model.clone();
+                        let t = task.tools.clone();
                         Box::pin(async move {
-                            self.run_subagent(None, &sp, &pr, mo.as_deref(), to).await
+                            self.run_subagent(
+                                None,
+                                &sp,
+                                &p,
+                                m.as_deref(),
+                                t,
+                            ).await
                         })
                     })
                     .collect();
+                let results = futures::future::join_all(futures).await;
+                let mut output = String::from("Spawned agents results:
 
-                let results = futures::future::join_all(futs).await;
-                serde_json::json!({ "results": results }).to_string()
+");
+                for (i, result) in results.iter().enumerate() {
+                    output.push_str(&format!("--- Agent {} ---
+{}
+
+", i + 1, result));
+                }
+                output
             }
-            "read_agent_file" => {
-                let agent_name = match arguments["agent_name"].as_str() {
-                    Some(n) => n.to_string(),
-                    None => return "Missing agent_name".to_string(),
-                };
-                let relative_path = match arguments["relative_path"].as_str() {
-                    Some(p) => p.to_string(),
-                    None => return "Missing relative_path".to_string(),
-                };
-
-                if let Err(e) = validate_skill_name(&agent_name) {
-                    return format!("Invalid agent_name: {}", e);
-                }
-                if let Err(e) = validate_skill_path(&relative_path) {
-                    return format!("Invalid path: {}", e);
-                }
-
-                // Resolve via agents registry (instance shadows bundled)
-                let agents_lock = self.agents.read().await;
-                let base_dir = self.resolve_skill_base_dir(
-                    &agent_name,
-                    &self.config.agents.directory,
-                    &agents_lock,
-                );
-                let target = base_dir.join(&agent_name).join(&relative_path);
-
-                // Canonicalize check against the resolved base dir
-                if let Ok(base_canonical) = base_dir.canonicalize() {
-                    if let Ok(target_canonical) = target.canonicalize() {
-                        if !target_canonical.starts_with(&base_canonical) {
-                            return format!(
-                                "Access denied: path '{}' resolves outside the agents directory",
-                                target.display()
-                            );
-                        }
-                    }
-                }
-                // Drop the read lock before awaiting the file read
-                drop(agents_lock);
-
-                match tokio::fs::read_to_string(&target).await {
-                    Ok(content) => content,
-                    Err(e) => format!(
-                        "Failed to read agent file '{}/{}': {}",
-                        agent_name, relative_path, e
-                    ),
-                }
-            }
-            "write_agent_file" => {
-                let agent_name = match arguments["agent_name"].as_str() {
-                    Some(n) => n.to_string(),
-                    None => return "Missing agent_name".to_string(),
-                };
-                let relative_path = match arguments["relative_path"].as_str() {
-                    Some(p) => p.to_string(),
-                    None => return "Missing relative_path".to_string(),
-                };
-                let content = arguments["content"].as_str().unwrap_or("").to_string();
-
-                if let Err(e) = validate_skill_name(&agent_name) {
-                    return format!("Invalid agent_name: {}", e);
-                }
-                if let Err(e) = validate_skill_path(&relative_path) {
-                    return format!("Invalid relative_path: {}", e);
-                }
-
-                let target = self
-                    .config
-                    .agents
-                    .directory
-                    .join(&agent_name)
-                    .join(&relative_path);
-
-                if let Some(parent) = target.parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        return format!("Failed to create directories: {}", e);
-                    }
-                }
-
-                match tokio::fs::write(&target, &content).await {
-                    Ok(()) => {
-                        info!("Agent file written: {}", target.display());
-
-                        // After writing, reload agents
-                        let instance_dir = self.config.agents.directory.clone();
-                        use crate::skills::loader::load_skills_from_dir;
-                        if let Ok(new_reg) =
-                            load_skills_from_dir(&instance_dir, instance_dir.clone()).await
-                        {
-                            let mut agents = self.agents.write().await;
-                            *agents = new_reg;
-                        }
-
-                        format!("Written: {}", target.display())
-                    }
-                    Err(e) => format!("Failed to write agent file: {}", e),
-                }
-            }
-            "reload_agents" => {
-                use crate::skills::loader::load_skills_from_dir;
-
-                let agents_dir = self.config.agents.directory.clone();
-                match load_skills_from_dir(&agents_dir, agents_dir.clone()).await {
-                    Ok(new_reg) => {
-                        let count = new_reg.len();
-                        let mut agents = self.agents.write().await;
-                        *agents = new_reg;
-                        info!("Agents reloaded: {} agent(s) active", count);
-                        format!("Agents reloaded. {} agent(s) now active.", count)
-                    }
-                    Err(e) => format!("Failed to reload agents: {}", e),
-                }
-            }
-            "try_new_tech" => {
-                let technology = match arguments["technology"].as_str() {
-                    Some(t) => t.to_string(),
-                    None => return "Missing technology".to_string(),
-                };
-                let experiment_code = match arguments["experiment_code"].as_str() {
-                    Some(c) => c.to_string(),
-                    None => return "Missing experiment_code".to_string(),
-                };
-                let language = arguments["language"].as_str().unwrap_or("rust").to_string();
-
-                let sandbox = &self.config.sandbox.allowed_directory;
-                let exp_id = uuid::Uuid::new_v4().to_string();
-                let exp_dir = sandbox.join("experiments").join(&exp_id);
-
-                if let Err(e) = tokio::fs::create_dir_all(&exp_dir).await {
-                    return format!("Failed to create experiment dir: {}", e);
-                }
-
-                let (filename, check_cmd, check_args) = match language.as_str() {
-                    "javascript" => ("experiment.js", "node", vec!["experiment.js".to_string()]),
-                    _ => {
-                        // Rust: create a minimal Cargo project structure
-                        let cargo_toml = "[package]\nname = \"experiment\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string();
-                        let src_dir = exp_dir.join("src");
-                        if let Err(e) = tokio::fs::create_dir_all(&src_dir).await {
-                            return format!("Failed to create src dir: {}", e);
-                        }
-                        if let Err(e) =
-                            tokio::fs::write(exp_dir.join("Cargo.toml"), cargo_toml).await
-                        {
-                            return format!("Failed to write Cargo.toml: {}", e);
-                        }
-                        if let Err(e) =
-                            tokio::fs::write(src_dir.join("main.rs"), &experiment_code).await
-                        {
-                            return format!("Failed to write main.rs: {}", e);
-                        }
-                        ("src/main.rs", "cargo", vec!["check".to_string()])
-                    }
-                };
-
-                // Write experiment code for JS (Rust already written above)
-                if language == "javascript" {
-                    if let Err(e) = tokio::fs::write(exp_dir.join(filename), &experiment_code).await
-                    {
-                        return format!("Failed to write experiment file: {}", e);
-                    }
-                }
-
-                info!(
-                    "Running experiment '{}' in {}",
-                    technology,
-                    exp_dir.display()
-                );
-
-                let output = match tokio::process::Command::new(check_cmd)
-                    .args(&check_args)
-                    .current_dir(&exp_dir)
-                    .output()
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(e) => return format!("Failed to run experiment: {}", e),
-                };
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
-                let success = output.status.success();
-
-                let mut result = format!("Experiment: {}\nLanguage: {}\n", technology, language);
-                if !stdout.is_empty() {
-                    result.push_str(&format!("STDOUT:\n{}\n", stdout));
-                }
-                if !stderr.is_empty() {
-                    result.push_str(&format!("STDERR:\n{}\n", stderr));
-                }
-                result.push_str(&format!(
-                    "Exit code: {}\nResult: {}\n",
-                    exit_code,
-                    if success { "SUCCESS" } else { "FAILED" }
-                ));
-
-                // Cleanup: remove the experiment directory so temporary projects
-                // (including Rust `target/` dirs) don't accumulate on disk.
-                if let Err(e) = tokio::fs::remove_dir_all(&exp_dir).await {
-                    warn!(
-                        "Failed to clean up experiment dir '{}': {}",
-                        exp_dir.display(),
-                        e
-                    );
-                }
-
-                result
-            }
-            "self_upgrade" => {
-                let branch = arguments["branch"].as_str().unwrap_or("main").to_string();
-                let mode = arguments["mode"].as_str().unwrap_or("auto").to_string();
-
-                // Validate branch name to prevent git flag injection and path traversal.
-                // A single chars() pass checks both the allowlist and the blocklist.
-                let is_valid_branch = !branch.is_empty()
-                    && !branch.starts_with('-')
-                    && !branch.starts_with('/')
-                    && !branch.ends_with('/')
-                    && !branch.ends_with('.')
-                    && !branch.ends_with(".lock")
-                    && !branch.contains("..")
-                    && !branch.contains("@{")
-                    && !branch.contains("//")
-                    && branch != "@"
-                    && branch.chars().all(|c| {
-                        (c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
-                            && !c.is_whitespace()
-                            && !c.is_control()
-                            && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
-                    });
-
-                if !is_valid_branch {
-                    return format!("Self-upgrade failed: invalid branch name '{}'", branch);
-                }
-
-                info!(
-                    "Self-upgrade requested: branch '{}', mode '{}'",
-                    branch, mode
-                );
-
-                match crate::learning::self_upgrade(&branch, &mode, None).await {
-                    Ok(log) => {
-                        self.restart_pending.store(true, Ordering::Release);
-                        log
-                    }
-                    Err(e) => format!("Self-upgrade failed: {:#}", e),
-                }
-            }
-            "patch_skill" => {
-                let skill_name = match arguments["skill_name"].as_str() {
-                    Some(n) => n.to_string(),
-                    None => return "Missing skill_name".to_string(),
-                };
-                let patch_content = match arguments["patch_content"].as_str() {
-                    Some(c) => c.to_string(),
-                    None => return "Missing patch_content".to_string(),
-                };
-
-                match crate::learning::self_patch_skill(
-                    &self.config.skills.directory,
-                    &skill_name,
-                    &patch_content,
-                    &self.skills,
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => format!("Patch failed: {:#}", e),
-                }
-            }
-            "send_file" => {
-                match async {
-                    let path = arguments["path"]
-                        .as_str()
-                        .context("Missing 'path' argument")?;
-                    let caption = arguments
-                        .get("caption")
-                        .and_then(|v| v.as_str())
-                        .filter(|c| !c.is_empty());
-
-                    let full_path =
-                        tools::validate_sandbox_path(&self.config.sandbox.allowed_directory, path)?;
-
-                    let metadata = tokio::fs::metadata(&full_path)
-                        .await
-                        .with_context(|| format!("File not found: {}", full_path.display()))?;
-                    const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
-                    if metadata.len() > TG_FILE_LIMIT {
-                        anyhow::bail!(
-                            "File is {} MB — exceeds Telegram's 50 MB limit",
-                            metadata.len() / 1024 / 1024
-                        );
-                    }
-
-                    let bytes = tokio::fs::read(&full_path)
-                        .await
-                        .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
-
-                    let file_name = full_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("file")
-                        .to_string();
-
-                    let input_file = InputFile::memory(bytes).file_name(file_name.clone());
-                    let mut req = self.bot.send_document(chat_id, input_file);
-                    if let Some(c) = caption {
-                        req = req.caption(c);
-                    }
-                    req.await
-                        .with_context(|| "Telegram API failed to send document")?;
-
-                    Ok(format!("File '{}' sent successfully.", file_name))
-                }
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => format!("Error sending file: {:#}", e),
-                }
-            }
-            "read_soul_file" => {
-                let file_name = match arguments["file_name"].as_str() {
-                    Some(n) => n,
-                    None => return "Missing 'file_name'".to_string(),
-                };
-                let path = match self.validate_soul_file_path(file_name).await {
-                    Ok(p) => p,
-                    Err(e) => return format!("Invalid soul file path: {}", e),
-                };
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => content,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        format!(
-                            "Soul file '{}' does not exist yet. It will be created on first update.",
-                            file_name
-                        )
-                    }
-                    Err(e) => format!("Error reading soul file: {}", e),
-                }
-            }
-            "update_soul_file" => {
-                let file_name = match arguments["file_name"].as_str() {
-                    Some(n) => n,
-                    None => return "Missing 'file_name'".to_string(),
-                };
-                let content = match arguments["content"].as_str() {
-                    Some(c) => c,
-                    None => return "Missing 'content'".to_string(),
-                };
-                let mode = arguments["mode"].as_str().unwrap_or("append");
-
-                // Null byte check
-                if content.contains('\0') {
-                    return "Content contains null bytes and was rejected.".to_string();
-                }
-
-                // Hard size limit (check first for unambiguous rejection)
-                if content.len() > 100_000 {
-                    return "Content too large (max 100KB). Please consolidate the file first."
-                        .to_string();
-                }
-                // Soft size warning
-                let size_warning = if content.len() > 50_000 {
-                    format!(
-                        "\n\n(Warning: content is {} bytes >50KB. Consider consolidating if it keeps growing.)",
-                        content.len()
-                    )
-                } else {
-                    String::new()
-                };
-
-                let path = match self.validate_soul_file_path(file_name).await {
-                    Ok(p) => p,
-                    Err(e) => return format!("Invalid soul file path: {}", e),
-                };
-
-                let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-
-                let new_content = match mode {
-                    "append" => {
-                        if existing.trim().is_empty() {
-                            // New file — create with frontmatter if not provided
-                            if content.starts_with("---") {
-                                content.to_string()
-                            } else {
-                                format!(
-                                    "---\nname: {}\nversion: 1\n---\n\n{}",
-                                    file_name.trim_end_matches(".md"),
-                                    content
-                                )
-                            }
-                        } else {
-                            if !existing.trim().starts_with("---") {
-                                return "Existing soul file has invalid format (missing frontmatter). Rejected.".to_string();
-                            }
-                            format!("{}\n{}", existing.trim_end(), content)
-                        }
-                    }
-                    "replace" => {
-                        if !content.trim().starts_with("---") {
-                            return "Replace mode requires content with YAML frontmatter"
-                                .to_string();
-                        }
-                        content.to_string()
-                    }
-                    _ => return "Invalid mode. Use 'append' or 'replace'.".to_string(),
-                };
-
-                // Validate frontmatter
-                if !crate::learning::has_valid_frontmatter(&new_content) {
-                    return "Update would produce invalid soul file (missing frontmatter). Rejected."
-                        .to_string();
-                }
-                // Verify name and version fields in frontmatter
-                if !new_content.contains("name:") || !new_content.contains("version:") {
-                    return "Update rejected: frontmatter must contain 'name' and 'version' fields."
-                        .to_string();
-                }
-
-                // Helper to append suffix to path (not with_extension, which replaces .md)
-                fn bak_path(p: &Path, suffix: &str) -> PathBuf {
-                    let mut s = p.to_string_lossy().to_string();
-                    s.push_str(suffix);
-                    PathBuf::from(s)
-                }
-
-                // Rotate backups: .bak.2→.bak.3, .bak.1→.bak.2, .bak→.bak.1, current→.bak
-                let bak_2 = bak_path(&path, ".bak.2");
-                let bak_3 = bak_path(&path, ".bak.3");
-                if bak_2.exists() {
-                    let _ = tokio::fs::rename(&bak_2, &bak_3).await;
-                }
-                let bak_1 = bak_path(&path, ".bak.1");
-                let bak_2_new = bak_path(&path, ".bak.2");
-                if bak_1.exists() {
-                    let _ = tokio::fs::rename(&bak_1, &bak_2_new).await;
-                }
-                let bak_current = bak_path(&path, ".bak");
-                let bak_1_new = bak_path(&path, ".bak.1");
-                if bak_current.exists() {
-                    let _ = tokio::fs::rename(&bak_current, &bak_1_new).await;
-                }
-                if path.exists() {
-                    let _ = tokio::fs::copy(&path, &bak_current).await;
-                }
-
-                // Write with post-write validation
-                if let Err(e) = tokio::fs::write(&path, &new_content).await {
-                    if bak_current.exists() {
-                        let _ = tokio::fs::copy(&bak_current, &path).await;
-                    }
-                    return format!("Failed to write soul file (restored from backup): {}", e);
-                }
-
-                // Read back and verify
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(read_back) if read_back == new_content => {
-                        self.soul_updated
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        format!(
-                            "{} updated successfully. Backup at {}{}",
-                            file_name,
-                            bak_current.display(),
-                            size_warning
-                        )
-                    }
-                    Ok(_) => {
-                        if bak_current.exists() {
-                            let _ = tokio::fs::copy(&bak_current, &path).await;
-                        }
-                        "Write verification failed (content mismatch). Restored from backup."
-                            .to_string()
-                    }
-                    Err(e) => {
-                        if bak_current.exists() {
-                            let _ = tokio::fs::copy(&bak_current, &path).await;
-                        }
-                        format!("Write verification error (restored from backup): {}", e)
-                    }
-                }
-            }
-            "revert_soul_file" => {
-                let file_name = match arguments["file_name"].as_str() {
-                    Some(n) => n,
-                    None => return "Missing 'file_name'".to_string(),
-                };
-                let path = match self.validate_soul_file_path(file_name).await {
-                    Ok(p) => p,
-                    Err(e) => return format!("Invalid soul file path: {}", e),
-                };
-                let bak = {
-                    let mut s = path.to_string_lossy().to_string();
-                    s.push_str(".bak");
-                    PathBuf::from(s)
-                };
-                if !bak.exists() {
-                    return format!("No backup found for {}", file_name);
-                }
-                match tokio::fs::copy(&bak, &path).await {
-                    Ok(_) => format!("{} restored from backup.", file_name),
-                    Err(e) => format!("Failed to restore backup: {}", e),
-                }
-            }
-            "execute_command" => {
-                self.execute_command_interactive(arguments, user_id, chat_id)
-                    .await
-            }
-            _ if self.mcp.is_mcp_tool(name) => match self.mcp.call_tool(name, arguments).await {
-                Ok(result) => result,
-                Err(e) => format!("MCP tool error: {}", e),
-            },
             _ => {
-                match tools::execute_builtin_tool(
-                    name,
-                    arguments,
-                    &self.config.sandbox.allowed_directory,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => format!("Tool error: {}", e),
-                }
+                let ctx = ToolContext {
+                    sandbox_dir: self.config.sandbox.allowed_directory.clone(),
+                    home_dir: self.config.resolved_home.clone(),
+                    sender: self.sender.clone(),
+                    cancel_registry: self.cancel_registry.clone(),
+                    user_id: user_id.to_string(),
+                    chat_id: chat_id.to_string(),
+                };
+                self.tool_registry.execute(name, arguments.clone(), ctx).await
+                    .unwrap_or_else(|e| format!("Error: {e}"))
             }
         }
     }
@@ -4358,7 +2583,7 @@ Simply answer the question with the information you have.
 
 /// Parse an ISO 8601 datetime string and return the Duration until it fires.
 /// Returns Err if the string is invalid or the time is in the past.
-fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
+pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
     use chrono::{Local, NaiveDateTime, TimeZone};
 
     let dt = NaiveDateTime::parse_from_str(trigger_value, "%Y-%m-%dT%H:%M:%S")
@@ -4393,7 +2618,7 @@ fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Durati
 }
 
 /// Validate a 6-field cron expression (sec min hour day month weekday).
-fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 6 {
         anyhow::bail!(
@@ -4422,6 +2647,7 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Validate skill directory name: lowercase letters, numbers, hyphens, 1–64 chars.
+#[allow(dead_code)]
 fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Skill name must not be empty".to_string());
@@ -4444,6 +2670,7 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 /// Validate a relative path within a skill directory: no '..' components, non-empty.
+#[allow(dead_code)]
 fn validate_skill_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Relative path must not be empty".to_string());
@@ -4459,6 +2686,7 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
 
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
+#[allow(dead_code)]
 fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
     let mut tools = vec!["read_skill_file".to_string(), "read_agent_file".to_string()];
     for t in declared {
@@ -4471,6 +2699,7 @@ fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
 
 /// Return declared tools that are not present in the set of all available tool names.
 /// Used to warn at subagent launch when the whitelist references unavailable tools.
+#[allow(dead_code)]
 fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Vec<String> {
     declared
         .iter()
@@ -4481,6 +2710,7 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
 
 /// Error message returned when the main agent or a subagent produces a tool call
 /// whose arguments are a regurgitated compaction marker rather than real JSON.
+#[allow(dead_code)]
 const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in compacted format \
     (reproduced from a compressed history entry). \
     Please regenerate the complete call with all required fields.";
@@ -4492,6 +2722,7 @@ const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in co
 /// Handles two formats:
 /// - Old (backward compat): JSON object with `_rustfox_compacted_arguments: true`
 /// - New: plain-text that starts with `COMPACTION_MARKER_PREFIX`
+#[allow(dead_code)]
 fn is_compacted_regurgitation(raw: &str, parsed: &serde_json::Value) -> bool {
     // Old JSON format — lookup the marker key in the parsed object.
     if parsed

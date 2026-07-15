@@ -8,13 +8,22 @@ use teloxide::prelude::*;
 use teloxide::types::{ParseMode, UpdateKind};
 use tracing::{error, info, warn};
 
+use async_trait::async_trait;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+
 use crate::agent::{Agent, LoopCallbackChoice, MidRunMode};
+use crate::platform::sender::{MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::rich_sender;
 use crate::utils::telegram_markdown::escape_text;
 use std::sync::OnceLock;
+
+/// Helper: parse a chat_id string (e.g. "123456789") into teloxide's ChatId.
+fn parse_chat_id(s: &str) -> Result<teloxide::types::ChatId> {
+    Ok(teloxide::types::ChatId(s.parse::<i64>()?))
+}
 
 static BOT_TOKEN: OnceLock<String> = OnceLock::new();
 
@@ -1719,21 +1728,17 @@ async fn handle_model_callback(
         return Ok(());
     }
 
-    // Handle command cancellation
+    // Handle command cancellation via CancelRegistry
     if let Some(cmd_id) = data.strip_prefix("cancel_cmd:") {
-        let mut map = agent.running_commands.lock().await;
-        if let Some(cmd) = map.remove(cmd_id) {
-            let _ = cmd.cancel_tx.send(());
-            bot.answer_callback_query(callback_id)
-                .text("⛔ Command cancelled")
-                .await
-                .ok();
+        let text = if agent.cancel_registry.cancel(cmd_id) {
+            "⛔ Command cancelled"
         } else {
-            bot.answer_callback_query(callback_id)
-                .text("Command already finished")
-                .await
-                .ok();
-        }
+            "Command already finished"
+        };
+        bot.answer_callback_query(callback_id)
+            .text(text)
+            .await
+            .ok();
         return Ok(());
     }
 
@@ -1837,6 +1842,67 @@ fn mime_from_extension(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         _ => "application/octet-stream",
+    }
+}
+
+pub struct TelegramAdapter {
+    bot: Bot,
+}
+
+impl TelegramAdapter {
+    pub fn new(bot: Bot) -> Self {
+        Self { bot }
+    }
+}
+
+#[async_trait]
+impl PlatformSender for TelegramAdapter {
+    async fn send_message(&self, chat_id_str: &str, text: &str, format: PlatformMsgFormat) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let parse_mode = match format {
+            PlatformMsgFormat::Markdown | PlatformMsgFormat::Auto => Some(ParseMode::MarkdownV2),
+            PlatformMsgFormat::Rich => None,
+        };
+        let mut req = self.bot.send_message(chat_id, text);
+        if let Some(pm) = parse_mode {
+            req = req.parse_mode(pm);
+        }
+        let msg = req.await?;
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn send_file(&self, chat_id_str: &str, path: &Path, caption: Option<&str>) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let input_file = teloxide::types::InputFile::file(path);
+        let msg = if let Some(cap) = caption {
+            self.bot.send_document(chat_id, input_file).caption(cap).await?
+        } else {
+            self.bot.send_document(chat_id, input_file).await?
+        };
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn show_cancel_button(&self, chat_id_str: &str, text: &str, cancel_id: &str) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let keyboard = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
+            "Cancel", format!("cancel_cmd:{cancel_id}"),
+        )]]);
+        let msg = self.bot.send_message(chat_id, text).reply_markup(keyboard).await?;
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn edit_message(&self, chat_id_str: &str, message_id: &PlatformMessageId, text: &str) -> Result<()> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let parts: Vec<&str> = message_id.split(':').collect();
+        let msg_id: i32 = parts.get(1).unwrap_or(&"0").parse()?;
+        self.bot.edit_message_text(chat_id, MessageId(msg_id), text).await?;
+        Ok(())
+    }
+
+    async fn notify_shutdown(&self, chat_id_str: &str) -> Result<()> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        self.bot.send_message(chat_id, "⚠️ Bot is shutting down...").await?;
+        Ok(())
     }
 }
 

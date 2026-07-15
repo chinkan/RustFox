@@ -1,6 +1,14 @@
 #![deny(dead_code)]
 
 pub mod agent;
+pub mod builtin_tools;
+pub mod cancel_registry;
+pub mod command_tool;
+pub mod conversation;
+pub mod memory_tools;
+pub mod scheduling_tools;
+pub mod skill_tools;
+pub mod tool_registry;
 pub mod agent_prompt;
 pub mod config;
 pub mod file_processor;
@@ -9,6 +17,7 @@ pub mod langsmith;
 pub mod learning;
 pub mod llm;
 pub mod loop_detector;
+pub mod loop_runner;
 pub mod mcp;
 pub mod memory;
 pub mod platform;

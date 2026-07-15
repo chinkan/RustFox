@@ -173,20 +173,8 @@ async fn main() -> Result<()> {
     }
     // Write a home-side lock recording content hashes for future diff/audit.
     if let Some(home) = &config.resolved_home {
-        let seed_lock = |lock_name: &str, dir: &std::path::Path| {
-            let lock_path = home.join(lock_name);
-            if !lock_path.exists() {
-                let lock = rustfox::skills::update::SkillLock {
-                    version: 1,
-                    skills: rustfox::skills::seed::lock_map_for(dir),
-                };
-                if let Ok(json) = serde_json::to_string_pretty(&lock) {
-                    let _ = std::fs::write(&lock_path, json);
-                }
-            }
-        };
-        seed_lock("skills-lock.json", &config.skills.directory);
-        seed_lock("agents-lock.json", &config.agents.directory);
+        let _ = rustfox::skills::seed::write_lock("skills-lock.json", &config.skills.directory, home);
+        let _ = rustfox::skills::seed::write_lock("agents-lock.json", &config.agents.directory, home);
     }
 
     // Load skills from the instance directory.
@@ -214,6 +202,36 @@ async fn main() -> Result<()> {
     let (job_tx, mut job_rx) =
         tokio::sync::mpsc::unbounded_channel::<rustfox::agent::ScheduledJobRequest>();
 
+    let cancel_registry = std::sync::Arc::new(rustfox::cancel_registry::CancelRegistry::new());
+    let sender: Arc<dyn rustfox::platform::sender::PlatformSender> = Arc::new(
+        rustfox::platform::telegram::TelegramAdapter::new((*bot).clone()),
+    );
+    let skills_rw = Arc::new(tokio::sync::RwLock::new(skills.clone()));
+
+    let mut tool_registry = rustfox::tool_registry::ToolRegistry::new();
+    tool_registry.register(Box::new(rustfox::builtin_tools::BuiltinTools::new(
+        config.skills.directory.clone(),
+        skills_rw.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::memory_tools::MemoryTools::new(
+        memory.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::scheduling_tools::SchedulingTools::new(
+        task_store.clone(),
+        Arc::clone(&scheduler),
+        job_tx.clone(),
+        Arc::clone(&bot),
+    )));
+    tool_registry.register(Box::new(rustfox::skill_tools::SkillTools::new(
+        config.skills.directory.clone(),
+        config.agents.directory.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::command_tool::CommandTool::new(
+        config.sandbox.allowed_directory.clone(),
+        cancel_registry.clone(),
+        sender.clone(),
+    )));
+
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
     let agent = Arc::new_cyclic(|weak| {
         Agent::new(
@@ -230,6 +248,9 @@ async fn main() -> Result<()> {
             job_tx,
             Arc::clone(&langsmith),
             config_path.clone(),
+            cancel_registry.clone(),
+            tool_registry,
+            sender.clone(),
         )
     });
 

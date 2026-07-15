@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use tracing::info;
 
 use crate::llm::{FunctionDefinition, ToolDefinition};
 
@@ -82,21 +81,21 @@ pub fn validate_home_path(home_dir: &Path, requested: &str) -> Result<PathBuf> {
     Ok(check_path)
 }
 
+// Backward-compatible shims for agent.rs during M1 refactoring.
+// These replicate the old free-function API. agent.rs will be updated
+// to use ToolRegistry directly in Task 10, then these are removed.
+
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
                 name: "read_file".to_string(),
-                description: "Read the contents of a file within the sandbox directory"
-                    .to_string(),
+                description: "Read the contents of a file within the sandbox directory".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path (relative to sandbox or absolute within sandbox)"
-                        }
+                        "path": { "type": "string", "description": "The file path (relative to sandbox or absolute within sandbox)" }
                     },
                     "required": ["path"]
                 }),
@@ -110,14 +109,8 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path (relative to sandbox or absolute within sandbox)"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The content to write to the file"
-                        }
+                        "path": { "type": "string", "description": "The file path (relative to sandbox or absolute within sandbox)" },
+                        "content": { "type": "string", "description": "The content to write to the file" }
                     },
                     "required": ["path", "content"]
                 }),
@@ -127,15 +120,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
                 name: "list_files".to_string(),
-                description: "List files and directories within a path in the sandbox directory"
-                    .to_string(),
+                description: "List files and directories within a path in the sandbox directory".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The directory path (relative to sandbox or absolute within sandbox). Defaults to sandbox root."
-                        }
+                        "path": { "type": "string", "description": "The directory path (relative to sandbox or absolute within sandbox). Defaults to sandbox root." }
                     },
                     "required": []
                 }),
@@ -144,39 +133,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
-                name: "send_file".to_string(),
-                description: "Send a file from the sandbox to the current chat. The file must already exist in the sandbox."
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path (relative to sandbox or absolute within sandbox)"
-                        },
-                        "caption": {
-                            "type": "string",
-                            "description": "Optional caption for the file"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
                 name: "execute_command".to_string(),
-                description:
-                    "Execute a shell command within the sandbox directory. The working directory is set to the sandbox."
-                        .to_string(),
+                description: "Execute a shell command within the sandbox directory. The working directory is set to the sandbox.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute"
-                        }
+                        "command": { "type": "string", "description": "The shell command to execute" }
                     },
                     "required": ["command"]
                 }),
@@ -190,15 +152,8 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Short title describing the overall goal"
-                        },
-                        "steps": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Ordered list of step descriptions"
-                        }
+                        "title": { "type": "string", "description": "Short title describing the overall goal" },
+                        "steps": { "type": "array", "items": { "type": "string" }, "description": "Ordered list of step descriptions" }
                     },
                     "required": ["title", "steps"]
                 }),
@@ -212,19 +167,9 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "step_id": {
-                            "type": "integer",
-                            "description": "Zero-based index of the step to update"
-                        },
-                        "status": {
-                            "type": "string",
-                            "enum": ["todo", "in_progress", "done", "failed"],
-                            "description": "New status for the step"
-                        },
-                        "notes": {
-                            "type": "string",
-                            "description": "Optional notes — result summary, error message, etc."
-                        }
+                        "step_id": { "type": "integer", "description": "Zero-based index of the step to update" },
+                        "status": { "type": "string", "enum": ["todo", "in_progress", "done", "failed"], "description": "New status for the step" },
+                        "notes": { "type": "string", "description": "Optional notes — result summary, error message, etc." }
                     },
                     "required": ["step_id", "status"]
                 }),
@@ -235,147 +180,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             function: FunctionDefinition {
                 name: "plan_view".to_string(),
                 description: "View the current plan as a checklist. Call at the end of execution to review progress before synthesising the final answer.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "try_new_tech".to_string(),
-                description: "Run a sandboxed experiment with a new technology or approach. Creates a temp project in sandbox/experiments/, writes the code, runs cargo check/test (Rust) or node (JS), and returns results. On success, may auto-generate a skill.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "technology": {
-                            "type": "string",
-                            "description": "Name/description of the technology being tested (e.g. 'serde flatten', 'tokio select')"
-                        },
-                        "experiment_code": {
-                            "type": "string",
-                            "description": "The source code for the experiment"
-                        },
-                        "language": {
-                            "type": "string",
-                            "enum": ["rust", "javascript"],
-                            "description": "Programming language for the experiment (default: rust)"
-                        }
-                    },
-                    "required": ["technology", "experiment_code"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "self_upgrade".to_string(),
-                description: "Upgrade the bot to the latest version. \
-Auto-detects whether running from source code (git pull + cargo build --release) \
-or from a pre-built release binary (downloads latest from GitHub). If running as \
-a systemd/launchd service, re-registers the service unit. Restarts the bot \
-after successful upgrade. Use this when the user asks to update/upgrade the bot.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "branch": {
-                            "type": "string",
-                            "description": "Git branch to build from (source mode only, default: 'main')"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["auto", "source", "release"],
-                            "description": "Force a specific upgrade mode (default: 'auto')"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "patch_skill".to_string(),
-                description: "Patch an existing skill's SKILL.md by appending content or replacing it entirely. Creates a .bak backup. If the patch starts with '---' (frontmatter), it replaces the whole file; otherwise it appends to the existing content. Reloads skills after patching.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "skill_name": {
-                            "type": "string",
-                            "description": "Name of the skill to patch (e.g. 'code-interpreter')"
-                        },
-                        "patch_content": {
-                            "type": "string",
-                            "description": "Content to append (or full replacement if it starts with ---)"
-                        }
-                    },
-                    "required": ["skill_name", "patch_content"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "read_soul_file".to_string(),
-                description: "Read the full contents of a soul file (SOUL.md, AGENTS.md, or USER.md) from the home directory.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
-                            "description": "Which soul file to read"
-                        }
-                    },
-                    "required": ["file_name"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "update_soul_file".to_string(),
-                description: "Update a soul file. Use 'append' mode to add content at the end (safe, no data loss). Use 'replace' mode to rewrite the entire file (for consolidation).".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
-                            "description": "Which soul file to update"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The markdown content to append or replace with"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["append", "replace"],
-                            "description": "'append' adds content after the frontmatter; 'replace' rewrites the entire file"
-                        }
-                    },
-                    "required": ["file_name", "content", "mode"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "revert_soul_file".to_string(),
-                description: "Restore a soul file from its most recent .bak backup.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "enum": ["SOUL.md", "AGENTS.md", "USER.md"],
-                            "description": "Which soul file to revert"
-                        }
-                    },
-                    "required": ["file_name"]
-                }),
+                parameters: json!({ "type": "object", "properties": {}, "required": [] }),
             },
         },
     ]
@@ -388,215 +193,79 @@ pub async fn execute_builtin_tool(
 ) -> Result<String> {
     match tool_name {
         "read_file" => {
-            let path = arguments["path"]
-                .as_str()
-                .context("Missing 'path' argument")?;
+            let path = arguments["path"].as_str().context("Missing 'path' argument")?;
             let full_path = validate_sandbox_path(sandbox_dir, path)?;
-            info!("Reading file: {}", full_path.display());
-            let content = tokio::fs::read_to_string(&full_path)
-                .await
+            let content = tokio::fs::read_to_string(&full_path).await
                 .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
             Ok(content)
         }
         "write_file" => {
-            let path = arguments["path"]
-                .as_str()
-                .context("Missing 'path' argument")?;
-            let content = arguments["content"]
-                .as_str()
-                .context("Missing 'content' argument")?;
+            let path = arguments["path"].as_str().context("Missing 'path' argument")?;
+            let content = arguments["content"].as_str().context("Missing 'content' argument")?;
             let full_path = validate_sandbox_path(sandbox_dir, path)?;
-
-            // Create parent directories if they don't exist
             if let Some(parent) = full_path.parent() {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("Failed to create directories: {}", parent.display())
-                })?;
+                tokio::fs::create_dir_all(parent).await?;
             }
-
-            info!("Writing file: {}", full_path.display());
-            tokio::fs::write(&full_path, content)
-                .await
-                .with_context(|| format!("Failed to write file: {}", full_path.display()))?;
-            Ok(format!(
-                "File written successfully: {}",
-                full_path.display()
-            ))
+            tokio::fs::write(&full_path, content).await?;
+            Ok(format!("File written successfully: {}", full_path.display()))
         }
         "list_files" => {
-            let path = arguments
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let full_path = validate_sandbox_path(sandbox_dir, path)?;
-            info!("Listing files: {}", full_path.display());
-
             let mut entries = Vec::new();
-            let mut read_dir = tokio::fs::read_dir(&full_path)
-                .await
+            let mut read_dir = tokio::fs::read_dir(&full_path).await
                 .with_context(|| format!("Failed to read directory: {}", full_path.display()))?;
-
             while let Some(entry) = read_dir.next_entry().await? {
                 let file_type = entry.file_type().await?;
-                let prefix = if file_type.is_dir() {
-                    "[DIR]"
-                } else {
-                    "[FILE]"
-                };
-                entries.push(format!(
-                    "{} {}",
-                    prefix,
-                    entry.file_name().to_string_lossy()
-                ));
+                let prefix = if file_type.is_dir() { "[DIR]" } else { "[FILE]" };
+                entries.push(format!("{} {}", prefix, entry.file_name().to_string_lossy()));
             }
-
             entries.sort();
-            if entries.is_empty() {
-                Ok("Directory is empty".to_string())
-            } else {
-                Ok(entries.join("\n"))
-            }
+            if entries.is_empty() { Ok("Directory is empty".to_string()) } else { Ok(entries.join("\n")) }
         }
-        // NOTE: execute_command is handled by Agent::execute_command_interactive
-        // (src/agent.rs) before reaching this fallback. The tool definition lives
-        // here so the LLM knows the tool exists.
         "plan_create" => {
-            let title = arguments["title"]
-                .as_str()
-                .context("Missing 'title' argument")?;
-            let steps = arguments["steps"]
-                .as_array()
-                .context("Missing 'steps' argument")?;
-
-            let plan_steps: Vec<serde_json::Value> = steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    json!({
-                        "id": i,
-                        "description": s.as_str().unwrap_or(""),
-                        "status": "todo",
-                        "notes": ""
-                    })
-                })
-                .collect();
-
-            let plan = json!({
-                "title": title,
-                "steps": plan_steps
-            });
-
+            let title = arguments["title"].as_str().context("Missing 'title' argument")?;
+            let steps = arguments["steps"].as_array().context("Missing 'steps' argument")?;
+            let plan_steps: Vec<serde_json::Value> = steps.iter().enumerate().map(|(i, s)| {
+                json!({ "id": i, "description": s.as_str().unwrap_or(""), "status": "todo", "notes": "" })
+            }).collect();
+            let plan = json!({ "title": title, "steps": plan_steps });
             let plan_path = sandbox_dir.join(".rustfox_plan.json");
-            tokio::fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)
-                .await
-                .context("Failed to write plan file")?;
-
-            info!("Plan created: {} ({} steps)", title, plan_steps.len());
-
-            let checklist: Vec<String> = plan_steps
-                .iter()
-                .map(|s| {
-                    format!(
-                        "[ ] {}: {}",
-                        s["id"].as_u64().unwrap_or(0),
-                        s["description"].as_str().unwrap_or("")
-                    )
-                })
-                .collect();
-
-            Ok(format!(
-                "Plan created: {}\n\n{}",
-                title,
-                checklist.join("\n")
-            ))
+            tokio::fs::write(&plan_path, serde_json::to_string_pretty(&plan)?).await?;
+            let checklist: Vec<String> = plan_steps.iter().map(|s| {
+                format!("[ ] {}: {}", s["id"].as_u64().unwrap_or(0), s["description"].as_str().unwrap_or(""))
+            }).collect();
+            Ok(format!("Plan created: {}\n\n{}", title, checklist.join("\n")))
         }
         "plan_update" => {
-            let step_id = arguments["step_id"]
-                .as_u64()
-                .context("Missing 'step_id' argument")? as usize;
-            let status = arguments["status"]
-                .as_str()
-                .context("Missing 'status' argument")?;
-            let notes = arguments
-                .get("notes")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
+            let step_id = arguments["step_id"].as_u64().context("Missing 'step_id' argument")? as usize;
+            let status = arguments["status"].as_str().context("Missing 'status' argument")?;
+            let notes = arguments.get("notes").and_then(|v| v.as_str()).unwrap_or("");
             let plan_path = sandbox_dir.join(".rustfox_plan.json");
-            let content = tokio::fs::read_to_string(&plan_path)
-                .await
-                .context("No active plan found. Call plan_create first.")?;
-            let mut plan: serde_json::Value =
-                serde_json::from_str(&content).context("Invalid plan file format")?;
-
-            let steps = plan["steps"]
-                .as_array_mut()
-                .context("Invalid plan: missing steps array")?;
-            let step = steps
-                .get_mut(step_id)
-                .with_context(|| format!("Step {} not found in plan", step_id))?;
-
+            let content = tokio::fs::read_to_string(&plan_path).await.context("No active plan found. Call plan_create first.")?;
+            let mut plan: serde_json::Value = serde_json::from_str(&content).context("Invalid plan file format")?;
+            let steps = plan["steps"].as_array_mut().context("Invalid plan: missing steps array")?;
+            let step = steps.get_mut(step_id).with_context(|| format!("Step {} not found in plan", step_id))?;
             let description = step["description"].as_str().unwrap_or("").to_string();
             step["status"] = json!(status);
             step["notes"] = json!(notes);
-
-            tokio::fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)
-                .await
-                .context("Failed to update plan file")?;
-
-            let icon = match status {
-                "done" => "[x]",
-                "failed" => "[!]",
-                "in_progress" => "[>]",
-                _ => "[ ]",
-            };
-
-            info!("Plan step {} -> {}", step_id, status);
-            Ok(format!(
-                "{} Step {}: {} [{}]{}",
-                icon,
-                step_id,
-                description,
-                status,
-                if notes.is_empty() {
-                    String::new()
-                } else {
-                    format!(" -- {}", notes)
-                }
-            ))
+            tokio::fs::write(&plan_path, serde_json::to_string_pretty(&plan)?).await?;
+            let icon = match status { "done" => "[x]", "failed" => "[!]", "in_progress" => "[>]", _ => "[ ]" };
+            Ok(format!("{} Step {}: {} [{}]{}", icon, step_id, description, status,
+                if notes.is_empty() { String::new() } else { format!(" -- {}", notes) }))
         }
         "plan_view" => {
             let plan_path = sandbox_dir.join(".rustfox_plan.json");
-            let content = tokio::fs::read_to_string(&plan_path)
-                .await
-                .context("No active plan found. Call plan_create first.")?;
-            let plan: serde_json::Value =
-                serde_json::from_str(&content).context("Invalid plan file format")?;
-
+            let content = tokio::fs::read_to_string(&plan_path).await.context("No active plan found. Call plan_create first.")?;
+            let plan: serde_json::Value = serde_json::from_str(&content).context("Invalid plan file format")?;
             let title = plan["title"].as_str().unwrap_or("Untitled Plan");
-            let steps = plan["steps"]
-                .as_array()
-                .context("Invalid plan: missing steps array")?;
-
-            let lines: Vec<String> = steps
-                .iter()
-                .map(|s| {
-                    let icon = match s["status"].as_str().unwrap_or("todo") {
-                        "done" => "[x]",
-                        "failed" => "[!]",
-                        "in_progress" => "[>]",
-                        _ => "[ ]",
-                    };
-                    let desc = s["description"].as_str().unwrap_or("");
-                    let notes = s["notes"].as_str().unwrap_or("");
-                    if notes.is_empty() {
-                        format!("{} {}", icon, desc)
-                    } else {
-                        format!("{} {} -- {}", icon, desc, notes)
-                    }
-                })
-                .collect();
-
+            let steps = plan["steps"].as_array().context("Invalid plan: missing steps array")?;
+            let lines: Vec<String> = steps.iter().map(|s| {
+                let icon = match s["status"].as_str().unwrap_or("todo") { "done" => "[x]", "failed" => "[!]", "in_progress" => "[>]", _ => "[ ]" };
+                let desc = s["description"].as_str().unwrap_or("");
+                let notes = s["notes"].as_str().unwrap_or("");
+                if notes.is_empty() { format!("{} {}", icon, desc) } else { format!("{} {} -- {}", icon, desc, notes) }
+            }).collect();
             Ok(format!("# {}\n\n{}", title, lines.join("\n")))
         }
         _ => anyhow::bail!("Unknown built-in tool: {}", tool_name),
@@ -607,126 +276,6 @@ pub async fn execute_builtin_tool(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn test_plan_create_writes_json() {
-        let dir = tempdir().unwrap();
-        let args = serde_json::json!({
-            "title": "My Plan",
-            "steps": ["Step A", "Step B"]
-        });
-        let result = execute_builtin_tool("plan_create", &args, dir.path())
-            .await
-            .unwrap();
-        assert!(result.contains("My Plan"));
-        assert!(result.contains("Step A"));
-        assert!(result.contains("Step B"));
-
-        let plan_path = dir.path().join(".rustfox_plan.json");
-        assert!(plan_path.exists());
-        let content = std::fs::read_to_string(plan_path).unwrap();
-        let plan: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(plan["title"].as_str().unwrap(), "My Plan");
-        assert_eq!(plan["steps"][0]["status"].as_str().unwrap(), "todo");
-        assert_eq!(plan["steps"][1]["description"].as_str().unwrap(), "Step B");
-    }
-
-    #[tokio::test]
-    async fn test_plan_update_changes_step_status() {
-        let dir = tempdir().unwrap();
-
-        let create_args = serde_json::json!({
-            "title": "Test Plan",
-            "steps": ["Step A", "Step B"]
-        });
-        execute_builtin_tool("plan_create", &create_args, dir.path())
-            .await
-            .unwrap();
-
-        let update_args = serde_json::json!({
-            "step_id": 0,
-            "status": "in_progress"
-        });
-        let result = execute_builtin_tool("plan_update", &update_args, dir.path())
-            .await
-            .unwrap();
-        assert!(result.contains("in_progress") || result.contains("[>]"));
-
-        let plan_path = dir.path().join(".rustfox_plan.json");
-        let content = std::fs::read_to_string(plan_path).unwrap();
-        let plan: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(plan["steps"][0]["status"].as_str().unwrap(), "in_progress");
-        assert_eq!(plan["steps"][1]["status"].as_str().unwrap(), "todo");
-    }
-
-    #[tokio::test]
-    async fn test_plan_update_stores_notes() {
-        let dir = tempdir().unwrap();
-
-        let create_args = serde_json::json!({
-            "title": "Test",
-            "steps": ["Only step"]
-        });
-        execute_builtin_tool("plan_create", &create_args, dir.path())
-            .await
-            .unwrap();
-
-        let update_args = serde_json::json!({
-            "step_id": 0,
-            "status": "done",
-            "notes": "Completed successfully"
-        });
-        execute_builtin_tool("plan_update", &update_args, dir.path())
-            .await
-            .unwrap();
-
-        let plan_path = dir.path().join(".rustfox_plan.json");
-        let content = std::fs::read_to_string(plan_path).unwrap();
-        let plan: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            plan["steps"][0]["notes"].as_str().unwrap(),
-            "Completed successfully"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_plan_view_renders_checklist() {
-        let dir = tempdir().unwrap();
-
-        let create_args = serde_json::json!({
-            "title": "My Plan",
-            "steps": ["Alpha", "Beta", "Gamma"]
-        });
-        execute_builtin_tool("plan_create", &create_args, dir.path())
-            .await
-            .unwrap();
-
-        execute_builtin_tool(
-            "plan_update",
-            &serde_json::json!({ "step_id": 0, "status": "done", "notes": "ok" }),
-            dir.path(),
-        )
-        .await
-        .unwrap();
-        execute_builtin_tool(
-            "plan_update",
-            &serde_json::json!({ "step_id": 1, "status": "in_progress" }),
-            dir.path(),
-        )
-        .await
-        .unwrap();
-
-        let result = execute_builtin_tool("plan_view", &serde_json::json!({}), dir.path())
-            .await
-            .unwrap();
-
-        assert!(result.contains("My Plan"));
-        assert!(result.contains("[x]"));
-        assert!(result.contains("[>]"));
-        assert!(result.contains("[ ]"));
-        assert!(result.contains("Alpha"));
-        assert!(result.contains("ok"));
-    }
 
     #[test]
     fn test_validate_home_path_allows_home_files() {
@@ -750,42 +299,5 @@ mod tests {
 
         let result = validate_home_path(&home, "../outside.txt");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builtin_tool_definitions_includes_soul_tools() {
-        let defs = builtin_tool_definitions();
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-
-        assert!(
-            names.contains(&"read_soul_file"),
-            "read_soul_file must be in builtin_tool_definitions"
-        );
-        assert!(
-            names.contains(&"update_soul_file"),
-            "update_soul_file must be in builtin_tool_definitions"
-        );
-        assert!(
-            names.contains(&"revert_soul_file"),
-            "revert_soul_file must be in builtin_tool_definitions"
-        );
-    }
-
-    #[test]
-    fn test_soul_tool_definitions_have_required_file_name_enum() {
-        let defs = builtin_tool_definitions();
-        for name in ["read_soul_file", "update_soul_file", "revert_soul_file"] {
-            let def = defs
-                .iter()
-                .find(|d| d.function.name == name)
-                .unwrap_or_else(|| panic!("missing tool: {name}"));
-            let file_name_schema = &def.function.parameters["properties"]["file_name"];
-            assert_eq!(file_name_schema["type"].as_str(), Some("string"));
-            let allowed = file_name_schema["enum"].as_array().expect("enum array");
-            let allowed_strs: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
-            assert!(allowed_strs.contains(&"SOUL.md"));
-            assert!(allowed_strs.contains(&"AGENTS.md"));
-            assert!(allowed_strs.contains(&"USER.md"));
-        }
     }
 }

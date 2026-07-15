@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::skills::update::SkillLock;
+
 /// SHA-256 (hex) of a skill/agent directory tree.
 /// Requires a primary markdown (`SKILL.md` or `AGENT.md`) to exist.
 pub fn hash_skill_dir(dir: &Path) -> Option<String> {
@@ -123,6 +125,20 @@ pub fn lock_map_for(dir: &Path) -> BTreeMap<String, String> {
         }
     }
     map
+}
+
+/// Write a lock file if it doesn't exist yet.
+pub fn write_lock(lock_name: &str, dir: &Path, home: &Path) -> Result<()> {
+    let lock_path = home.join(lock_name);
+    if !lock_path.exists() {
+        let lock = SkillLock {
+            version: 1,
+            skills: lock_map_for(dir),
+        };
+        let json = serde_json::to_string_pretty(&lock)?;
+        std::fs::write(&lock_path, json)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
