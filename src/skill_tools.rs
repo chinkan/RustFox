@@ -9,6 +9,34 @@ use crate::llm::{FunctionDefinition, ToolDefinition};
 use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 
+/// Validate skill/agent name: alphanumeric, hyphens, underscores, 1–64 chars.
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Skill name cannot be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err("Skill name too long (max 64 chars)".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Skill name contains invalid characters".to_string());
+    }
+    Ok(())
+}
+
+/// Validate a relative path within a skill/agent directory: no '..' components, non-empty, not absolute.
+fn validate_skill_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    if path.contains("..") {
+        return Err("Path cannot contain '..'".to_string());
+    }
+    if path.starts_with('/') {
+        return Err("Path cannot be absolute".to_string());
+    }
+    Ok(())
+}
+
 pub struct SkillTools {
     skills_dir: PathBuf,
     agents_dir: PathBuf,
@@ -118,6 +146,8 @@ impl ToolHandler for SkillTools {
                 let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?;
                 let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
                 let content = args["content"].as_str().context("Missing 'content'")?;
+                validate_skill_name(skill_name).map_err(|e| anyhow::anyhow!(e))?;
+                validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let dir = self.skills_dir.join(skill_name);
                 tokio::fs::create_dir_all(&dir).await?;
                 let file_path = dir.join(relative_path);
@@ -142,6 +172,8 @@ impl ToolHandler for SkillTools {
             "read_skill_file" => {
                 let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?;
                 let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                validate_skill_name(skill_name).map_err(|e| anyhow::anyhow!(e))?;
+                validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let file_path = self.skills_dir.join(skill_name).join(relative_path);
                 let content = tokio::fs::read_to_string(&file_path).await
                     .with_context(|| format!("Failed to read skill file: {}", file_path.display()))?;
@@ -151,6 +183,8 @@ impl ToolHandler for SkillTools {
                 let agent_name = args["agent_name"].as_str().context("Missing 'agent_name'")?;
                 let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
                 let content = args["content"].as_str().context("Missing 'content'")?;
+                validate_skill_name(agent_name).map_err(|e| anyhow::anyhow!(e))?;
+                validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let dir = self.agents_dir.join(agent_name);
                 tokio::fs::create_dir_all(&dir).await?;
                 let file_path = dir.join(relative_path);
@@ -163,6 +197,8 @@ impl ToolHandler for SkillTools {
             "read_agent_file" => {
                 let agent_name = args["agent_name"].as_str().context("Missing 'agent_name'")?;
                 let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                validate_skill_name(agent_name).map_err(|e| anyhow::anyhow!(e))?;
+                validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let file_path = self.agents_dir.join(agent_name).join(relative_path);
                 let content = tokio::fs::read_to_string(&file_path).await
                     .with_context(|| format!("Failed to read agent file: {}", file_path.display()))?;
@@ -182,5 +218,78 @@ impl ToolHandler for SkillTools {
             }
             _ => anyhow::bail!("SkillTools: unknown tool {name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_skill_name_valid() {
+        assert!(validate_skill_name("creating-skills").is_ok());
+        assert!(validate_skill_name("my-skill-123").is_ok());
+        assert!(validate_skill_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_skill_name_empty() {
+        assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_too_long() {
+        let long = "a".repeat(65);
+        assert!(validate_skill_name(&long).is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_invalid_chars() {
+        // The new validation (is_ascii_alphanumeric) allows uppercase and underscores
+        assert!(validate_skill_name("my skill").is_err()); // space
+        assert!(validate_skill_name("my/skill").is_err()); // slash
+    }
+
+    #[test]
+    fn test_validate_skill_path_valid() {
+        assert!(validate_skill_path("SKILL.md").is_ok());
+        assert!(validate_skill_path("reference.md").is_ok());
+        assert!(validate_skill_path("scripts/helper.py").is_ok());
+        assert!(validate_skill_path("scripts/sub/tool.sh").is_ok());
+    }
+
+    #[test]
+    fn test_validate_skill_path_traversal() {
+        assert!(validate_skill_path("../other-skill/SKILL.md").is_err());
+        assert!(validate_skill_path("scripts/../../../etc/passwd").is_err());
+        assert!(validate_skill_path("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_path_empty() {
+        assert!(validate_skill_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_path_absolute() {
+        assert!(validate_skill_path("/etc/passwd").is_err());
+        assert!(validate_skill_path("/SKILL.md").is_err());
+    }
+
+    #[test]
+    fn test_read_skill_file_validates_skill_name() {
+        // validate_skill_name is reused — just verify the boundary
+        assert!(validate_skill_name("valid-skill").is_ok());
+        assert!(validate_skill_name("../evil").is_err());
+        assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn test_read_skill_file_validates_relative_path() {
+        assert!(validate_skill_path("SKILL.md").is_ok());
+        assert!(validate_skill_path("style-guide.md").is_ok());
+        assert!(validate_skill_path("../other-skill/SKILL.md").is_err());
+        assert!(validate_skill_path("/etc/passwd").is_err());
+        assert!(validate_skill_path("").is_err());
     }
 }
