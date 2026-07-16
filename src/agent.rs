@@ -847,6 +847,15 @@ impl Agent {
                 });
 
                 self.clear_cancel_token(user_id).await;
+
+                // Post-loop soul reflection: if the agent didn't update SOUL.md during the
+                // conversation but the soul_updated flag was set by a tool, fire a reflection
+                // update to capture session-end insights.
+                if self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
+                    // The soul was already updated by update_soul_file tool during the conversation.
+                    // No need to fire a second reflection.
+                }
+
                 Ok(final_content)
             }
             Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
