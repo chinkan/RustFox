@@ -76,7 +76,7 @@ impl CommandTool {
         let msg_id = self.sender.show_cancel_button(&ctx.chat_id, &status_text, &cmd_id).await?;
 
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        self.cancel_registry.register(cmd_id.clone(), cancel_tx);
+        self.cancel_registry.register(cmd_id.clone(), cancel_tx).await;
 
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
         let output_tx2 = output_tx.clone();
@@ -183,7 +183,7 @@ impl CommandTool {
             unreachable!()
         };
 
-        self.cancel_registry.unregister(&cmd_id);
+        self.cancel_registry.unregister(&cmd_id).await;
         Ok(result)
     }
 }

@@ -1730,7 +1730,7 @@ async fn handle_model_callback(
 
     // Handle command cancellation via CancelRegistry
     if let Some(cmd_id) = data.strip_prefix("cancel_cmd:") {
-        let text = if agent.cancel_registry.cancel(cmd_id) {
+        let text = if agent.cancel_registry.cancel(cmd_id).await {
             "⛔ Command cancelled"
         } else {
             "Command already finished"

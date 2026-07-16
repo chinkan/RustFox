@@ -17,13 +17,13 @@ impl CancelRegistry {
         }
     }
 
-    pub fn register(&self, id: String, tx: oneshot::Sender<()>) {
-        let mut map = self.inner.blocking_lock();
+    pub async fn register(&self, id: String, tx: oneshot::Sender<()>) {
+        let mut map = self.inner.lock().await;
         map.insert(id, tx);
     }
 
-    pub fn cancel(&self, id: &str) -> bool {
-        let mut map = self.inner.blocking_lock();
+    pub async fn cancel(&self, id: &str) -> bool {
+        let mut map = self.inner.lock().await;
         if let Some(tx) = map.remove(id) {
             let _ = tx.send(());
             true
@@ -32,8 +32,8 @@ impl CancelRegistry {
         }
     }
 
-    pub fn unregister(&self, id: &str) {
-        let mut map = self.inner.blocking_lock();
+    pub async fn unregister(&self, id: &str) {
+        let mut map = self.inner.lock().await;
         map.remove(id);
     }
 }
@@ -48,36 +48,36 @@ impl Default for CancelRegistry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_register_and_cancel() {
+    #[tokio::test]
+    async fn test_register_and_cancel() {
         let reg = CancelRegistry::new();
         let (tx, mut rx) = oneshot::channel();
-        reg.register("cmd_1".to_string(), tx);
-        assert!(reg.cancel("cmd_1"));
+        reg.register("cmd_1".to_string(), tx).await;
+        assert!(reg.cancel("cmd_1").await);
         assert!(rx.try_recv().is_ok());
     }
 
-    #[test]
-    fn test_cancel_unknown() {
+    #[tokio::test]
+    async fn test_cancel_unknown() {
         let reg = CancelRegistry::new();
-        assert!(!reg.cancel("nonexistent"));
+        assert!(!reg.cancel("nonexistent").await);
     }
 
-    #[test]
-    fn test_unregister() {
+    #[tokio::test]
+    async fn test_unregister() {
         let reg = CancelRegistry::new();
         let (tx, _rx) = oneshot::channel();
-        reg.register("cmd_1".to_string(), tx);
-        reg.unregister("cmd_1");
-        assert!(!reg.cancel("cmd_1"));
+        reg.register("cmd_1".to_string(), tx).await;
+        reg.unregister("cmd_1").await;
+        assert!(!reg.cancel("cmd_1").await);
     }
 
-    #[test]
-    fn test_double_cancel() {
+    #[tokio::test]
+    async fn test_double_cancel() {
         let reg = CancelRegistry::new();
         let (tx, _rx) = oneshot::channel();
-        reg.register("cmd_1".to_string(), tx);
-        assert!(reg.cancel("cmd_1"));
-        assert!(!reg.cancel("cmd_1"));
+        reg.register("cmd_1".to_string(), tx).await;
+        assert!(reg.cancel("cmd_1").await);
+        assert!(!reg.cancel("cmd_1").await);
     }
 }
