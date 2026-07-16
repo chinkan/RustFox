@@ -2,6 +2,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,14 +17,18 @@ use crate::platform::sender::PlatformSender;
 pub struct BuiltinTools {
     skills_dir: PathBuf,
     skills: Arc<RwLock<SkillRegistry>>,
+    restart_pending: Arc<AtomicBool>,
+    soul_updated: Arc<AtomicBool>,
 }
 
 impl BuiltinTools {
     pub fn new(
         skills_dir: PathBuf,
         skills: Arc<RwLock<SkillRegistry>>,
+        restart_pending: Arc<AtomicBool>,
+        soul_updated: Arc<AtomicBool>,
     ) -> Self {
-        Self { skills_dir, skills }
+        Self { skills_dir, skills, restart_pending, soul_updated }
     }
 }
 
@@ -318,6 +323,7 @@ impl ToolHandler for BuiltinTools {
                 let exp_id = uuid::Uuid::new_v4().to_string();
                 let exp_dir = ctx.sandbox_dir.join("experiments").join(&exp_id);
                 tokio::fs::create_dir_all(&exp_dir).await?;
+                tracing::info!("Running experiment '{}'", technology);
 
                 let (filename, check_cmd, check_args) = match language.as_str() {
                     "javascript" => ("experiment.js", "node", vec!["experiment.js".to_string()]),
@@ -381,7 +387,10 @@ impl ToolHandler for BuiltinTools {
                 }
 
                 match learning::self_upgrade(&branch, &mode, None).await {
-                    Ok(log) => Ok(log),
+                    Ok(log) => {
+                        self.restart_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(log)
+                    }
                     Err(e) => Ok(format!("Self-upgrade failed: {:#}", e)),
                 }
             }
@@ -478,9 +487,12 @@ impl ToolHandler for BuiltinTools {
                 }
 
                 match tokio::fs::read_to_string(&path).await {
-                    Ok(read_back) if read_back == new_content => Ok(format!(
-                        "{} updated successfully. Backup at {}.bak", file_name, path.display()
-                    )),
+                    Ok(read_back) if read_back == new_content => {
+                        self.soul_updated.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(format!(
+                            "{} updated successfully. Backup at {}.bak", file_name, path.display()
+                        ))
+                    }
                     Ok(_) => {
                         let bak = bak_path(&path, ".bak");
                         if bak.exists() { let _ = tokio::fs::copy(&bak, &path).await; }
@@ -523,6 +535,8 @@ mod tests {
         BuiltinTools::new(
             PathBuf::from("/tmp/skills"),
             Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
         )
     }
 

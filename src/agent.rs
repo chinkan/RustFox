@@ -93,8 +93,8 @@ pub struct Agent {
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
     pub langsmith: Arc<LangSmithClient>,
-    pub restart_pending: AtomicBool,
-    pub soul_updated: AtomicBool,
+    pub restart_pending: Arc<AtomicBool>,
+    pub soul_updated: Arc<AtomicBool>,
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
     pub cancel_registry: Arc<CancelRegistry>,
@@ -174,6 +174,8 @@ impl Agent {
         cancel_registry: Arc<CancelRegistry>,
         tool_registry: ToolRegistry,
         sender: Arc<dyn PlatformSender>,
+        restart_pending: Arc<AtomicBool>,
+        soul_updated: Arc<AtomicBool>,
     ) -> Self {
         let llm = LlmClient::new(registry.clone());
         let initial_model = registry.default_qualified_model();
@@ -191,8 +193,8 @@ impl Agent {
             self_weak,
             job_tx,
             langsmith,
-            restart_pending: AtomicBool::new(false),
-            soul_updated: AtomicBool::new(false),
+            restart_pending,
+            soul_updated,
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
             cancel_registry,

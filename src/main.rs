@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -208,11 +209,15 @@ async fn main() -> Result<()> {
     );
     let skills_rw = Arc::new(tokio::sync::RwLock::new(skills.clone()));
     let agents_rw = Arc::new(tokio::sync::RwLock::new(agents.clone()));
+    let restart_pending = Arc::new(AtomicBool::new(false));
+    let soul_updated = Arc::new(AtomicBool::new(false));
 
     let mut tool_registry = rustfox::tool_registry::ToolRegistry::new();
     tool_registry.register(Box::new(rustfox::builtin_tools::BuiltinTools::new(
         config.skills.directory.clone(),
         skills_rw.clone(),
+        restart_pending.clone(),
+        soul_updated.clone(),
     )));
     tool_registry.register(Box::new(rustfox::memory_tools::MemoryTools::new(
         memory.clone(),
@@ -254,6 +259,8 @@ async fn main() -> Result<()> {
             cancel_registry.clone(),
             tool_registry,
             sender.clone(),
+            restart_pending.clone(),
+            soul_updated.clone(),
         )
     });
 
