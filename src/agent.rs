@@ -27,7 +27,6 @@ use crate::skills::{format_listed_section, SkillRegistry};
 use crate::cancel_registry::CancelRegistry;
 use crate::tool_registry::{ToolContext, ToolRegistry};
 use crate::platform::sender::PlatformSender;
-use crate::tools;
 use std::collections::HashMap;
 
 /// Mid-run mode determines how a user's message is handled when the agent
@@ -119,6 +118,7 @@ pub struct Agent {
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
+#[allow(dead_code)]
 struct AdHocTask {
     system_prompt: String,
     prompt: String,
@@ -341,6 +341,7 @@ impl Agent {
 
     /// Build the system prompt for an ad-hoc subagent by prepending system context
     /// (timestamp, user model, location) to the agent's specific instructions.
+    #[allow(dead_code)]
     async fn build_subagent_system_prompt(&self, agent_instructions: &str) -> String {
         let mut prompt = self.build_system_context().await;
         prompt.push_str("\n\n");
@@ -598,6 +599,7 @@ impl Agent {
     }
 
     /// Build LangSmith outputs for an LLM run, including completion metadata and prompt stats.
+    #[allow(dead_code)]
     fn llm_run_outputs(
         completion: Option<&crate::llm::ChatCompletion>,
         prompt: &PreparedPrompt,
@@ -1025,6 +1027,7 @@ impl Agent {
     /// directly with a default sandbox tool whitelist. The system_prompt is augmented
     /// with ambient system context (timestamp, user model, location) via
     /// `build_subagent_system_prompt`.
+    #[allow(dead_code)]
     pub(crate) async fn run_subagent(
         &self,
         skill_name: Option<&str>,
@@ -1059,9 +1062,8 @@ impl Agent {
             );
 
             let all_possible_tools: Vec<ToolDefinition> = {
-                let mut t = tools::builtin_tool_definitions();
+                let mut t = self.tool_registry.all_definitions();
                 t.extend(self.mcp.tool_definitions());
-                t.extend(self.skill_tool_definitions());
                 t
             };
 
@@ -1152,9 +1154,8 @@ impl Agent {
 
         // Build the subagent tool definitions (filtered to whitelist only)
         let all_possible_tools: Vec<ToolDefinition> = {
-            let mut t = tools::builtin_tool_definitions();
+            let mut t = self.tool_registry.all_definitions();
             t.extend(self.mcp.tool_definitions());
-            t.extend(self.skill_tool_definitions()); // includes read_skill_file + read_agent_file
             t
         };
 
@@ -1250,6 +1251,7 @@ impl Agent {
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     async fn run_subagent_loop(
         &self,
         messages: &mut Vec<ChatMessage>,
@@ -1422,6 +1424,7 @@ impl Agent {
     }
 
     /// Execute a tool call by routing to the right handler
+    #[allow(dead_code)]
     async fn execute_tool(
         &self,
         name: &str,
@@ -1703,6 +1706,7 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Validate skill directory name: lowercase letters, numbers, hyphens, 1–64 chars.
+#[allow(dead_code)]
 fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Skill name must not be empty".to_string());
@@ -1725,6 +1729,7 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 /// Validate a relative path within a skill directory: no '..' components, non-empty.
+#[allow(dead_code)]
 fn validate_skill_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Relative path must not be empty".to_string());
@@ -1740,6 +1745,7 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
 
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
+#[allow(dead_code)]
 fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
     let mut tools = vec!["read_skill_file".to_string(), "read_agent_file".to_string()];
     for t in declared {
@@ -1752,6 +1758,7 @@ fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
 
 /// Return declared tools that are not present in the set of all available tool names.
 /// Used to warn at subagent launch when the whitelist references unavailable tools.
+#[allow(dead_code)]
 fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Vec<String> {
     declared
         .iter()
@@ -1762,6 +1769,7 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
 
 /// Error message returned when the main agent or a subagent produces a tool call
 /// whose arguments are a regurgitated compaction marker rather than real JSON.
+#[allow(dead_code)]
 const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in compacted format \
     (reproduced from a compressed history entry). \
     Please regenerate the complete call with all required fields.";
@@ -1773,6 +1781,7 @@ const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in co
 /// Handles two formats:
 /// - Old (backward compat): JSON object with `_rustfox_compacted_arguments: true`
 /// - New: plain-text that starts with `COMPACTION_MARKER_PREFIX`
+#[allow(dead_code)]
 fn is_compacted_regurgitation(raw: &str, parsed: &serde_json::Value) -> bool {
     // Old JSON format — lookup the marker key in the parsed object.
     if parsed
