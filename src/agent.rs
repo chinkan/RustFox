@@ -1,21 +1,24 @@
 use anyhow::Result;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
+use serde_json::Value;
 use teloxide::types::ChatId;
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    prepare_messages_for_llm, recovery_nudge_for, ConversationMeta,
+    ConversationMeta,
     PreparedPrompt,
 };
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
 use crate::llm::{
-    is_empty_assistant_response, ChatMessage, ContentPart, LlmClient,
+    ChatMessage, ContentPart, LlmClient,
     MessageContent, ToolCall, ToolDefinition,
 };
 use crate::mcp::McpManager;
@@ -800,8 +803,10 @@ impl Agent {
             interactive_loop_callback: true,
             allowed_tools: None,
             langsmith_project: Some(ls_project.clone()),
+            model: None,
             tool_event_tx,
             stream_token_tx,
+            recovery_nudge: None,
         };
 
         let outcome = crate::loop_runner::AgenticLoop::new(
@@ -814,6 +819,7 @@ impl Agent {
             Some(&self.langsmith),
             self.sender.as_ref() as &dyn PlatformSender,
             Box::new(make_ctx),
+            None,
         )
         .run(
             &mut crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr)),
@@ -1261,178 +1267,229 @@ impl Agent {
 
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
+    /// Returns a boxed future to break type-level cycles with the special_tool_handler.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
-    async fn run_subagent_loop(
-        &self,
-        messages: &mut Vec<ChatMessage>,
-        subagent_tools: &[ToolDefinition],
-        allowed_tools: &[String],
-        model: &str,
+    fn run_subagent_loop<'a>(
+        &'a self,
+        messages: &'a mut Vec<ChatMessage>,
+        _subagent_tools: &'a [ToolDefinition],
+        allowed_tools: &'a [String],
+        model: &'a str,
         max_iter: u32,
-        label: &str,
+        label: &'a str,
         cancel_token: Option<CancellationToken>,
-    ) -> String {
-        let empty_response_retry_limit = self.config.empty_response_retry_limit();
-
-        let loop_config = self.config.loop_detection_config();
-        let mut loop_detector_sub =
-            crate::loop_detector::LoopDetector::new(loop_config.threshold, loop_config.enabled);
-
-        for iteration in 0..max_iter {
-            // CHECK: cancelled by /stop?
-            if let Some(ref token) = cancel_token {
-                if token.is_cancelled() {
-                    return format!("Subagent '{}' cancelled by user.", label);
-                }
-            }
-            // --- Empty response recovery: retry loop ---
-            let mut retry_count = 0u32;
-            let response: ChatMessage;
-
-            // Prepare prompt with optional compaction (invariant across retries)
-            let context_window = {
-                let (provider, _) = self.registry.resolve_model(model);
-                provider.config().context_window
-            };
-            // TODO: consider adding Tier 3/4 to subagent loops in a follow-up
-            let base_prompt = prepare_messages_for_llm(messages, context_window);
-
-            loop {
-                let mut prompt_prepared = base_prompt.clone();
-                if retry_count > 0 {
-                    let nudge = recovery_nudge_for(messages);
-                    prompt_prepared.messages.push(nudge);
-                }
-
-                let completion = match self
-                    .llm
-                    .chat_completion_with_model(&prompt_prepared.messages, subagent_tools, model)
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Subagent '{}' API call failed: {}", label, e);
-                        return format!("Subagent '{}' error: {}", label, e);
-                    }
-                };
-
-                if is_empty_assistant_response(&completion.message) {
-                    if retry_count >= empty_response_retry_limit {
-                        return format!(
-                            "Subagent '{}' returned an empty response after {} attempts.",
-                            label,
-                            retry_count + 1
-                        );
-                    }
-                    retry_count += 1;
-                    continue;
-                }
-
-                if retry_count > 0 {
-                    info!(
-                        "Subagent '{}' recovered from empty response after retry",
-                        label
-                    );
-                }
-
-                response = completion.message;
-                break;
-            }
-
-            // --- Subagent loop detection: auto-recover with nudge ---
-            if loop_config.enabled {
-                if let Some(ref tool_calls) = response.tool_calls {
-                    loop_detector_sub.record(tool_calls, iteration as usize);
-                    if let Some(loop_info) = loop_detector_sub.detect_loop() {
-                        warn!(
-                            subagent = %label,
-                            tool = %loop_info.tool_name,
-                            count = loop_info.call_count,
-                            "Subagent loop detected — injecting recovery nudge"
-                        );
-
-                        // Persist the assistant tool-call message so the LLM sees it
-                        // on the next iteration — required because a `tool`-role
-                        // nudge without a preceding assistant tool_use would be
-                        // an orphan message that APIs reject.
-                        messages.push(response.clone());
-
-                        // Inject recovery message as a user-role turn so it
-                        // doesn't depend on a matching tool_call_id.
-                        let nudge_text = format!(
-                            "Error: You have called {} {} times with the same arguments. \
-                             The result has not changed. Try a different approach.",
-                            loop_info.tool_name, loop_info.call_count,
-                        );
-                        messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: Some(MessageContent::from_text(nudge_text)),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
-
-                        loop_detector_sub.clear();
-                        continue;
-                    }
-                }
-            }
-            // --- End subagent loop detection ---
-
-            if let Some(tool_calls) = &response.tool_calls {
-                if !tool_calls.is_empty() {
-                    messages.push(response.clone());
-
-                    for tool_call in tool_calls {
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(&tool_call.function.arguments)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-                        if is_compacted_regurgitation(&tool_call.function.arguments, &arguments) {
-                            messages.push(ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some(MessageContent::from_text(REGURGITATION_ERROR_MSG)),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_call.id.clone()),
+    ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
+        Box::pin(async move {
+        // Build special_tool_handler for invoke_agent/spawn_agents (circular dependency
+        // prevents them from being registered in ToolRegistry).
+        let special_handler = {
+            let self_weak = self.self_weak.clone();
+            move |name: &str, args: &Value, _user_id: &str, _chat_id: &str| {
+                let name_owned = name.to_string();
+                let args_owned = args.clone();
+                let self_weak = self_weak.clone();
+                Box::pin(async move {
+                    match name_owned.as_str() {
+                        "invoke_agent" => {
+                            let agent_name = match args_owned["agent"]
+                                .as_str()
+                                .or_else(|| args_owned["skill"].as_str())
+                            {
+                                Some(a) => a.to_string(),
+                                None => return Some("Missing agent".to_string()),
+                            };
+                            let prompt = match args_owned["prompt"].as_str() {
+                                Some(p) => p.to_string(),
+                                None => return Some("Missing prompt".to_string()),
+                            };
+                            let model_override = args_owned["model"].as_str().map(str::to_string);
+                            let tools_override = args_owned["tools"].as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect::<Vec<_>>()
                             });
-                            continue;
+                            tracing::info!(
+                                "Invoking agent '{}' (model_override: {:?})",
+                                agent_name,
+                                model_override
+                            );
+                            let agent = match self_weak.upgrade() {
+                                Some(a) => a,
+                                None => return Some("Agent is shutting down".to_string()),
+                            };
+                            Some(
+                                agent
+                                    .run_subagent(
+                                        Some(&agent_name),
+                                        "",
+                                        &prompt,
+                                        model_override.as_deref(),
+                                        tools_override,
+                                    )
+                                    .await,
+                            )
                         }
-
-                        let result = if allowed_tools.contains(&tool_call.function.name) {
-                            self.execute_tool(
-                                &tool_call.function.name,
-                                &arguments,
-                                "",        // agent has no user_id context
-                                ChatId(0), // agent has no chat_id context
-                            )
-                            .await
-                        } else {
-                            format!(
-                                "Tool '{}' is not available to this agent.",
-                                tool_call.function.name
-                            )
-                        };
-
-                        messages.push(ChatMessage {
-                            role: "tool".to_string(),
-                            content: Some(MessageContent::from_text(result)),
-                            tool_calls: None,
-                            tool_call_id: Some(tool_call.id.clone()),
-                        });
+                        "spawn_agents" => {
+                            let parsed_tasks: Vec<AdHocTask> =
+                                if let Some(tasks) = args_owned["tasks"].as_array() {
+                                    if tasks.is_empty() {
+                                        return Some("tasks array is empty".to_string());
+                                    }
+                                    let mut parsed = Vec::with_capacity(tasks.len());
+                                    for (i, task) in tasks.iter().enumerate() {
+                                        let system_prompt = match task["system_prompt"].as_str() {
+                                            Some(s) => s.to_string(),
+                                            None => {
+                                                return Some(format!(
+                                                    "Task at index {}: missing system_prompt",
+                                                    i
+                                                ))
+                                            }
+                                        };
+                                        let prompt = match task["prompt"].as_str() {
+                                            Some(p) => p.to_string(),
+                                            None => {
+                                                return Some(format!(
+                                                    "Task at index {}: missing prompt",
+                                                    i
+                                                ))
+                                            }
+                                        };
+                                        parsed.push(AdHocTask {
+                                            system_prompt,
+                                            prompt,
+                                            model: task["model"].as_str().map(str::to_string),
+                                            tools: task["tools"].as_array().map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                                    .collect()
+                                            }),
+                                        });
+                                    }
+                                    parsed
+                                } else {
+                                    let system_prompt = match args_owned["system_prompt"].as_str()
+                                    {
+                                        Some(s) => s.to_string(),
+                                        None => {
+                                            return Some(
+                                                "Missing system_prompt or tasks".to_string(),
+                                            )
+                                        }
+                                    };
+                                    let prompt = match args_owned["prompt"].as_str() {
+                                        Some(p) => p.to_string(),
+                                        None => return Some("Missing prompt".to_string()),
+                                    };
+                                    vec![AdHocTask {
+                                        system_prompt,
+                                        prompt,
+                                        model: args_owned["model"].as_str().map(str::to_string),
+                                        tools: args_owned["tools"].as_array().map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(str::to_string))
+                                                .collect()
+                                        }),
+                                    }]
+                                };
+                            let agent = match self_weak.upgrade() {
+                                Some(a) => a,
+                                None => return Some("Agent is shutting down".to_string()),
+                            };
+                            let futures: Vec<_> = parsed_tasks
+                                .into_iter()
+                                .map(|task| {
+                                    let sp = task.system_prompt.clone();
+                                    let p = task.prompt.clone();
+                                    let m = task.model.clone();
+                                    let t = task.tools.clone();
+                                    let a = agent.clone();
+                                    Box::pin(async move {
+                                        a.run_subagent(None, &sp, &p, m.as_deref(), t)
+                                            .await
+                                    })
+                                })
+                                .collect();
+                            let results = futures::future::join_all(futures).await;
+                            let mut output = String::from(
+                                "Spawned agents results:\n\n",
+                            );
+                            for (i, result) in results.iter().enumerate() {
+                                output.push_str(&format!(
+                                    "--- Agent {} ---\n{}\n\n",
+                                    i + 1,
+                                    result
+                                ));
+                            }
+                            Some(output)
+                        }
+                        _ => None,
                     }
-
-                    continue;
-                }
+                }) as Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>
             }
+        };
 
-            return response.content.map(|c| c.as_text()).unwrap_or_default();
-        }
+        let make_ctx = {
+            let sandbox_dir = self.config.sandbox.allowed_directory.clone();
+            let home_dir = self.config.resolved_home.clone();
+            let sender = self.sender.clone();
+            let cancel_registry = self.cancel_registry.clone();
+            move |_user_id: &str, _chat_id: &str| ToolContext {
+                sandbox_dir: sandbox_dir.clone(),
+                home_dir: home_dir.clone(),
+                sender: sender.clone(),
+                cancel_registry: cancel_registry.clone(),
+                user_id: String::new(),
+                chat_id: String::new(),
+            }
+        };
 
-        format!(
-            "Subagent '{}' reached the maximum number of iterations ({}).",
-            label, max_iter
+        let allowed_tools_vec: Vec<String> = allowed_tools.to_vec();
+        let loop_config = crate::loop_runner::LoopConfig {
+            max_iterations: max_iter,
+            empty_response_retry_limit: self.config.empty_response_retry_limit(),
+            compaction_enabled: false,
+            loop_detection_enabled: true,
+            interactive_loop_callback: false,
+            allowed_tools: Some(allowed_tools_vec),
+            langsmith_project: None,
+            model: Some(model.to_string()),
+            tool_event_tx: None,
+            stream_token_tx: None,
+            recovery_nudge: None,
+        };
+
+        let outcome = crate::loop_runner::AgenticLoop::new(
+            &self.llm,
+            &self.tool_registry,
+            &self.mcp,
+            &loop_config,
+            cancel_token,
+            None,
+            None,
+            self.sender.as_ref() as &dyn PlatformSender,
+            Box::new(make_ctx),
+            Some(Box::new(special_handler)),
         )
-    }
+        .run(
+            &mut crate::loop_runner::MessageContainer::Plain(std::mem::take(messages)),
+            "",
+            "",
+        )
+        .await;
+
+        match outcome {
+            Ok(crate::loop_runner::LoopOutcome::FinalResponse(text)) => text,
+            Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
+                format!("Subagent '{}' cancelled by user.", label)
+            }
+            Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                format!("Subagent '{}' reached the maximum number of iterations ({}).", label, max_iter)
+            }
+            Err(e) => format!("Subagent '{}' error: {}", label, e),
+        }
+    })}
 
     /// Execute a tool call by routing to the right handler
     #[allow(dead_code)]
@@ -2157,3 +2214,4 @@ mod tests {
             .contains("question"));
     }
 }
+
