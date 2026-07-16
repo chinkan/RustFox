@@ -40,11 +40,11 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "read_file".to_string(),
-                    description: "Read the contents of a file from the sandbox.".to_string(),
+                    description: "Read the contents of a file within the sandbox directory".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string", "description": "Path to the file (relative to sandbox or absolute within sandbox)" }
+                            "path": { "type": "string", "description": "The file path (relative to sandbox or absolute within sandbox)" }
                         },
                         "required": ["path"]
                     }),
@@ -54,12 +54,12 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "write_file".to_string(),
-                    description: "Write content to a file. Creates parent directories if they don't exist.".to_string(),
+                    description: "Write content to a file within the sandbox directory. Creates parent directories if needed.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string", "description": "Path to the file (relative to sandbox or absolute within sandbox)" },
-                            "content": { "type": "string", "description": "Content to write" }
+                            "path": { "type": "string", "description": "The file path (relative to sandbox or absolute within sandbox)" },
+                            "content": { "type": "string", "description": "The content to write to the file" }
                         },
                         "required": ["path", "content"]
                     }),
@@ -98,7 +98,7 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "plan_create".to_string(),
-                    description: "Create a new execution plan with ordered steps.".to_string(),
+                    description: "Create a new execution plan with ordered steps. Call this BEFORE starting any multi-step task. Stores the plan in the sandbox for tracking.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -113,7 +113,7 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "plan_update".to_string(),
-                    description: "Update a step's status in the active plan.".to_string(),
+                    description: "Update a step's status in the active plan. Call before starting a step (in_progress) and after finishing (done or failed).".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -129,7 +129,7 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "plan_view".to_string(),
-                    description: "View the current plan as a checklist.".to_string(),
+                    description: "View the current plan as a checklist. Call at the end of execution to review progress before synthesising the final answer.".to_string(),
                     parameters: json!({ "type": "object", "properties": {}, "required": [] }),
                 },
             },
