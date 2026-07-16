@@ -11,6 +11,8 @@ use crate::platform::sender::PlatformSender;
 use crate::platform::tool_notifier::ToolEvent;
 use crate::tool_registry::{ToolContext, ToolRegistry};
 
+pub type ToolHandlerFn = Box<dyn Fn(&str, &Value, &str, &str) -> Option<String> + Send + Sync>;
+
 pub struct LoopConfig {
     pub max_iterations: u32,
     pub empty_response_retry_limit: u32,
@@ -21,6 +23,7 @@ pub struct LoopConfig {
     pub langsmith_project: Option<String>,
     pub tool_event_tx: Option<mpsc::Sender<ToolEvent>>,
     pub stream_token_tx: Option<mpsc::Sender<String>>,
+    pub recovery_nudge: Option<String>,
 }
 
 pub enum LoopOutcome {
@@ -41,6 +44,7 @@ pub struct AgenticLoop<'a> {
     langsmith: Option<&'a LangSmithClient>,
     platform_sender: &'a dyn PlatformSender,
     make_tool_ctx: Box<dyn Fn(&str, &str) -> ToolContext + Send + Sync + 'a>,
+    special_tool_handler: Option<ToolHandlerFn>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -56,8 +60,9 @@ impl<'a> AgenticLoop<'a> {
         langsmith: Option<&'a LangSmithClient>,
         platform_sender: &'a dyn PlatformSender,
         make_tool_ctx: Box<dyn Fn(&str, &str) -> ToolContext + Send + Sync + 'a>,
+        special_tool_handler: Option<ToolHandlerFn>,
     ) -> Self {
-        Self { llm, tools, mcp, config, cancel, chain_run_id, langsmith, platform_sender, make_tool_ctx }
+        Self { llm, tools, mcp, config, cancel, chain_run_id, langsmith, platform_sender, make_tool_ctx, special_tool_handler }
     }
 
     pub async fn run(
@@ -102,6 +107,18 @@ impl<'a> AgenticLoop<'a> {
 
             if text.is_empty() && tool_calls.is_empty() {
                 empty_count += 1;
+                if let Some(ref nudge) = self.config.recovery_nudge {
+                    let nudge_msg = ChatMessage {
+                        role: "user".to_string(),
+                        content: Some(MessageContent::from_text(nudge.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    };
+                    match messages {
+                        MessageContainer::Conversation(cm) => cm.add_user_turn(nudge_msg),
+                        MessageContainer::Plain(msgs) => msgs.push(nudge_msg),
+                    }
+                }
                 if empty_count >= self.config.empty_response_retry_limit {
                     return Ok(LoopOutcome::FinalResponse("I'm having trouble processing that. Please try again.".to_string()));
                 }
@@ -124,14 +141,21 @@ impl<'a> AgenticLoop<'a> {
                         }
                     }
 
+                    let args: Value = serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
+
+                    // Check special tool handler first (for invoke_agent/spawn_agents)
+                    if let Some(ref handler) = self.special_tool_handler {
+                        if let Some(result) = handler(&tc.function.name, &args, user_id, chat_id) {
+                            messages.push_tool_result(&tc.id, result);
+                            continue;
+                        }
+                    }
+
                     let result = if tc.function.name.starts_with("mcp_") {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
                         self.mcp.call_tool(&tc.function.name, &args).await
                             .unwrap_or_else(|e| format!("Error: {e}"))
                     } else {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
                         let ctx = (self.make_tool_ctx)(user_id, chat_id);
                         self.tools.execute(&tc.function.name, args, ctx).await
                             .unwrap_or_else(|e| format!("Error: {e}"))
