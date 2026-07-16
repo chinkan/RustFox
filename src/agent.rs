@@ -1,24 +1,21 @@
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use teloxide::payloads::SendMessageSetters;
-use teloxide::prelude::Requester;
 use teloxide::types::ChatId;
 use teloxide::Bot;
 
 use crate::agent_prompt::{
-    build_compact_boundary_marker, build_compact_summary_prompt,
     prepare_messages_for_llm, recovery_nudge_for, ConversationMeta,
-    PreparedPrompt, PRESERVED_TOOL_GROUPS,
+    PreparedPrompt,
 };
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
 use crate::llm::{
-    is_empty_assistant_response, ChatMessage, ContentPart, FunctionDefinition, LlmClient,
+    is_empty_assistant_response, ChatMessage, ContentPart, LlmClient,
     MessageContent, ToolCall, ToolDefinition,
 };
 use crate::mcp::McpManager;
@@ -32,8 +29,6 @@ use crate::tool_registry::{ToolContext, ToolRegistry};
 use crate::platform::sender::PlatformSender;
 use crate::tools;
 use std::collections::HashMap;
-use tokio::process::Command as TokioCommand;
-use tokio::sync::oneshot;
 
 /// Mid-run mode determines how a user's message is handled when the agent
 /// is already processing a previous turn. `Steer` injects the message into
@@ -70,10 +65,7 @@ pub enum LoopCallbackChoice {
     AddInstruction,
 }
 
-/// Number of context snippets to retrieve from conversation history for
-/// compaction summarization.
-#[allow(dead_code)]
-const COMPACTION_RAG_LIMIT: usize = 5;
+
 
 /// A request dispatched from a fire closure to the background job runner.
 pub struct ScheduledJobRequest {
@@ -82,11 +74,6 @@ pub struct ScheduledJobRequest {
     pub task_id: String,
     pub is_recurring: bool,
     pub task_store: ScheduledTaskStore,
-}
-
-/// A running shell command that can be cancelled by the user via a callback button.
-pub struct RunningCommand {
-    pub cancel_tx: oneshot::Sender<()>,
 }
 
 /// The core agent that processes messages through LLM + tools.
@@ -103,7 +90,6 @@ pub struct Agent {
     pub task_store: ScheduledTaskStore,
     pub scheduler: Arc<Scheduler>,
     pub bot: Arc<Bot>,
-    #[allow(dead_code)]
     pub self_weak: Weak<Agent>,
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
@@ -112,7 +98,6 @@ pub struct Agent {
     pub soul_updated: AtomicBool,
     pub current_model: tokio::sync::RwLock<String>,
     pub config_path: PathBuf,
-    pub running_commands: Arc<tokio::sync::Mutex<HashMap<String, RunningCommand>>>,
     pub cancel_registry: Arc<CancelRegistry>,
     pub tool_registry: ToolRegistry,
     pub sender: Arc<dyn PlatformSender>,
@@ -134,7 +119,6 @@ pub struct Agent {
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
-#[allow(dead_code)]
 struct AdHocTask {
     system_prompt: String,
     prompt: String,
@@ -211,7 +195,6 @@ impl Agent {
             soul_updated: AtomicBool::new(false),
             current_model: tokio::sync::RwLock::new(initial_model),
             config_path,
-            running_commands: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_registry,
             tool_registry,
             sender,
@@ -358,27 +341,11 @@ impl Agent {
 
     /// Build the system prompt for an ad-hoc subagent by prepending system context
     /// (timestamp, user model, location) to the agent's specific instructions.
-    #[allow(dead_code)]
     async fn build_subagent_system_prompt(&self, agent_instructions: &str) -> String {
         let mut prompt = self.build_system_context().await;
         prompt.push_str("\n\n");
         prompt.push_str(agent_instructions);
         prompt
-    }
-
-    /// Resolve the base directory for a skill/agent by checking the registry.
-    /// Falls back to the configured directory if not found (for newly-created skills).
-#[allow(dead_code)]
-    fn resolve_skill_base_dir(
-        &self,
-        name: &str,
-        config_dir: &Path,
-        skills_lock: &SkillRegistry,
-    ) -> PathBuf {
-        skills_lock
-            .base_dir(name)
-            .unwrap_or(config_dir)
-            .to_path_buf()
     }
 
     /// Reload both skill and agent registries from their directories.
@@ -631,7 +598,6 @@ impl Agent {
     }
 
     /// Build LangSmith outputs for an LLM run, including completion metadata and prompt stats.
-    #[allow(dead_code)]
     fn llm_run_outputs(
         completion: Option<&crate::llm::ChatCompletion>,
         prompt: &PreparedPrompt,
@@ -921,271 +887,6 @@ impl Agent {
         }
     }
 
-    /// Tier 3: Auto-compact via LLM summarization.
-    ///
-    /// `_context_window` is reserved for future threshold-based
-    /// split-point calculation — the summarization LLM handles
-    /// split decisions internally.
-    #[allow(dead_code)]
-    async fn auto_compact_conversation(
-        llm: &LlmClient,
-        memory: &MemoryStore,
-        conversation_id: &str,
-        messages: &[ChatMessage],
-        _context_window: usize,
-    ) -> Result<Vec<ChatMessage>> {
-        // 1. Separate system messages from the rest
-        let mut system_msgs: Vec<ChatMessage> = Vec::new();
-        let non_system: Vec<ChatMessage> = messages
-            .iter()
-            .filter(|&msg| {
-                if msg.role == "system" {
-                    system_msgs.push(msg.clone());
-                    false
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-
-        let tool_groups = crate::agent_prompt::find_tool_groups(&non_system);
-
-        let preserve_count = PRESERVED_TOOL_GROUPS.min(tool_groups.len());
-        let preserved_groups_start = tool_groups.len().saturating_sub(preserve_count);
-
-        let summary_end = if preserved_groups_start > 0 {
-            let last_summary = &tool_groups[preserved_groups_start - 1];
-            *last_summary
-                .tool_result_indices
-                .last()
-                .unwrap_or(&last_summary.assistant_idx)
-                + 1
-        } else {
-            return Ok(messages.to_vec());
-        };
-
-        let to_summarize = &non_system[..summary_end];
-        let preserved = &non_system[summary_end..];
-
-        // 2. Summarize with RAG-aware compaction
-        let mut compacted = Self::summarize_and_replace(
-            llm,
-            memory,
-            conversation_id,
-            to_summarize,
-            preserved,
-            "Auto-compact",
-            "★ COMPACT SUMMARY ★",
-        )
-        .await?;
-
-        // 3. Prepend system messages back
-        let mut result = system_msgs;
-        result.append(&mut compacted);
-        Ok(result)
-    }
-
-    /// Tier 4: Reactive compact — emergency 413 recovery.
-    ///
-    /// `_context_window` is reserved for future threshold-based
-    /// split-point calculation — the summarization LLM handles
-    /// split decisions internally.
-    #[allow(dead_code)]
-    async fn reactive_compact(
-        llm: &LlmClient,
-        memory: &MemoryStore,
-        conversation_id: &str,
-        messages: &[ChatMessage],
-        _context_window: usize,
-    ) -> Result<Vec<ChatMessage>> {
-        const PRESERVE_COUNT: usize = 4;
-
-        // 1. Separate system messages
-        let mut system_msgs: Vec<ChatMessage> = Vec::new();
-        let non_system: Vec<ChatMessage> = messages
-            .iter()
-            .filter(|&msg| {
-                if msg.role == "system" {
-                    system_msgs.push(msg.clone());
-                    false
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-
-        if non_system.len() <= PRESERVE_COUNT {
-            anyhow::bail!("Too few non-system messages for reactive compact");
-        }
-
-        let split = non_system.len().saturating_sub(PRESERVE_COUNT);
-        let to_summarize = &non_system[..split];
-        let preserved = &non_system[split..];
-
-        let mut compacted = Self::summarize_and_replace(
-            llm,
-            memory,
-            conversation_id,
-            to_summarize,
-            preserved,
-            "Reactive compact",
-            "★ COMPACT SUMMARY (EMERGENCY) ★",
-        )
-        .await?;
-
-        let mut result = system_msgs;
-        result.append(&mut compacted);
-        Ok(result)
-    }
-
-    /// Shared helper for Tiers 3 and 4: send messages to LLM for
-    /// summarization, then assemble the compacted result.
-    #[allow(dead_code)]
-    async fn summarize_and_replace(
-        llm: &LlmClient,
-        memory: &MemoryStore,
-        conversation_id: &str,
-        to_summarize: &[ChatMessage],
-        preserved: &[ChatMessage],
-        error_label: &str,
-        summary_label: &str,
-    ) -> Result<Vec<ChatMessage>> {
-        // NEW: RAG retrieval for compaction (non-fatal — warn on error, continue)
-        let retrieved = match crate::memory::rag::retrieve_context_for_compaction(
-            memory,
-            to_summarize,
-            preserved,
-            conversation_id,
-            COMPACTION_RAG_LIMIT,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("RAG retrieval for compaction failed: {}", e);
-                None
-            }
-        };
-
-        // Build compact messages: summary prompt + optional retrieved context + truncated input
-        let mut compact_msgs = Vec::new();
-        compact_msgs.push(build_compact_summary_prompt());
-
-        if let Some(ref ctx) = retrieved {
-            compact_msgs.push(ChatMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text(ctx.clone())),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-
-        // Tool-group-aware truncation
-        let groups = crate::agent_prompt::find_tool_groups(to_summarize);
-        let bookend_groups = 1usize;
-        let tail_groups = 3usize.min(groups.len().saturating_sub(bookend_groups));
-
-        let mut seen_indices = std::collections::HashSet::new();
-
-        // First bookend groups (conversation origin)
-        for group in groups.iter().take(bookend_groups) {
-            seen_indices.insert(group.assistant_idx);
-            for &ti in &group.tool_result_indices {
-                seen_indices.insert(ti);
-            }
-        }
-
-        // Last tail groups (recent flow)
-        for group in groups.iter().rev().take(tail_groups) {
-            seen_indices.insert(group.assistant_idx);
-            for &ti in &group.tool_result_indices {
-                seen_indices.insert(ti);
-            }
-        }
-
-        // Always include non-assistant/non-tool messages
-        for (idx, msg) in to_summarize.iter().enumerate() {
-            if msg.role != "assistant" && !msg.has_tool_calls() {
-                seen_indices.insert(idx);
-            }
-        }
-
-        // Build sampled list in original order with truncation notice
-        let mut sampled: Vec<ChatMessage> = Vec::new();
-        let mut inserted_notice = false;
-        for (idx, msg) in to_summarize.iter().enumerate() {
-            if seen_indices.contains(&idx) {
-                sampled.push(msg.clone());
-            } else if !inserted_notice {
-                sampled.push(ChatMessage {
-                    role: "system".to_string(),
-                    content: Some(MessageContent::Text(format!(
-                        "[... {} messages omitted, see retrieved_context above ...]",
-                        to_summarize.len() - seen_indices.len()
-                    ))),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-                inserted_notice = true;
-            }
-        }
-
-        // If no truncation happened, use the full to_summarize
-        if sampled.is_empty() {
-            sampled = to_summarize.to_vec();
-        }
-
-        let user_prompt = format!(
-            "Summarize the following conversation (sampled from {} messages):",
-            to_summarize.len()
-        );
-        compact_msgs.push(ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(user_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        compact_msgs.extend(sampled);
-
-        let summary_response = match llm.chat(&compact_msgs, &[]).await {
-            Ok(c) => c,
-            Err(e) => anyhow::bail!("{} LLM call failed: {}", error_label, e),
-        };
-
-        let summary_text = summary_response
-            .content
-            .as_ref()
-            .map(|c| c.as_text())
-            .unwrap_or_default();
-
-        if summary_text.is_empty() {
-            anyhow::bail!("{} returned empty summary", error_label);
-        }
-
-        let boundary = build_compact_boundary_marker(to_summarize.len(), 1);
-        let summary_msg = ChatMessage {
-            role: "system".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "{}\n\n{}",
-                summary_label, summary_text
-            ))),
-            tool_calls: None,
-            tool_call_id: None,
-        };
-
-        let mut result: Vec<ChatMessage> = Vec::with_capacity(3 + preserved.len());
-        result.push(boundary);
-        result.push(summary_msg);
-        result.extend(preserved.iter().cloned());
-
-        let nudge = recovery_nudge_for(&result);
-        result.push(nudge);
-
-        Ok(result)
-    }
-
     /// Re-register all active scheduled tasks from the DB into the scheduler.
     /// Called once at startup after the agent is constructed.
     pub async fn restore_scheduled_tasks(&self) {
@@ -1324,7 +1025,6 @@ impl Agent {
     /// directly with a default sandbox tool whitelist. The system_prompt is augmented
     /// with ambient system context (timestamp, user model, location) via
     /// `build_subagent_system_prompt`.
-    #[allow(dead_code)]
     pub(crate) async fn run_subagent(
         &self,
         skill_name: Option<&str>,
@@ -1549,7 +1249,6 @@ impl Agent {
 
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
-    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     async fn run_subagent_loop(
         &self,
@@ -1722,266 +1421,7 @@ impl Agent {
         )
     }
 
-    /// Get the path for a soul file by name.
-#[allow(dead_code)]
-    fn soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
-        let home = self
-            .config
-            .resolved_home()
-            .context("Home directory not resolved")?;
-        match file_name {
-            "SOUL.md" => Ok(home.join("SOUL.md")),
-            "AGENTS.md" => Ok(home.join("AGENTS.md")),
-            "USER.md" => Ok(home.join("USER.md")),
-            _ => anyhow::bail!("Invalid soul file name: {}", file_name),
-        }
-    }
-
-    /// Validate that a soul file path is within the home directory.
-#[allow(dead_code)]
-    async fn validate_soul_file_path(&self, file_name: &str) -> anyhow::Result<PathBuf> {
-        let home = self
-            .config
-            .resolved_home()
-            .context("Home directory not resolved")?;
-        let path = self.soul_file_path(file_name)?;
-        tools::validate_home_path(home, &path.to_string_lossy())
-    }
-
-#[allow(dead_code)]
-    async fn execute_command_interactive(
-        &self,
-        arguments: &serde_json::Value,
-        _user_id: &str,
-        chat_id: ChatId,
-    ) -> String {
-        use std::time::Instant;
-        use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-        use tokio::io::AsyncReadExt;
-
-        let command = match arguments["command"].as_str() {
-            Some(c) => c,
-            None => return "Error: Missing 'command' argument".to_string(),
-        };
-
-        let cmd_id = format!("cmd_{}", uuid::Uuid::new_v4());
-        let sandbox_dir = &self.config.sandbox.allowed_directory;
-
-        let mut child = match TokioCommand::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(sandbox_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => return format!("Error: Failed to spawn command: {}", e),
-        };
-
-        let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
-
-        // Send initial message with cancel button
-        let keyboard = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
-            "Cancel",
-            format!("cancel_cmd:{}", cmd_id),
-        )]]);
-
-        let msg = match self
-            .bot
-            .send_message(
-                chat_id,
-                format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd),
-            )
-            .reply_markup(keyboard)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                let _ = child.kill().await;
-                return format!("Error: Failed to send command message: {}", e);
-            }
-        };
-
-        // Set up cancel channel
-        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-
-        // Register in running_commands
-        {
-            let mut map = self.running_commands.lock().await;
-            map.insert(cmd_id.clone(), RunningCommand { cancel_tx });
-        }
-
-        // Capture Arc for cleanup
-        let running_commands = self.running_commands.clone();
-        let cmd_id_clone = cmd_id.clone();
-
-        // Output streaming
-        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
-        let output_tx2 = output_tx.clone();
-        let mut child_stdout = child.stdout.take();
-        let mut child_stderr = child.stderr.take();
-
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            while let Some(stream) = child_stdout.as_mut() {
-                match stream.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if output_tx
-                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            while let Some(stream) = child_stderr.as_mut() {
-                match stream.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if output_tx2
-                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        // Cap accumulated output to prevent unbounded memory growth
-        const MAX_BUFFER_CHARS: usize = 100_000;
-
-        let mut output_buffer = String::new();
-        let mut last_edit = Instant::now();
-
-        // Main select loop — only determines exit reason
-        let mut exit_code: Option<i32> = None;
-        let mut cancelled = false;
-        tokio::pin!(cancel_rx);
-
-        loop {
-            tokio::select! {
-                Some(chunk) = output_rx.recv() => {
-                    output_buffer.push_str(&chunk);
-                    if output_buffer.chars().count() > MAX_BUFFER_CHARS {
-                        output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
-                    }
-                    if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
-                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
-                        let body = format!("```\n{}\n```", capped);
-                        let text = format!("💻 Running: `{}`\n\n{}", escaped_cmd, body);
-                        if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
-                            warn!("Failed to update running message: {e}");
-                        }
-                        last_edit = Instant::now();
-                    }
-                }
-                status = child.wait() => {
-                    exit_code = Some(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1));
-                    break;
-                }
-                _ = &mut cancel_rx => {
-                    cancelled = true;
-                    // Kill child + its process group so sh -c grandchildren are stopped
-                    if let Some(pid) = child.id() {
-                        let _ = nix::sys::signal::killpg(
-                            nix::unistd::Pid::from_raw(pid as i32),
-                            nix::sys::signal::Signal::SIGKILL,
-                        );
-                    }
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    break;
-                }
-            }
-        }
-
-        // Post-loop: wait for readers to finish, drain remaining output.
-        // Readers finish promptly after pipe EOF (child has exited), so this
-        // join resolves within microseconds. No timeout needed — it would
-        // reintroduce a race window where try_recv could miss late chunks.
-        let _ = tokio::join!(stdout_handle, stderr_handle);
-        while let Ok(chunk) = output_rx.try_recv() {
-            output_buffer.push_str(&chunk);
-        }
-        // Re-cap buffer after drain (defensive — drain may push past limit)
-        if output_buffer.chars().count() > MAX_BUFFER_CHARS {
-            output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
-        }
-
-        fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
-            if buf.is_empty() {
-                if no_output_msg.is_empty() {
-                    None
-                } else {
-                    Some(no_output_msg.to_owned())
-                }
-            } else {
-                let capped = crate::utils::strings::truncate_tail(buf, 3500);
-                Some(format!("```\n{}\n```", capped))
-            }
-        }
-
-        // Build the final result with complete output
-        let result = if cancelled {
-            let body = format_body(&output_buffer, "");
-            let text = match body {
-                None => format!("❌ Cancelled: `{}`", escaped_cmd),
-                Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
-            };
-            if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
-                warn!("Failed to update cancelled message: {e}");
-            }
-            "⚠️ User cancelled the command".to_string()
-        } else if let Some(code) = exit_code {
-            let (icon, label) = if code == 0 {
-                ("✅", "Completed")
-            } else {
-                ("❌", "Failed")
-            };
-            let body = format_body(&output_buffer, "Command completed with no output.");
-            let text = format!(
-                "{} {}: `{}`\n\n{}",
-                icon,
-                label,
-                escaped_cmd,
-                body.unwrap_or_default()
-            );
-            if let Err(e) = self.bot.edit_message_text(chat_id, msg.id, &text).await {
-                warn!("Failed to update completed message: {e}");
-            }
-
-            let mut result = String::new();
-            if !output_buffer.is_empty() {
-                result.push_str(output_buffer.trim_end());
-                result.push('\n');
-            }
-            result.push_str(&format!("Exit code: {}", code));
-            result
-        } else {
-            unreachable!("select loop always sets either cancelled or exit_code")
-        };
-
-        // Cleanup registry
-        let mut map = running_commands.lock().await;
-        map.remove(&cmd_id_clone);
-
-        result
-    }
-
     /// Execute a tool call by routing to the right handler
-    #[allow(dead_code)]
     async fn execute_tool(
         &self,
         name: &str,
@@ -2263,7 +1703,6 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Validate skill directory name: lowercase letters, numbers, hyphens, 1–64 chars.
-#[allow(dead_code)]
 fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Skill name must not be empty".to_string());
@@ -2286,7 +1725,6 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 /// Validate a relative path within a skill directory: no '..' components, non-empty.
-#[allow(dead_code)]
 fn validate_skill_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Relative path must not be empty".to_string());
@@ -2302,7 +1740,6 @@ fn validate_skill_path(path: &str) -> Result<(), String> {
 
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
-#[allow(dead_code)]
 fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
     let mut tools = vec!["read_skill_file".to_string(), "read_agent_file".to_string()];
     for t in declared {
@@ -2315,7 +1752,6 @@ fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
 
 /// Return declared tools that are not present in the set of all available tool names.
 /// Used to warn at subagent launch when the whitelist references unavailable tools.
-#[allow(dead_code)]
 fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Vec<String> {
     declared
         .iter()
@@ -2326,7 +1762,6 @@ fn missing_subagent_tools(declared: &[String], available_names: &[String]) -> Ve
 
 /// Error message returned when the main agent or a subagent produces a tool call
 /// whose arguments are a regurgitated compaction marker rather than real JSON.
-#[allow(dead_code)]
 const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in compacted format \
     (reproduced from a compressed history entry). \
     Please regenerate the complete call with all required fields.";
@@ -2338,7 +1773,6 @@ const REGURGITATION_ERROR_MSG: &str = "Error: Your tool call arguments are in co
 /// Handles two formats:
 /// - Old (backward compat): JSON object with `_rustfox_compacted_arguments: true`
 /// - New: plain-text that starts with `COMPACTION_MARKER_PREFIX`
-#[allow(dead_code)]
 fn is_compacted_regurgitation(raw: &str, parsed: &serde_json::Value) -> bool {
     // Old JSON format — lookup the marker key in the parsed object.
     if parsed
