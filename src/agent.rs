@@ -91,7 +91,6 @@ pub struct Agent {
     // Fields used by scheduling / job closures
     pub task_store: ScheduledTaskStore,
     pub scheduler: Arc<Scheduler>,
-    pub bot: Arc<Bot>,
     pub self_weak: Weak<Agent>,
     /// Sender for dispatching scheduled job work to the background runner.
     pub job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
@@ -169,7 +168,6 @@ impl Agent {
         agents: SkillRegistry,
         task_store: ScheduledTaskStore,
         scheduler: Arc<Scheduler>,
-        bot: Arc<Bot>,
         self_weak: Weak<Agent>,
         job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
         langsmith: Arc<LangSmithClient>,
@@ -192,7 +190,6 @@ impl Agent {
             agents: tokio::sync::RwLock::new(agents),
             task_store,
             scheduler,
-            bot,
             self_weak,
             job_tx,
             langsmith,
@@ -908,7 +905,7 @@ impl Agent {
 
     /// Re-register all active scheduled tasks from the DB into the scheduler.
     /// Called once at startup after the agent is constructed.
-    pub async fn restore_scheduled_tasks(&self) {
+    pub async fn restore_scheduled_tasks(&self, bot: Arc<Bot>) {
         let tasks = match self.task_store.list_all_active().await {
             Ok(t) => t,
             Err(e) => {
@@ -921,7 +918,7 @@ impl Agent {
         for task in tasks {
             // Build the same fire closure as in schedule_task handler
             let job_tx = self.job_tx.clone();
-            let bot_clone = Arc::clone(&self.bot);
+            let bot_clone = Arc::clone(&bot);
             let tid = task.id.clone();
             let uid = task.user_id.clone();
             let cid = task.chat_id.clone();

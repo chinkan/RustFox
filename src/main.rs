@@ -251,7 +251,6 @@ async fn main() -> Result<()> {
             agents,
             task_store.clone(),
             Arc::clone(&scheduler),
-            Arc::clone(&bot),
             weak.clone(),
             job_tx,
             Arc::clone(&langsmith),
@@ -400,7 +399,7 @@ async fn main() -> Result<()> {
     .await?;
     scheduler.start().await?;
     info!("  Scheduler: active");
-    agent.restore_scheduled_tasks().await;
+    agent.restore_scheduled_tasks(Arc::clone(&bot)).await;
     info!("  Scheduled tasks: restored from DB");
 
     // Construct Supervisor with a populated backend Registry so resume /
