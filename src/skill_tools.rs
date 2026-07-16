@@ -2,18 +2,28 @@ use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::llm::{FunctionDefinition, ToolDefinition};
+use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 
 pub struct SkillTools {
     skills_dir: PathBuf,
     agents_dir: PathBuf,
+    skills: Arc<RwLock<SkillRegistry>>,
+    agents: Arc<RwLock<SkillRegistry>>,
 }
 
 impl SkillTools {
-    pub fn new(skills_dir: PathBuf, agents_dir: PathBuf) -> Self {
-        Self { skills_dir, agents_dir }
+    pub fn new(
+        skills_dir: PathBuf,
+        agents_dir: PathBuf,
+        skills: Arc<RwLock<SkillRegistry>>,
+        agents: Arc<RwLock<SkillRegistry>>,
+    ) -> Self {
+        Self { skills_dir, agents_dir, skills, agents }
     }
 }
 
@@ -118,7 +128,16 @@ impl ToolHandler for SkillTools {
                 Ok(format!("Successfully wrote {}/{}", skill_name, relative_path))
             }
             "reload_skills" => {
-                Ok("Skills reloaded. The skills are now up to date.".to_string())
+                let skills_dir = self.skills_dir.clone();
+                match crate::skills::loader::load_skills_from_dir(&skills_dir, skills_dir.clone()).await {
+                    Ok(new_reg) => {
+                        let count = new_reg.len();
+                        let mut skills = self.skills.write().await;
+                        *skills = new_reg;
+                        Ok(format!("Skills reloaded. {} skill(s) now active.", count))
+                    }
+                    Err(e) => Ok(format!("Failed to reload skills: {}", e)),
+                }
             }
             "read_skill_file" => {
                 let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?;
@@ -150,7 +169,16 @@ impl ToolHandler for SkillTools {
                 Ok(content)
             }
             "reload_agents" => {
-                Ok("Agents reloaded.".to_string())
+                let agents_dir = self.agents_dir.clone();
+                match crate::skills::loader::load_skills_from_dir(&agents_dir, agents_dir.clone()).await {
+                    Ok(new_reg) => {
+                        let count = new_reg.len();
+                        let mut agents = self.agents.write().await;
+                        *agents = new_reg;
+                        Ok(format!("Agents reloaded. {} agent(s) active.", count))
+                    }
+                    Err(e) => Ok(format!("Failed to reload agents: {}", e)),
+                }
             }
             _ => anyhow::bail!("SkillTools: unknown tool {name}"),
         }

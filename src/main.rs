@@ -207,6 +207,7 @@ async fn main() -> Result<()> {
         rustfox::platform::telegram::TelegramAdapter::new((*bot).clone()),
     );
     let skills_rw = Arc::new(tokio::sync::RwLock::new(skills.clone()));
+    let agents_rw = Arc::new(tokio::sync::RwLock::new(agents.clone()));
 
     let mut tool_registry = rustfox::tool_registry::ToolRegistry::new();
     tool_registry.register(Box::new(rustfox::builtin_tools::BuiltinTools::new(
@@ -225,6 +226,8 @@ async fn main() -> Result<()> {
     tool_registry.register(Box::new(rustfox::skill_tools::SkillTools::new(
         config.skills.directory.clone(),
         config.agents.directory.clone(),
+        skills_rw.clone(),
+        agents_rw.clone(),
     )));
     tool_registry.register(Box::new(rustfox::command_tool::CommandTool::new(
         config.sandbox.allowed_directory.clone(),
