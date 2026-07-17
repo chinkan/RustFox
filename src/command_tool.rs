@@ -25,7 +25,11 @@ impl CommandTool {
         cancel_registry: Arc<CancelRegistry>,
         sender: Arc<dyn PlatformSender>,
     ) -> Self {
-        Self { sandbox_dir, cancel_registry, sender }
+        Self {
+            sandbox_dir,
+            cancel_registry,
+            sender,
+        }
     }
 }
 
@@ -58,7 +62,9 @@ impl ToolHandler for CommandTool {
 
 impl CommandTool {
     async fn exec_command(&self, arguments: &Value, ctx: &ToolContext) -> ToolResult {
-        let command = arguments["command"].as_str().context("Missing 'command' argument")?;
+        let command = arguments["command"]
+            .as_str()
+            .context("Missing 'command' argument")?;
         let cmd_id = format!("cmd_{}", uuid::Uuid::new_v4());
 
         let mut child = TokioCommand::new("sh")
@@ -73,10 +79,15 @@ impl CommandTool {
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
         let status_text = format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
-        let msg_id = self.sender.show_cancel_button(&ctx.chat_id, &status_text, &cmd_id).await?;
+        let msg_id = self
+            .sender
+            .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
+            .await?;
 
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        self.cancel_registry.register(cmd_id.clone(), cancel_tx).await;
+        self.cancel_registry
+            .register(cmd_id.clone(), cancel_tx)
+            .await;
 
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
         let output_tx2 = output_tx.clone();
@@ -88,7 +99,11 @@ impl CommandTool {
             while let Some(stream) = child_stdout.as_mut() {
                 match stream.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => { let _ = output_tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).await; }
+                    Ok(n) => {
+                        let _ = output_tx
+                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                            .await;
+                    }
                 }
             }
         });
@@ -98,7 +113,11 @@ impl CommandTool {
             while let Some(stream) = child_stderr.as_mut() {
                 match stream.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => { let _ = output_tx2.send(String::from_utf8_lossy(&buf[..n]).to_string()).await; }
+                    Ok(n) => {
+                        let _ = output_tx2
+                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                            .await;
+                    }
                 }
             }
         });
@@ -155,7 +174,11 @@ impl CommandTool {
 
         fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
             if buf.is_empty() {
-                if no_output_msg.is_empty() { None } else { Some(no_output_msg.to_owned()) }
+                if no_output_msg.is_empty() {
+                    None
+                } else {
+                    Some(no_output_msg.to_owned())
+                }
             } else {
                 let capped = crate::utils::strings::truncate_tail(buf, 3500);
                 Some(format!("```\n{}\n```", capped))
@@ -171,12 +194,25 @@ impl CommandTool {
             let _ = self.sender.edit_message(&ctx.chat_id, &msg_id, &text).await;
             "⚠️ User cancelled the command".to_string()
         } else if let Some(code) = exit_code {
-            let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
+            let (icon, label) = if code == 0 {
+                ("✅", "Completed")
+            } else {
+                ("❌", "Failed")
+            };
             let body = format_body(&output_buffer, "Command completed with no output.");
-            let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body.unwrap_or_default());
+            let text = format!(
+                "{} {}: `{}`\n\n{}",
+                icon,
+                label,
+                escaped_cmd,
+                body.unwrap_or_default()
+            );
             let _ = self.sender.edit_message(&ctx.chat_id, &msg_id, &text).await;
             let mut result = String::new();
-            if !output_buffer.is_empty() { result.push_str(output_buffer.trim_end()); result.push('\n'); }
+            if !output_buffer.is_empty() {
+                result.push_str(output_buffer.trim_end());
+                result.push('\n');
+            }
             result.push_str(&format!("Exit code: {}", code));
             result
         } else {

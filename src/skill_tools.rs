@@ -17,7 +17,10 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.len() > 64 {
         return Err("Skill name too long (max 64 chars)".to_string());
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Skill name contains invalid characters".to_string());
     }
     Ok(())
@@ -51,7 +54,12 @@ impl SkillTools {
         skills: Arc<RwLock<SkillRegistry>>,
         agents: Arc<RwLock<SkillRegistry>>,
     ) -> Self {
-        Self { skills_dir, agents_dir, skills, agents }
+        Self {
+            skills_dir,
+            agents_dir,
+            skills,
+            agents,
+        }
     }
 }
 
@@ -63,7 +71,9 @@ impl ToolHandler for SkillTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "write_skill_file".to_string(),
-                    description: "Write a file into a skill directory under the configured skills folder.".to_string(),
+                    description:
+                        "Write a file into a skill directory under the configured skills folder."
+                            .to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -79,7 +89,8 @@ impl ToolHandler for SkillTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "reload_skills".to_string(),
-                    description: "Reload all skills from the skills directory into memory.".to_string(),
+                    description: "Reload all skills from the skills directory into memory."
+                        .to_string(),
                     parameters: json!({ "type": "object", "properties": {} }),
                 },
             },
@@ -133,7 +144,8 @@ impl ToolHandler for SkillTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "reload_agents".to_string(),
-                    description: "Reload all agents from the agents directory into memory.".to_string(),
+                    description: "Reload all agents from the agents directory into memory."
+                        .to_string(),
                     parameters: json!({ "type": "object", "properties": {} }),
                 },
             },
@@ -143,8 +155,12 @@ impl ToolHandler for SkillTools {
     async fn execute(&self, name: &str, args: Value, _ctx: ToolContext) -> ToolResult {
         match name {
             "write_skill_file" => {
-                let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?;
-                let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                let skill_name = args["skill_name"]
+                    .as_str()
+                    .context("Missing 'skill_name'")?;
+                let relative_path = args["relative_path"]
+                    .as_str()
+                    .context("Missing 'relative_path'")?;
                 let content = args["content"].as_str().context("Missing 'content'")?;
                 validate_skill_name(skill_name).map_err(|e| anyhow::anyhow!(e))?;
                 validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
@@ -155,11 +171,16 @@ impl ToolHandler for SkillTools {
                     tokio::fs::create_dir_all(parent).await?;
                 }
                 tokio::fs::write(&file_path, content).await?;
-                Ok(format!("Successfully wrote {}/{}", skill_name, relative_path))
+                Ok(format!(
+                    "Successfully wrote {}/{}",
+                    skill_name, relative_path
+                ))
             }
             "reload_skills" => {
                 let skills_dir = self.skills_dir.clone();
-                match crate::skills::loader::load_skills_from_dir(&skills_dir, skills_dir.clone()).await {
+                match crate::skills::loader::load_skills_from_dir(&skills_dir, skills_dir.clone())
+                    .await
+                {
                     Ok(new_reg) => {
                         let count = new_reg.len();
                         let mut skills = self.skills.write().await;
@@ -170,18 +191,29 @@ impl ToolHandler for SkillTools {
                 }
             }
             "read_skill_file" => {
-                let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?;
-                let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                let skill_name = args["skill_name"]
+                    .as_str()
+                    .context("Missing 'skill_name'")?;
+                let relative_path = args["relative_path"]
+                    .as_str()
+                    .context("Missing 'relative_path'")?;
                 validate_skill_name(skill_name).map_err(|e| anyhow::anyhow!(e))?;
                 validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let file_path = self.skills_dir.join(skill_name).join(relative_path);
-                let content = tokio::fs::read_to_string(&file_path).await
-                    .with_context(|| format!("Failed to read skill file: {}", file_path.display()))?;
+                let content = tokio::fs::read_to_string(&file_path)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to read skill file: {}", file_path.display())
+                    })?;
                 Ok(content)
             }
             "write_agent_file" => {
-                let agent_name = args["agent_name"].as_str().context("Missing 'agent_name'")?;
-                let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                let agent_name = args["agent_name"]
+                    .as_str()
+                    .context("Missing 'agent_name'")?;
+                let relative_path = args["relative_path"]
+                    .as_str()
+                    .context("Missing 'relative_path'")?;
                 let content = args["content"].as_str().context("Missing 'content'")?;
                 validate_skill_name(agent_name).map_err(|e| anyhow::anyhow!(e))?;
                 validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
@@ -192,21 +224,33 @@ impl ToolHandler for SkillTools {
                     tokio::fs::create_dir_all(parent).await?;
                 }
                 tokio::fs::write(&file_path, content).await?;
-                Ok(format!("Successfully wrote agent {}/{}", agent_name, relative_path))
+                Ok(format!(
+                    "Successfully wrote agent {}/{}",
+                    agent_name, relative_path
+                ))
             }
             "read_agent_file" => {
-                let agent_name = args["agent_name"].as_str().context("Missing 'agent_name'")?;
-                let relative_path = args["relative_path"].as_str().context("Missing 'relative_path'")?;
+                let agent_name = args["agent_name"]
+                    .as_str()
+                    .context("Missing 'agent_name'")?;
+                let relative_path = args["relative_path"]
+                    .as_str()
+                    .context("Missing 'relative_path'")?;
                 validate_skill_name(agent_name).map_err(|e| anyhow::anyhow!(e))?;
                 validate_skill_path(relative_path).map_err(|e| anyhow::anyhow!(e))?;
                 let file_path = self.agents_dir.join(agent_name).join(relative_path);
-                let content = tokio::fs::read_to_string(&file_path).await
-                    .with_context(|| format!("Failed to read agent file: {}", file_path.display()))?;
+                let content = tokio::fs::read_to_string(&file_path)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to read agent file: {}", file_path.display())
+                    })?;
                 Ok(content)
             }
             "reload_agents" => {
                 let agents_dir = self.agents_dir.clone();
-                match crate::skills::loader::load_skills_from_dir(&agents_dir, agents_dir.clone()).await {
+                match crate::skills::loader::load_skills_from_dir(&agents_dir, agents_dir.clone())
+                    .await
+                {
                     Ok(new_reg) => {
                         let count = new_reg.len();
                         let mut agents = self.agents.write().await;

@@ -11,25 +11,19 @@ use serde_json::Value;
 use teloxide::types::ChatId;
 use teloxide::Bot;
 
-use crate::agent_prompt::{
-    ConversationMeta,
-    PreparedPrompt,
-};
+use crate::agent_prompt::{ConversationMeta, PreparedPrompt};
+use crate::cancel_registry::CancelRegistry;
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
-use crate::llm::{
-    ChatMessage, ContentPart, LlmClient,
-    MessageContent, ToolCall, ToolDefinition,
-};
+use crate::llm::{ChatMessage, ContentPart, LlmClient, MessageContent, ToolCall, ToolDefinition};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
+use crate::platform::sender::PlatformSender;
 use crate::platform::IncomingMessage;
 use crate::scheduler::reminders::ScheduledTaskStore;
 use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
-use crate::cancel_registry::CancelRegistry;
 use crate::tool_registry::{ToolContext, ToolRegistry};
-use crate::platform::sender::PlatformSender;
 use std::collections::HashMap;
 
 /// Mid-run mode determines how a user's message is handled when the agent
@@ -66,8 +60,6 @@ pub enum LoopCallbackChoice {
     Stop,
     AddInstruction,
 }
-
-
 
 /// A request dispatched from a fire closure to the background job runner.
 pub struct ScheduledJobRequest {
@@ -672,7 +664,8 @@ impl Agent {
 
         // RAG: auto-retrieve relevant past messages and inject into system prompt
         if !incoming.text.is_empty() {
-            let filtered_msgs: Vec<_> = cmgr.messages()
+            let filtered_msgs: Vec<_> = cmgr
+                .messages()
                 .iter()
                 .filter(|m| m.role == "user" || m.role == "assistant")
                 .cloned()
@@ -720,7 +713,9 @@ impl Agent {
             provider.supports_vision()
         };
 
-        let image_parts = cmgr.add_incoming(incoming, &self.config, supports_vision).await?;
+        let image_parts = cmgr
+            .add_incoming(incoming, &self.config, supports_vision)
+            .await?;
 
         // Build user message content
         let user_msg_content = if image_parts.is_empty() {
@@ -728,7 +723,9 @@ impl Agent {
         } else {
             let mut parts: Vec<ContentPart> = Vec::new();
             if !incoming.text.is_empty() {
-                parts.push(ContentPart::Text { text: incoming.text.clone() });
+                parts.push(ContentPart::Text {
+                    text: incoming.text.clone(),
+                });
             }
             parts.extend(image_parts);
             MessageContent::Parts(parts)
@@ -745,7 +742,7 @@ impl Agent {
 
         // Compaction state for this conversation session (persists across iterations)
         let _conv_meta = ConversationMeta::new();
-// Gather all tool definitions
+        // Gather all tool definitions
         let mut all_tools: Vec<ToolDefinition> = self.tool_registry.all_definitions();
         all_tools.extend(self.mcp.tool_definitions());
 
@@ -884,7 +881,10 @@ impl Agent {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
                     outputs: None,
-                    error: Some(format!("Reached max iterations ({})", self.config.max_iterations())),
+                    error: Some(format!(
+                        "Reached max iterations ({})",
+                        self.config.max_iterations()
+                    )),
                     end_time: Self::now_iso8601_static(),
                 });
                 self.clear_cancel_token(user_id).await;
@@ -1278,58 +1278,60 @@ impl Agent {
         cancel_token: Option<CancellationToken>,
     ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
         Box::pin(async move {
-        // Build special_tool_handler for invoke_agent/spawn_agents (circular dependency
-        // prevents them from being registered in ToolRegistry).
-        let special_handler = {
-            let self_weak = self.self_weak.clone();
-            move |name: &str, args: &Value, _user_id: &str, _chat_id: &str| {
-                let name_owned = name.to_string();
-                let args_owned = args.clone();
-                let self_weak = self_weak.clone();
-                Box::pin(async move {
-                    match name_owned.as_str() {
-                        "invoke_agent" => {
-                            let agent_name = match args_owned["agent"]
-                                .as_str()
-                                .or_else(|| args_owned["skill"].as_str())
-                            {
-                                Some(a) => a.to_string(),
-                                None => return Some("Missing agent".to_string()),
-                            };
-                            let prompt = match args_owned["prompt"].as_str() {
-                                Some(p) => p.to_string(),
-                                None => return Some("Missing prompt".to_string()),
-                            };
-                            let model_override = args_owned["model"].as_str().map(str::to_string);
-                            let tools_override = args_owned["tools"].as_array().map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(str::to_string))
-                                    .collect::<Vec<_>>()
-                            });
-                            tracing::info!(
-                                "Invoking agent '{}' (model_override: {:?})",
-                                agent_name,
-                                model_override
-                            );
-                            let agent = match self_weak.upgrade() {
-                                Some(a) => a,
-                                None => return Some("Agent is shutting down".to_string()),
-                            };
-                            Some(
-                                agent
-                                    .run_subagent(
-                                        Some(&agent_name),
-                                        "",
-                                        &prompt,
-                                        model_override.as_deref(),
-                                        tools_override,
-                                    )
-                                    .await,
-                            )
-                        }
-                        "spawn_agents" => {
-                            let parsed_tasks: Vec<AdHocTask> =
-                                if let Some(tasks) = args_owned["tasks"].as_array() {
+            // Build special_tool_handler for invoke_agent/spawn_agents (circular dependency
+            // prevents them from being registered in ToolRegistry).
+            let special_handler = {
+                let self_weak = self.self_weak.clone();
+                move |name: &str, args: &Value, _user_id: &str, _chat_id: &str| {
+                    let name_owned = name.to_string();
+                    let args_owned = args.clone();
+                    let self_weak = self_weak.clone();
+                    Box::pin(async move {
+                        match name_owned.as_str() {
+                            "invoke_agent" => {
+                                let agent_name = match args_owned["agent"]
+                                    .as_str()
+                                    .or_else(|| args_owned["skill"].as_str())
+                                {
+                                    Some(a) => a.to_string(),
+                                    None => return Some("Missing agent".to_string()),
+                                };
+                                let prompt = match args_owned["prompt"].as_str() {
+                                    Some(p) => p.to_string(),
+                                    None => return Some("Missing prompt".to_string()),
+                                };
+                                let model_override =
+                                    args_owned["model"].as_str().map(str::to_string);
+                                let tools_override = args_owned["tools"].as_array().map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(str::to_string))
+                                        .collect::<Vec<_>>()
+                                });
+                                tracing::info!(
+                                    "Invoking agent '{}' (model_override: {:?})",
+                                    agent_name,
+                                    model_override
+                                );
+                                let agent = match self_weak.upgrade() {
+                                    Some(a) => a,
+                                    None => return Some("Agent is shutting down".to_string()),
+                                };
+                                Some(
+                                    agent
+                                        .run_subagent(
+                                            Some(&agent_name),
+                                            "",
+                                            &prompt,
+                                            model_override.as_deref(),
+                                            tools_override,
+                                        )
+                                        .await,
+                                )
+                            }
+                            "spawn_agents" => {
+                                let parsed_tasks: Vec<AdHocTask> = if let Some(tasks) =
+                                    args_owned["tasks"].as_array()
+                                {
                                     if tasks.is_empty() {
                                         return Some("tasks array is empty".to_string());
                                     }
@@ -1366,8 +1368,7 @@ impl Agent {
                                     }
                                     parsed
                                 } else {
-                                    let system_prompt = match args_owned["system_prompt"].as_str()
-                                    {
+                                    let system_prompt = match args_owned["system_prompt"].as_str() {
                                         Some(s) => s.to_string(),
                                         None => {
                                             return Some(
@@ -1390,104 +1391,105 @@ impl Agent {
                                         }),
                                     }]
                                 };
-                            let agent = match self_weak.upgrade() {
-                                Some(a) => a,
-                                None => return Some("Agent is shutting down".to_string()),
-                            };
-                            let futures: Vec<_> = parsed_tasks
-                                .into_iter()
-                                .map(|task| {
-                                    let sp = task.system_prompt.clone();
-                                    let p = task.prompt.clone();
-                                    let m = task.model.clone();
-                                    let t = task.tools.clone();
-                                    let a = agent.clone();
-                                    Box::pin(async move {
-                                        a.run_subagent(None, &sp, &p, m.as_deref(), t)
-                                            .await
+                                let agent = match self_weak.upgrade() {
+                                    Some(a) => a,
+                                    None => return Some("Agent is shutting down".to_string()),
+                                };
+                                let futures: Vec<_> = parsed_tasks
+                                    .into_iter()
+                                    .map(|task| {
+                                        let sp = task.system_prompt.clone();
+                                        let p = task.prompt.clone();
+                                        let m = task.model.clone();
+                                        let t = task.tools.clone();
+                                        let a = agent.clone();
+                                        Box::pin(async move {
+                                            a.run_subagent(None, &sp, &p, m.as_deref(), t).await
+                                        })
                                     })
-                                })
-                                .collect();
-                            let results = futures::future::join_all(futures).await;
-                            let mut output = String::from(
-                                "Spawned agents results:\n\n",
-                            );
-                            for (i, result) in results.iter().enumerate() {
-                                output.push_str(&format!(
-                                    "--- Agent {} ---\n{}\n\n",
-                                    i + 1,
-                                    result
-                                ));
+                                    .collect();
+                                let results = futures::future::join_all(futures).await;
+                                let mut output = String::from("Spawned agents results:\n\n");
+                                for (i, result) in results.iter().enumerate() {
+                                    output.push_str(&format!(
+                                        "--- Agent {} ---\n{}\n\n",
+                                        i + 1,
+                                        result
+                                    ));
+                                }
+                                Some(output)
                             }
-                            Some(output)
+                            _ => None,
                         }
-                        _ => None,
-                    }
-                }) as Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>
+                    })
+                        as Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>
+                }
+            };
+
+            let make_ctx = {
+                let sandbox_dir = self.config.sandbox.allowed_directory.clone();
+                let home_dir = self.config.resolved_home.clone();
+                let sender = self.sender.clone();
+                let cancel_registry = self.cancel_registry.clone();
+                move |_user_id: &str, _chat_id: &str| ToolContext {
+                    sandbox_dir: sandbox_dir.clone(),
+                    home_dir: home_dir.clone(),
+                    sender: sender.clone(),
+                    cancel_registry: cancel_registry.clone(),
+                    user_id: String::new(),
+                    chat_id: String::new(),
+                }
+            };
+
+            let allowed_tools_vec: Vec<String> = allowed_tools.to_vec();
+            let loop_config = crate::loop_runner::LoopConfig {
+                max_iterations: max_iter,
+                empty_response_retry_limit: self.config.empty_response_retry_limit(),
+                compaction_enabled: false,
+                loop_detection_enabled: true,
+                interactive_loop_callback: false,
+                allowed_tools: Some(allowed_tools_vec),
+                langsmith_project: None,
+                model: Some(model.to_string()),
+                tool_event_tx: None,
+                stream_token_tx: None,
+                recovery_nudge: None,
+            };
+
+            let outcome = crate::loop_runner::AgenticLoop::new(
+                &self.llm,
+                &self.tool_registry,
+                &self.mcp,
+                &loop_config,
+                cancel_token,
+                None,
+                None,
+                self.sender.as_ref() as &dyn PlatformSender,
+                Box::new(make_ctx),
+                Some(Box::new(special_handler)),
+            )
+            .run(
+                &mut crate::loop_runner::MessageContainer::Plain(std::mem::take(messages)),
+                "",
+                "",
+            )
+            .await;
+
+            match outcome {
+                Ok(crate::loop_runner::LoopOutcome::FinalResponse(text)) => text,
+                Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
+                    format!("Subagent '{}' cancelled by user.", label)
+                }
+                Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                    format!(
+                        "Subagent '{}' reached the maximum number of iterations ({}).",
+                        label, max_iter
+                    )
+                }
+                Err(e) => format!("Subagent '{}' error: {}", label, e),
             }
-        };
-
-        let make_ctx = {
-            let sandbox_dir = self.config.sandbox.allowed_directory.clone();
-            let home_dir = self.config.resolved_home.clone();
-            let sender = self.sender.clone();
-            let cancel_registry = self.cancel_registry.clone();
-            move |_user_id: &str, _chat_id: &str| ToolContext {
-                sandbox_dir: sandbox_dir.clone(),
-                home_dir: home_dir.clone(),
-                sender: sender.clone(),
-                cancel_registry: cancel_registry.clone(),
-                user_id: String::new(),
-                chat_id: String::new(),
-            }
-        };
-
-        let allowed_tools_vec: Vec<String> = allowed_tools.to_vec();
-        let loop_config = crate::loop_runner::LoopConfig {
-            max_iterations: max_iter,
-            empty_response_retry_limit: self.config.empty_response_retry_limit(),
-            compaction_enabled: false,
-            loop_detection_enabled: true,
-            interactive_loop_callback: false,
-            allowed_tools: Some(allowed_tools_vec),
-            langsmith_project: None,
-            model: Some(model.to_string()),
-            tool_event_tx: None,
-            stream_token_tx: None,
-            recovery_nudge: None,
-        };
-
-        let outcome = crate::loop_runner::AgenticLoop::new(
-            &self.llm,
-            &self.tool_registry,
-            &self.mcp,
-            &loop_config,
-            cancel_token,
-            None,
-            None,
-            self.sender.as_ref() as &dyn PlatformSender,
-            Box::new(make_ctx),
-            Some(Box::new(special_handler)),
-        )
-        .run(
-            &mut crate::loop_runner::MessageContainer::Plain(std::mem::take(messages)),
-            "",
-            "",
-        )
-        .await;
-
-        match outcome {
-            Ok(crate::loop_runner::LoopOutcome::FinalResponse(text)) => text,
-            Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
-                format!("Subagent '{}' cancelled by user.", label)
-            }
-            Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
-                format!("Subagent '{}' reached the maximum number of iterations ({}).", label, max_iter)
-            }
-            Err(e) => format!("Subagent '{}' error: {}", label, e),
-        }
-    })}
-
+        })
+    }
 }
 
 /// Build a context-forked message list for a /btw side question.
@@ -2073,4 +2075,3 @@ mod tests {
             .contains("question"));
     }
 }
-

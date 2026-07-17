@@ -6,8 +6,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::ScheduledJobRequest;
 use crate::llm::{FunctionDefinition, ToolDefinition};
-use crate::scheduler::{reminders::ScheduledTask, Scheduler};
 use crate::scheduler::reminders::ScheduledTaskStore;
+use crate::scheduler::{reminders::ScheduledTask, Scheduler};
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 use teloxide::prelude::Bot;
 use uuid::Uuid;
@@ -26,7 +26,12 @@ impl SchedulingTools {
         job_tx: UnboundedSender<ScheduledJobRequest>,
         bot: Arc<Bot>,
     ) -> Self {
-        Self { task_store, scheduler, job_tx, bot }
+        Self {
+            task_store,
+            scheduler,
+            job_tx,
+            bot,
+        }
     }
 }
 
@@ -55,7 +60,8 @@ impl ToolHandler for SchedulingTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "list_scheduled_tasks".to_string(),
-                    description: "List all active scheduled tasks for the current user.".to_string(),
+                    description: "List all active scheduled tasks for the current user."
+                        .to_string(),
                     parameters: json!({ "type": "object", "properties": {} }),
                 },
             },
@@ -101,21 +107,39 @@ impl ToolHandler for SchedulingTools {
     async fn execute(&self, name: &str, args: Value, ctx: ToolContext) -> ToolResult {
         match name {
             "schedule_task" => {
-                let trigger_type = args["trigger_type"].as_str().context("Missing 'trigger_type'")?.to_string();
-                let trigger_value = args["trigger_value"].as_str().context("Missing 'trigger_value'")?.to_string();
-                let prompt_text = args["prompt"].as_str().context("Missing 'prompt'")?.to_string();
-                let description = args["description"].as_str().context("Missing 'description'")?.to_string();
+                let trigger_type = args["trigger_type"]
+                    .as_str()
+                    .context("Missing 'trigger_type'")?
+                    .to_string();
+                let trigger_value = args["trigger_value"]
+                    .as_str()
+                    .context("Missing 'trigger_value'")?
+                    .to_string();
+                let prompt_text = args["prompt"]
+                    .as_str()
+                    .context("Missing 'prompt'")?
+                    .to_string();
+                let description = args["description"]
+                    .as_str()
+                    .context("Missing 'description'")?
+                    .to_string();
 
                 use crate::agent::parse_one_shot_delay;
                 use crate::agent::validate_cron_expr;
 
                 let delay = if trigger_type == "one_shot" {
-                    Some(parse_one_shot_delay(&trigger_value).map_err(|e| anyhow::anyhow!("Invalid trigger: {e}"))?)
+                    Some(
+                        parse_one_shot_delay(&trigger_value)
+                            .map_err(|e| anyhow::anyhow!("Invalid trigger: {e}"))?,
+                    )
                 } else if trigger_type == "recurring" {
-                    validate_cron_expr(&trigger_value).map_err(|e| anyhow::anyhow!("Invalid cron expression: {e}"))?;
+                    validate_cron_expr(&trigger_value)
+                        .map_err(|e| anyhow::anyhow!("Invalid cron expression: {e}"))?;
                     None
                 } else {
-                    anyhow::bail!("Unknown trigger_type '{trigger_type}'. Use 'one_shot' or 'recurring'.");
+                    anyhow::bail!(
+                        "Unknown trigger_type '{trigger_type}'. Use 'one_shot' or 'recurring'."
+                    );
                 };
 
                 let task_id = Uuid::new_v4().to_string();
@@ -174,7 +198,8 @@ impl ToolHandler for SchedulingTools {
                             task_store: store,
                         };
                         let _ = tx.send(req);
-                    }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
                 };
 
                 let sched_result = if let Some(d) = delay {
@@ -184,12 +209,11 @@ impl ToolHandler for SchedulingTools {
                 };
 
                 match sched_result {
-                    Ok(_sched_id) => {
-                        Ok(format!("Task scheduled! ID: {} — {} ({})", task_id, description, trigger_value))
-                    }
-                    Err(e) => {
-                        Ok(format!("Failed to register task with scheduler: {}", e))
-                    }
+                    Ok(_sched_id) => Ok(format!(
+                        "Task scheduled! ID: {} — {} ({})",
+                        task_id, description, trigger_value
+                    )),
+                    Err(e) => Ok(format!("Failed to register task with scheduler: {}", e)),
                 }
             }
             "list_scheduled_tasks" => {
@@ -218,17 +242,27 @@ impl ToolHandler for SchedulingTools {
             }
             "get_scheduled_task_history" => {
                 let task_id = args["task_id"].as_str().context("Missing 'task_id'")?;
-                let runs: Vec<crate::scheduler::reminders::ScheduledTaskRun> = match self.task_store.get_task_runs(task_id, 50).await {
-                    Ok(r) => r,
-                    Err(e) => return Ok(format!("Failed to get history: {}", e)),
-                };
+                let runs: Vec<crate::scheduler::reminders::ScheduledTaskRun> =
+                    match self.task_store.get_task_runs(task_id, 50).await {
+                        Ok(r) => r,
+                        Err(e) => return Ok(format!("Failed to get history: {}", e)),
+                    };
                 if runs.is_empty() {
                     Ok("No history for this task.".to_string())
                 } else {
-                    let lines: Vec<String> = runs.iter().map(|r| {
-                        let response_preview = r.response.as_deref().unwrap_or("").chars().take(100).collect::<String>();
-                        format!("[{}] {} — {}", r.run_at, r.status, response_preview)
-                    }).collect();
+                    let lines: Vec<String> = runs
+                        .iter()
+                        .map(|r| {
+                            let response_preview = r
+                                .response
+                                .as_deref()
+                                .unwrap_or("")
+                                .chars()
+                                .take(100)
+                                .collect::<String>();
+                            format!("[{}] {} — {}", r.run_at, r.status, response_preview)
+                        })
+                        .collect();
                     Ok(lines.join("\n"))
                 }
             }
@@ -264,15 +298,21 @@ impl ToolHandler for SchedulingTools {
                             attachments: vec![],
                         };
                         let req = ScheduledJobRequest {
-                            incoming, bot, task_id: tid,
-                            is_recurring: false, task_store: store,
+                            incoming,
+                            bot,
+                            task_id: tid,
+                            is_recurring: false,
+                            task_store: store,
                         };
                         let _ = tx.send(req);
-                    }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
                 };
-                match self.scheduler.add_one_shot_job(
-                    std::time::Duration::from_secs(1), &task.description, fire,
-                ).await {
+                match self
+                    .scheduler
+                    .add_one_shot_job(std::time::Duration::from_secs(1), &task.description, fire)
+                    .await
+                {
                     Ok(_) => Ok(format!("Re-run scheduled for task {task_id}")),
                     Err(e) => Ok(format!("Failed to re-run task: {}", e)),
                 }

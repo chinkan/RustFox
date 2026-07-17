@@ -31,7 +31,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { handlers: Vec::new() }
+        Self {
+            handlers: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, handler: Box<dyn ToolHandler>) {
@@ -131,16 +133,36 @@ mod tests {
 
     #[async_trait]
     impl PlatformSender for TestSender {
-        async fn send_message(&self, _chat_id: &str, _text: &str, _format: MessageFormat) -> Result<PlatformMessageId> {
+        async fn send_message(
+            &self,
+            _chat_id: &str,
+            _text: &str,
+            _format: MessageFormat,
+        ) -> Result<PlatformMessageId> {
             Ok("test:1".to_string())
         }
-        async fn send_file(&self, _chat_id: &str, _path: &Path, _caption: Option<&str>) -> Result<PlatformMessageId> {
+        async fn send_file(
+            &self,
+            _chat_id: &str,
+            _path: &Path,
+            _caption: Option<&str>,
+        ) -> Result<PlatformMessageId> {
             Ok("test:1".to_string())
         }
-        async fn show_cancel_button(&self, _chat_id: &str, _text: &str, _cancel_id: &str) -> Result<PlatformMessageId> {
+        async fn show_cancel_button(
+            &self,
+            _chat_id: &str,
+            _text: &str,
+            _cancel_id: &str,
+        ) -> Result<PlatformMessageId> {
             Ok("test:1".to_string())
         }
-        async fn edit_message(&self, _chat_id: &str, _message_id: &PlatformMessageId, _text: &str) -> Result<()> {
+        async fn edit_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &PlatformMessageId,
+            _text: &str,
+        ) -> Result<()> {
             Ok(())
         }
         async fn notify_shutdown(&self, _chat_id: &str) -> Result<()> {

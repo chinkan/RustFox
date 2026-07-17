@@ -13,8 +13,16 @@ use crate::platform::sender::PlatformSender;
 use crate::platform::tool_notifier::ToolEvent;
 use crate::tool_registry::{ToolContext, ToolRegistry};
 
-pub type ToolHandlerFn =
-    Box<dyn Fn(&str, &Value, &str, &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>> + Send + Sync>;
+pub type ToolHandlerFn = Box<
+    dyn Fn(
+            &str,
+            &Value,
+            &str,
+            &str,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>
+        + Send
+        + Sync,
+>;
 
 pub struct LoopConfig {
     pub max_iterations: u32,
@@ -66,7 +74,18 @@ impl<'a> AgenticLoop<'a> {
         make_tool_ctx: Box<dyn Fn(&str, &str) -> ToolContext + Send + Sync + 'a>,
         special_tool_handler: Option<ToolHandlerFn>,
     ) -> Self {
-        Self { llm, tools, mcp, config, cancel, chain_run_id, langsmith, platform_sender, make_tool_ctx, special_tool_handler }
+        Self {
+            llm,
+            tools,
+            mcp,
+            config,
+            cancel,
+            chain_run_id,
+            langsmith,
+            platform_sender,
+            make_tool_ctx,
+            special_tool_handler,
+        }
     }
 
     pub async fn run(
@@ -97,7 +116,9 @@ impl<'a> AgenticLoop<'a> {
             let tool_defs = if let Some(ref whitelist) = self.config.allowed_tools {
                 let mut all = self.tools.all_definitions();
                 all.extend(self.mcp.tool_definitions());
-                all.into_iter().filter(|d| whitelist.contains(&d.function.name)).collect()
+                all.into_iter()
+                    .filter(|d| whitelist.contains(&d.function.name))
+                    .collect()
             } else {
                 let mut all = self.tools.all_definitions();
                 all.extend(self.mcp.tool_definitions());
@@ -105,13 +126,25 @@ impl<'a> AgenticLoop<'a> {
             };
 
             let (text, tool_calls) = if let Some(ref model) = self.config.model {
-                let completion = self.llm.chat_completion_with_model(&prepared.messages, &tool_defs, model).await?;
-                let text = completion.message.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                let completion = self
+                    .llm
+                    .chat_completion_with_model(&prepared.messages, &tool_defs, model)
+                    .await?;
+                let text = completion
+                    .message
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .unwrap_or_default();
                 let tool_calls = completion.message.tool_calls.clone().unwrap_or_default();
                 (text, tool_calls)
             } else {
                 let msg = self.llm.chat(&prepared.messages, &tool_defs).await?;
-                let text = msg.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                let text = msg
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .unwrap_or_default();
                 let tool_calls = msg.tool_calls.clone().unwrap_or_default();
                 (text, tool_calls)
             };
@@ -131,7 +164,9 @@ impl<'a> AgenticLoop<'a> {
                     }
                 }
                 if empty_count >= self.config.empty_response_retry_limit {
-                    return Ok(LoopOutcome::FinalResponse("I'm having trouble processing that. Please try again.".to_string()));
+                    return Ok(LoopOutcome::FinalResponse(
+                        "I'm having trouble processing that. Please try again.".to_string(),
+                    ));
                 }
                 continue;
             }
@@ -147,7 +182,13 @@ impl<'a> AgenticLoop<'a> {
                 for tc in &tool_calls {
                     if let Some(ref whitelist) = self.config.allowed_tools {
                         if !whitelist.contains(&tc.function.name) {
-                            messages.push_tool_result(&tc.id, format!("Tool '{}' is not available to this agent.", tc.function.name));
+                            messages.push_tool_result(
+                                &tc.id,
+                                format!(
+                                    "Tool '{}' is not available to this agent.",
+                                    tc.function.name
+                                ),
+                            );
                             continue;
                         }
                     }
@@ -165,11 +206,15 @@ impl<'a> AgenticLoop<'a> {
                     }
 
                     let result = if tc.function.name.starts_with("mcp_") {
-                        self.mcp.call_tool(&tc.function.name, &args).await
+                        self.mcp
+                            .call_tool(&tc.function.name, &args)
+                            .await
                             .unwrap_or_else(|e| format!("Error: {e}"))
                     } else {
                         let ctx = (self.make_tool_ctx)(user_id, chat_id);
-                        self.tools.execute(&tc.function.name, args, ctx).await
+                        self.tools
+                            .execute(&tc.function.name, args, ctx)
+                            .await
                             .unwrap_or_else(|e| format!("Error: {e}"))
                     };
 
@@ -201,7 +246,9 @@ impl MessageContainer {
     pub fn prepare(&self, context_window: usize) -> crate::agent_prompt::PreparedPrompt {
         match self {
             MessageContainer::Conversation(cm) => cm.prepare(context_window),
-            MessageContainer::Plain(msgs) => crate::agent_prompt::prepare_messages_for_llm(msgs, context_window),
+            MessageContainer::Plain(msgs) => {
+                crate::agent_prompt::prepare_messages_for_llm(msgs, context_window)
+            }
         }
     }
 

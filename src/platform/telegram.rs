@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 
 use crate::agent::{Agent, LoopCallbackChoice, MidRunMode};
-use crate::platform::sender::{MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender};
+use crate::platform::sender::{
+    MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender,
+};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
@@ -1735,10 +1737,7 @@ async fn handle_model_callback(
         } else {
             "Command already finished"
         };
-        bot.answer_callback_query(callback_id)
-            .text(text)
-            .await
-            .ok();
+        bot.answer_callback_query(callback_id).text(text).await.ok();
         return Ok(());
     }
 
@@ -1857,7 +1856,12 @@ impl TelegramAdapter {
 
 #[async_trait]
 impl PlatformSender for TelegramAdapter {
-    async fn send_message(&self, chat_id_str: &str, text: &str, format: PlatformMsgFormat) -> Result<PlatformMessageId> {
+    async fn send_message(
+        &self,
+        chat_id_str: &str,
+        text: &str,
+        format: PlatformMsgFormat,
+    ) -> Result<PlatformMessageId> {
         let chat_id = parse_chat_id(chat_id_str)?;
         let parse_mode = match format {
             PlatformMsgFormat::Markdown | PlatformMsgFormat::Auto => Some(ParseMode::MarkdownV2),
@@ -1871,37 +1875,64 @@ impl PlatformSender for TelegramAdapter {
         Ok(format!("{}:{}", chat_id.0, msg.id.0))
     }
 
-    async fn send_file(&self, chat_id_str: &str, path: &Path, caption: Option<&str>) -> Result<PlatformMessageId> {
+    async fn send_file(
+        &self,
+        chat_id_str: &str,
+        path: &Path,
+        caption: Option<&str>,
+    ) -> Result<PlatformMessageId> {
         let chat_id = parse_chat_id(chat_id_str)?;
         let input_file = teloxide::types::InputFile::file(path);
         let msg = if let Some(cap) = caption {
-            self.bot.send_document(chat_id, input_file).caption(cap).await?
+            self.bot
+                .send_document(chat_id, input_file)
+                .caption(cap)
+                .await?
         } else {
             self.bot.send_document(chat_id, input_file).await?
         };
         Ok(format!("{}:{}", chat_id.0, msg.id.0))
     }
 
-    async fn show_cancel_button(&self, chat_id_str: &str, text: &str, cancel_id: &str) -> Result<PlatformMessageId> {
+    async fn show_cancel_button(
+        &self,
+        chat_id_str: &str,
+        text: &str,
+        cancel_id: &str,
+    ) -> Result<PlatformMessageId> {
         let chat_id = parse_chat_id(chat_id_str)?;
         let keyboard = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
-            "Cancel", format!("cancel_cmd:{cancel_id}"),
+            "Cancel",
+            format!("cancel_cmd:{cancel_id}"),
         )]]);
-        let msg = self.bot.send_message(chat_id, text).reply_markup(keyboard).await?;
+        let msg = self
+            .bot
+            .send_message(chat_id, text)
+            .reply_markup(keyboard)
+            .await?;
         Ok(format!("{}:{}", chat_id.0, msg.id.0))
     }
 
-    async fn edit_message(&self, chat_id_str: &str, message_id: &PlatformMessageId, text: &str) -> Result<()> {
+    async fn edit_message(
+        &self,
+        chat_id_str: &str,
+        message_id: &PlatformMessageId,
+        text: &str,
+    ) -> Result<()> {
         let chat_id = parse_chat_id(chat_id_str)?;
         let parts: Vec<&str> = message_id.split(':').collect();
         let msg_id: i32 = parts.get(1).unwrap_or(&"0").parse()?;
-        self.bot.edit_message_text(chat_id, MessageId(msg_id), text).await?;
+        self.bot
+            .edit_message_text(chat_id, MessageId(msg_id), text)
+            .await?;
         Ok(())
     }
 
     async fn notify_shutdown(&self, chat_id_str: &str) -> Result<()> {
         let chat_id = parse_chat_id(chat_id_str)?;
-        self.bot.send_message(chat_id, "⚠️ Bot is shutting down...").await?;
+        self.bot
+            .send_message(chat_id, "⚠️ Bot is shutting down...")
+            .await?;
         Ok(())
     }
 }

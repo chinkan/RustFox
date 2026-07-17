@@ -24,7 +24,10 @@ impl ConversationManager {
         _config: &Config,
     ) -> Result<Self> {
         let conversation_id = memory.get_or_create_conversation(platform, user_id).await?;
-        let history = memory.load_messages(&conversation_id).await.unwrap_or_default();
+        let history = memory
+            .load_messages(&conversation_id)
+            .await
+            .unwrap_or_default();
 
         let now = chrono::Local::now();
         let context_prompt = format!(
@@ -35,7 +38,9 @@ impl ConversationManager {
 
         let system_msg = ChatMessage {
             role: "system".to_string(),
-            content: Some(MessageContent::Text(format!("{system_prompt}{context_prompt}"))),
+            content: Some(MessageContent::Text(format!(
+                "{system_prompt}{context_prompt}"
+            ))),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -63,7 +68,8 @@ impl ConversationManager {
             config,
             &self.memory,
             supports_vision,
-        ).await;
+        )
+        .await;
 
         let user_msg = ChatMessage {
             role: "user".to_string(),
@@ -71,7 +77,9 @@ impl ConversationManager {
             tool_calls: None,
             tool_call_id: None,
         };
-        self.memory.save_message(&self.conversation_id, &user_msg).await?;
+        self.memory
+            .save_message(&self.conversation_id, &user_msg)
+            .await?;
 
         Ok(image_parts)
     }
@@ -90,7 +98,8 @@ impl ConversationManager {
 
     pub fn inject_rag_context(&mut self, rag_block: &str) {
         if !rag_block.is_empty() {
-            self.system_prompt.push_str(&format!("\n\n# Retrieved Context\n{rag_block}"));
+            self.system_prompt
+                .push_str(&format!("\n\n# Retrieved Context\n{rag_block}"));
         }
     }
 
@@ -105,29 +114,62 @@ impl ConversationManager {
     }
 
     pub async fn compact_tier3(&mut self, context_window: usize) {
-        let total: usize = self.messages.iter().map(|m| m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0)).sum();
+        let total: usize = self
+            .messages
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0))
+            .sum();
         if total > context_window / 2 {
             let system = self.messages.first().cloned();
-            let recent: Vec<ChatMessage> = self.messages.iter().skip(1).rev().take(20).cloned().collect();
+            let recent: Vec<ChatMessage> = self
+                .messages
+                .iter()
+                .skip(1)
+                .rev()
+                .take(20)
+                .cloned()
+                .collect();
             let mut trimmed = Vec::new();
-            if let Some(sys) = system { trimmed.push(sys); }
+            if let Some(sys) = system {
+                trimmed.push(sys);
+            }
             trimmed.extend(recent.into_iter().rev());
             self.messages = trimmed;
         }
     }
 
     pub async fn compact_tier4(&mut self, llm: &LlmClient, context_window: usize) -> Result<bool> {
-        let total: usize = self.messages.iter().map(|m| m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0)).sum();
-        if total <= context_window / 2 { return Ok(false); }
+        let total: usize = self
+            .messages
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0))
+            .sum();
+        if total <= context_window / 2 {
+            return Ok(false);
+        }
 
         let system = self.messages.first().cloned();
         let keep_count = 10.min(self.messages.len().saturating_sub(1));
         let keep_from = self.messages.len().saturating_sub(keep_count);
-        let to_summarize: Vec<&ChatMessage> = self.messages.iter().skip(1).take(keep_from.saturating_sub(1)).collect();
-        if to_summarize.is_empty() { return Ok(false); }
+        let to_summarize: Vec<&ChatMessage> = self
+            .messages
+            .iter()
+            .skip(1)
+            .take(keep_from.saturating_sub(1))
+            .collect();
+        if to_summarize.is_empty() {
+            return Ok(false);
+        }
 
-        let summary_text: String = to_summarize.iter()
-            .map(|m| format!("{}: {}", m.role, m.content.as_ref().map(|c| c.as_text()).unwrap_or_default()))
+        let summary_text: String = to_summarize
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}: {}",
+                    m.role,
+                    m.content.as_ref().map(|c| c.as_text()).unwrap_or_default()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -135,13 +177,17 @@ impl ConversationManager {
         let summary_msg = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: Some(MessageContent::Text("You are a conversation summarizer.".to_string())),
-                tool_calls: None, tool_call_id: None,
+                content: Some(MessageContent::Text(
+                    "You are a conversation summarizer.".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text(summary_prompt)),
-                tool_calls: None, tool_call_id: None,
+                tool_calls: None,
+                tool_call_id: None,
             },
         ];
 
@@ -149,11 +195,21 @@ impl ConversationManager {
             Ok(summary) => {
                 let summary_entry = ChatMessage {
                     role: "user".to_string(),
-                    content: Some(MessageContent::Text(format!("[Previous conversation summarized: {}]", summary.content.as_ref().map(|c| c.as_text()).unwrap_or_default()))),
-                    tool_calls: None, tool_call_id: Some("summary".to_string()),
+                    content: Some(MessageContent::Text(format!(
+                        "[Previous conversation summarized: {}]",
+                        summary
+                            .content
+                            .as_ref()
+                            .map(|c| c.as_text())
+                            .unwrap_or_default()
+                    ))),
+                    tool_calls: None,
+                    tool_call_id: Some("summary".to_string()),
                 };
                 let mut new_msgs = Vec::new();
-                if let Some(sys) = system { new_msgs.push(sys); }
+                if let Some(sys) = system {
+                    new_msgs.push(sys);
+                }
                 new_msgs.push(summary_entry);
                 new_msgs.extend(self.messages.iter().skip(keep_from).cloned());
                 self.messages = new_msgs;

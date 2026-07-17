@@ -97,7 +97,14 @@ impl ToolHandler for MemoryTools {
 
                 if let Ok(msgs) = self.memory.search_messages(query, limit).await {
                     for msg in msgs {
-                        results.push(format!("[{}]: {}", msg.role, msg.content.as_ref().map(|c| c.as_text()).unwrap_or_default()));
+                        results.push(format!(
+                            "[{}]: {}",
+                            msg.role,
+                            msg.content
+                                .as_ref()
+                                .map(|c| c.as_text())
+                                .unwrap_or_default()
+                        ));
                     }
                 }
 

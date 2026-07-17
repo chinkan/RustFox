@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use tokio::sync::Mutex;
 
 /// A shared map of oneshot sender channels keyed by opaque ID.
 /// Any tool can register a cancel channel; the Telegram callback handler

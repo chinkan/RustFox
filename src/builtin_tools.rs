@@ -8,11 +8,11 @@ use tokio::sync::RwLock;
 
 use crate::learning;
 use crate::llm::{FunctionDefinition, ToolDefinition};
+#[allow(unused_imports)]
+use crate::platform::sender::PlatformSender;
 use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 use crate::tools::validate_sandbox_path;
-#[allow(unused_imports)]
-use crate::platform::sender::PlatformSender;
 
 pub struct BuiltinTools {
     skills_dir: PathBuf,
@@ -28,7 +28,12 @@ impl BuiltinTools {
         restart_pending: Arc<AtomicBool>,
         soul_updated: Arc<AtomicBool>,
     ) -> Self {
-        Self { skills_dir, skills, restart_pending, soul_updated }
+        Self {
+            skills_dir,
+            skills,
+            restart_pending,
+            soul_updated,
+        }
     }
 }
 
@@ -231,19 +236,26 @@ impl ToolHandler for BuiltinTools {
             "read_file" => {
                 let path = args["path"].as_str().context("Missing 'path' argument")?;
                 let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
-                let content = tokio::fs::read_to_string(&resolved).await
+                let content = tokio::fs::read_to_string(&resolved)
+                    .await
                     .with_context(|| format!("Failed to read file: {}", resolved.display()))?;
                 Ok(content)
             }
             "write_file" => {
                 let path = args["path"].as_str().context("Missing 'path' argument")?;
-                let content = args["content"].as_str().context("Missing 'content' argument")?;
+                let content = args["content"]
+                    .as_str()
+                    .context("Missing 'content' argument")?;
                 let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
                 if let Some(parent) = resolved.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
                 tokio::fs::write(&resolved, content).await?;
-                Ok(format!("Wrote {} bytes to {}", content.len(), resolved.display()))
+                Ok(format!(
+                    "Wrote {} bytes to {}",
+                    content.len(),
+                    resolved.display()
+                ))
             }
             "list_files" => {
                 let path = args["path"].as_str().unwrap_or(".");
@@ -252,7 +264,11 @@ impl ToolHandler for BuiltinTools {
                 let mut dir = tokio::fs::read_dir(&resolved).await?;
                 while let Some(entry) = dir.next_entry().await? {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let kind = if entry.file_type().await?.is_dir() { "dir" } else { "file" };
+                    let kind = if entry.file_type().await?.is_dir() {
+                        "dir"
+                    } else {
+                        "file"
+                    };
                     entries.push(format!("[{kind}] {name}"));
                 }
                 entries.sort();
@@ -260,16 +276,28 @@ impl ToolHandler for BuiltinTools {
             }
             "send_file" => {
                 let path = args["path"].as_str().context("Missing 'path' argument")?;
-                let caption = args.get("caption").and_then(|v| v.as_str()).filter(|c| !c.is_empty());
+                let caption = args
+                    .get("caption")
+                    .and_then(|v| v.as_str())
+                    .filter(|c| !c.is_empty());
                 let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
-                let metadata = tokio::fs::metadata(&resolved).await
+                let metadata = tokio::fs::metadata(&resolved)
+                    .await
                     .with_context(|| format!("File not found: {}", resolved.display()))?;
                 const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
                 if metadata.len() > TG_FILE_LIMIT {
-                    anyhow::bail!("File is {} MB — exceeds Telegram's 50 MB limit", metadata.len() / 1024 / 1024);
+                    anyhow::bail!(
+                        "File is {} MB — exceeds Telegram's 50 MB limit",
+                        metadata.len() / 1024 / 1024
+                    );
                 }
-                ctx.sender.send_file(&ctx.chat_id, &resolved, caption).await?;
-                let file_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                ctx.sender
+                    .send_file(&ctx.chat_id, &resolved, caption)
+                    .await?;
+                let file_name = resolved
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
                 Ok(format!("File '{}' sent successfully.", file_name))
             }
             "plan_create" => {
@@ -277,28 +305,41 @@ impl ToolHandler for BuiltinTools {
                 let plans_dir = ctx.sandbox_dir.join(".plans");
                 tokio::fs::create_dir_all(&plans_dir).await?;
                 let plan_path = plans_dir.join(format!("{}.json", title));
-                let steps = args["steps"].as_array().context("Missing 'steps' argument")?;
+                let steps = args["steps"]
+                    .as_array()
+                    .context("Missing 'steps' argument")?;
                 let plan = json!({
                     "title": title,
                     "steps": steps,
                     "statuses": vec![json!("todo"); steps.len()],
                 });
                 tokio::fs::write(&plan_path, serde_json::to_string_pretty(&plan)?).await?;
-                Ok(format!("Created plan '{}' with {} steps", title, steps.len()))
+                Ok(format!(
+                    "Created plan '{}' with {} steps",
+                    title,
+                    steps.len()
+                ))
             }
             "plan_update" => {
                 let title = args["title"].as_str().unwrap_or("default");
                 let step_id = args["step_id"].as_u64().context("Missing 'step_id'")? as usize;
-                let status = args["status"].as_str().context("Missing 'status' argument")?;
+                let status = args["status"]
+                    .as_str()
+                    .context("Missing 'status' argument")?;
                 let _notes = args.get("notes").and_then(|v| v.as_str());
-                let plan_path = ctx.sandbox_dir.join(".plans").join(format!("{}.json", title));
+                let plan_path = ctx
+                    .sandbox_dir
+                    .join(".plans")
+                    .join(format!("{}.json", title));
                 let content = tokio::fs::read_to_string(&plan_path).await?;
                 let mut plan: Value = serde_json::from_str(&content)?;
                 if let Some(statuses) = plan.get_mut("statuses").and_then(|s| s.as_array_mut()) {
                     if step_id < statuses.len() {
                         statuses[step_id] = json!(status);
                         if let Some(n) = _notes {
-                            if let Some(notes_arr) = plan.get_mut("notes").and_then(|n| n.as_array_mut()) {
+                            if let Some(notes_arr) =
+                                plan.get_mut("notes").and_then(|n| n.as_array_mut())
+                            {
                                 if step_id < notes_arr.len() {
                                     notes_arr[step_id] = json!(n);
                                 }
@@ -311,13 +352,22 @@ impl ToolHandler for BuiltinTools {
             }
             "plan_view" => {
                 let title = args["title"].as_str().unwrap_or("default");
-                let plan_path = ctx.sandbox_dir.join(".plans").join(format!("{}.json", title));
+                let plan_path = ctx
+                    .sandbox_dir
+                    .join(".plans")
+                    .join(format!("{}.json", title));
                 let content = tokio::fs::read_to_string(&plan_path).await?;
                 Ok(content)
             }
             "try_new_tech" => {
-                let technology = args["technology"].as_str().context("Missing 'technology'")?.to_string();
-                let experiment_code = args["experiment_code"].as_str().context("Missing 'experiment_code'")?.to_string();
+                let technology = args["technology"]
+                    .as_str()
+                    .context("Missing 'technology'")?
+                    .to_string();
+                let experiment_code = args["experiment_code"]
+                    .as_str()
+                    .context("Missing 'experiment_code'")?
+                    .to_string();
                 let language = args["language"].as_str().unwrap_or("rust").to_string();
 
                 let exp_id = uuid::Uuid::new_v4().to_string();
@@ -353,12 +403,24 @@ impl ToolHandler for BuiltinTools {
                 let success = output.status.success();
 
                 let mut result = format!("Experiment: {}\nLanguage: {}\n", technology, language);
-                if !stdout.is_empty() { result.push_str(&format!("STDOUT:\n{}\n", stdout)); }
-                if !stderr.is_empty() { result.push_str(&format!("STDERR:\n{}\n", stderr)); }
-                result.push_str(&format!("Exit code: {}\nResult: {}\n", exit_code, if success { "SUCCESS" } else { "FAILED" }));
+                if !stdout.is_empty() {
+                    result.push_str(&format!("STDOUT:\n{}\n", stdout));
+                }
+                if !stderr.is_empty() {
+                    result.push_str(&format!("STDERR:\n{}\n", stderr));
+                }
+                result.push_str(&format!(
+                    "Exit code: {}\nResult: {}\n",
+                    exit_code,
+                    if success { "SUCCESS" } else { "FAILED" }
+                ));
 
                 if let Err(e) = tokio::fs::remove_dir_all(&exp_dir).await {
-                    tracing::warn!("Failed to clean up experiment dir '{}': {}", exp_dir.display(), e);
+                    tracing::warn!(
+                        "Failed to clean up experiment dir '{}': {}",
+                        exp_dir.display(),
+                        e
+                    );
                 }
                 Ok(result)
             }
@@ -383,34 +445,50 @@ impl ToolHandler for BuiltinTools {
                             && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
                     });
                 if !is_valid_branch {
-                    return Ok(format!("Self-upgrade failed: invalid branch name '{}'", branch));
+                    return Ok(format!(
+                        "Self-upgrade failed: invalid branch name '{}'",
+                        branch
+                    ));
                 }
 
                 match learning::self_upgrade(&branch, &mode, None).await {
                     Ok(log) => {
-                        self.restart_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.restart_pending
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         Ok(log)
                     }
                     Err(e) => Ok(format!("Self-upgrade failed: {:#}", e)),
                 }
             }
             "patch_skill" => {
-                let skill_name = args["skill_name"].as_str().context("Missing 'skill_name'")?.to_string();
-                let patch_content = args["patch_content"].as_str().context("Missing 'patch_content'")?.to_string();
+                let skill_name = args["skill_name"]
+                    .as_str()
+                    .context("Missing 'skill_name'")?
+                    .to_string();
+                let patch_content = args["patch_content"]
+                    .as_str()
+                    .context("Missing 'patch_content'")?
+                    .to_string();
                 match learning::self_patch_skill(
                     &self.skills_dir,
                     &skill_name,
                     &patch_content,
                     &self.skills,
-                ).await {
+                )
+                .await
+                {
                     Ok(msg) => Ok(msg),
                     Err(e) => Ok(format!("Patch failed: {:#}", e)),
                 }
             }
             "read_soul_file" => {
                 let file_name = args["file_name"].as_str().context("Missing 'file_name'")?;
-                let home = ctx.home_dir.as_ref().context("No home directory configured")?;
-                let path = validate_sandbox_path(home, file_name).unwrap_or_else(|_| home.join(file_name));
+                let home = ctx
+                    .home_dir
+                    .as_ref()
+                    .context("No home directory configured")?;
+                let path =
+                    validate_sandbox_path(home, file_name).unwrap_or_else(|_| home.join(file_name));
                 match tokio::fs::read_to_string(&path).await {
                     Ok(content) => Ok(content),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -428,10 +506,16 @@ impl ToolHandler for BuiltinTools {
                     return Ok("Content contains null bytes and was rejected.".to_string());
                 }
                 if content.len() > 100_000 {
-                    return Ok("Content too large (max 100KB). Please consolidate the file first.".to_string());
+                    return Ok(
+                        "Content too large (max 100KB). Please consolidate the file first."
+                            .to_string(),
+                    );
                 }
 
-                let home = ctx.home_dir.as_ref().context("No home directory configured")?;
+                let home = ctx
+                    .home_dir
+                    .as_ref()
+                    .context("No home directory configured")?;
                 let path = home.join(file_name);
 
                 let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
@@ -439,8 +523,15 @@ impl ToolHandler for BuiltinTools {
                 let new_content = match mode {
                     "append" => {
                         if existing.trim().is_empty() {
-                            if content.starts_with("---") { content.to_string() }
-                            else { format!("---\nname: {}\nversion: 1\n---\n\n{}", file_name.trim_end_matches(".md"), content) }
+                            if content.starts_with("---") {
+                                content.to_string()
+                            } else {
+                                format!(
+                                    "---\nname: {}\nversion: 1\n---\n\n{}",
+                                    file_name.trim_end_matches(".md"),
+                                    content
+                                )
+                            }
                         } else {
                             if !existing.trim().starts_with("---") {
                                 return Ok("Existing soul file has invalid format (missing frontmatter). Rejected.".to_string());
@@ -450,7 +541,9 @@ impl ToolHandler for BuiltinTools {
                     }
                     "replace" => {
                         if !content.trim().starts_with("---") {
-                            return Ok("Replace mode requires content with YAML frontmatter".to_string());
+                            return Ok(
+                                "Replace mode requires content with YAML frontmatter".to_string()
+                            );
                         }
                         content.to_string()
                     }
@@ -458,10 +551,16 @@ impl ToolHandler for BuiltinTools {
                 };
 
                 if !learning::has_valid_frontmatter(&new_content) {
-                    return Ok("Update would produce invalid soul file (missing frontmatter). Rejected.".to_string());
+                    return Ok(
+                        "Update would produce invalid soul file (missing frontmatter). Rejected."
+                            .to_string(),
+                    );
                 }
                 if !new_content.contains("name:") || !new_content.contains("version:") {
-                    return Ok("Update rejected: frontmatter must contain 'name' and 'version' fields.".to_string());
+                    return Ok(
+                        "Update rejected: frontmatter must contain 'name' and 'version' fields."
+                            .to_string(),
+                    );
                 }
 
                 fn bak_path(p: &std::path::Path, suffix: &str) -> PathBuf {
@@ -482,32 +581,53 @@ impl ToolHandler for BuiltinTools {
 
                 if let Err(e) = tokio::fs::write(&path, &new_content).await {
                     let bak = bak_path(&path, ".bak");
-                    if bak.exists() { let _ = tokio::fs::copy(&bak, &path).await; }
-                    return Ok(format!("Failed to write soul file (restored from backup): {}", e));
+                    if bak.exists() {
+                        let _ = tokio::fs::copy(&bak, &path).await;
+                    }
+                    return Ok(format!(
+                        "Failed to write soul file (restored from backup): {}",
+                        e
+                    ));
                 }
 
                 match tokio::fs::read_to_string(&path).await {
                     Ok(read_back) if read_back == new_content => {
-                        self.soul_updated.store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.soul_updated
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         Ok(format!(
-                            "{} updated successfully. Backup at {}.bak", file_name, path.display()
+                            "{} updated successfully. Backup at {}.bak",
+                            file_name,
+                            path.display()
                         ))
                     }
                     Ok(_) => {
                         let bak = bak_path(&path, ".bak");
-                        if bak.exists() { let _ = tokio::fs::copy(&bak, &path).await; }
-                        Ok("Write verification failed (content mismatch). Restored from backup.".to_string())
+                        if bak.exists() {
+                            let _ = tokio::fs::copy(&bak, &path).await;
+                        }
+                        Ok(
+                            "Write verification failed (content mismatch). Restored from backup."
+                                .to_string(),
+                        )
                     }
                     Err(e) => {
                         let bak = bak_path(&path, ".bak");
-                        if bak.exists() { let _ = tokio::fs::copy(&bak, &path).await; }
-                        Ok(format!("Write verification error (restored from backup): {}", e))
+                        if bak.exists() {
+                            let _ = tokio::fs::copy(&bak, &path).await;
+                        }
+                        Ok(format!(
+                            "Write verification error (restored from backup): {}",
+                            e
+                        ))
                     }
                 }
             }
             "revert_soul_file" => {
                 let file_name = args["file_name"].as_str().context("Missing 'file_name'")?;
-                let home = ctx.home_dir.as_ref().context("No home directory configured")?;
+                let home = ctx
+                    .home_dir
+                    .as_ref()
+                    .context("No home directory configured")?;
                 let path = home.join(file_name);
                 let bak = {
                     let mut s = path.to_string_lossy().to_string();

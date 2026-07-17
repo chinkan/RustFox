@@ -174,8 +174,10 @@ async fn main() -> Result<()> {
     }
     // Write a home-side lock recording content hashes for future diff/audit.
     if let Some(home) = &config.resolved_home {
-        let _ = rustfox::skills::seed::write_lock("skills-lock.json", &config.skills.directory, home);
-        let _ = rustfox::skills::seed::write_lock("agents-lock.json", &config.agents.directory, home);
+        let _ =
+            rustfox::skills::seed::write_lock("skills-lock.json", &config.skills.directory, home);
+        let _ =
+            rustfox::skills::seed::write_lock("agents-lock.json", &config.agents.directory, home);
     }
 
     // Load skills from the instance directory.

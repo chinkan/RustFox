@@ -1,6 +1,6 @@
-use std::path::Path;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::Path;
 
 /// Opaque message identifier returned by the platform after sending.
 /// Telegram encoding: `"{chat_id_int}:{message_id_int}"`.
