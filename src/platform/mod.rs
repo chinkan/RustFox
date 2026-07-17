@@ -1,5 +1,8 @@
+pub mod sender;
 pub mod telegram;
 pub mod tool_notifier;
+
+pub use sender::{PlatformMessageId, PlatformSender};
 
 /// What kind of attachment was received
 #[derive(Debug, Clone, PartialEq)]

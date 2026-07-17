@@ -1,17 +1,77 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{ParseMode, UpdateKind};
 use tracing::{error, info, warn};
 
-use crate::agent::Agent;
+use async_trait::async_trait;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+
+use crate::agent::{Agent, LoopCallbackChoice, MidRunMode};
+use crate::platform::sender::{
+    MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender,
+};
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
+use crate::utils::rich_sender;
 use crate::utils::telegram_markdown::escape_text;
+use std::sync::OnceLock;
+
+/// Helper: parse a chat_id string (e.g. "123456789") into teloxide's ChatId.
+fn parse_chat_id(s: &str) -> Result<teloxide::types::ChatId> {
+    Ok(teloxide::types::ChatId(s.parse::<i64>()?))
+}
+
+static BOT_TOKEN: OnceLock<String> = OnceLock::new();
+
+/// Must be called once at startup after the Bot is created.
+pub fn init_bot_token(token: String) {
+    BOT_TOKEN.set(token).ok();
+}
+
+/// Message format mode for Telegram responses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MessageFormat {
+    /// `sendRichMessage` only, no fallback
+    Rich,
+    /// Entity-formatted `sendMessage` only, no rich path
+    Markdown,
+    /// Try `sendRichMessage`, fall back to entities on BadMarkdown
+    Auto,
+}
+
+impl MessageFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageFormat::Rich => "rich",
+            MessageFormat::Markdown => "markdown",
+            MessageFormat::Auto => "auto",
+        }
+    }
+
+    pub fn from_str_value(s: &str) -> Option<Self> {
+        match s {
+            "rich" => Some(MessageFormat::Rich),
+            "markdown" => Some(MessageFormat::Markdown),
+            "auto" => Some(MessageFormat::Auto),
+            _ => None,
+        }
+    }
+}
+
+/// Load the user's preferred message format from memory.
+async fn load_message_format(memory: &crate::memory::MemoryStore, user_id: &str) -> MessageFormat {
+    let raw = memory
+        .recall("settings", &format!("message_format_{}", user_id))
+        .await
+        .unwrap_or(None);
+    MessageFormat::from_str_value(raw.as_deref().unwrap_or("auto")).unwrap_or(MessageFormat::Auto)
+}
 
 /// Split long messages for Telegram's 4096 char limit
 #[cfg(test)]
@@ -91,6 +151,13 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "Upgrade the bot to the latest version (source or release binary)",
         ),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
+        BotCommand::new("mode", "Set steer/queue mode for mid-processing messages"),
+        BotCommand::new("stop", "Cancel the current processing gracefully"),
+        BotCommand::new("btw", "Ask a parallel question while the bot is busy"),
+        BotCommand::new(
+            "format",
+            "Switch message format: rich (native), markdown (web), auto",
+        ),
     ]
 }
 
@@ -199,12 +266,43 @@ pub async fn run(
         })
         .endpoint(handle_model_callback);
 
+    let loop_callback_handler = Update::filter_callback_query()
+        .filter_map(|q: CallbackQuery| {
+            if q.data
+                .as_deref()
+                .is_some_and(|d| d.contains(r#""type":"loop""#))
+            {
+                Some(q)
+            } else {
+                None
+            }
+        })
+        .endpoint(handle_loop_callback);
+
     let handler = dptree::entry()
         .branch(message_handler)
+        .branch(loop_callback_handler)
         .branch(callback_handler);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![agent])
+        // Commands (like /btw) bypass per-chat serialization for true concurrency.
+        // Regular messages keep per-chat ordering to avoid race conditions.
+        .distribution_function(|upd: &Update| {
+            let is_cmd = match &upd.kind {
+                UpdateKind::Message(m)
+                | UpdateKind::EditedMessage(m)
+                | UpdateKind::ChannelPost(m) => {
+                    m.text().map(|t| t.starts_with('/')).unwrap_or(false)
+                }
+                _ => false,
+            };
+            if is_cmd {
+                None
+            } else {
+                upd.chat().map(|c| c.id)
+            }
+        })
         .default_handler(|upd| async move {
             warn!("Unhandled update: {:?}", upd.id);
         })
@@ -214,6 +312,67 @@ pub async fn run(
         .await;
 
     Ok(())
+}
+
+/// Send entities-only fallback (no rich path).
+async fn send_entities_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
+    let (text, entities) = markdown_to_entities(markdown);
+    let chunks = split_entities(&text, &entities, 4090);
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
+        if i == 0 {
+            bot.send_message(chat_id, chunk_text)
+                .entities(chunk_entities.clone())
+                .await?;
+        } else {
+            bot.send_message(chat_id, chunk_text)
+                .entities(chunk_entities.clone())
+                .await
+                .ok();
+        }
+    }
+    Ok(())
+}
+
+/// Send a markdown string with the user's preferred format mode.
+pub async fn send_markdown_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    markdown: &str,
+    format: MessageFormat,
+) -> ResponseResult<()> {
+    match format {
+        MessageFormat::Rich => {
+            let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
+            let processed = crate::utils::markdown_entities::preprocess_markdown(markdown);
+            rich_sender::send_rich_messages(token, chat_id.0, &processed)
+                .await
+                .map_err(|e| {
+                    teloxide::RequestError::Io(Arc::new(std::io::Error::other(format!("{e}"))))
+                })?;
+            Ok(())
+        }
+        MessageFormat::Markdown => send_entities_message(bot, chat_id, markdown).await,
+        MessageFormat::Auto => {
+            let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized");
+
+            let entity_sender = || async { send_entities_message(bot, chat_id, markdown).await };
+
+            match rich_sender::try_send_rich_fallback(token, chat_id.0, markdown, &entity_sender)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    warn!("send_markdown_message all paths failed: {e}");
+                    Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
+                        format!("{e}"),
+                    ))))
+                }
+            }
+        }
+    }
 }
 
 fn is_verbose_enabled(value: Option<&str>) -> bool {
@@ -487,6 +646,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     let user_id = user.id.0;
     let user_name = user.first_name.clone();
+    let mut msg_format = load_message_format(&agent.memory, &user_id.to_string()).await;
 
     // For media messages, use caption as text; for text messages, use msg.text()
     let text = msg
@@ -580,66 +740,109 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         {
             error!("Failed to clear conversation: {}", e);
         }
-        bot.send_message(
+        return send_markdown_message(
+            &bot,
             msg.chat.id,
-            escape_text("Conversation archived. Past messages remain searchable."),
+            "Conversation archived. Past messages remain searchable.",
+            msg_format,
         )
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-        return Ok(());
+        .await;
     }
 
     if text == "/start" {
-        let help = escape_text(
-            "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
+        let help = "Hello! I'm your AI assistant. Send me a message and I'll help you.\n\n\
              Commands:\n\
-             /clear - Clear conversation history\n\
-             /tools - List available tools\n\
-             /skills - List loaded skills\n\
-             /update-skills - Re-sync bundled skills/agents (backs up local edits)\n\
-             /verbose - Toggle tool call progress display\n\
-             /queryrewrite - Toggle query rewriting for memory search\n\
-             /selfupgrade - Upgrade the bot (source or release binary)\n\
-             /models - Browse and change the OpenRouter model",
-        );
-        bot.send_message(msg.chat.id, help)
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+             **/clear** — Clear conversation history\n\
+             **/tools** — List available tools\n\
+             **/skills** — List loaded skills\n\
+             **/update-skills** — Re-sync bundled skills (backs up local edits)\n\
+             **/verbose** — Toggle tool call progress display\n\
+             **/queryrewrite** — Toggle query rewriting for memory search\n\
+             **/format** — Switch message format: rich, markdown, or auto\n\
+             **/selfupgrade** — Upgrade the bot (source or release binary)\n\
+             **/models** — Browse and change the model\n\
+             **/stop** — Cancel the current processing gracefully\n\
+             **/btw** — Ask a parallel question while the bot is busy";
+        return send_markdown_message(&bot, msg.chat.id, help, msg_format).await;
     }
 
     if text == "/tools" {
         let all_tools = agent.all_tool_definitions();
-        let mut tool_list = String::from("Available tools:\n\n");
+        let mut builtin = Vec::new();
+        let mut mcp_servers: BTreeMap<String, Vec<&crate::llm::ToolDefinition>> = BTreeMap::new();
+
+        // Known MCP server names (same list as friendly_tool_name in tool_notifier.rs)
+        // Sorted by length descending to match longest first (handles server names with underscores)
+        const KNOWN_MCP_SERVERS: [&str; 14] = [
+            "google-workspace",
+            "google_workspace",
+            "brave-search",
+            "brave_search",
+            "filesystem",
+            "puppeteer",
+            "github",
+            "sqlite",
+            "threads",
+            "notion",
+            "fetch",
+            "git",
+            "context7",
+            "qdrant",
+        ];
+
         for tool in &all_tools {
+            if let Some(rest) = tool.function.name.strip_prefix("mcp_") {
+                let server = KNOWN_MCP_SERVERS
+                    .iter()
+                    .find(|server| rest.starts_with(&format!("{}_", server)))
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        // Unknown server: split on first underscore
+                        rest.find('_').map(|sep| rest[..sep].to_string())
+                    });
+                match server {
+                    Some(s) => mcp_servers.entry(s).or_default().push(tool),
+                    None => builtin.push(tool),
+                }
+            } else {
+                builtin.push(tool);
+            }
+        }
+
+        let mut tool_list = format!("**Built-in tools** ({}):\n", builtin.len());
+        for tool in &builtin {
             tool_list.push_str(&format!(
-                "  - {}: {}\n",
+                "  - `{}`: {}\n",
                 tool.function.name, tool.function.description
             ));
         }
-        bot.send_message(msg.chat.id, escape_text(&tool_list))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        tool_list.push('\n');
+
+        for (server, tools) in &mcp_servers {
+            tool_list.push_str(&format!("**MCP: {}** ({}):\n", server, tools.len()));
+            for tool in tools {
+                tool_list.push_str(&format!(
+                    "  - `{}`: {}\n",
+                    tool.function.name, tool.function.description
+                ));
+            }
+            tool_list.push('\n');
+        }
+
+        return send_markdown_message(&bot, msg.chat.id, &tool_list, msg_format).await;
     }
 
     if text == "/skills" {
         let skills_guard = agent.skills.read().await;
         let skills = skills_guard.list();
         if skills.is_empty() {
-            bot.send_message(msg.chat.id, escape_text("No skills loaded."))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-        } else {
-            let mut skill_list = String::from("Loaded skills:\n\n");
-            for skill in &skills {
-                skill_list.push_str(&format!("  - {}: {}\n", skill.name, skill.description));
-            }
-            bot.send_message(msg.chat.id, escape_text(&skill_list))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
+            return send_markdown_message(&bot, msg.chat.id, "No skills loaded.", msg_format).await;
         }
-        return Ok(());
+        let mut skill_list = String::from("**Loaded skills:**\n\n");
+        for skill in &skills {
+            skill_list.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+        }
+        return send_markdown_message(&bot, msg.chat.id, &skill_list, msg_format).await;
     }
 
     if text == "/updateskills" || text == "/update-skills" {
@@ -663,10 +866,7 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         let (s, a) = agent.reload_skills_and_agents().await;
         lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
 
-        bot.send_message(msg.chat.id, escape_text(&lines.join("\n")))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        return send_markdown_message(&bot, msg.chat.id, &lines.join("\n"), msg_format).await;
     }
 
     if text == "/verbose" {
@@ -688,14 +888,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await
             .ok();
         let reply = if new_value == "true" {
-            "🔧 Tool call UI enabled. I'll show you what I'm working on."
+            "🔧 **Tool call UI enabled.** I'll show you what I'm working on."
         } else {
-            "🔇 Tool call UI disabled. I'll respond silently."
+            "🔇 **Tool call UI disabled.** I'll respond silently."
         };
-        bot.send_message(msg.chat.id, escape_text(reply))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
+        return send_markdown_message(&bot, msg.chat.id, reply, msg_format).await;
     }
 
     // Accept both the canonical `/queryrewrite` (registered with Telegram —
@@ -725,13 +922,93 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             .await
             .ok();
         let reply = if new_value == "true" {
-            "🔍 Query rewriting enabled. Follow-up questions will be rewritten before memory search."
+            "🔍 **Query rewriting enabled.** Follow-up questions will be rewritten before memory search."
         } else {
-            "🔍 Query rewriting disabled. Messages will be searched as-is."
+            "🔍 **Query rewriting disabled.** Messages will be searched as-is."
         };
-        bot.send_message(msg.chat.id, escape_text(reply))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        return send_markdown_message(&bot, msg.chat.id, reply, msg_format).await;
+    }
+
+    // Handle /btw <text> for context-forked side question
+    if text == "/btw" || text.starts_with("/btw ") {
+        let btw_text = text
+            .strip_prefix("/btw")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("What are you doing?")
+            .to_string();
+
+        // Reply immediately, then answer in background
+        let _ = send_markdown_message(
+            &bot,
+            msg.chat.id,
+            "⏳ **BTW question sent to subagent...**",
+            msg_format,
+        )
+        .await;
+
+        let agent_clone = agent.clone();
+        let bot_clone = bot.clone();
+        let chat_id = msg.chat.id;
+        let user_id_str = user_id.to_string();
+        let btw_format = msg_format;
+        tokio::spawn(async move {
+            // Load conversation context inside the spawned task
+            let conversation_id = match agent_clone
+                .memory
+                .get_or_create_conversation("telegram", &user_id_str)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = send_markdown_message(
+                        &bot_clone,
+                        chat_id,
+                        &format!("**BTW error:** {}", e),
+                        btw_format,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let messages = agent_clone
+                .memory
+                .load_messages_with_limit(
+                    &conversation_id,
+                    agent_clone.config.memory.max_raw_messages,
+                )
+                .await
+                .unwrap_or_default();
+
+            let forked = crate::agent::build_btw_context(&messages, &btw_text);
+            // Use the agent's current model (qualified string like "openrouter/qwen/qwen3-235b-a22b")
+            let model = agent_clone.current_model.read().await.clone();
+            match agent_clone
+                .llm
+                .chat_completion_with_model(&forked, &[], &model)
+                .await
+            {
+                Ok(response) => {
+                    let text = response
+                        .message
+                        .content
+                        .as_ref()
+                        .map(|c| c.as_text())
+                        .unwrap_or_default();
+                    let _ = send_markdown_message(&bot_clone, chat_id, &text, btw_format).await;
+                }
+                Err(e) => {
+                    let _ = send_markdown_message(
+                        &bot_clone,
+                        chat_id,
+                        &format!("**BTW error:** {}", e),
+                        btw_format,
+                    )
+                    .await;
+                }
+            }
+        });
+
         return Ok(());
     }
 
@@ -877,6 +1154,166 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         }
     }
 
+    // Handle /format command — switch message output format
+    if text.starts_with("/format") {
+        let parts: Vec<&str> = text.splitn(2, |c: char| c.is_whitespace()).collect();
+        let sub = parts.get(1).copied().unwrap_or("");
+        match sub {
+            "rich" | "markdown" | "auto" => {
+                let fmt = MessageFormat::from_str_value(sub).unwrap();
+                msg_format = fmt;
+                agent
+                    .memory
+                    .remember(
+                        "settings",
+                        &format!("message_format_{}", user_id),
+                        sub,
+                        None,
+                    )
+                    .await
+                    .ok();
+                return send_markdown_message(
+                    &bot,
+                    msg.chat.id,
+                    &format!(
+                        "✅ **Format changed to {}.** {}",
+                        sub,
+                        match fmt {
+                            MessageFormat::Rich => "Using sendRichMessage (Telegram native only).",
+                            MessageFormat::Markdown =>
+                                "Using entity-formatted sendMessage (works everywhere).",
+                            MessageFormat::Auto => "Try rich, fall back to entities on failure.",
+                        }
+                    ),
+                    msg_format,
+                )
+                .await;
+            }
+            "" => {
+                return send_markdown_message(
+                    &bot,
+                    msg.chat.id,
+                    &format!(
+                        "Current format: **{}**\n\n\
+                         Use `/format rich`, `/format markdown`, or `/format auto` to change.\n\n\
+                         - **rich** — sendRichMessage (Telegram native only)\n\
+                         - **markdown** — entity-formatted sendMessage (works everywhere)\n\
+                         - **auto** — try rich, fall back to entities",
+                        msg_format.as_str()
+                    ),
+                    msg_format,
+                )
+                .await;
+            }
+            _ => {
+                return send_markdown_message(
+                    &bot,
+                    msg.chat.id,
+                    "Unknown format. Use `/format rich`, `/format markdown`, or `/format auto`.",
+                    msg_format,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Handle /mode command
+    if text.starts_with("/mode") {
+        let parts: Vec<&str> = text.splitn(2, |c: char| c.is_whitespace()).collect();
+        let sub = parts.get(1).copied().unwrap_or("");
+        if sub == "steer" {
+            agent
+                .set_mid_run_mode(&user_id.to_string(), MidRunMode::Steer)
+                .await;
+            return send_markdown_message(
+                &bot, msg.chat.id,
+                "🔄 **Mode set to steer.** Mid-processing messages will be injected as steering context.",
+                msg_format,
+            ).await;
+        } else if sub == "queue" {
+            agent
+                .set_mid_run_mode(&user_id.to_string(), MidRunMode::Queue)
+                .await;
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "🔄 **Mode set to queue.** Mid-processing messages will wait for the next turn.",
+                msg_format,
+            )
+            .await;
+        } else if sub.is_empty() {
+            let current = agent.get_mid_run_mode(&user_id.to_string()).await;
+            let mode_str = current.as_str();
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                &format!(
+                    "Current mode: **{}**\n\nUse `/mode steer` or `/mode queue` to change.",
+                    mode_str
+                ),
+                msg_format,
+            )
+            .await;
+        } else {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "Unknown mode. Use `/mode steer` or `/mode queue`.",
+                msg_format,
+            )
+            .await;
+        }
+    }
+
+    // Handle /stop command
+    if text == "/stop" {
+        if agent.cancel_processing(&user_id.to_string()).await {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "⏹ **Processing cancelled.** Accumulated state has been saved.",
+                msg_format,
+            )
+            .await;
+        } else {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "Nothing is currently processing.",
+                msg_format,
+            )
+            .await;
+        }
+    }
+
+    // CHECK: if user is currently being processed, queue non-command messages as injection
+    if !text.starts_with('/') && agent.is_processing(&user_id.to_string()).await {
+        let current_mode = agent.get_mid_run_mode(&user_id.to_string()).await;
+        let maxed = !agent.queue_injection(&user_id.to_string(), &text).await;
+        if maxed {
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "⚠️ **Injection queue full** (max 10). Please wait for current processing to finish.",
+                msg_format,
+            )
+            .await;
+        }
+        info!(
+            "Queued '{}' as injection for user {} (mode: {:?})",
+            text, user_id, current_mode
+        );
+        let confirm = match current_mode {
+            MidRunMode::Steer => {
+                "📨 **Steer queued** — will inject into current processing at next step."
+            }
+            MidRunMode::Queue => {
+                "📨 **Message queued** — will process after current task completes."
+            }
+        };
+        return send_markdown_message(&bot, msg.chat.id, confirm, msg_format).await;
+    }
+
     // Send "typing" indicator
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await
@@ -948,48 +1385,57 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     };
 
     // Streaming: set up token channel for progressive message display
-    const TELEGRAM_STREAM_SPLIT: usize = 3800;
+    // Split threshold: use UTF-16 code units (Telegram's limit is 4096).
+    // Streaming uses a conservative 3500 to leave room for mid-split growth.
+    // The final flush uses markdown_to_entities + split_entities with MAX_UTF16=4090.
+    const TELEGRAM_STREAM_SPLIT_UTF16: usize = 3500;
 
     let (stream_token_tx, stream_token_rx) = tokio::sync::mpsc::channel::<String>(128);
 
     // Spawn receiver task: edits Telegram message as tokens arrive
     let stream_bot = bot.clone();
     let stream_chat_id = msg.chat.id;
+    let stream_format = msg_format;
     let stream_handle = tokio::spawn(async move {
         use std::time::{Duration, Instant};
 
+        struct StreamChunk {
+            content: String,
+            msg_id: Option<teloxide::types::MessageId>,
+        }
+
         let mut buffer = String::new();
-        // The first token always starts a fresh message — the placeholder
-        // (if any) is owned and deleted by `handle_message` after streaming.
         let mut current_msg_id: Option<teloxide::types::MessageId> = None;
+        let mut chunks: Vec<StreamChunk> = Vec::new();
         let mut last_action = Instant::now();
         let mut rx = stream_token_rx;
+        let mut buffer_utf16_len: usize = 0;
 
         while let Some(token) = rx.recv().await {
             buffer.push_str(&token);
+            buffer_utf16_len += token.encode_utf16().count();
 
             // When buffer exceeds split threshold, finalize the current message
             // and reset so subsequent tokens start a new message.
-            //
-            // Previous logic sent the full buffer as a NEW message, then cleared
-            // the buffer.  This caused the new message to visually shrink on the
-            // next edit (which only contained the small post-split tokens).
-            //
-            // Fix: edit/send the current message with its accumulated content
-            // (finalizing it), then clear the buffer AND current_msg_id so the
-            // next batch of tokens creates a fresh message.
-            if buffer.len() > TELEGRAM_STREAM_SPLIT {
-                if let Some(msg_id) = current_msg_id {
-                    if let Err(e) = stream_bot
-                        .edit_message_text(stream_chat_id, msg_id, &buffer)
+            if buffer_utf16_len > TELEGRAM_STREAM_SPLIT_UTF16 {
+                let snapshot = buffer.clone();
+                let msg_id = if let Some(mid) = current_msg_id {
+                    stream_bot
+                        .edit_message_text(stream_chat_id, mid, &snapshot)
                         .await
-                    {
-                        tracing::warn!(error = %e, "stream_handle: edit failed at split");
-                    }
-                } else if let Err(e) = stream_bot.send_message(stream_chat_id, &buffer).await {
-                    tracing::warn!(error = %e, "stream_handle: send failed at split");
-                }
+                        .ok();
+                    Some(mid)
+                } else if let Ok(sent) = stream_bot.send_message(stream_chat_id, &snapshot).await {
+                    Some(sent.id)
+                } else {
+                    None
+                };
+                chunks.push(StreamChunk {
+                    content: snapshot,
+                    msg_id,
+                });
                 buffer.clear();
+                buffer_utf16_len = 0;
                 current_msg_id = None;
                 last_action = Instant::now();
                 continue;
@@ -1012,44 +1458,86 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
             }
         }
 
-        // Final: flush whatever is left in the buffer.
-        // Use the entity-based approach: convert completed Markdown to (plain_text, entities).
-        // This is robust for LLM output — no escaping needed, no risk of Telegram 400 errors.
-        // Intermediate streaming edits remain plain text (partial markdown is fragile).
-        if !buffer.is_empty() {
-            const MAX_UTF16: usize = 4090;
-            let (plain_text, entities) = markdown_to_entities(&buffer);
-            let chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+        // If the last buffer had no message ID yet, send it now.
+        if !buffer.is_empty() && current_msg_id.is_none() {
+            match stream_bot.send_message(stream_chat_id, &buffer).await {
+                Ok(sent) => current_msg_id = Some(sent.id),
+                Err(e) => tracing::warn!(error = %e, "stream_handle: final send failed"),
+            }
+        }
 
-            for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
-                if i == 0 {
-                    // First chunk: edit or replace the existing in-progress message
-                    if let Some(msg_id) = current_msg_id {
-                        stream_bot
-                            .edit_message_text(stream_chat_id, msg_id, chunk_text)
-                            .entities(chunk_entities.clone())
-                            .await
-                            .ok();
-                    } else {
-                        stream_bot
-                            .send_message(stream_chat_id, chunk_text)
-                            .entities(chunk_entities.clone())
-                            .await
-                            .ok();
+        // Add the last segment as the final chunk.
+        chunks.push(StreamChunk {
+            content: buffer,
+            msg_id: current_msg_id,
+        });
+
+        // If nothing was streamed, skip the final formatting.
+        if chunks.is_empty() || chunks.iter().all(|c| c.content.is_empty()) {
+            return;
+        }
+
+        // Build the full text from all chunks.
+        let full_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
+
+        // Collect all message IDs for cleanup.
+        let old_ids: Vec<teloxide::types::MessageId> =
+            chunks.iter().filter_map(|c| c.msg_id).collect();
+
+        const MAX_UTF16: usize = 4090;
+
+        // Delete all old streaming messages (best-effort) so we can send fresh
+        // properly-formatted chunks without orphaned plain-text messages.
+        for mid in &old_ids {
+            stream_bot.delete_message(stream_chat_id, *mid).await.ok();
+        }
+
+        // Pre-process markdown for spoiler/underline
+        let processed = crate::utils::markdown_entities::preprocess_markdown(&full_text);
+        let (plain_text, entities) = markdown_to_entities(&full_text);
+        let entity_chunks = split_entities(&plain_text, &entities, MAX_UTF16);
+        let rich_chunks = rich_sender::split_markdown_at_newlines(&processed, MAX_UTF16);
+        let token = BOT_TOKEN.get().expect("BOT_TOKEN not initialized").clone();
+
+        match stream_format {
+            MessageFormat::Rich => {
+                for chunk_md in &rich_chunks {
+                    if rich_sender::send_rich_message(&token, stream_chat_id.0, chunk_md)
+                        .await
+                        .is_err()
+                    {
+                        // Rich-only mode: one failure stops the chain
+                        tracing::warn!("stream_handle: rich send failed, aborting");
+                        break;
                     }
-                } else {
-                    // Subsequent chunks: send as new messages
+                }
+            }
+            MessageFormat::Markdown => {
+                for (ct, ce) in &entity_chunks {
                     stream_bot
-                        .send_message(stream_chat_id, chunk_text)
-                        .entities(chunk_entities.clone())
+                        .send_message(stream_chat_id, ct)
+                        .entities(ce.clone())
                         .await
                         .ok();
                 }
             }
+            MessageFormat::Auto => {
+                for (i, chunk_md) in rich_chunks.iter().enumerate() {
+                    let result =
+                        rich_sender::send_rich_message(&token, stream_chat_id.0, chunk_md).await;
+                    if result.is_err() {
+                        // Fallback: use entity chunk i
+                        if let Some((ct, ce)) = entity_chunks.get(i) {
+                            stream_bot
+                                .send_message(stream_chat_id, ct)
+                                .entities(ce.clone())
+                                .await
+                                .ok();
+                        }
+                    }
+                }
+            }
         }
-        // If `buffer` was empty and `current_msg_id` is None, nothing was
-        // streamed — the placeholder owned by `handle_message` will be cleaned
-        // up after this task completes.
     });
 
     // Build platform-agnostic message
@@ -1111,9 +1599,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
 
     if let Err(e) = process_result {
         warn!(error = %e, "Agent processing failed");
-        bot.send_message(msg.chat.id, escape_text(&format!("Error: {:#}", e)))
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e), msg_format)
+            .await;
     }
     // Success: response already delivered via streaming
 
@@ -1137,6 +1624,41 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     Ok(())
 }
 
+/// Handle callback query from loop detection inline keyboard.
+/// Resolves the oneshot sender so the suspended agent loop can continue.
+async fn handle_loop_callback(bot: Bot, q: CallbackQuery, agent: Arc<Agent>) -> ResponseResult<()> {
+    let user_id = q.from.id.to_string();
+    let data = match q.data {
+        Some(ref d) => d.clone(),
+        None => {
+            // Even if there's no data, we must answer the callback query
+            bot.answer_callback_query(q.id).await.ok();
+            return Ok(());
+        }
+    };
+
+    // Parse the user's choice from callback data
+    let choice = if data.contains(r#""action":"continue""#) {
+        LoopCallbackChoice::Continue
+    } else if data.contains(r#""action":"stop""#) {
+        LoopCallbackChoice::Stop
+    } else if data.contains(r#""action":"add_instruction""#) {
+        LoopCallbackChoice::AddInstruction
+    } else {
+        // Unknown action — answer and ignore
+        bot.answer_callback_query(q.id).await.ok();
+        return Ok(());
+    };
+
+    // Send the choice to the waiting agent loop (if any)
+    if let Some(sender) = agent.take_loop_callback(&user_id).await {
+        let _ = sender.send(choice);
+    }
+
+    bot.answer_callback_query(q.id).await.ok();
+    Ok(())
+}
+
 /// Handle callback queries from inline keyboard buttons (e.g. model selection).
 async fn handle_model_callback(
     bot: Bot,
@@ -1146,13 +1668,21 @@ async fn handle_model_callback(
     let callback_id = q.id.clone();
     let data = match q.data {
         Some(ref d) => d.clone(),
-        None => return Ok(()),
+        None => {
+            // Even if there's no data, we must answer the callback query
+            bot.answer_callback_query(callback_id).await.ok();
+            return Ok(());
+        }
     };
     let msg = q.regular_message().cloned();
 
-    bot.answer_callback_query(callback_id).await?;
+    // Remove the old unconditional answer_callback_query that had no text.
+    // Each branch below now answers with the appropriate text (or silently)
+    // exactly once. A second answer for the same callback_id is ignored by
+    // Telegram, which previously swallowed the "⛔ Command cancelled" toast.
 
     if let Some(provider_name) = data.strip_prefix("provider_select:") {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(provider) = agent.registry.get_provider(provider_name) {
             if let Some(ref m) = msg {
                 let user_id = q.from.id.0.to_string();
@@ -1171,6 +1701,7 @@ async fn handle_model_callback(
     }
 
     if data == "model_search_prompt" {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(m) = msg {
             let prompt = "Send me a model name or ID to search for. Examples: claude, kimi, gpt, or a full model ID like openrouter/o3-mini.";
             bot.edit_message_text(m.chat.id, m.id, prompt).await?;
@@ -1191,10 +1722,22 @@ async fn handle_model_callback(
     }
 
     if data == "model_select:cancel" {
+        bot.answer_callback_query(callback_id.clone()).await.ok();
         if let Some(m) = msg {
             bot.edit_message_text(m.chat.id, m.id, "❌ Model selection cancelled.")
                 .await?;
         }
+        return Ok(());
+    }
+
+    // Handle command cancellation via CancelRegistry
+    if let Some(cmd_id) = data.strip_prefix("cancel_cmd:") {
+        let text = if agent.cancel_registry.cancel(cmd_id).await {
+            "⛔ Command cancelled"
+        } else {
+            "Command already finished"
+        };
+        bot.answer_callback_query(callback_id).text(text).await.ok();
         return Ok(());
     }
 
@@ -1215,6 +1758,7 @@ async fn handle_model_callback(
         }
     }
 
+    bot.answer_callback_query(callback_id).await.ok();
     Ok(())
 }
 
@@ -1297,6 +1841,99 @@ fn mime_from_extension(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         _ => "application/octet-stream",
+    }
+}
+
+pub struct TelegramAdapter {
+    bot: Bot,
+}
+
+impl TelegramAdapter {
+    pub fn new(bot: Bot) -> Self {
+        Self { bot }
+    }
+}
+
+#[async_trait]
+impl PlatformSender for TelegramAdapter {
+    async fn send_message(
+        &self,
+        chat_id_str: &str,
+        text: &str,
+        format: PlatformMsgFormat,
+    ) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let parse_mode = match format {
+            PlatformMsgFormat::Markdown | PlatformMsgFormat::Auto => Some(ParseMode::MarkdownV2),
+            PlatformMsgFormat::Rich => None,
+        };
+        let mut req = self.bot.send_message(chat_id, text);
+        if let Some(pm) = parse_mode {
+            req = req.parse_mode(pm);
+        }
+        let msg = req.await?;
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn send_file(
+        &self,
+        chat_id_str: &str,
+        path: &Path,
+        caption: Option<&str>,
+    ) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let input_file = teloxide::types::InputFile::file(path);
+        let msg = if let Some(cap) = caption {
+            self.bot
+                .send_document(chat_id, input_file)
+                .caption(cap)
+                .await?
+        } else {
+            self.bot.send_document(chat_id, input_file).await?
+        };
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn show_cancel_button(
+        &self,
+        chat_id_str: &str,
+        text: &str,
+        cancel_id: &str,
+    ) -> Result<PlatformMessageId> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let keyboard = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
+            "Cancel",
+            format!("cancel_cmd:{cancel_id}"),
+        )]]);
+        let msg = self
+            .bot
+            .send_message(chat_id, text)
+            .reply_markup(keyboard)
+            .await?;
+        Ok(format!("{}:{}", chat_id.0, msg.id.0))
+    }
+
+    async fn edit_message(
+        &self,
+        chat_id_str: &str,
+        message_id: &PlatformMessageId,
+        text: &str,
+    ) -> Result<()> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let parts: Vec<&str> = message_id.split(':').collect();
+        let msg_id: i32 = parts.get(1).unwrap_or(&"0").parse()?;
+        self.bot
+            .edit_message_text(chat_id, MessageId(msg_id), text)
+            .await?;
+        Ok(())
+    }
+
+    async fn notify_shutdown(&self, chat_id_str: &str) -> Result<()> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        self.bot
+            .send_message(chat_id, "⚠️ Bot is shutting down...")
+            .await?;
+        Ok(())
     }
 }
 
@@ -1393,13 +2030,13 @@ mod tests {
     }
 
     #[test]
-    fn test_command_responses_use_escape_text() {
-        // All non-streaming command responses must escape plain text and use MarkdownV2
-        // so that special chars like `.`, `-`, `!`, `_`, `(`, `)` don't break the parser.
+    fn test_command_responses_use_entity_formatting() {
+        // Command responses now use send_markdown_message (entity-based) instead of
+        // escape_text + ParseMode::MarkdownV2.
         let source = include_str!("telegram.rs");
         assert!(
-            source.contains("escape_text"),
-            "Command responses must call escape_text() before sending with MarkdownV2"
+            source.contains("send_markdown_message"),
+            "Command responses must use send_markdown_message for entity-based formatting"
         );
     }
 

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -173,20 +174,10 @@ async fn main() -> Result<()> {
     }
     // Write a home-side lock recording content hashes for future diff/audit.
     if let Some(home) = &config.resolved_home {
-        let seed_lock = |lock_name: &str, dir: &std::path::Path| {
-            let lock_path = home.join(lock_name);
-            if !lock_path.exists() {
-                let lock = rustfox::skills::update::SkillLock {
-                    version: 1,
-                    skills: rustfox::skills::seed::lock_map_for(dir),
-                };
-                if let Ok(json) = serde_json::to_string_pretty(&lock) {
-                    let _ = std::fs::write(&lock_path, json);
-                }
-            }
-        };
-        seed_lock("skills-lock.json", &config.skills.directory);
-        seed_lock("agents-lock.json", &config.agents.directory);
+        let _ =
+            rustfox::skills::seed::write_lock("skills-lock.json", &config.skills.directory, home);
+        let _ =
+            rustfox::skills::seed::write_lock("agents-lock.json", &config.agents.directory, home);
     }
 
     // Load skills from the instance directory.
@@ -208,9 +199,48 @@ async fn main() -> Result<()> {
     // Create Bot early so it can be passed to Agent
     let bot = Arc::new(teloxide::Bot::new(&config.telegram.bot_token));
 
+    rustfox::platform::telegram::init_bot_token(config.telegram.bot_token.clone());
+
     // Channel for dispatching scheduled job work from fire closures to background runner
     let (job_tx, mut job_rx) =
         tokio::sync::mpsc::unbounded_channel::<rustfox::agent::ScheduledJobRequest>();
+
+    let cancel_registry = std::sync::Arc::new(rustfox::cancel_registry::CancelRegistry::new());
+    let sender: Arc<dyn rustfox::platform::sender::PlatformSender> = Arc::new(
+        rustfox::platform::telegram::TelegramAdapter::new((*bot).clone()),
+    );
+    let skills_rw = Arc::new(tokio::sync::RwLock::new(skills.clone()));
+    let agents_rw = Arc::new(tokio::sync::RwLock::new(agents.clone()));
+    let restart_pending = Arc::new(AtomicBool::new(false));
+    let soul_updated = Arc::new(AtomicBool::new(false));
+
+    let mut tool_registry = rustfox::tool_registry::ToolRegistry::new();
+    tool_registry.register(Box::new(rustfox::builtin_tools::BuiltinTools::new(
+        config.skills.directory.clone(),
+        skills_rw.clone(),
+        restart_pending.clone(),
+        soul_updated.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::memory_tools::MemoryTools::new(
+        memory.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::scheduling_tools::SchedulingTools::new(
+        task_store.clone(),
+        Arc::clone(&scheduler),
+        job_tx.clone(),
+        Arc::clone(&bot),
+    )));
+    tool_registry.register(Box::new(rustfox::skill_tools::SkillTools::new(
+        config.skills.directory.clone(),
+        config.agents.directory.clone(),
+        skills_rw.clone(),
+        agents_rw.clone(),
+    )));
+    tool_registry.register(Box::new(rustfox::command_tool::CommandTool::new(
+        config.sandbox.allowed_directory.clone(),
+        cancel_registry.clone(),
+        sender.clone(),
+    )));
 
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
     let agent = Arc::new_cyclic(|weak| {
@@ -223,34 +253,84 @@ async fn main() -> Result<()> {
             agents,
             task_store.clone(),
             Arc::clone(&scheduler),
-            Arc::clone(&bot),
             weak.clone(),
             job_tx,
             Arc::clone(&langsmith),
             config_path.clone(),
+            cancel_registry.clone(),
+            tool_registry,
+            sender.clone(),
+            restart_pending.clone(),
+            soul_updated.clone(),
         )
     });
 
-    // Spawn background runner: receives ScheduledJobRequest, calls process_message, sends reply
+    // Spawn background runner: receives ScheduledJobRequest, calls process_message, persists result, sends reply
     let agent_for_runner = Arc::clone(&agent);
     tokio::spawn(async move {
-        use teloxide::prelude::*;
         while let Some(req) = job_rx.recv().await {
             let agent = Arc::clone(&agent_for_runner);
-            // Mark one-shot as completed (before running, so failure can override)
-            if !req.is_recurring {
-                let _ = req.task_store.set_status(&req.task_id, "completed").await;
+
+            // Persist run record BEFORE processing (capture fire time)
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            if let Err(e) = req
+                .task_store
+                .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
+                .await
+            {
+                tracing::warn!("Failed to persist scheduled task run record: {}", e);
             }
+
             let response = match agent.process_message(&req.incoming, None, None).await {
-                Ok(r) => r,
+                Ok(r) => {
+                    if let Err(e) = req
+                        .task_store
+                        .update_run(&run_id, Some(&r), None, "completed")
+                        .await
+                    {
+                        tracing::warn!("Failed to update scheduled task run record: {}", e);
+                    }
+                    r
+                }
                 Err(e) => {
                     tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
+                    let err_str = format!("{:#}", e);
+                    if let Err(e) = req
+                        .task_store
+                        .update_run(&run_id, None, Some(&err_str), "failed")
+                        .await
+                    {
+                        tracing::warn!("Failed to update failed scheduled task run record: {}", e);
+                    }
                     if !req.is_recurring {
                         let _ = req.task_store.set_status(&req.task_id, "failed").await;
                     }
+                    // Send error to user via rich message
+                    let chat_id_val: i64 = match req.incoming.chat_id.parse() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            tracing::error!(
+                                "Unparseable chat_id '{}' for task {}",
+                                req.incoming.chat_id,
+                                req.task_id
+                            );
+                            continue;
+                        }
+                    };
+                    let chat = teloxide::types::ChatId(chat_id_val);
+                    let error_msg = format!("**Scheduled task failed:** {}", e);
+                    let _ = rustfox::platform::telegram::send_markdown_message(
+                        &req.bot,
+                        chat,
+                        &error_msg,
+                        rustfox::platform::telegram::MessageFormat::Auto,
+                    )
+                    .await;
                     continue;
                 }
             };
+
             let chat_id_val: i64 = match req.incoming.chat_id.parse() {
                 Ok(v) => v,
                 Err(_) => {
@@ -263,13 +343,15 @@ async fn main() -> Result<()> {
                 }
             };
             let chat = teloxide::types::ChatId(chat_id_val);
-            for chunk in rustfox::agent::split_response_chunks(&response, 4000) {
-                if chunk.is_empty() {
-                    continue;
-                }
-                if let Err(e) = req.bot.send_message(chat, &chunk).await {
-                    tracing::error!("Failed to send scheduled response: {}", e);
-                }
+            if let Err(e) = rustfox::platform::telegram::send_markdown_message(
+                &req.bot,
+                chat,
+                &response,
+                rustfox::platform::telegram::MessageFormat::Auto,
+            )
+            .await
+            {
+                tracing::error!("Failed to send scheduled response: {}", e);
             }
         }
     });
@@ -319,7 +401,7 @@ async fn main() -> Result<()> {
     .await?;
     scheduler.start().await?;
     info!("  Scheduler: active");
-    agent.restore_scheduled_tasks().await;
+    agent.restore_scheduled_tasks(Arc::clone(&bot)).await;
     info!("  Scheduled tasks: restored from DB");
 
     // Construct Supervisor with a populated backend Registry so resume /

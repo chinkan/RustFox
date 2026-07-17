@@ -290,6 +290,8 @@ pub fn friendly_tool_name(name: &str) -> String {
         "schedule_task" => return "🗓️ Scheduling a task".to_string(),
         "list_scheduled_tasks" => return "🗓️ Checking scheduled tasks".to_string(),
         "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
+        "get_scheduled_task_history" => return "📋 Checking task history".to_string(),
+        "rerun_scheduled_task" => return "🔄 Re-running scheduled task".to_string(),
         "invoke_agent" => return "🤖 Calling a specialist".to_string(),
         "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
         "read_skill_file" => return "📖 Reading skill".to_string(),
@@ -389,7 +391,6 @@ fn is_sensitive_key(key: &str) -> bool {
         "private_key",
         "cookie",
         "content",
-        "command",
         "prompt",
         "message",
         "text",
@@ -406,7 +407,7 @@ pub fn format_args_preview(args_json: &str) -> String {
     // - Only render a compact allowlist of safe keys when present
     // - Never render nested objects/arrays in full
 
-    const SAFE_KEYS: [&str; 13] = [
+    const SAFE_KEYS: [&str; 14] = [
         "query",
         "path",
         "url",
@@ -420,6 +421,7 @@ pub fn format_args_preview(args_json: &str) -> String {
         "language",
         "technology",
         "name",
+        "command",
     ];
 
     let Ok(val) = serde_json::from_str::<JsonValue>(args_json) else {
@@ -612,14 +614,25 @@ mod tests {
     }
 
     #[test]
-    fn test_format_args_preview_suppresses_command_content_and_prompt() {
-        let j = r#"{"command":"rm -rf /", "prompt":"write me a secret"}"#;
+    fn test_format_args_preview_suppresses_content_and_prompt() {
+        let j = r#"{"sensitive":"data", "prompt":"write me a secret"}"#;
         // multi-key but all sensitive — should suppress to empty
         let out = format_args_preview(j);
         assert!(
             out.is_empty(),
             "sensitive multi-key should be empty: {}",
             out
+        );
+    }
+
+    #[test]
+    fn test_format_args_preview_shows_command_single_arg() {
+        let j = r#"{"command":"rm -rf /"}"#;
+        let out = format_args_preview(j);
+        assert!(!out.is_empty(), "command should be visible: {out}");
+        assert!(
+            out.contains("rm -rf /"),
+            "command content must be in output: {out}"
         );
     }
 
@@ -1121,6 +1134,22 @@ mod tests {
         assert!(
             !friendly.contains("query_"),
             "verb prefix should be stripped: {friendly}"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_get_scheduled_task_history() {
+        assert_eq!(
+            friendly_tool_name("get_scheduled_task_history"),
+            "📋 Checking task history"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_rerun_scheduled_task() {
+        assert_eq!(
+            friendly_tool_name("rerun_scheduled_task"),
+            "🔄 Re-running scheduled task"
         );
     }
 }

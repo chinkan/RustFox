@@ -1,7 +1,7 @@
 ---
 description: Reviews specification documents for completeness, consistency, clarity, and readiness before planning begins.
 mode: subagent
-model: opencode-go/mimo-v2.5
+model: opencode-go/kimi-k2.7-code
 permission:
   read: allow
   edit: deny

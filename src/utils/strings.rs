@@ -1,3 +1,19 @@
+/// Keep the last `max_chars` characters of `s`. If `s` exceeds `max_chars`,
+/// prepend `"...(truncated)\n"` to the tail.
+/// Safe for any UTF-8 input.
+pub fn truncate_tail(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    let prefix = "...(truncated)\n";
+    let tail: String = s
+        .chars()
+        .skip(char_count.saturating_sub(max_chars))
+        .collect();
+    format!("{}{}", prefix, tail)
+}
+
 /// Truncates `s` to at most `max_chars` Unicode scalar values.
 /// Appends "..." if truncation occurred.
 /// Safe for any UTF-8 input including Chinese, Japanese, emoji, etc.
@@ -15,6 +31,40 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_tail_short_text() {
+        let input = "hello world";
+        let result = truncate_tail(input, 100);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_tail_exact() {
+        let input = "hello";
+        let result = truncate_tail(input, 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_tail_truncated() {
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let result = truncate_tail(input, 10);
+        let prefix = "...(truncated)\n";
+        assert!(result.starts_with(prefix));
+        assert!(result.ends_with("qrstuvwxyz"));
+        assert_eq!(result.len(), prefix.len() + "qrstuvwxyz".len());
+    }
+
+    #[test]
+    fn test_truncate_tail_chinese() {
+        let input = "每日上午10點 arXiv AI 論文摘要（香港時間）這是一段很長的中文文字";
+        let result = truncate_tail(input, 10);
+        assert!(result.starts_with("...(truncated)\n"));
+        let char_count = result.chars().count();
+        // 10 tail chars + 16 prefix chars
+        assert!(char_count <= 27, "too long: {} chars", char_count);
+    }
 
     #[test]
     fn test_truncate_chars_ascii_short() {
