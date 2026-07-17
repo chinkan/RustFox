@@ -1,5 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -11,7 +13,8 @@ use crate::platform::sender::PlatformSender;
 use crate::platform::tool_notifier::ToolEvent;
 use crate::tool_registry::{ToolContext, ToolRegistry};
 
-pub type ToolHandlerFn = Box<dyn Fn(&str, &Value, &str, &str) -> Option<String> + Send + Sync>;
+pub type ToolHandlerFn =
+    Box<dyn Fn(&str, &Value, &str, &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>> + Send + Sync>;
 
 pub struct LoopConfig {
     pub max_iterations: u32,
@@ -21,6 +24,7 @@ pub struct LoopConfig {
     pub interactive_loop_callback: bool,
     pub allowed_tools: Option<Vec<String>>,
     pub langsmith_project: Option<String>,
+    pub model: Option<String>,
     pub tool_event_tx: Option<mpsc::Sender<ToolEvent>>,
     pub stream_token_tx: Option<mpsc::Sender<String>>,
     pub recovery_nudge: Option<String>,
@@ -100,10 +104,17 @@ impl<'a> AgenticLoop<'a> {
                 all
             };
 
-            let response = self.llm.chat(&prepared.messages, &tool_defs).await?;
-
-            let text = response.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-            let tool_calls = response.tool_calls.clone().unwrap_or_default();
+            let (text, tool_calls) = if let Some(ref model) = self.config.model {
+                let completion = self.llm.chat_completion_with_model(&prepared.messages, &tool_defs, model).await?;
+                let text = completion.message.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                let tool_calls = completion.message.tool_calls.clone().unwrap_or_default();
+                (text, tool_calls)
+            } else {
+                let msg = self.llm.chat(&prepared.messages, &tool_defs).await?;
+                let text = msg.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                let tool_calls = msg.tool_calls.clone().unwrap_or_default();
+                (text, tool_calls)
+            };
 
             if text.is_empty() && tool_calls.is_empty() {
                 empty_count += 1;
@@ -146,7 +157,8 @@ impl<'a> AgenticLoop<'a> {
 
                     // Check special tool handler first (for invoke_agent/spawn_agents)
                     if let Some(ref handler) = self.special_tool_handler {
-                        if let Some(result) = handler(&tc.function.name, &args, user_id, chat_id) {
+                        let fut = (handler)(&tc.function.name, &args, user_id, chat_id);
+                        if let Some(result) = fut.await {
                             messages.push_tool_result(&tc.id, result);
                             continue;
                         }
