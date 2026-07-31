@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
+use crate::tool_registry::ToolUiMode;
 
 type ExecFn =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
@@ -34,7 +35,7 @@ impl ReasoningBackend {
                     attachments: Vec::new(),
                 };
                 agent
-                    .process_message(&incoming, None, None)
+                    .process_message(&incoming, None, None, ToolUiMode::Minimal)
                     .await
                     .map_err(|e| anyhow!("agent failed: {e:#}"))
             })

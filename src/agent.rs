@@ -631,6 +631,7 @@ impl Agent {
         incoming: &IncomingMessage,
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
@@ -779,6 +780,7 @@ impl Agent {
             let home_dir = self.config.resolved_home.clone();
             let sender = self.sender.clone();
             let cancel_registry = self.cancel_registry.clone();
+            let mode = tool_ui_mode;
             move |_user_id: &str, _chat_id: &str| ToolContext {
                 sandbox_dir: sandbox_dir.clone(),
                 home_dir: home_dir.clone(),
@@ -786,6 +788,7 @@ impl Agent {
                 cancel_registry: cancel_registry.clone(),
                 user_id: _user_id.to_string(),
                 chat_id: _chat_id.to_string(),
+                tool_ui_mode: mode,
             }
         };
 
@@ -1438,6 +1441,7 @@ impl Agent {
                     cancel_registry: cancel_registry.clone(),
                     user_id: String::new(),
                     chat_id: String::new(),
+                    tool_ui_mode: crate::tool_registry::ToolUiMode::Minimal,
                 }
             };
 

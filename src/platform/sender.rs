@@ -45,5 +45,7 @@ pub trait PlatformSender: Send + Sync {
         text: &str,
     ) -> Result<()>;
 
+    async fn delete_message(&self, chat_id: &str, message_id: &PlatformMessageId) -> Result<()>;
+
     async fn notify_shutdown(&self, chat_id: &str) -> Result<()>;
 }

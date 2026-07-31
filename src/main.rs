@@ -16,6 +16,7 @@ use rustfox::scheduler::tasks::register_builtin_tasks;
 use rustfox::scheduler::Scheduler;
 use rustfox::setup;
 use rustfox::skills::loader::load_skills_from_dir;
+use rustfox::tool_registry::ToolUiMode;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -282,7 +283,10 @@ async fn main() -> Result<()> {
                 tracing::warn!("Failed to persist scheduled task run record: {}", e);
             }
 
-            let response = match agent.process_message(&req.incoming, None, None).await {
+            let response = match agent
+                .process_message(&req.incoming, None, None, ToolUiMode::Minimal)
+                .await
+            {
                 Ok(r) => {
                     if let Err(e) = req
                         .task_store
