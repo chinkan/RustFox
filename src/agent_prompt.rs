@@ -10,12 +10,104 @@
 
 use crate::llm::{ChatMessage, MessageContent};
 
+/// A single compressed message, rendered as a structured marker line.
+///
+/// Part of the public compaction API: the unified `compact_messages` pipeline
+/// emits one `CompressedMessage` per summarized message so downstream readers
+/// (and the LLM itself) can tell what kind of content was compressed.
+#[derive(Debug, Clone)]
+pub struct CompressedMessage {
+    pub role: String,
+    /// "tool_call" | "tool_result" | "user" | "assistant" | "system"
+    pub original_type: String,
+    pub summary: String,
+    pub key_data: Option<serde_json::Value>,
+}
+
+impl CompressedMessage {
+    /// Render this message as a structured marker line. Tool messages embed
+    /// `key_data` (e.g. counts/status codes) when present.
+    ///
+    /// Formats:
+    /// - `[Tool: NAME] description | result: SUMMARY | status: ok|error`
+    /// - `[User] TOPIC: SUMMARY`
+    /// - `[Assistant] ACTION: DECISION_SUMMARY`
+    /// - `[System] EVENT: NOTABLE_INFO`
+    pub fn to_marker(&self) -> String {
+        let summary = self.summary.trim();
+        match self.original_type.as_str() {
+            "tool_call" | "tool_result" => {
+                let name = self
+                    .key_data
+                    .as_ref()
+                    .and_then(|k| k.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let description = self
+                    .key_data
+                    .as_ref()
+                    .and_then(|k| k.get("description"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let status = if let Some(s) = self
+                    .key_data
+                    .as_ref()
+                    .and_then(|k| k.get("status"))
+                    .and_then(|v| v.as_str())
+                {
+                    s.to_string()
+                } else if summary.contains("Error") || summary.contains("error") {
+                    "error".to_string()
+                } else {
+                    "ok".to_string()
+                };
+                let mut marker =
+                    format!("[Tool: {name}] {description} | result: {summary} | status: {status}");
+                if let Some(kd) = &self.key_data {
+                    if let Ok(extra) = serde_json::to_string(kd) {
+                        marker.push_str(&format!(" | {extra}"));
+                    }
+                }
+                marker
+            }
+            "user" => format!("[User] TOPIC: {summary}"),
+            "assistant" => format!("[Assistant] ACTION: {summary}"),
+            "system" => format!("[System] EVENT: {summary}"),
+            other => format!("[{other}] {summary}"),
+        }
+    }
+}
+
 /// Percentage of context_window that triggers Tier 1 (observation masking).
-const OBSERVATION_MASK_PCT: f64 = 0.20;
+const OBSERVATION_MASK_PCT: f64 = 0.70;
 /// Percentage that triggers Tier 2 (context collapse).
-const COLLAPSE_PCT: f64 = 0.60;
+const COLLAPSE_PCT: f64 = 0.75;
 /// Percentage that triggers Tier 3 (auto compact).
-pub const COMPACT_PCT: f64 = 0.85;
+pub const COMPACT_PCT: f64 = 0.82;
+/// Utilization fraction (total chars / context_window) at which the unified
+/// compaction pipeline begins summarizing the oldest messages.
+pub const COMPACT_TRIGGER_PCT: f64 = 0.70;
+/// Graduated compression ladder: (trigger, fraction of oldest messages to compress).
+pub const COMPACT_LADDER: [(f64, f64); 5] = [
+    (0.70, 0.10),
+    (0.75, 0.25),
+    (0.82, 0.40),
+    (0.88, 0.55),
+    (0.93, 0.70),
+];
+
+/// Oldest-message fraction to compress for a given utilization.
+///
+/// Returns the fraction from the largest ladder entry whose trigger is
+/// `<= utilization`, or `0.0` when utilization is below the first trigger.
+pub fn compact_fraction(utilization: f64) -> f64 {
+    for (trigger, fraction) in COMPACT_LADDER.iter().rev() {
+        if utilization >= *trigger {
+            return *fraction;
+        }
+    }
+    0.0
+}
 /// Documentary threshold — Tier 4 is triggered by HTTP 413 errors,
 /// not by a percentage, but this documents the utilization level at
 /// which a 413 would typically occur.
@@ -593,7 +685,7 @@ mod tests {
 
     #[test]
     fn observation_mask_replaces_old_tool_results_and_keeps_recent() {
-        let ctx = 2000;
+        let ctx = 1000;
         let mut messages = Vec::new();
 
         messages.push(ChatMessage {
@@ -976,5 +1068,74 @@ mod tests {
         let msg = build_compact_boundary_marker(10, 1);
         let text = msg.content.as_ref().unwrap().as_text();
         assert!(text.contains("state"), "Should hint at state format");
+    }
+
+    #[test]
+    fn compact_fraction_ladder() {
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(approx(compact_fraction(0.69), 0.0));
+        assert!(approx(compact_fraction(0.70), 0.10));
+        assert!(approx(compact_fraction(0.80), 0.25));
+        assert!(approx(compact_fraction(0.90), 0.55));
+        assert!(approx(compact_fraction(0.99), 0.70));
+        // Saturates at the largest ladder entry.
+        assert!(approx(compact_fraction(2.0), 0.70));
+    }
+
+    #[test]
+    fn compressed_message_to_marker_formats() {
+        let tool = CompressedMessage {
+            role: "tool".to_string(),
+            original_type: "tool_result".to_string(),
+            summary: "wrote config file".to_string(),
+            key_data: Some(serde_json::json!({"name": "write_file", "bytes": 42})),
+        };
+        let tool_marker = tool.to_marker();
+        assert!(
+            tool_marker.starts_with("[Tool: write_file]"),
+            "{}",
+            tool_marker
+        );
+        assert!(tool_marker.contains("| status: ok"), "{}", tool_marker);
+        assert!(tool_marker.contains("\"bytes\":42"), "{}", tool_marker);
+
+        let err_tool = CompressedMessage {
+            role: "tool".to_string(),
+            original_type: "tool_result".to_string(),
+            summary: "Error: permission denied".to_string(),
+            key_data: None,
+        };
+        assert!(
+            err_tool.to_marker().contains("| status: error"),
+            "{}",
+            err_tool.to_marker()
+        );
+
+        let user = CompressedMessage {
+            role: "user".to_string(),
+            original_type: "user".to_string(),
+            summary: "fix the bug".to_string(),
+            key_data: None,
+        };
+        assert_eq!(user.to_marker(), "[User] TOPIC: fix the bug");
+
+        let assistant = CompressedMessage {
+            role: "assistant".to_string(),
+            original_type: "assistant".to_string(),
+            summary: "decided to use tokio".to_string(),
+            key_data: None,
+        };
+        assert_eq!(
+            assistant.to_marker(),
+            "[Assistant] ACTION: decided to use tokio"
+        );
+
+        let system = CompressedMessage {
+            role: "system".to_string(),
+            original_type: "system".to_string(),
+            summary: "sandbox dir set".to_string(),
+            key_data: None,
+        };
+        assert_eq!(system.to_marker(), "[System] EVENT: sandbox dir set");
     }
 }

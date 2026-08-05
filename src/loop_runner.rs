@@ -104,10 +104,9 @@ impl<'a> AgenticLoop<'a> {
                 }
             }
 
-            if self.config.compaction_enabled && iteration > 0 && iteration % 5 == 0 {
+            if self.config.compaction_enabled && iteration > 0 {
                 if let MessageContainer::Conversation(cm) = messages {
-                    cm.compact_tier3(context_window).await;
-                    let _ = cm.compact_tier4(self.llm, context_window).await;
+                    let _ = cm.compact_messages(self.llm, context_window).await;
                 }
             }
 
