@@ -96,6 +96,7 @@ impl<'a> AgenticLoop<'a> {
     ) -> Result<LoopOutcome> {
         let context_window = 128_000;
         let mut empty_count = 0u32;
+        let mut last_compact_turn = 0usize;
 
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
@@ -104,9 +105,15 @@ impl<'a> AgenticLoop<'a> {
                 }
             }
 
-            if self.config.compaction_enabled && iteration > 0 {
+            if self.config.compaction_enabled
+                && iteration > 0
+                && ((iteration as usize).saturating_sub(last_compact_turn) >= 5
+                    || last_compact_turn == 0)
+            {
                 if let MessageContainer::Conversation(cm) = messages {
-                    let _ = cm.compact_messages(self.llm, context_window).await;
+                    if let Ok(true) = cm.compact_messages(self.llm, context_window).await {
+                        last_compact_turn = iteration as usize;
+                    }
                 }
             }
 

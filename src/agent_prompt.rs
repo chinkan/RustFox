@@ -36,7 +36,24 @@ impl CompressedMessage {
     pub fn to_marker(&self) -> String {
         let summary = self.summary.trim();
         match self.original_type.as_str() {
-            "tool_call" | "tool_result" => {
+            "tool_call" => {
+                let name = self
+                    .key_data
+                    .as_ref()
+                    .and_then(|k| k.get("name"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| (!summary.is_empty()).then_some(summary))
+                    .unwrap_or("unknown");
+                let args = self
+                    .key_data
+                    .as_ref()
+                    .and_then(|k| k.get("args"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                format!("[Tool: {name}] {args}").trim_end().to_string()
+            }
+            "tool_result" => {
                 let name = self
                     .key_data
                     .as_ref()
