@@ -1,18 +1,33 @@
 use anyhow::Result;
 
-use crate::agent_prompt::{prepare_messages_for_llm, CompressedMessage};
+use crate::agent_prompt::prepare_messages_for_llm;
 use crate::config::Config;
 use crate::llm::{ChatMessage, ContentPart, LlmClient, MessageContent};
 use crate::memory::MemoryStore;
 use crate::platform::IncomingMessage;
 use crate::skills::SkillRegistry;
-use std::collections::HashMap;
+
+/// Inputs for one compaction pass (ADR 0003).
+pub struct CompactionContext<'a> {
+    pub llm: &'a LlmClient,
+    /// Provider window in tokens (from `registry.effective_context_window`).
+    pub context_window: usize,
+    /// Optional cheaper model for summary + flush turns (Q9).
+    pub compaction_model: Option<&'a str>,
+    /// USER.md path for the durable-memory flush (Q5); `None` disables flush.
+    pub user_model_path: Option<&'a std::path::Path>,
+}
 
 pub struct ConversationManager {
     messages: Vec<ChatMessage>,
     system_prompt: String,
     memory: MemoryStore,
     conversation_id: String,
+    /// Running summary of compacted history (ADR 0003 Q2) — layered,
+    /// persisted as `[SUMMARY]` rows (Q8), injected as a system message.
+    summary: Option<String>,
+    /// Highest message index whose user turn was already flushed to USER.md (Q6).
+    last_flush_turn: Option<usize>,
 }
 
 impl ConversationManager {
@@ -29,6 +44,24 @@ impl ConversationManager {
             .load_messages(&conversation_id)
             .await
             .unwrap_or_default();
+
+        let mut folded_summary: Vec<String> = Vec::new();
+        let mut raw: Vec<ChatMessage> = Vec::new();
+        for m in history {
+            if m.role == "system" {
+                if let Some(text) = m.content.as_ref().map(|c| c.as_text()) {
+                    if let Some(rest) = text.strip_prefix("[SUMMARY]") {
+                        folded_summary.push(rest.trim().to_string());
+                        continue;
+                    }
+                }
+            }
+            if m.role == "user" && m.tool_call_id.as_deref() == Some("summary") {
+                continue; // legacy marker-style summary entries are superseded
+            }
+            raw.push(m);
+        }
+        let summary = (!folded_summary.is_empty()).then(|| folded_summary.join("\n\n"));
 
         let now = chrono::Local::now();
         let context_prompt = format!(
@@ -47,13 +80,25 @@ impl ConversationManager {
         };
 
         let mut messages = vec![system_msg];
-        messages.extend(history);
+        if let Some(s) = &summary {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text(format!(
+                    "Previously compacted context:\n{s}"
+                ))),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+        messages.extend(raw);
 
         Ok(Self {
             messages,
             system_prompt,
             memory: memory.clone(),
             conversation_id,
+            summary,
+            last_flush_turn: None,
         })
     }
 
@@ -89,6 +134,70 @@ impl ConversationManager {
         self.messages.push(msg);
     }
 
+    /// ADR 0003 Q6: flush only when the range contains a user-authored
+    /// message newer than the last flushed one.
+    pub(crate) fn should_flush(
+        range_user_max: Option<usize>,
+        last_flush_turn: Option<usize>,
+    ) -> bool {
+        match (range_user_max, last_flush_turn) {
+            (Some(max), Some(last)) => max > last,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
+    /// Apply a new summary layer (ADR 0003 Q2/Q8): fold into the running
+    /// summary, rebuild the message list as [system, summary block,
+    /// protected tail], and persist the layer as a `[SUMMARY]` system
+    /// message. Persistence failures are logged and ignored — the in-memory
+    /// state wins.
+    pub(crate) async fn apply_summary_layer(
+        &mut self,
+        layer: &str,
+        tail_start: usize,
+    ) -> Result<()> {
+        let layer = layer.trim();
+        if layer.is_empty() {
+            anyhow::bail!("empty summary layer");
+        }
+        self.summary = Some(match self.summary.take() {
+            Some(prev) => format!("{prev}\n\n{layer}"),
+            None => layer.to_string(),
+        });
+
+        let mut new_msgs = Vec::with_capacity(2 + self.messages.len().saturating_sub(tail_start));
+        if let Some(system) = self.messages.first().cloned() {
+            new_msgs.push(system);
+        }
+        new_msgs.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "Previously compacted context:\n{}",
+                self.summary.as_deref().unwrap_or_default()
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        new_msgs.extend(self.messages.iter().skip(tail_start).cloned());
+        self.messages = new_msgs;
+
+        let persisted = ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(format!("[SUMMARY]\n{layer}"))),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        if let Err(e) = self
+            .memory
+            .save_message(&self.conversation_id, &persisted)
+            .await
+        {
+            tracing::warn!(error = %format!("{e:#}"), "Failed to persist summary layer");
+        }
+        Ok(())
+    }
+
     pub fn add_assistant_turn(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
     }
@@ -114,138 +223,77 @@ impl ConversationManager {
         self.messages.push(steer_msg);
     }
 
-    /// Unified compaction pipeline: compress the oldest messages once total
-    /// utilization crosses `agent_prompt::COMPACT_TRIGGER_PCT` of the context
-    /// window. The fraction of oldest messages summarized follows the graduated
-    /// `agent_prompt::COMPACT_LADDER`; the system message (index 0) and the
-    /// newest 8 messages always stay verbatim.
-    ///
-    /// Summarization is attempted via the LLM and rendered as structured marker
-    /// lines; on LLM failure a sync structured extraction is used instead (no
-    /// LLM call). Returns `Ok(true)` when compaction happened, `Ok(false)` when
-    /// nothing was summarized.
-    pub async fn compact_messages(
-        &mut self,
-        llm: &LlmClient,
-        context_window: usize,
-    ) -> Result<bool> {
-        if context_window == 0 {
+    /// Unified compaction pipeline (ADR 0003 Q1): compress the oldest
+    /// messages once total estimated tokens cross 85% of the real provider
+    /// window. The protected tail (last two user turns + active exchange,
+    /// never mid-tool-pair) stays verbatim. Durable facts are flushed to
+    /// USER.md before the running summary is extended. On summarizer
+    /// failure the pass is DEFERRED — nothing is truncated (Q7).
+    pub async fn compact_messages(&mut self, ctx: &CompactionContext<'_>) -> Result<bool> {
+        if ctx.context_window == 0 {
             return Ok(false);
         }
-        let total: usize = self
-            .messages
+        let trigger_tokens =
+            (ctx.context_window as f64 * crate::agent_prompt::COMPACT_TRIGGER_PCT) as usize;
+        if crate::agent_prompt::estimate_tokens(&self.messages) <= trigger_tokens {
+            return Ok(false);
+        }
+
+        let tail_start =
+            crate::agent_prompt::protected_tail_start(&self.messages, ctx.context_window);
+        if tail_start == 0 || tail_start >= self.messages.len() {
+            return Ok(false);
+        }
+        let range: Vec<&ChatMessage> = self.messages.iter().skip(1).take(tail_start - 1).collect();
+        if range.is_empty() {
+            return Ok(false);
+        }
+
+        // Q5/Q6: durable-memory flush before the summary is written.
+        let range_user_max = range
             .iter()
-            .map(|m| m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0))
-            .sum();
-        let utilization = total as f64 / context_window as f64;
-        if utilization < crate::agent_prompt::COMPACT_TRIGGER_PCT {
-            return Ok(false);
-        }
-
-        // Graduated fraction of the oldest (non-system) messages to compress,
-        // clamped so at most len-9 messages are summarized (system + newest 8
-        // stay verbatim).
-        let fraction = crate::agent_prompt::compact_fraction(utilization);
-        let max_summarize = self.messages.len().saturating_sub(9);
-        let mut summarize_count =
-            ((self.messages.len().saturating_sub(1)) as f64 * fraction) as usize;
-        summarize_count = summarize_count.min(max_summarize);
-        if summarize_count == 0 {
-            return Ok(false);
-        }
-
-        // Round the summarized range down to tool-group boundaries so a
-        // [tool_call, tool_result] pair is never split across the
-        // summarize/preserve boundary.
-        let mut i = 1usize;
-        while i <= summarize_count {
-            let msg = &self.messages[i];
-            if msg.has_tool_calls() {
-                let call_ids: Vec<&str> = msg
-                    .tool_calls
-                    .iter()
-                    .flatten()
-                    .map(|c| c.id.as_str())
-                    .collect();
-                let mut last_result: Option<usize> = None;
-                for j in (i + 1)..self.messages.len() {
-                    let m = &self.messages[j];
-                    if m.role == "tool"
-                        && m.tool_call_id
-                            .as_deref()
-                            .is_some_and(|id| call_ids.contains(&id))
-                    {
-                        last_result = Some(j);
-                    } else if m.role != "tool" {
-                        break;
+            .enumerate()
+            .filter(|(_, m)| m.role == "user")
+            .map(|(i, _)| i + 1) // range index 0 == message index 1
+            .max();
+        if Self::should_flush(range_user_max, self.last_flush_turn) {
+            if let Some(path) = ctx.user_model_path {
+                match crate::learning::flush_user_model(ctx.llm, path, &range, ctx.compaction_model)
+                    .await
+                {
+                    Ok(true) => {
+                        self.last_flush_turn = range_user_max;
                     }
-                }
-                if let Some(r) = last_result {
-                    if r > summarize_count {
-                        summarize_count = r;
+                    Ok(false) => tracing::info!("User-model flush skipped: no durable facts"),
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "User-model flush failed");
                     }
-                }
-            } else if msg.role == "tool" {
-                // A result inside the range whose matching call is preserved
-                // in the tail: stop the range before this result.
-                let call_in_tail = self.messages[(summarize_count + 1)..].iter().any(|m| {
-                    m.has_tool_calls()
-                        && m.tool_calls.as_ref().is_some_and(|calls| {
-                            calls
-                                .iter()
-                                .any(|c| Some(c.id.as_str()) == msg.tool_call_id.as_deref())
-                        })
-                });
-                if call_in_tail {
-                    summarize_count = i.saturating_sub(1);
-                    break;
                 }
             }
-            i += 1;
-        }
-        if summarize_count == 0 {
-            return Ok(false);
         }
 
-        // System (index 0) and the newest 8 messages stay verbatim.
-        let preserved_tail_start = (self.messages.len().saturating_sub(8)).max(summarize_count + 1);
-        let to_summarize: Vec<&ChatMessage> =
-            self.messages.iter().skip(1).take(summarize_count).collect();
-
-        let summary_text = match self.summarize_with_llm(llm, &to_summarize).await {
+        // Q2/Q7: extend the running summary; defer on failure.
+        let layer = match self.summarize_with_llm(ctx, &range).await {
             Ok(text) => text,
             Err(e) => {
-                tracing::warn!("LLM compaction failed ({e}); using sync structured summary");
-                self.build_sync_summary(&to_summarize)
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    range = range.len(),
+                    "Compaction summary failed; deferring (no truncation)"
+                );
+                return Ok(false);
             }
         };
 
-        let heading = format!(
-            "★ COMPACTED CONTEXT — {} messages summarized ★\n",
-            to_summarize.len()
-        );
-        let summary_entry = ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(format!("{heading}{summary_text}"))),
-            tool_calls: None,
-            tool_call_id: Some("summary".to_string()),
-        };
-
-        let mut new_msgs =
-            Vec::with_capacity(2 + self.messages.len().saturating_sub(preserved_tail_start));
-        if let Some(system) = self.messages.first().cloned() {
-            new_msgs.push(system);
-        }
-        new_msgs.push(summary_entry);
-        new_msgs.extend(self.messages.iter().skip(preserved_tail_start).cloned());
-        self.messages = new_msgs;
+        self.apply_summary_layer(&layer, tail_start).await?;
         Ok(true)
     }
 
-    /// Ask the LLM to summarize `to_summarize` as structured marker lines.
+    /// Ask the summarizer (Q9 model override, else current model) to EXTEND
+    /// the running summary with the new portion of the conversation.
     async fn summarize_with_llm(
         &self,
-        llm: &LlmClient,
+        ctx: &CompactionContext<'_>,
         to_summarize: &[&ChatMessage],
     ) -> Result<String> {
         let summary_text: String = to_summarize
@@ -260,15 +308,23 @@ impl ConversationManager {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let previous = self.summary.as_deref().unwrap_or("");
         let summary_prompt = format!(
-            "Summarize the following conversation, preserving key decisions and facts.\n\
-             Output the summary AS STRUCTURED MARKER LINES, one per message, in exactly these formats:\n\
-             [Tool: NAME] description | result: SUMMARY | status: ok|error\n\
-             [User] TOPIC: SUMMARY\n\
-             [Assistant] ACTION: DECISION_SUMMARY\n\
-             [System] EVENT: NOTABLE_INFO\n\n\
-             Conversation:\n{summary_text}"
+            "You are maintaining a running summary of a long conversation.\n\
+             {prev_block}\
+             Below is the new portion of the conversation. EXTEND the previous summary with it:\n\
+             - Preserve key facts, decisions, preferences, and open questions\n\
+             - Merge new information; never contradict or repeat the previous summary\n\
+             - Be concise — at most 300 words\n\
+             - Output ONLY the new summary text (no preamble, no markers)\n\n\
+             New conversation:\n{summary_text}",
+            prev_block = if previous.is_empty() {
+                String::new()
+            } else {
+                format!("Previous summary:\n{previous}\n\n")
+            },
         );
+
         let summary_msg = vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -286,82 +342,20 @@ impl ConversationManager {
             },
         ];
 
-        let response = llm.chat(&summary_msg, &[]).await?;
+        let response = match ctx.compaction_model {
+            Some(model) => {
+                ctx.llm
+                    .chat_completion_with_model(&summary_msg, &[], model)
+                    .await?
+                    .message
+            }
+            None => ctx.llm.chat(&summary_msg, &[]).await?,
+        };
         Ok(response
             .content
             .as_ref()
             .map(|c| c.as_text())
             .unwrap_or_default())
-    }
-
-    /// Sync fallback: build structured marker lines from `to_summarize`
-    /// without any LLM call.
-    fn build_sync_summary(&self, to_summarize: &[&ChatMessage]) -> String {
-        const MAX_CHARS: usize = 200;
-        // Resolve tool identity by NAME: map tool_call_id -> function name so
-        // tool results can render the call's name instead of the raw id.
-        let mut tool_names: HashMap<&str, &str> = HashMap::new();
-        for m in &self.messages {
-            if let Some(calls) = &m.tool_calls {
-                for c in calls {
-                    tool_names.entry(c.id.as_str()).or_insert(&c.function.name);
-                }
-            }
-        }
-
-        let mut compacted: Vec<CompressedMessage> = Vec::new();
-        for m in to_summarize {
-            let text = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-            if text.is_empty() && !m.has_tool_calls() {
-                continue;
-            }
-            let truncated: String = text.chars().take(MAX_CHARS).collect();
-            if m.has_tool_calls() {
-                // Assistant tool-call message -> [Tool: NAME] marker.
-                let call = m
-                    .tool_calls
-                    .iter()
-                    .flatten()
-                    .next()
-                    .expect("has_tool_calls checked");
-                let name = call.function.name.clone();
-                compacted.push(CompressedMessage {
-                    role: m.role.clone(),
-                    original_type: "tool_call".to_string(),
-                    summary: name.clone(),
-                    key_data: Some(serde_json::json!({
-                        "name": name,
-                        "args": call.function.arguments.chars().take(MAX_CHARS).collect::<String>(),
-                    })),
-                });
-            } else if m.role == "tool" {
-                let id = m.tool_call_id.as_deref().unwrap_or("unknown");
-                let name = tool_names.get(id).copied().unwrap_or(id).to_string();
-                let status = if text.contains("Error") || text.contains("error") {
-                    "error"
-                } else {
-                    "ok"
-                };
-                compacted.push(CompressedMessage {
-                    role: m.role.clone(),
-                    original_type: "tool_result".to_string(),
-                    summary: truncated,
-                    key_data: Some(serde_json::json!({"name": name, "status": status})),
-                });
-            } else {
-                compacted.push(CompressedMessage {
-                    role: m.role.clone(),
-                    original_type: m.role.clone(),
-                    summary: truncated,
-                    key_data: None,
-                });
-            }
-        }
-        compacted
-            .iter()
-            .map(|c| c.to_marker())
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     pub fn prepare(&self, context_window: usize) -> crate::agent_prompt::PreparedPrompt {
@@ -418,108 +412,122 @@ mod tests {
             system_prompt: String::new(),
             memory: crate::memory::MemoryStore::open_in_memory().unwrap(),
             conversation_id: String::new(),
+            summary: None,
+            last_flush_turn: None,
         }
     }
 
     #[tokio::test]
-    async fn compact_messages_never_splits_tool_pair() {
-        use crate::llm::{FunctionCall, ToolCall};
+    async fn should_flush_gate() {
+        // no user message in range → never flush
+        assert!(!ConversationManager::should_flush(None, None));
+        // first flush with a user message → yes
+        assert!(ConversationManager::should_flush(Some(3), None));
+        // same range as last flush → no
+        assert!(!ConversationManager::should_flush(Some(3), Some(3)));
+        // newer user message than last flush → yes
+        assert!(ConversationManager::should_flush(Some(7), Some(3)));
+    }
 
-        let mut messages = vec![ChatMessage {
-            role: "system".to_string(),
-            content: Some(MessageContent::Text("system prompt".to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "first request {}",
-                "x".repeat(100)
-            ))),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(format!(
-                "second request {}",
-                "x".repeat(100)
-            ))),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        // idx 3: assistant with tool call — the naive boundary (len-9 = 3)
-        // lands exactly here, which would orphan the result below.
-        messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "call_split".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "lookup_thing".to_string(),
-                    arguments: r#"{"query":"x"}"#.to_string(),
-                },
-            }]),
-            tool_call_id: None,
-        });
-        // idx 4: matching tool result — naive range summarizes the call but
-        // preserves the result, orphaning the pair.
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("lookup result payload".to_string())),
-            tool_calls: None,
-            tool_call_id: Some("call_split".to_string()),
-        });
-        for i in 0..7 {
-            messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text(format!(
-                    "filler {} {}",
-                    "y".repeat(120),
-                    i
-                ))),
+    #[tokio::test]
+    async fn apply_summary_layer_rebuilds_messages_and_persists() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "layer_u1")
+            .await
+            .unwrap();
+        let mut cm = manager(vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text("sys".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
-            });
-        }
-        // len == 12: naive summarize_count = min(11 * 0.70, 12 - 9) = 3 → mid-pair.
-        let mut cm = manager(messages);
-        let llm = failing_llm();
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("old request".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("old reply".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("latest request".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ]);
+        cm.memory = store.clone();
+        cm.conversation_id = conv.clone();
 
-        let result = cm.compact_messages(&llm, 1_000).await.unwrap();
-        assert!(result, "compaction must happen");
+        cm.apply_summary_layer("layer one content", 3)
+            .await
+            .unwrap();
 
+        // Rebuilt: system + summary block + tail from index 3.
+        assert_eq!(cm.messages.len(), 3);
+        assert_eq!(cm.messages[0].role, "system");
+        assert_eq!(cm.messages[1].role, "system");
+        assert!(
+            cm.messages[1]
+                .content
+                .as_ref()
+                .unwrap()
+                .as_text()
+                .contains("Previously compacted context:\nlayer one content"),
+            "summary injected as system message: {}",
+            cm.messages[1].content.as_ref().unwrap().as_text()
+        );
+        assert_eq!(
+            cm.messages[2].content.as_ref().unwrap().as_text(),
+            "latest request"
+        );
+
+        // Second layer extends, not replaces.
+        cm.apply_summary_layer("layer two content", 2)
+            .await
+            .unwrap();
         let summary_text = cm.messages[1].content.as_ref().unwrap().as_text();
-        // Tool call rendered by NAME, not as [Assistant] ACTION.
         assert!(
-            summary_text.contains("[Tool: lookup_thing]"),
-            "missing tool-call marker: {summary_text}"
+            summary_text.contains("layer one content")
+                && summary_text.contains("layer two content"),
+            "layered extension: {summary_text}"
         );
-        // The pair was summarized together: the result is in the summary.
-        assert!(
-            summary_text.contains("lookup result payload"),
-            "tool result must be summarized with its call: {summary_text}"
+        assert_eq!(
+            cm.summary.as_deref().unwrap(),
+            "layer one content\n\nlayer two content"
         );
-        // Preserved tail: no orphaned tool result or call for call_split.
-        for m in &cm.messages[2..] {
-            assert_ne!(
-                m.tool_call_id.as_deref(),
-                Some("call_split"),
-                "preserved tail must not contain a tool result whose call was summarized"
-            );
-            assert!(
-                !m.has_tool_calls()
-                    || !m
-                        .tool_calls
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .any(|c| c.id == "call_split"),
-                "preserved tail must not contain a summarized tool call"
-            );
-        }
+
+        // Persisted: [SUMMARY] rows reload.
+        let reloaded = store.load_messages(&conv).await.unwrap();
+        let summary_rows: Vec<String> = reloaded
+            .iter()
+            .filter_map(|m| {
+                m.content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .filter(|t| t.starts_with("[SUMMARY]"))
+            })
+            .collect();
+        assert_eq!(summary_rows.len(), 2, "one [SUMMARY] row per layer");
+        assert!(summary_rows[0].contains("layer one content"));
+        assert!(summary_rows[1].contains("layer two content"));
+    }
+
+    #[tokio::test]
+    async fn apply_summary_layer_rejects_empty() {
+        let mut cm = manager(vec![ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        }]);
+        assert!(cm.apply_summary_layer("   ", 1).await.is_err());
     }
 
     #[tokio::test]
@@ -557,14 +565,23 @@ mod tests {
         };
         let before = texts(&cm);
         let llm = failing_llm();
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: 100_000,
+            compaction_model: None,
+            user_model_path: None,
+        };
 
-        let result = cm.compact_messages(&llm, 100_000).await.unwrap();
+        let result = cm.compact_messages(&ctx).await.unwrap();
         assert!(!result, "tiny conversation must not trigger compaction");
         assert_eq!(texts(&cm), before, "messages must be unchanged");
     }
 
-    #[tokio::test]
-    async fn compact_messages_sync_fallback_produces_markers() {
+    #[test]
+    fn compact_range_boundary_lands_after_tool_pair() {
+        use crate::agent_prompt::protected_tail_start;
+        use crate::llm::{FunctionCall, ToolCall};
+
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: Some(MessageContent::Text("system prompt".to_string())),
@@ -574,74 +591,232 @@ mod tests {
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::Text(format!(
-                "user question {} {}",
-                "x".repeat(90),
-                0
+                "first request {}",
+                "x".repeat(100)
             ))),
             tool_calls: None,
             tool_call_id: None,
         });
-        for i in 0..10 {
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_split".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "lookup_thing".to_string(),
+                    arguments: r#"{"query":"x"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        });
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text("lookup result payload".to_string())),
+            tool_calls: None,
+            tool_call_id: Some("call_split".to_string()),
+        });
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "second request {}",
+                "x".repeat(100)
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let start = protected_tail_start(&messages, 1_000_000);
+        // Boundary must not orphan the pair: both call and result are either
+        // both in the tail or both summarized.
+        let call_in_tail = messages[start..].iter().any(|m| {
+            m.has_tool_calls()
+                && m.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|c| c.id == "call_split"))
+        });
+        let result_in_tail = messages[start..]
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("call_split"));
+        assert_eq!(
+            call_in_tail, result_in_tail,
+            "tool pair must not be split at the boundary (start={start})"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_messages_defers_on_llm_failure_never_truncates() {
+        use crate::agent_prompt::{estimate_tokens, protected_tail_start};
+
+        let mut messages = vec![ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text("system prompt".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "UNIQUE_KEYWORD_A long initial request {}",
+                "x".repeat(900)
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        for i in 0..15 {
             messages.push(ChatMessage {
                 role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::llm::ToolCall {
+                    id: format!("call_{i}"),
+                    call_type: "function".to_string(),
+                    function: crate::llm::FunctionCall {
+                        name: "search".to_string(),
+                        arguments: format!(r#"{{"q":"{}"}}"#, "y".repeat(120)),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
                 content: Some(MessageContent::Text(format!(
-                    "assistant reply {} {}",
-                    "x".repeat(80),
-                    i
+                    "tool result {}",
+                    "z".repeat(200)
+                ))),
+                tool_calls: None,
+                tool_call_id: Some(format!("call_{i}")),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(
+                "UNIQUE_KEYWORD_B follow-up request".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let mut cm = manager(messages);
+        let llm = failing_llm();
+        let original_len = cm.messages.len();
+        let window = estimate_tokens(&cm.messages);
+        assert!(window > 0);
+
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: window,
+            compaction_model: None,
+            user_model_path: None,
+        };
+        let result = cm.compact_messages(&ctx).await.unwrap();
+
+        // LLM failure → defer: no compaction, no truncation, nothing lost.
+        assert!(!result, "must defer when summarization fails");
+        assert_eq!(cm.messages.len(), original_len, "messages unchanged");
+
+        let texts: Vec<String> = cm
+            .messages
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("UNIQUE_KEYWORD_A")),
+            "initial request preserved verbatim"
+        );
+        assert!(
+            texts.last().unwrap().contains("UNIQUE_KEYWORD_B"),
+            "latest user intent preserved verbatim"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|t| t.len() >= 200 || !t.contains("UNIQUE_KEYWORD_A")),
+            "no 200-char truncation anywhere"
+        );
+
+        // Second attempt: protected tail must include both user turns.
+        let tail = protected_tail_start(&cm.messages, window);
+        assert!(
+            cm.messages[tail..].iter().any(|m| m
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .is_some_and(|t| t.contains("UNIQUE_KEYWORD_B"))),
+            "protected tail contains the latest user turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_success_path_preserves_user_intent() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("test", "compact_u1")
+            .await
+            .unwrap();
+        let mut cm = manager(vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text("sys".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text(format!(
+                    "UNIQUE_KEYWORD_A old request {}",
+                    "x".repeat(800)
                 ))),
                 tool_calls: None,
                 tool_call_id: None,
-            });
-            let result = if i == 3 {
-                format!("Error: file not found {}", "y".repeat(70))
-            } else {
-                format!("tool result {} {}", "y".repeat(80), i)
-            };
-            messages.push(ChatMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text(result)),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("old reply".to_string())),
                 tool_calls: None,
-                tool_call_id: Some(format!("tool_{i}")),
-            });
-        }
-        let last_content = messages.last().unwrap().content.clone();
-        let mut cm = manager(messages);
-        let llm = failing_llm();
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("middle message".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text(
+                    "UNIQUE_KEYWORD_B follow-up".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ]);
+        cm.conversation_id = conv.clone();
 
-        let result = cm.compact_messages(&llm, 1_000).await.unwrap();
-        assert!(result, "LLM failure must still compact via sync fallback");
+        let tail = crate::agent_prompt::protected_tail_start(&cm.messages, 1_000_000);
+        assert_eq!(
+            tail, 3,
+            "old request + reply summarized, follow-up protected"
+        );
+        cm.apply_summary_layer("user asked about UNIQUE_KEYWORD_A topic", tail)
+            .await
+            .unwrap();
 
-        // system + 1 summary entry + newest 8 preserved
-        assert_eq!(cm.messages.len(), 10);
-        assert_eq!(cm.messages[0].role, "system");
-        assert_eq!(cm.messages[1].role, "user");
-        assert_eq!(cm.messages[1].tool_call_id.as_deref(), Some("summary"));
-
+        // System message at index 1 carries the summary; the latest intent is verbatim.
+        assert_eq!(cm.messages[1].role, "system");
         let summary_text = cm.messages[1].content.as_ref().unwrap().as_text();
         assert!(
-            summary_text.contains("★ COMPACTED CONTEXT — 13 messages summarized ★"),
-            "missing heading: {}",
-            summary_text
+            summary_text.contains("UNIQUE_KEYWORD_A"),
+            "summary preserves the old intent: {summary_text}"
         );
-        assert!(summary_text.contains("[User] TOPIC:"), "{summary_text}");
-        assert!(
-            summary_text.contains("[Assistant] ACTION:"),
-            "{summary_text}"
-        );
-        assert!(summary_text.contains("[Tool: tool_3]"), "{summary_text}");
-        assert!(summary_text.contains("| status: error"), "{summary_text}");
-
-        // Preserved tail: newest 8 messages verbatim, in order.
         assert_eq!(
             cm.messages
                 .last()
                 .unwrap()
                 .content
                 .as_ref()
-                .map(|c| c.as_text()),
-            last_content.as_ref().map(|c| c.as_text())
+                .unwrap()
+                .as_text(),
+            "UNIQUE_KEYWORD_B follow-up"
         );
-        assert_eq!(cm.messages[2].role, "assistant");
-        assert!(cm.messages[2].content.as_ref().unwrap().as_text().len() > 50);
     }
 }

@@ -99,40 +99,10 @@ impl CompressedMessage {
 const OBSERVATION_MASK_PCT: f64 = 0.70;
 /// Percentage that triggers Tier 2 (context collapse).
 const COLLAPSE_PCT: f64 = 0.75;
-/// Percentage that triggers Tier 3 (auto compact).
-pub const COMPACT_PCT: f64 = 0.82;
-/// Utilization fraction (total chars / context_window) at which the unified
-/// compaction pipeline begins summarizing the oldest messages.
-pub const COMPACT_TRIGGER_PCT: f64 = 0.70;
-/// Graduated compression ladder: (trigger, fraction of oldest messages to compress).
-pub const COMPACT_LADDER: [(f64, f64); 5] = [
-    (0.70, 0.10),
-    (0.75, 0.25),
-    (0.82, 0.40),
-    (0.88, 0.55),
-    (0.93, 0.70),
-];
-
-/// Oldest-message fraction to compress for a given utilization.
-///
-/// Returns the fraction from the largest ladder entry whose trigger is
-/// `<= utilization`, or `0.0` when utilization is below the first trigger.
-pub fn compact_fraction(utilization: f64) -> f64 {
-    for (trigger, fraction) in COMPACT_LADDER.iter().rev() {
-        if utilization >= *trigger {
-            return *fraction;
-        }
-    }
-    0.0
-}
-/// Documentary threshold — Tier 4 is triggered by HTTP 413 errors,
-/// not by a percentage, but this documents the utilization level at
-/// which a 413 would typically occur.
-#[allow(dead_code)]
-pub(crate) const REACTIVE_PCT: f64 = 0.95;
+/// Utilization fraction (estimated tokens / context_window) at which the
+/// unified compaction pipeline begins summarizing the oldest messages.
+pub const COMPACT_TRIGGER_PCT: f64 = 0.85;
 /// Minimum turns between Tier 3/4 compactions.
-pub const COMPACT_TURN_GAP: usize = 5;
-/// Number of most recent tool groups to preserve verbatim.
 pub const PRESERVED_TOOL_GROUPS: usize = 2;
 /// Absolute hard cap safety net (applied regardless of context_window).
 const PROMPT_HARD_CAP_BYTES: usize = 100_000;
@@ -159,36 +129,6 @@ pub struct PreparedPrompt {
     pub stats: PromptStats,
 }
 
-/// Per-conversation compaction metadata.
-///
-/// Tracked in-memory alongside the message list. The agent loop increments
-/// `current_turn` each iteration and updates `last_compact_turn` after
-/// Tier 3/4 fires.
-#[derive(Debug, Clone)]
-pub struct ConversationMeta {
-    pub last_compact_turn: usize,
-    pub has_attempted_reactive_compact: bool,
-    pub is_compact_agent: bool,
-    pub current_turn: usize,
-}
-
-impl ConversationMeta {
-    pub fn new() -> Self {
-        Self {
-            last_compact_turn: 0,
-            has_attempted_reactive_compact: false,
-            is_compact_agent: false,
-            current_turn: 0,
-        }
-    }
-}
-
-impl Default for ConversationMeta {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Estimate the byte size of a prompt from its messages.
 pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
     messages
@@ -208,6 +148,136 @@ pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
             content_chars + tool_args_chars
         })
         .sum()
+}
+
+/// Estimate token count from messages, CJK-aware.
+///
+/// CJK characters cost ~1 token each; Latin/other characters ~1/4 token.
+/// Tool-call arguments count toward the total. This is the single token
+/// estimate used for the compaction trigger (ADR 0003 Q3).
+pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+    let mut latin_chars = 0usize;
+    let mut cjk_chars = 0usize;
+    for msg in messages {
+        if let Some(content) = msg.content.as_ref() {
+            count_chars(&content.as_text(), &mut latin_chars, &mut cjk_chars);
+        }
+        if let Some(calls) = msg.tool_calls.as_ref() {
+            for call in calls {
+                count_chars(&call.function.arguments, &mut latin_chars, &mut cjk_chars);
+            }
+        }
+    }
+    latin_chars / 4 + cjk_chars
+}
+
+fn count_chars(text: &str, latin: &mut usize, cjk: &mut usize) {
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            *cjk += 1;
+        } else {
+            *latin += 1;
+        }
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2E80..=0x2EFF | // CJK Radicals Supplement
+        0x3000..=0x303F | // CJK punctuation
+        0x3040..=0x30FF | // Hiragana + Katakana
+        0x3400..=0x4DBF | // CJK Extension A
+        0x4E00..=0x9FFF | // CJK Unified Ideographs
+        0xAC00..=0xD7AF   // Hangul
+    )
+}
+
+/// First index of the protected tail — messages from this index on are kept
+/// verbatim (ADR 0003 Q4): the last two user turns plus the active exchange,
+/// capped at 20% of `window` tokens. The boundary never splits a
+/// [tool_call, tool_result] pair. Returns 0 when nothing can be protected
+/// (no user messages) — callers treat 0 as "do not compact".
+pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
+    let user_idx: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user")
+        .map(|(i, _)| i)
+        .collect();
+    if user_idx.is_empty() {
+        return 0;
+    }
+    let last_user = *user_idx.last().expect("non-empty");
+    let base = if user_idx.len() >= 2 {
+        user_idx[user_idx.len() - 2]
+    } else {
+        user_idx[0]
+    };
+    if base == 0 {
+        return 0; // would protect the system message — nothing to compact
+    }
+
+    let mut start = base;
+    let cap_tokens = window / 5;
+    while start < last_user && estimate_tokens(&messages[start..]) > cap_tokens {
+        start += 1;
+    }
+
+    // Never split a [tool_call, tool_result] pair.
+    loop {
+        let mut changed = false;
+        let mut i = start;
+        while i < messages.len() {
+            let msg = &messages[i];
+            if msg.has_tool_calls() {
+                let call_ids: Vec<&str> = msg
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .map(|c| c.id.as_str())
+                    .collect();
+                let mut last_result = i;
+                for (offset, m) in messages.iter().skip(i + 1).enumerate() {
+                    let j = i + 1 + offset;
+                    if m.role == "tool"
+                        && m.tool_call_id
+                            .as_deref()
+                            .is_some_and(|id| call_ids.contains(&id))
+                    {
+                        last_result = j;
+                    } else if m.role != "tool" {
+                        break;
+                    }
+                }
+                if last_result + 1 > start {
+                    start = last_result + 1;
+                    changed = true;
+                }
+            }
+            i += 1;
+        }
+        if start > 0 {
+            let prev = &messages[start - 1];
+            if prev.role == "tool" {
+                let call_in_tail = messages[start..].iter().any(|m| {
+                    m.has_tool_calls()
+                        && m.tool_calls.as_ref().is_some_and(|calls| {
+                            calls
+                                .iter()
+                                .any(|c| Some(c.id.as_str()) == prev.tool_call_id.as_deref())
+                        })
+                });
+                if call_in_tail {
+                    start -= 1;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    start
 }
 
 /// Create a recovery nudge message appropriate for the conversation context.
@@ -467,29 +537,30 @@ pub fn prepare_messages_for_llm(messages: &[ChatMessage], context_window: usize)
             after_tier1
         };
 
-        // Safety net: if still over hard cap, keep all sys/user + the 2 newest messages (1 preserved pair)
+        // Safety net (ADR 0003 Q7 step 3): if still over the hard cap after
+        // Tiers 1-2, drop the OLDEST non-protected traffic only — the last two
+        // user turns + active exchange always survive.
         if estimate_prompt_bytes(&after_tier2) > PROMPT_HARD_CAP_BYTES {
-            let preserved_count = after_tier2
-                .iter()
-                .filter(|m| m.role == "system" || m.role == "user")
-                .count();
-            let mut hard_cap_messages: Vec<ChatMessage> = Vec::with_capacity(preserved_count + 2);
-            for m in &after_tier2 {
-                if m.role == "system" || m.role == "user" {
-                    hard_cap_messages.push(m.clone());
-                }
+            let tail_start = protected_tail_start(&after_tier2, context_window).max(1);
+            let mut hard_cap_messages: Vec<ChatMessage> =
+                Vec::with_capacity(after_tier2.len().saturating_sub(tail_start) + 2);
+            if let Some(system) = after_tier2.first() {
+                hard_cap_messages.push(system.clone());
             }
-            // Append the 2 newest non-system/user messages (preserves latest preserved pair)
-            let mut newest_pair: Vec<ChatMessage> = Vec::with_capacity(2);
-            for m in after_tier2.iter().rev() {
-                if m.role != "system" && m.role != "user" {
-                    newest_pair.push(m.clone());
-                    if newest_pair.len() == 2 {
-                        break;
-                    }
+            if tail_start < after_tier2.len() {
+                if tail_start > 1 {
+                    hard_cap_messages.push(ChatMessage {
+                        role: "system".to_string(),
+                        content: Some(MessageContent::Text(
+                            "★ earlier conversation dropped — memory compaction failed ★"
+                                .to_string(),
+                        )),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
                 }
+                hard_cap_messages.extend(after_tier2.iter().skip(tail_start).cloned());
             }
-            hard_cap_messages.extend(newest_pair.into_iter().rev());
             hard_cap_messages
         } else {
             after_tier2
@@ -521,27 +592,6 @@ fn compact_min_message_count(context_window: usize) -> usize {
     let base = COMPACT_MIN_MESSAGE_COUNT;
     let window_k = context_window / 512_000; // 512K = 128K tokens
     base + (base / 2) * window_k
-}
-
-/// Check whether Tier 3 auto-compact should trigger.
-///
-/// All conditions must be true:
-/// - Message count > compact_min_message_count
-/// - Estimated prompt bytes > context_window * COMPACT_PCT
-/// - Turn gap >= COMPACT_TURN_GAP since last compact
-/// - Not already in compact agent loop (recursion guard)
-pub fn should_auto_compact(
-    messages: &[ChatMessage],
-    meta: &ConversationMeta,
-    context_window: usize,
-) -> bool {
-    let threshold = (context_window as f64 * COMPACT_PCT) as usize;
-    let bytes = estimate_prompt_bytes(messages);
-
-    bytes > threshold
-        && messages.len() > compact_min_message_count(context_window)
-        && meta.current_turn - meta.last_compact_turn >= COMPACT_TURN_GAP
-        && !meta.is_compact_agent
 }
 
 /// Create the summary prompt content used for Tier 3 and Tier 4 LLM calls.
@@ -868,55 +918,6 @@ mod tests {
     }
 
     #[test]
-    fn should_auto_compact_checks_bytes_turns_and_recursion_guard() {
-        let mut meta = ConversationMeta {
-            last_compact_turn: 0,
-            has_attempted_reactive_compact: false,
-            is_compact_agent: false,
-            current_turn: 10,
-        };
-
-        let small: Vec<ChatMessage> = (0..3)
-            .map(|_| ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("hi".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-            })
-            .collect();
-        assert!(!should_auto_compact(&small, &meta, 512_000));
-
-        let few_but_big: Vec<ChatMessage> = (0..5)
-            .map(|_| ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("x".repeat(100_000))),
-                tool_calls: None,
-                tool_call_id: None,
-            })
-            .collect();
-        assert!(!should_auto_compact(&few_but_big, &meta, 512_000));
-
-        let many_big: Vec<ChatMessage> = (0..23)
-            .map(|_| ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("x".repeat(50_000))),
-                tool_calls: None,
-                tool_call_id: None,
-            })
-            .collect();
-
-        meta.is_compact_agent = true;
-        assert!(!should_auto_compact(&many_big, &meta, 512_000));
-        meta.is_compact_agent = false;
-
-        meta.last_compact_turn = 8;
-        assert!(!should_auto_compact(&many_big, &meta, 512_000));
-        meta.last_compact_turn = 0;
-
-        assert!(should_auto_compact(&many_big, &meta, 512_000));
-    }
-
-    #[test]
     #[allow(clippy::vec_init_then_push)]
     fn find_tool_groups_detects_consecutive_tool_calls() {
         let mut messages = Vec::new();
@@ -973,29 +974,6 @@ mod tests {
         assert_eq!(groups[0].tool_result_indices, vec![2]);
         assert_eq!(groups[1].assistant_idx, 3);
         assert_eq!(groups[1].tool_result_indices, vec![4]);
-    }
-
-    #[test]
-    fn should_auto_compact_needs_minimum_message_count() {
-        let meta = ConversationMeta::new();
-        let few: Vec<ChatMessage> = (0..5)
-            .map(|_| ChatMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("x".repeat(100_000))),
-                tool_calls: None,
-                tool_call_id: None,
-            })
-            .collect();
-        assert!(!should_auto_compact(&few, &meta, 512_000));
-    }
-
-    #[test]
-    fn conversation_meta_defaults_to_zero() {
-        let meta = ConversationMeta::new();
-        assert_eq!(meta.last_compact_turn, 0);
-        assert!(!meta.has_attempted_reactive_compact);
-        assert!(!meta.is_compact_agent);
-        assert_eq!(meta.current_turn, 0);
     }
 
     #[test]
@@ -1067,6 +1045,54 @@ mod tests {
     }
 
     #[test]
+    fn hard_cap_fallback_drops_oldest_only_keeps_latest_user_intent() {
+        let mut msgs = vec![chat_msg("system", "sys")];
+        msgs.push(chat_msg("user", "request 0"));
+        // 7 tool groups (16 msgs + sys + last user = 17 > compact_min_message_count(15)).
+        // Preserved tool groups alone exceed PROMPT_HARD_CAP_BYTES, so the
+        // obs/coll tiers cannot reduce below the cap → the hard-cap branch fires.
+        for i in 0..7 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("c{i}"),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "x".repeat(60_000),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            msgs.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("y".repeat(60_000))),
+                tool_calls: None,
+                tool_call_id: Some(format!("c{i}")),
+            });
+        }
+        msgs.push(chat_msg("user", "request last"));
+        let prepared = prepare_messages_for_llm(&msgs, 1_000);
+        assert!(
+            prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(|c| c.as_text() == "request last")
+                .unwrap_or(false)),
+            "last user turn survives the hard cap"
+        );
+        assert!(
+            !prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(|c| c.as_text() == "request 0")
+                .unwrap_or(false)),
+            "oldest traffic dropped"
+        );
+    }
+
+    #[test]
     fn compact_summary_prompt_contains_state_keywords() {
         let msg = build_compact_summary_prompt();
         let text = msg.content.as_ref().unwrap().as_text();
@@ -1087,16 +1113,195 @@ mod tests {
         assert!(text.contains("state"), "Should hint at state format");
     }
 
+    fn chat_msg(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(MessageContent::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn tool_call_msg(id: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![crate::llm::ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        }
+    }
+
+    fn tool_result_msg(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text("result payload".to_string())),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+        }
+    }
+
     #[test]
-    fn compact_fraction_ladder() {
-        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        assert!(approx(compact_fraction(0.69), 0.0));
-        assert!(approx(compact_fraction(0.70), 0.10));
-        assert!(approx(compact_fraction(0.80), 0.25));
-        assert!(approx(compact_fraction(0.90), 0.55));
-        assert!(approx(compact_fraction(0.99), 0.70));
-        // Saturates at the largest ladder entry.
-        assert!(approx(compact_fraction(2.0), 0.70));
+    fn protected_tail_start_keeps_last_two_user_turns() {
+        let mut msgs = vec![chat_msg("system", "sys")];
+        for i in 0..10 {
+            msgs.push(chat_msg("user", &format!("turn {i}")));
+            msgs.push(chat_msg("assistant", &format!("reply {i}")));
+        }
+        let start = protected_tail_start(&msgs, 1_000_000);
+        let tail: Vec<&str> = msgs[start..].iter().map(|m| m.role.as_str()).collect();
+        assert!(tail.contains(&"user"), "tail keeps user turns");
+        assert_eq!(
+            msgs[start..].iter().filter(|m| m.role == "user").count(),
+            2,
+            "exactly the last two user turns survive"
+        );
+        assert!(
+            msgs[start..].iter().any(|m| {
+                m.content
+                    .as_ref()
+                    .map(|c| c.as_text() == "turn 8")
+                    .unwrap_or(false)
+            }),
+            "second-to-last user turn verbatim"
+        );
+        assert!(
+            msgs[start..].iter().any(|m| {
+                m.content
+                    .as_ref()
+                    .map(|c| c.as_text() == "turn 9")
+                    .unwrap_or(false)
+            }),
+            "last user turn verbatim"
+        );
+    }
+
+    #[test]
+    fn protected_tail_start_never_splits_tool_pair() {
+        // user, call, result, user — boundary must not land between call and result.
+        let msgs = vec![
+            chat_msg("system", "sys"),
+            chat_msg("user", "old request"),
+            tool_call_msg("call_a", "lookup_thing"),
+            tool_result_msg("call_a"),
+            chat_msg("assistant", "old answer"),
+            chat_msg("user", "latest request"),
+        ];
+        let start = protected_tail_start(&msgs, 1_000_000);
+        let tail = &msgs[start..];
+        assert!(
+            !(tail
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call_a"))
+                && !tail.iter().any(|m| {
+                    m.has_tool_calls()
+                        && m.tool_calls
+                            .as_ref()
+                            .is_some_and(|calls| calls.iter().any(|c| c.id == "call_a"))
+                })),
+            "orphaned tool result in tail"
+        );
+        assert!(
+            !(tail.iter().any(|m| {
+                m.has_tool_calls()
+                    && m.tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| calls.iter().any(|c| c.id == "call_a"))
+            }) && !tail
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call_a"))),
+            "orphaned tool call in tail"
+        );
+    }
+
+    #[test]
+    fn protected_tail_start_caps_at_20_percent() {
+        let mut msgs = vec![chat_msg("system", "sys")];
+        for i in 0..8 {
+            msgs.push(chat_msg("user", &format!("request {i}")));
+            msgs.push(chat_msg("assistant", &"reply ".repeat(500)));
+        }
+        // window sized so the full tail (~4K chars) exceeds 20% of window tokens
+        let window = estimate_tokens(&msgs) * 5 / 2; // tail cap = window/5 < tail tokens
+        let start = protected_tail_start(&msgs, window);
+        let tail_tokens = estimate_tokens(&msgs[start..]);
+        assert!(
+            tail_tokens <= window / 5 + estimate_tokens(&msgs[msgs.len() - 2..]),
+            "tail must be capped near 20% (plus the mandatory last turn): {tail_tokens} > {}",
+            window / 5
+        );
+        // last user turn always survives the cap
+        assert!(
+            msgs[start..].iter().any(|m| {
+                m.content
+                    .as_ref()
+                    .map(|c| c.as_text().starts_with("request 7"))
+                    .unwrap_or(false)
+            }),
+            "last user turn must never be dropped by the cap"
+        );
+    }
+
+    #[test]
+    fn protected_tail_start_returns_zero_without_user_messages() {
+        let msgs = vec![
+            chat_msg("system", "sys"),
+            chat_msg("assistant", "a"),
+            chat_msg("tool", "t"),
+        ];
+        assert_eq!(protected_tail_start(&msgs, 1_000_000), 0);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_cjk_and_latin() {
+        use crate::llm::{ChatMessage, MessageContent};
+
+        fn msg(text: &str) -> ChatMessage {
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text(text.to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            }
+        }
+
+        // 4 Latin chars ≈ 1 token.
+        let latin = vec![msg("abcd")];
+        assert_eq!(estimate_tokens(&latin), 1, "4 latin chars ≈ 1 token");
+
+        // CJK chars cost 1 token each.
+        let cjk = vec![msg("中文测试")];
+        assert_eq!(estimate_tokens(&cjk), 4, "CJK chars ≈ 1 token each");
+
+        // Mixed.
+        let mixed = vec![msg("hello中文")];
+        assert_eq!(estimate_tokens(&mixed), 1 + 2, "latin/4 + cjk");
+
+        // Tool-call arguments count toward the total.
+        let with_tool = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![crate::llm::ToolCall {
+                id: "c1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "search".to_string(),
+                    arguments: r#"{"q":"abcd"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        }];
+        assert_eq!(
+            estimate_tokens(&with_tool),
+            3,
+            "tool args count (12 latin chars)"
+        );
     }
 
     #[test]
