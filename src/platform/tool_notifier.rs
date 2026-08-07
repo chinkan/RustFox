@@ -9,6 +9,8 @@ const MAX_DISPLAY_FIELD_CHARS: usize = 60;
 use teloxide::{prelude::*, types::Message};
 use tracing::{debug, warn};
 
+use crate::tool_registry::ToolUiMode;
+
 /// Events emitted by the agent during tool execution.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -166,15 +168,15 @@ impl ToolDisplayState {
         self.plan.is_some() || !self.activities.is_empty()
     }
 
-    fn format_live(&self) -> String {
-        self.format("⏳ Working on your request")
+    fn format_live(&self, mode: ToolUiMode) -> String {
+        self.format("⏳ Working on your request", mode)
     }
 
     #[allow(dead_code)]
-    fn format_completed(&self) -> String {
+    fn format_completed(&self, mode: ToolUiMode) -> String {
         // Default successful header and result. Caller may adjust based on overall
         // request success vs failure when rendering the final card.
-        self.format("✅ Completed")
+        self.format("✅ Completed", mode)
     }
 
     fn apply_plan_update(&mut self, update: PlanStepUpdate) {
@@ -186,7 +188,7 @@ impl ToolDisplayState {
         }
     }
 
-    fn format(&self, header: &str) -> String {
+    fn format(&self, header: &str, mode: ToolUiMode) -> String {
         let mut text = header.to_string();
 
         if let Some(plan) = &self.plan {
@@ -221,7 +223,8 @@ impl ToolDisplayState {
             for activity in &self.activities {
                 text.push('\n');
                 text.push_str(&friendly_tool_name(&activity.name));
-                if !activity.args_preview.is_empty() {
+                // In verbose mode, show args_preview; in minimal, hide it
+                if mode == ToolUiMode::Verbose && !activity.args_preview.is_empty() {
                     text.push_str(": ");
                     text.push_str(&crate::utils::strings::truncate_chars(
                         &activity.args_preview,
@@ -493,16 +496,18 @@ pub struct ToolCallNotifier {
     status_msg: Option<Message>,
     display_state: ToolDisplayState,
     last_edit: Option<Instant>,
+    mode: ToolUiMode,
 }
 
 impl ToolCallNotifier {
-    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
+    pub fn new(bot: Bot, chat_id: ChatId, mode: ToolUiMode) -> Self {
         Self {
             bot,
             chat_id,
             status_msg: None,
             display_state: ToolDisplayState::default(),
             last_edit: None,
+            mode,
         }
     }
 
@@ -563,7 +568,7 @@ impl ToolCallNotifier {
     }
 
     fn format_status(&self) -> String {
-        self.display_state.format_live()
+        self.display_state.format_live(self.mode)
     }
 
     fn final_status_text(&self, success: bool) -> Option<String> {
@@ -573,7 +578,7 @@ impl ToolCallNotifier {
             } else {
                 "⛔ Stopped"
             };
-            let mut text = self.display_state.format(header);
+            let mut text = self.display_state.format(header, self.mode);
 
             if success {
                 text.push_str("\n\nResult\nFinal answer sent below.");
@@ -697,7 +702,7 @@ mod tests {
             title: "Long Plan Title".to_string(),
             steps,
         });
-        let formatted = s.format_completed();
+        let formatted = s.format_completed(ToolUiMode::Verbose);
         // Should always be under Telegram's safe limit (we clamp elsewhere to MAX_STATUS_TEXT_CHARS=3800)
         assert!(
             formatted.chars().count() <= 4000,
@@ -708,7 +713,8 @@ mod tests {
 
     #[test]
     fn test_notifier_final_status_text_returns_completed_card_when_activity_exists() {
-        let mut notifier = ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1));
+        let mut notifier =
+            ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1), ToolUiMode::Verbose);
         notifier.display_state.handle_event(ToolEvent::Started {
             name: "read_file".to_string(),
             args_preview: "/tmp/file.txt".to_string(),
@@ -737,7 +743,8 @@ mod tests {
 
     #[test]
     fn test_notifier_final_status_text_is_none_without_activity() {
-        let notifier = ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1));
+        let notifier =
+            ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1), ToolUiMode::Minimal);
         assert!(notifier.final_status_text(true).is_none());
     }
 
@@ -753,7 +760,7 @@ mod tests {
                     .to_string(),
         });
 
-        let text = state.format_live();
+        let text = state.format_live(ToolUiMode::Verbose);
         assert!(
             text.contains("Working on your request"),
             "live header missing: {text}"
@@ -788,7 +795,7 @@ mod tests {
             arguments_json: r#"{"step_id":1,"status":"in_progress","notes":"working"}"#.to_string(),
         });
 
-        let text = state.format_live();
+        let text = state.format_live(ToolUiMode::Verbose);
         assert!(
             text.contains("[ ] 0. First"),
             "unchanged step missing: {text}"
@@ -812,7 +819,7 @@ mod tests {
             args_preview: "step 0".to_string(),
             arguments_json: r#"{"step_id":0,"status":"done","notes":"token=secret"}"#.to_string(),
         });
-        let text = state.format_completed();
+        let text = state.format_completed(ToolUiMode::Verbose);
         assert!(text.contains("[x] 0. First"), "done step missing: {text}");
         assert!(
             !text.contains("token=secret"),
@@ -822,7 +829,8 @@ mod tests {
 
     #[test]
     fn test_notifier_final_status_text_reports_failed_request() {
-        let mut notifier = ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1));
+        let mut notifier =
+            ToolCallNotifier::new(Bot::new("TEST_TOKEN"), ChatId(1), ToolUiMode::Verbose);
         notifier.display_state.handle_event(ToolEvent::Started {
             name: "read_file".to_string(),
             args_preview: "/tmp/file.txt".to_string(),
@@ -865,7 +873,7 @@ mod tests {
             success: false,
         });
 
-        let text = state.format_live();
+        let text = state.format_live(ToolUiMode::Verbose);
         assert!(
             text.contains("[!] 0. Only step"),
             "failed step missing: {text}"
@@ -900,7 +908,7 @@ mod tests {
             success: false,
         });
 
-        let text = state.format_live();
+        let text = state.format_live(ToolUiMode::Verbose);
         assert!(
             text.contains("[x] 1. Second"),
             "valid completed step changed unexpectedly: {text}"
@@ -925,7 +933,7 @@ mod tests {
             success: true,
         });
 
-        let text = state.format_completed();
+        let text = state.format_completed(ToolUiMode::Verbose);
         assert!(
             text.contains("Completed"),
             "completed header missing: {text}"

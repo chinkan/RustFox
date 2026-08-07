@@ -11,7 +11,17 @@ use tracing::warn;
 use crate::cancel_registry::CancelRegistry;
 use crate::llm::{FunctionDefinition, ToolDefinition};
 use crate::platform::sender::PlatformSender;
-use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
+use crate::tool_registry::{ToolContext, ToolHandler, ToolResult, ToolUiMode};
+
+/// Controls how command execution messages are sent to Telegram.
+enum SendMode {
+    /// Full live output with cancel button.
+    Verbose,
+    /// Cancel button only, no live edits. Message deleted on completion.
+    Minimal,
+    /// No message sent. Tool notifier handles nothing (silent mode).
+    Silent,
+}
 
 pub struct CommandTool {
     sandbox_dir: PathBuf,
@@ -78,11 +88,29 @@ impl CommandTool {
 
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
-        let status_text = format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
-        let msg_id = self
-            .sender
-            .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
-            .await?;
+        // Verbose: cancel button + live output + final result
+        // Minimal: cancel button (simple text) + no live output, delete on finish
+        // Silent: no message at all (tool_notifier handles nothing)
+        let (msg_id, send_mode) = match ctx.tool_ui_mode {
+            ToolUiMode::Verbose => {
+                let status_text =
+                    format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
+                let id = self
+                    .sender
+                    .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
+                    .await?;
+                (Some(id), SendMode::Verbose)
+            }
+            ToolUiMode::Minimal => {
+                let status_text = format!("⏳ Running: `{}`", escaped_cmd);
+                let id = self
+                    .sender
+                    .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
+                    .await?;
+                (Some(id), SendMode::Minimal)
+            }
+            ToolUiMode::Silent => (None, SendMode::Silent),
+        };
 
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         self.cancel_registry
@@ -136,11 +164,13 @@ impl CommandTool {
                     if output_buffer.chars().count() > MAX_BUFFER_CHARS {
                         output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
                     }
-                    if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
+                    if matches!(send_mode, SendMode::Verbose) && last_edit.elapsed() >= std::time::Duration::from_millis(500) {
                         let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
                         let text = format!("💻 Running: `{}`\n\n```\n{}\n```", escaped_cmd, capped);
-                        if let Err(e) = self.sender.edit_message(&ctx.chat_id, &msg_id, &text).await {
-                            warn!("Failed to update running message: {e}");
+                        if let Some(mid) = &msg_id {
+                            if let Err(e) = self.sender.edit_message(&ctx.chat_id, mid, &text).await {
+                                warn!("Failed to update running message: {e}");
+                            }
                         }
                         last_edit = Instant::now();
                     }
@@ -186,28 +216,52 @@ impl CommandTool {
         }
 
         let result = if cancelled {
-            let body = format_body(&output_buffer, "");
-            let text = match body {
-                None => format!("❌ Cancelled: `{}`", escaped_cmd),
-                Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
-            };
-            let _ = self.sender.edit_message(&ctx.chat_id, &msg_id, &text).await;
+            if let Some(mid) = &msg_id {
+                match send_mode {
+                    SendMode::Verbose => {
+                        let body = format_body(&output_buffer, "");
+                        let text = match body {
+                            None => format!("❌ Cancelled: `{}`", escaped_cmd),
+                            Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
+                        };
+                        let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
+                    }
+                    SendMode::Minimal => {
+                        // Delete the minimal message
+                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
+                    }
+                    // Silent mode sends no message; nothing to clean up.
+                    SendMode::Silent => {}
+                }
+            }
             "⚠️ User cancelled the command".to_string()
         } else if let Some(code) = exit_code {
-            let (icon, label) = if code == 0 {
-                ("✅", "Completed")
-            } else {
-                ("❌", "Failed")
-            };
-            let body = format_body(&output_buffer, "Command completed with no output.");
-            let text = format!(
-                "{} {}: `{}`\n\n{}",
-                icon,
-                label,
-                escaped_cmd,
-                body.unwrap_or_default()
-            );
-            let _ = self.sender.edit_message(&ctx.chat_id, &msg_id, &text).await;
+            if let Some(mid) = &msg_id {
+                match send_mode {
+                    SendMode::Verbose => {
+                        let (icon, label) = if code == 0 {
+                            ("✅", "Completed")
+                        } else {
+                            ("❌", "Failed")
+                        };
+                        let body = format_body(&output_buffer, "Command completed with no output.");
+                        let text = format!(
+                            "{} {}: `{}`\n\n{}",
+                            icon,
+                            label,
+                            escaped_cmd,
+                            body.unwrap_or_default()
+                        );
+                        let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
+                    }
+                    SendMode::Minimal => {
+                        // Delete the minimal message
+                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
+                    }
+                    // Silent mode sends no message; nothing to clean up.
+                    SendMode::Silent => {}
+                }
+            }
             let mut result = String::new();
             if !output_buffer.is_empty() {
                 result.push_str(output_buffer.trim_end());

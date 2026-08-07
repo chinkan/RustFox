@@ -10,6 +10,58 @@ use crate::platform::sender::PlatformSender;
 
 pub type ToolResult = Result<String>;
 
+/// Controls how tool execution progress is displayed to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolUiMode {
+    /// No tool progress messages at all (just "⏳ Thinking..." placeholder).
+    Silent,
+    /// Show tool names + status, but hide args and command output.
+    Minimal,
+    /// Show everything: tool names, args, live command output, results.
+    Verbose,
+}
+
+impl ToolUiMode {
+    /// Parse from stored memory value. Handles legacy boolean key.
+    pub fn from_memory(s: Option<&str>) -> Self {
+        match s {
+            Some("verbose") => Self::Verbose,
+            Some("minimal") => Self::Minimal,
+            Some("silent") => Self::Silent,
+            // backward compat: old "true"/"false" key. "false" meant no tool UI
+            // at all (placeholder only) → Silent. Absent key → new default Minimal.
+            Some("true") => Self::Verbose,
+            Some("false") => Self::Silent,
+            None => Self::Minimal,
+            _ => Self::Minimal,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Minimal => "minimal",
+            Self::Verbose => "verbose",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Minimal => Self::Verbose,
+            Self::Verbose => Self::Silent,
+            Self::Silent => Self::Minimal,
+        }
+    }
+
+    pub fn reply_message(&self) -> &'static str {
+        match self {
+            Self::Silent => "🔇 **Tool UI silent.** No progress messages.",
+            Self::Minimal => "🔧 **Tool UI minimal.** Tool names + status, no details.",
+            Self::Verbose => "🔧 **Tool UI verbose.** Full tool call details.",
+        }
+    }
+}
+
 pub struct ToolContext {
     pub sandbox_dir: PathBuf,
     pub home_dir: Option<PathBuf>,
@@ -17,6 +69,7 @@ pub struct ToolContext {
     pub cancel_registry: Arc<CancelRegistry>,
     pub user_id: String,
     pub chat_id: String,
+    pub tool_ui_mode: ToolUiMode,
 }
 
 #[async_trait]
@@ -108,6 +161,7 @@ mod tests {
             cancel_registry: Arc::new(CancelRegistry::new()),
             user_id: "test".to_string(),
             chat_id: "0".to_string(),
+            tool_ui_mode: ToolUiMode::Minimal,
         };
         let result = reg.execute("mock_tool", json!({}), ctx).await.unwrap();
         assert_eq!(result, "executed mock_tool");
@@ -123,6 +177,7 @@ mod tests {
             cancel_registry: Arc::new(CancelRegistry::new()),
             user_id: "test".to_string(),
             chat_id: "0".to_string(),
+            tool_ui_mode: ToolUiMode::Minimal,
         };
         let result = reg.execute("unknown", json!({}), ctx).await;
         assert!(result.is_err());
@@ -162,6 +217,13 @@ mod tests {
             _chat_id: &str,
             _message_id: &PlatformMessageId,
             _text: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &PlatformMessageId,
         ) -> Result<()> {
             Ok(())
         }

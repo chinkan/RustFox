@@ -11,7 +11,7 @@ use serde_json::Value;
 use teloxide::types::ChatId;
 use teloxide::Bot;
 
-use crate::agent_prompt::{ConversationMeta, PreparedPrompt};
+use crate::agent_prompt::PreparedPrompt;
 use crate::cancel_registry::CancelRegistry;
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
@@ -631,6 +631,7 @@ impl Agent {
         incoming: &IncomingMessage,
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
@@ -740,8 +741,30 @@ impl Agent {
         };
         cmgr.add_user_turn(user_msg);
 
-        // Compaction state for this conversation session (persists across iterations)
-        let _conv_meta = ConversationMeta::new();
+        // Per-turn compaction (ADR 0003 Q1): routine compaction runs once per
+        // user turn, before the agentic loop, at 85% of the real provider window.
+        let current_model = self.current_model.read().await.clone();
+        let context_window = self.registry.effective_context_window(&current_model);
+        let compaction_model = self.config.learning.compaction_model.clone();
+        let user_model_path = self
+            .config
+            .resolved_home
+            .as_ref()
+            .map(|h| h.join("USER.md"));
+        let compact_ctx = crate::conversation::CompactionContext {
+            llm: &self.llm,
+            context_window,
+            compaction_model: compaction_model.as_deref(),
+            user_model_path: user_model_path.as_deref(),
+        };
+        if let Err(e) = cmgr.compact_messages(&compact_ctx).await {
+            warn!(
+                user_id = %user_id,
+                error = %format!("{e:#}"),
+                "Per-turn compaction failed"
+            );
+        }
+
         // Gather all tool definitions
         let mut all_tools: Vec<ToolDefinition> = self.tool_registry.all_definitions();
         all_tools.extend(self.mcp.tool_definitions());
@@ -779,6 +802,7 @@ impl Agent {
             let home_dir = self.config.resolved_home.clone();
             let sender = self.sender.clone();
             let cancel_registry = self.cancel_registry.clone();
+            let mode = tool_ui_mode;
             move |_user_id: &str, _chat_id: &str| ToolContext {
                 sandbox_dir: sandbox_dir.clone(),
                 home_dir: home_dir.clone(),
@@ -786,13 +810,14 @@ impl Agent {
                 cancel_registry: cancel_registry.clone(),
                 user_id: _user_id.to_string(),
                 chat_id: _chat_id.to_string(),
+                tool_ui_mode: mode,
             }
         };
 
         let loop_config = crate::loop_runner::LoopConfig {
             max_iterations: self.config.max_iterations(),
             empty_response_retry_limit: self.config.empty_response_retry_limit(),
-            compaction_enabled: true,
+            context_window,
             loop_detection_enabled: true,
             interactive_loop_callback: true,
             allowed_tools: None,
@@ -1438,14 +1463,16 @@ impl Agent {
                     cancel_registry: cancel_registry.clone(),
                     user_id: String::new(),
                     chat_id: String::new(),
+                    tool_ui_mode: crate::tool_registry::ToolUiMode::Minimal,
                 }
             };
 
             let allowed_tools_vec: Vec<String> = allowed_tools.to_vec();
+            let subagent_window = self.registry.effective_context_window(model);
             let loop_config = crate::loop_runner::LoopConfig {
                 max_iterations: max_iter,
                 empty_response_retry_limit: self.config.empty_response_retry_limit(),
-                compaction_enabled: false,
+                context_window: subagent_window,
                 loop_detection_enabled: true,
                 interactive_loop_callback: false,
                 allowed_tools: Some(allowed_tools_vec),

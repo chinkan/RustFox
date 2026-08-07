@@ -473,6 +473,117 @@ pub fn truncate_to(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// Shared: format message excerpts for the user-model update prompt.
+fn format_snippets(messages: &[&ChatMessage]) -> String {
+    messages
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .filter_map(|m| {
+            m.content
+                .as_ref()
+                .map(|c| format!("[{}]: {}", m.role, c.as_text()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Shared: build the user-model update prompt from existing content + snippets.
+fn build_user_model_prompt(existing: &str, snippets: &str) -> String {
+    format!(
+        "You maintain a concise user profile for an AI assistant.\n\
+         \n\
+         Current user model:\n```\n{existing}\n```\n\
+         \n\
+         Recent conversation excerpts:\n```\n{snippets}\n```\n\
+         \n\
+         Update the user model based on the conversations. Rules:\n\
+         - Keep the YAML frontmatter exactly as-is (name, description, tags)\n\
+         - Update fields: user_name, language, communication_style, preferences, \
+           interests, context\n\
+         - Be concise — max 500 words total\n\
+         - Only add information the user explicitly stated or strongly implied\n\
+         - Do not remove existing valid entries — merge new info\n\
+         - Output the COMPLETE updated file (frontmatter + body), nothing else"
+    )
+}
+
+/// Shared: validated write with `.bak` backup before overwrite.
+async fn write_user_model_with_backup(user_model_path: &Path, new_content: &str) -> Result<()> {
+    if let Some(parent) = user_model_path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+    if user_model_path.exists() {
+        let mut bak_path = user_model_path.to_string_lossy().to_string();
+        bak_path.push_str(".bak");
+        let _ = tokio::fs::copy(user_model_path, &bak_path).await;
+    }
+    tokio::fs::write(user_model_path, new_content)
+        .await
+        .with_context(|| format!("Failed to write user model: {}", user_model_path.display()))?;
+    Ok(())
+}
+
+/// Shared: prompt → LLM (optionally model-overridden) → frontmatter-validated
+/// write. Returns `Ok(false)` when there is nothing to write.
+async fn write_user_model_from_snippets(
+    llm: &LlmClient,
+    user_model_path: &Path,
+    snippets: &str,
+    model: Option<&str>,
+) -> Result<bool> {
+    if snippets.trim().is_empty() {
+        return Ok(false);
+    }
+    let existing = if user_model_path.exists() {
+        tokio::fs::read_to_string(user_model_path)
+            .await
+            .unwrap_or_default()
+    } else {
+        DEFAULT_USER_MODEL.to_string()
+    };
+    let prompt = build_user_model_prompt(&existing, snippets);
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: Some(MessageContent::Text(prompt)),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+
+    let response = match model {
+        Some(m) => {
+            llm.chat_completion_with_model(&messages, &[], m)
+                .await?
+                .message
+        }
+        None => llm.chat(&messages, &[]).await?,
+    };
+    let new_content = response.content.unwrap_or_default().as_text();
+
+    // Strict validation: must start with `---` and contain a closing `---`
+    // delimiter so we don't write malformed or injection-bearing content into
+    // USER.md (which is later injected into the system prompt).
+    if !has_valid_frontmatter(&new_content) || new_content.trim().is_empty() {
+        warn!("User model update returned invalid content, skipping");
+        return Ok(false);
+    }
+
+    write_user_model_with_backup(user_model_path, &new_content).await?;
+    info!("User model updated: {}", user_model_path.display());
+    Ok(true)
+}
+
+/// Pre-compaction flush (ADR 0003 Q5): bank durable facts from the
+/// to-be-summarized range into USER.md so compaction cannot erase them.
+pub async fn flush_user_model(
+    llm: &LlmClient,
+    user_model_path: &Path,
+    range: &[&ChatMessage],
+    model: Option<&str>,
+) -> Result<bool> {
+    let snippets = format_snippets(range);
+    write_user_model_from_snippets(llm, user_model_path, &snippets, model).await
+}
+
 /// Update the user model by summarizing recent conversations through the LLM.
 pub async fn update_user_model(
     llm: &LlmClient,
@@ -501,93 +612,9 @@ async fn update_user_model_inner(
         return Ok(false); // Not enough data yet
     }
 
-    let conversation_snippets: String = recent
-        .iter()
-        .filter_map(|m| {
-            m.content
-                .as_ref()
-                .map(|c| format!("[{}]: {}", m.role, c.as_text()))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // Read existing model.
-    let existing = if user_model_path.exists() {
-        tokio::fs::read_to_string(user_model_path)
-            .await
-            .unwrap_or_default()
-    } else {
-        DEFAULT_USER_MODEL.to_string()
-    };
-
-    let prompt = format!(
-        "You maintain a concise user profile for an AI assistant.\n\
-         \n\
-         Current user model:\n```\n{existing}\n```\n\
-         \n\
-         Recent conversation excerpts:\n```\n{snippets}\n```\n\
-         \n\
-         Update the user model based on the conversations. Rules:\n\
-         - Keep the YAML frontmatter exactly as-is (name, description, tags)\n\
-         - Update fields: user_name, language, communication_style, preferences, \
-           interests, context\n\
-         - Be concise — max 500 words total\n\
-         - Only add information the user explicitly stated or strongly implied\n\
-         - Do not remove existing valid entries — merge new info\n\
-         - Output the COMPLETE updated file (frontmatter + body), nothing else",
-        existing = existing,
-        snippets = conversation_snippets,
-    );
-
-    let messages = vec![ChatMessage {
-        role: "user".to_string(),
-        content: Some(MessageContent::Text(prompt)),
-        tool_calls: None,
-        tool_call_id: None,
-    }];
-
-    let response = llm.chat(&messages, &[]).await?;
-    let new_content = response.content.unwrap_or_default().as_text();
-
-    // Strict validation: must start with `---` and contain a closing `---`
-    // delimiter so we don't write malformed or injection-bearing content into
-    // USER.md (which is later injected into the system prompt).
-    if !has_valid_frontmatter(&new_content) || new_content.trim().is_empty() {
-        warn!("User model update returned invalid content, skipping");
-        return Ok(false);
-    }
-
-    // Ensure parent directory exists.
-    if let Some(parent) = user_model_path.parent() {
-        tokio::fs::create_dir_all(parent).await.ok();
-    }
-
-    // Create backup before overwriting
-    if user_model_path.exists() {
-        let mut bak_path = user_model_path.to_string_lossy().to_string();
-        bak_path.push_str(".bak");
-        let bak = std::path::PathBuf::from(&bak_path);
-        let _ = tokio::fs::copy(user_model_path, &bak).await;
-    }
-
-    tokio::fs::write(user_model_path, &new_content)
-        .await
-        .with_context(|| format!("Failed to write user model: {}", user_model_path.display()))?;
-
-    // Log diff summary
-    let old_lines: usize = existing.lines().count();
-    let new_lines: usize = new_content.lines().count();
-    let added = new_lines.saturating_sub(old_lines);
-    let removed = old_lines.saturating_sub(new_lines);
-    tracing::info!(
-        "User model updated: {} ({} lines, +{}/-{})",
-        user_model_path.display(),
-        new_lines,
-        added,
-        removed
-    );
-
-    Ok(true)
+    let refs: Vec<&ChatMessage> = recent.iter().collect();
+    let snippets = format_snippets(&refs);
+    write_user_model_from_snippets(llm, user_model_path, &snippets, None).await
 }
 
 // ─── Feature 4: Self-Update ─────────────────────────────────────────────────
@@ -922,6 +949,29 @@ pub fn has_valid_frontmatter(content: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_flush_user_model_writes_valid_content() {
+        use crate::llm::{ChatMessage, MessageContent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let _path = dir.path().join("USER.md");
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(
+                "I prefer replies in Traditional Chinese and short answers.".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let snippets = format_snippets(&[&msg]);
+        assert!(snippets.contains("[user]: I prefer replies"));
+
+        // Frontmatter validation gate.
+        assert!(has_valid_frontmatter("---\nname: user-model\n---\n\nbody"));
+        assert!(!has_valid_frontmatter("no frontmatter here"));
+    }
 
     #[test]
     fn test_extract_line_value() {

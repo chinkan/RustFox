@@ -389,6 +389,10 @@ pub struct LearningConfig {
     /// Cron expression for weekly user model update (default: Sunday 3am).
     #[serde(default = "default_user_model_cron")]
     pub user_model_cron: String,
+    /// Optional model override for compaction summary + USER.md flush turns
+    /// (ADR 0003 Q9). Empty default = the conversation's current model.
+    #[serde(default)]
+    pub compaction_model: Option<String>,
 }
 
 fn default_model() -> String {
@@ -559,6 +563,7 @@ fn default_learning_config() -> LearningConfig {
         skill_extraction_threshold: default_skill_extraction_threshold(),
         user_model_update_interval: default_user_model_update_interval(),
         user_model_cron: default_user_model_cron(),
+        compaction_model: None,
     }
 }
 

@@ -17,6 +17,7 @@ use crate::platform::sender::{
 };
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
+use crate::tool_registry::ToolUiMode;
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::rich_sender;
 use crate::utils::telegram_markdown::escape_text;
@@ -375,8 +376,35 @@ pub async fn send_markdown_message(
     }
 }
 
-fn is_verbose_enabled(value: Option<&str>) -> bool {
-    value.map(|v| v == "true").unwrap_or(false)
+/// Read the tool UI mode for a user, with backward compatibility for the old
+/// `tool_ui_enabled_{user_id}` boolean key.
+async fn read_tool_ui_mode(agent: &Agent, user_id: &str) -> ToolUiMode {
+    // Try new key first
+    let new_key = format!("tool_ui_mode_{}", user_id);
+    match agent.memory.recall("settings", &new_key).await {
+        Ok(Some(val)) => return ToolUiMode::from_memory(Some(&val)),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "Failed to recall tool UI mode"),
+    }
+    // Fallback: migrate from old boolean key. Only persist when the old key
+    // actually exists, so the default (no key) stays a live decision.
+    let old_key = format!("tool_ui_enabled_{}", user_id);
+    match agent.memory.recall("settings", &old_key).await {
+        Ok(Some(old_val)) => {
+            let mode = ToolUiMode::from_memory(Some(&old_val));
+            agent
+                .memory
+                .remember("settings", &new_key, mode.as_str(), None)
+                .await
+                .ok();
+            mode
+        }
+        Ok(None) => ToolUiMode::Minimal,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to recall legacy tool UI setting");
+            ToolUiMode::Minimal
+        }
+    }
 }
 
 /// Show models for a selected provider, or prompt for text search.
@@ -870,29 +898,20 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     }
 
     if text == "/verbose" {
-        let current = agent
-            .memory
-            .recall("settings", &format!("tool_ui_enabled_{}", user_id))
-            .await
-            .unwrap_or(None);
-        let currently_on = is_verbose_enabled(current.as_deref());
-        let new_value = if currently_on { "false" } else { "true" };
+        let current = read_tool_ui_mode(&agent, &user_id.to_string()).await;
+        let new_mode = current.next();
         agent
             .memory
             .remember(
                 "settings",
-                &format!("tool_ui_enabled_{}", user_id),
-                new_value,
+                &format!("tool_ui_mode_{}", user_id),
+                new_mode.as_str(),
                 None,
             )
             .await
             .ok();
-        let reply = if new_value == "true" {
-            "🔧 **Tool call UI enabled.** I'll show you what I'm working on."
-        } else {
-            "🔇 **Tool call UI disabled.** I'll respond silently."
-        };
-        return send_markdown_message(&bot, msg.chat.id, reply, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, new_mode.reply_message(), msg_format)
+            .await;
     }
 
     // Accept both the canonical `/queryrewrite` (registered with Telegram —
@@ -1319,30 +1338,26 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         .await
         .ok();
 
-    // Check if verbose tool UI is enabled for this user
-    let verbose_setting = agent
-        .memory
-        .recall("settings", &format!("tool_ui_enabled_{}", user_id))
-        .await
-        .unwrap_or(None);
-    let verbose_enabled = is_verbose_enabled(verbose_setting.as_deref());
+    // Check tool UI mode for this user
+    let tool_ui_mode = read_tool_ui_mode(&agent, &user_id.to_string()).await;
 
-    // Set up tool event channel if verbose is on
-    let (tool_event_tx, tool_event_rx) = if verbose_enabled {
+    // Set up tool event channel if not silent
+    let (tool_event_tx, tool_event_rx) = if tool_ui_mode != ToolUiMode::Silent {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::platform::tool_notifier::ToolEvent>(32);
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
 
-    // Spawn notifier task if verbose
-    let notifier_handle = if verbose_enabled {
+    // Spawn notifier task if not silent
+    let notifier_handle = if tool_ui_mode != ToolUiMode::Silent {
         let bot_clone = bot.clone();
         let chat_id = msg.chat.id;
-        let mut rx = tool_event_rx.expect("rx exists when verbose");
+        let mut rx = tool_event_rx.expect("rx exists when not silent");
+        let mode = tool_ui_mode;
         Some(tokio::spawn(async move {
             let mut notifier =
-                crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id);
+                crate::platform::tool_notifier::ToolCallNotifier::new(bot_clone, chat_id, mode);
             notifier.start().await;
             let mut handled_finished = false;
             while let Some(event) = rx.recv().await {
@@ -1365,24 +1380,25 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         None
     };
 
-    // When verbose is OFF, send a transient "Thinking..." placeholder so the user
+    // When silent, send a transient "Thinking..." placeholder so the user
     // knows the bot is processing. The placeholder is **independent** of the
     // streaming output — when the first token arrives it is delivered as a NEW
     // message, and the placeholder is deleted by `handle_message` after the
     // stream completes (success or error). This keeps the placeholder a
     // standalone progress signal rather than a doomed attempt to morph into the
     // final answer.
-    let placeholder_msg_id: Option<teloxide::types::MessageId> = if !verbose_enabled {
-        match bot.send_message(msg.chat.id, "⏳ Thinking...").await {
-            Ok(sent) => Some(sent.id),
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to send thinking placeholder");
-                None
+    let placeholder_msg_id: Option<teloxide::types::MessageId> =
+        if tool_ui_mode == ToolUiMode::Silent {
+            match bot.send_message(msg.chat.id, "⏳ Thinking...").await {
+                Ok(sent) => Some(sent.id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to send thinking placeholder");
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Streaming: set up token channel for progressive message display
     // Split threshold: use UTF-16 code units (Telegram's limit is 4096).
@@ -1555,7 +1571,12 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
     // Finished event after processing completes.
     let agent_tool_event_tx = tool_event_tx.clone();
     let process_result = match agent
-        .process_message(&incoming, tool_event_tx, Some(stream_token_tx))
+        .process_message(
+            &incoming,
+            tool_event_tx,
+            Some(stream_token_tx),
+            tool_ui_mode,
+        )
         .await
     {
         Ok(text) => Ok(text),
@@ -1928,6 +1949,21 @@ impl PlatformSender for TelegramAdapter {
         Ok(())
     }
 
+    async fn delete_message(
+        &self,
+        chat_id_str: &str,
+        message_id: &PlatformMessageId,
+    ) -> Result<()> {
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let parts: Vec<&str> = message_id.split(':').collect();
+        let Some(msg_id_str) = parts.get(1) else {
+            anyhow::bail!("invalid message id format: {message_id}");
+        };
+        let msg_id: i32 = msg_id_str.parse()?;
+        self.bot.delete_message(chat_id, MessageId(msg_id)).await?;
+        Ok(())
+    }
+
     async fn notify_shutdown(&self, chat_id_str: &str) -> Result<()> {
         let chat_id = parse_chat_id(chat_id_str)?;
         self.bot
@@ -1951,10 +1987,35 @@ mod tests {
     }
 
     #[test]
-    fn test_is_verbose_enabled_parses_true() {
-        assert!(is_verbose_enabled(Some("true")));
-        assert!(!is_verbose_enabled(Some("false")));
-        assert!(!is_verbose_enabled(None));
+    fn test_tool_ui_mode_from_memory() {
+        use crate::tool_registry::ToolUiMode;
+        assert_eq!(
+            ToolUiMode::from_memory(Some("verbose")),
+            ToolUiMode::Verbose
+        );
+        assert_eq!(
+            ToolUiMode::from_memory(Some("minimal")),
+            ToolUiMode::Minimal
+        );
+        assert_eq!(ToolUiMode::from_memory(Some("silent")), ToolUiMode::Silent);
+        // backward compat
+        assert_eq!(ToolUiMode::from_memory(Some("true")), ToolUiMode::Verbose);
+        // "false" meant no tool UI at all → Silent, not Minimal
+        assert_eq!(ToolUiMode::from_memory(Some("false")), ToolUiMode::Silent);
+        assert_eq!(ToolUiMode::from_memory(None), ToolUiMode::Minimal);
+        // unknown defaults to minimal
+        assert_eq!(
+            ToolUiMode::from_memory(Some("unknown")),
+            ToolUiMode::Minimal
+        );
+    }
+
+    #[test]
+    fn test_tool_ui_mode_cycle() {
+        use crate::tool_registry::ToolUiMode;
+        assert_eq!(ToolUiMode::Minimal.next(), ToolUiMode::Verbose);
+        assert_eq!(ToolUiMode::Verbose.next(), ToolUiMode::Silent);
+        assert_eq!(ToolUiMode::Silent.next(), ToolUiMode::Minimal);
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub type ToolHandlerFn = Box<
 pub struct LoopConfig {
     pub max_iterations: u32,
     pub empty_response_retry_limit: u32,
-    pub compaction_enabled: bool,
+    pub context_window: usize,
     pub loop_detection_enabled: bool,
     pub interactive_loop_callback: bool,
     pub allowed_tools: Option<Vec<String>>,
@@ -94,20 +94,13 @@ impl<'a> AgenticLoop<'a> {
         user_id: &str,
         chat_id: &str,
     ) -> Result<LoopOutcome> {
-        let context_window = 128_000;
+        let context_window = self.config.context_window;
         let mut empty_count = 0u32;
 
-        for iteration in 0..self.config.max_iterations {
+        for _iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
                 if cancel.is_cancelled() {
                     return Ok(LoopOutcome::Cancelled);
-                }
-            }
-
-            if self.config.compaction_enabled && iteration > 0 && iteration % 5 == 0 {
-                if let MessageContainer::Conversation(cm) = messages {
-                    cm.compact_tier3(context_window).await;
-                    let _ = cm.compact_tier4(self.llm, context_window).await;
                 }
             }
 
