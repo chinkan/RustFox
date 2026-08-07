@@ -77,14 +77,15 @@ impl CommandTool {
             .context("Missing 'command' argument")?;
         let cmd_id = format!("cmd_{}", uuid::Uuid::new_v4());
 
-        let mut child = TokioCommand::new("sh")
-            .arg("-c")
+        let mut cmd = TokioCommand::new(if cfg!(windows) { "cmd" } else { "sh" });
+        cmd.arg(if cfg!(windows) { "/C" } else { "-c" })
             .arg(command)
             .current_dir(&self.sandbox_dir)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn()?;
 
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
@@ -181,6 +182,7 @@ impl CommandTool {
                 }
                 _ = &mut cancel_rx => {
                     cancelled = true;
+                    #[cfg(unix)]
                     if let Some(pid) = child.id() {
                         let _ = nix::sys::signal::killpg(
                             nix::unistd::Pid::from_raw(pid as i32),
