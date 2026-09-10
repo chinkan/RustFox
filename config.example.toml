@@ -68,6 +68,8 @@ Be concise and helpful."""
 # The LLM's persistent workspace (file/command tools are confined here).
 # Leave unset to use <home>/workspace. Set an absolute path to override.
 # allowed_directory = "/absolute/path/to/workspace"
+# Wall-clock limit for execute_command (seconds). 0 = no timeout. Default: 90.
+# execute_timeout_secs = 90
 
 [memory]
 # Path to the SQLite database file for persistent memory

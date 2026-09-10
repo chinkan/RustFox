@@ -27,6 +27,8 @@ pub struct CommandTool {
     sandbox_dir: PathBuf,
     cancel_registry: Arc<CancelRegistry>,
     sender: Arc<dyn PlatformSender>,
+    /// 0 = no wall-clock timeout.
+    execute_timeout_secs: u64,
 }
 
 impl CommandTool {
@@ -34,11 +36,13 @@ impl CommandTool {
         sandbox_dir: PathBuf,
         cancel_registry: Arc<CancelRegistry>,
         sender: Arc<dyn PlatformSender>,
+        execute_timeout_secs: u64,
     ) -> Self {
         Self {
             sandbox_dir,
             cancel_registry,
             sender,
+            execute_timeout_secs,
         }
     }
 }
@@ -156,7 +160,18 @@ impl CommandTool {
         let mut last_edit = Instant::now();
         let mut exit_code: Option<i32> = None;
         let mut cancelled = false;
+        let mut timed_out = false;
         tokio::pin!(cancel_rx);
+
+        let timeout_secs = self.execute_timeout_secs;
+        let timeout_fut = async {
+            if timeout_secs == 0 {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+            }
+        };
+        tokio::pin!(timeout_fut);
 
         loop {
             tokio::select! {
@@ -182,15 +197,12 @@ impl CommandTool {
                 }
                 _ = &mut cancel_rx => {
                     cancelled = true;
-                    #[cfg(unix)]
-                    if let Some(pid) = child.id() {
-                        let _ = nix::sys::signal::killpg(
-                            nix::unistd::Pid::from_raw(pid as i32),
-                            nix::sys::signal::Signal::SIGKILL,
-                        );
-                    }
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    Self::kill_child(&mut child).await;
+                    break;
+                }
+                _ = &mut timeout_fut => {
+                    timed_out = true;
+                    Self::kill_child(&mut child).await;
                     break;
                 }
             }
@@ -217,26 +229,33 @@ impl CommandTool {
             }
         }
 
-        let result = if cancelled {
+        let result = if cancelled || timed_out {
+            let label = if timed_out {
+                format!("Timed out after {}s", timeout_secs)
+            } else {
+                "Cancelled".to_string()
+            };
             if let Some(mid) = &msg_id {
                 match send_mode {
                     SendMode::Verbose => {
                         let body = format_body(&output_buffer, "");
                         let text = match body {
-                            None => format!("❌ Cancelled: `{}`", escaped_cmd),
-                            Some(b) => format!("❌ Cancelled: `{}`\n\n{}", escaped_cmd, b),
+                            None => format!("❌ {}: `{}`", label, escaped_cmd),
+                            Some(b) => format!("❌ {}: `{}`\n\n{}", label, escaped_cmd, b),
                         };
                         let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
                     }
                     SendMode::Minimal => {
-                        // Delete the minimal message
                         let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
                     }
-                    // Silent mode sends no message; nothing to clean up.
                     SendMode::Silent => {}
                 }
             }
-            "⚠️ User cancelled the command".to_string()
+            if timed_out {
+                format!("⚠️ Command timed out after {}s", timeout_secs)
+            } else {
+                "⚠️ User cancelled the command".to_string()
+            }
         } else if let Some(code) = exit_code {
             if let Some(mid) = &msg_id {
                 match send_mode {
@@ -277,5 +296,17 @@ impl CommandTool {
 
         self.cancel_registry.unregister(&cmd_id).await;
         Ok(result)
+    }
+
+    async fn kill_child(child: &mut tokio::process::Child) {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 }

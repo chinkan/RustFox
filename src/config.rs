@@ -184,10 +184,26 @@ pub struct OcrConfig {
     pub model_dir: std::path::PathBuf,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SandboxConfig {
     #[serde(default)]
     pub allowed_directory: PathBuf,
+    /// Wall-clock limit for `execute_command`. 0 = no timeout.
+    #[serde(default = "default_execute_timeout_secs")]
+    pub execute_timeout_secs: u64,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            allowed_directory: PathBuf::new(),
+            execute_timeout_secs: default_execute_timeout_secs(),
+        }
+    }
+}
+
+fn default_execute_timeout_secs() -> u64 {
+    90
 }
 
 #[derive(Debug, Deserialize, Clone)]

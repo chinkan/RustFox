@@ -241,6 +241,7 @@ async fn main() -> Result<()> {
         config.sandbox.allowed_directory.clone(),
         cancel_registry.clone(),
         sender.clone(),
+        config.sandbox.execute_timeout_secs,
     )));
 
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
