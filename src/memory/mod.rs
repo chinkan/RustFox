@@ -361,7 +361,8 @@ impl MemoryStore {
             );
             CREATE INDEX IF NOT EXISTS idx_facts_entity_relation
                 ON facts(entity, relation, valid_from);
-            CREATE INDEX IF NOT EXISTS idx_facts_active
+            -- Enforce one active value per (entity, relation).
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_active
                 ON facts(entity, relation) WHERE valid_to IS NULL;
             ",
         )?;

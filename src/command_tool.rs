@@ -93,6 +93,12 @@ impl CommandTool {
 
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
+        // Register cancel before showing the button so concurrent callbacks never miss.
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        self.cancel_registry
+            .register(cmd_id.clone(), cancel_tx)
+            .await;
+
         // Verbose: cancel button + live output + final result
         // Minimal: cancel button (simple text) + no live output, delete on finish
         // Silent: no message at all (tool_notifier handles nothing)
@@ -116,11 +122,6 @@ impl CommandTool {
             }
             ToolUiMode::Silent => (None, SendMode::Silent),
         };
-
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        self.cancel_registry
-            .register(cmd_id.clone(), cancel_tx)
-            .await;
 
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
         let output_tx2 = output_tx.clone();
@@ -251,11 +252,16 @@ impl CommandTool {
                     SendMode::Silent => {}
                 }
             }
-            if timed_out {
+            let mut msg = if timed_out {
                 format!("⚠️ Command timed out after {}s", timeout_secs)
             } else {
                 "⚠️ User cancelled the command".to_string()
+            };
+            if !output_buffer.is_empty() {
+                msg.push('\n');
+                msg.push_str(output_buffer.trim_end());
             }
+            msg
         } else if let Some(code) = exit_code {
             if let Some(mid) = &msg_id {
                 match send_mode {

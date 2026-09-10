@@ -58,12 +58,37 @@ impl Backend for ShellBackend {
                 next_step: None,
             });
         }
-        let output = Command::new("sh")
+        let timeout = std::time::Duration::from_secs(job.timeout_secs);
+        let run = Command::new("sh")
             .arg("-c")
             .arg(&cmd)
             .current_dir(&self.sandbox)
-            .output()
-            .await?;
+            .output();
+        let output = match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                job.status = JobStatus::Failed;
+                return Ok(JobOutput {
+                    status: JobStatus::Failed,
+                    summary: String::new(),
+                    evidence: vec![],
+                    errors: vec![format!("command failed: {e}")],
+                    changed_files: vec![],
+                    next_step: None,
+                });
+            }
+            Err(_) => {
+                job.status = JobStatus::Failed;
+                return Ok(JobOutput {
+                    status: JobStatus::Failed,
+                    summary: String::new(),
+                    evidence: vec![],
+                    errors: vec![format!("timed out after {}s", job.timeout_secs)],
+                    changed_files: vec![],
+                    next_step: None,
+                });
+            }
+        };
         let exit = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

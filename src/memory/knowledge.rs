@@ -271,6 +271,7 @@ impl MemoryStore {
         key: &str,
         as_of: &str,
     ) -> Result<Option<String>> {
+        let as_of = normalize_as_of(as_of);
         let conn = self.conn.lock().await;
 
         let current: Option<(String, String)> = conn
@@ -295,7 +296,7 @@ impl MemoryStore {
         // Reverse-apply changes newer than as_of onto the live value.
         let mut val = current.as_ref().map(|(v, _)| v.clone());
         for h in &history {
-            if h.changed_at.as_str() <= as_of {
+            if normalize_ts(&h.changed_at).as_str() <= as_of.as_str() {
                 break;
             }
             val = h.old_value.clone();
@@ -303,12 +304,16 @@ impl MemoryStore {
 
         // Before first create and no residual history → absent.
         if let Some((_, ref created_at)) = current {
-            if as_of < created_at.as_str() && history.is_empty() {
+            let created = normalize_ts(created_at);
+            if as_of.as_str() < created.as_str() && history.is_empty() {
                 return Ok(None);
             }
-            if as_of < created_at.as_str() {
-                let earliest = history.iter().map(|h| h.changed_at.as_str()).min();
-                if earliest.is_none_or(|e| as_of < e) {
+            if as_of.as_str() < created.as_str() {
+                let earliest = history.iter().map(|h| normalize_ts(&h.changed_at)).min();
+                if earliest
+                    .as_ref()
+                    .is_none_or(|e| as_of.as_str() < e.as_str())
+                {
                     return Ok(None);
                 }
             }
@@ -318,9 +323,11 @@ impl MemoryStore {
     }
 
     /// Insert fact; skip if identical active exists. Auto-closes prior active for pair.
+    /// Backdated inserts (valid_from before active start) land as closed history rows.
     pub async fn add_fact(&self, fact: FactToAdd) -> Result<String> {
         let conn = self.conn.lock().await;
         let confidence = fact.confidence.unwrap_or(1.0);
+        let valid_from = normalize_from(&fact.valid_from);
 
         let existing: Option<String> = conn
             .query_row(
@@ -334,14 +341,48 @@ impl MemoryStore {
             return Ok(id);
         }
 
-        conn.execute(
-            "UPDATE facts SET valid_to = ?1
-             WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL",
-            rusqlite::params![&fact.valid_from, &fact.entity, &fact.relation],
-        )
-        .context("Failed to close prior active fact")?;
+        let active_from: Option<String> = conn
+            .query_row(
+                "SELECT valid_from FROM facts
+                 WHERE entity = ?1 AND relation = ?2 AND valid_to IS NULL",
+                rusqlite::params![&fact.entity, &fact.relation],
+                |row| row.get(0),
+            )
+            .ok();
 
         let id = Uuid::new_v4().to_string();
+
+        if let Some(ref active_vf) = active_from {
+            let active_vf_n = normalize_from(active_vf);
+            if valid_from.as_str() < active_vf_n.as_str() {
+                // Historical backfill: closed against active start; leave active alone.
+                conn.execute(
+                    "INSERT INTO facts
+                        (id, entity, relation, value, valid_from, valid_to, source, confidence)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        &id,
+                        &fact.entity,
+                        &fact.relation,
+                        &fact.value,
+                        &valid_from,
+                        &active_vf_n,
+                        &fact.source,
+                        confidence
+                    ],
+                )
+                .context("Failed to insert historical fact")?;
+                return Ok(id);
+            }
+
+            conn.execute(
+                "UPDATE facts SET valid_to = ?1
+                 WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL",
+                rusqlite::params![&valid_from, &fact.entity, &fact.relation],
+            )
+            .context("Failed to close prior active fact")?;
+        }
+
         conn.execute(
             "INSERT INTO facts (id, entity, relation, value, valid_from, source, confidence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -350,7 +391,7 @@ impl MemoryStore {
                 &fact.entity,
                 &fact.relation,
                 &fact.value,
-                &fact.valid_from,
+                &valid_from,
                 &fact.source,
                 confidence
             ],
@@ -361,12 +402,14 @@ impl MemoryStore {
 
     /// End currently-active fact for (entity, relation).
     pub async fn close_fact(&self, entity: &str, relation: &str, valid_to: &str) -> Result<bool> {
+        let valid_to = normalize_from(valid_to);
         let conn = self.conn.lock().await;
         let rows = conn
             .execute(
                 "UPDATE facts SET valid_to = ?1
-                 WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL",
-                rusqlite::params![valid_to, entity, relation],
+                 WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL
+                   AND valid_from <= ?1",
+                rusqlite::params![&valid_to, entity, relation],
             )
             .context("Failed to close fact")?;
         Ok(rows > 0)
@@ -376,6 +419,7 @@ impl MemoryStore {
     pub async fn query_facts(&self, entity: &str, as_of: Option<&str>) -> Result<Vec<Fact>> {
         let conn = self.conn.lock().await;
         if let Some(as_of) = as_of {
+            let as_of = normalize_as_of(as_of);
             let mut stmt = conn.prepare(
                 "SELECT id, entity, relation, value, valid_from, valid_to, source, confidence
                  FROM facts
@@ -419,24 +463,39 @@ impl MemoryStore {
             .context("Failed to load fact timeline")?;
         Ok(facts)
     }
+}
 
-    /// Substring search across fact values (ponytail: LIKE, not FTS).
-    pub async fn search_facts(&self, query: &str, limit: usize) -> Result<Vec<Fact>> {
-        let conn = self.conn.lock().await;
-        let pattern = format!("%{query}%");
-        let mut stmt = conn.prepare(
-            "SELECT id, entity, relation, value, valid_from, valid_to, source, confidence
-             FROM facts
-             WHERE value LIKE ?1 OR entity LIKE ?1 OR relation LIKE ?1
-             ORDER BY created_at DESC
-             LIMIT ?2",
-        )?;
-        let facts = stmt
-            .query_map(rusqlite::params![pattern, limit as i64], parse_fact)?
-            .collect::<Result<Vec<_>, _>>()
-            .context("Failed to search facts")?;
-        Ok(facts)
+/// Date-only `YYYY-MM-DD` → start of day for lower bounds / stored from.
+fn normalize_from(ts: &str) -> String {
+    if is_date_only(ts) {
+        format!("{ts} 00:00:00")
+    } else {
+        ts.to_string()
     }
+}
+
+/// Date-only `YYYY-MM-DD` → end of day so "as of that day" includes the whole day.
+fn normalize_as_of(ts: &str) -> String {
+    if is_date_only(ts) {
+        format!("{ts} 23:59:59")
+    } else {
+        ts.to_string()
+    }
+}
+
+fn normalize_ts(ts: &str) -> String {
+    if is_date_only(ts) {
+        format!("{ts} 00:00:00")
+    } else {
+        ts.to_string()
+    }
+}
+
+fn is_date_only(ts: &str) -> bool {
+    ts.len() == 10
+        && ts.as_bytes().get(4) == Some(&b'-')
+        && ts.as_bytes().get(7) == Some(&b'-')
+        && ts.bytes().all(|b| b.is_ascii_digit() || b == b'-')
 }
 
 fn parse_knowledge_row(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> {
@@ -633,5 +692,49 @@ mod tests {
         assert!(store.query_facts("Kan", None).await.unwrap().is_empty());
         let past = store.query_facts("Kan", Some("2025-01-01")).await.unwrap();
         assert_eq!(past[0].value, "HK");
+    }
+
+    #[tokio::test]
+    async fn test_add_fact_backfill_no_invert() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Adidas".into(),
+                valid_from: "2026-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Nike".into(),
+                valid_from: "2024-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        let active = store.query_facts("Kan", None).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].value, "Adidas");
+        let past = store.query_facts("Kan", Some("2025-06-01")).await.unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].value, "Nike");
+        assert!(past[0].valid_to.is_some());
+    }
+
+    #[test]
+    fn test_date_only_normalize() {
+        assert_eq!(normalize_as_of("2025-06-01"), "2025-06-01 23:59:59");
+        assert_eq!(normalize_from("2025-06-01"), "2025-06-01 00:00:00");
+        assert_eq!(
+            normalize_as_of("2025-06-01 12:00:00"),
+            "2025-06-01 12:00:00"
+        );
     }
 }

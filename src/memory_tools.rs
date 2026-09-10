@@ -121,14 +121,15 @@ impl ToolHandler for MemoryTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "fact_history".to_string(),
-                    description: "Version timeline for knowledge (category+key) or facts (entity+relation).".to_string(),
+                    description: "Version timeline for knowledge (category+key) or facts (entity+relation). With category+key+as_of, returns knowledge value at that time.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
                             "category": { "type": "string", "description": "Knowledge category" },
                             "key": { "type": "string", "description": "Knowledge key" },
                             "entity": { "type": "string", "description": "Fact entity" },
-                            "relation": { "type": "string", "description": "Fact relation" }
+                            "relation": { "type": "string", "description": "Fact relation" },
+                            "as_of": { "type": "string", "description": "Optional ISO date; with category+key returns knowledge_as_of" }
                         }
                     }),
                 },
@@ -249,7 +250,14 @@ impl ToolHandler for MemoryTools {
                 let key = args["key"].as_str();
                 let entity = args["entity"].as_str();
                 let relation = args["relation"].as_str();
-                if let (Some(cat), Some(k)) = (category, key) {
+                let as_of = args["as_of"].as_str();
+                if let (Some(cat), Some(k), Some(as_of)) = (category, key, as_of) {
+                    match self.memory.knowledge_as_of(cat, k, as_of).await {
+                        Ok(Some(v)) => Ok(format!("[{cat}/{k}] as of {as_of}: {v}")),
+                        Ok(None) => Ok(format!("No value for [{cat}/{k}] as of {as_of}")),
+                        Err(e) => Ok(format!("Failed knowledge_as_of: {e}")),
+                    }
+                } else if let (Some(cat), Some(k)) = (category, key) {
                     match self.memory.knowledge_timeline(cat, k).await {
                         Ok(versions) if versions.is_empty() => Ok("No knowledge history.".into()),
                         Ok(versions) => Ok(versions
