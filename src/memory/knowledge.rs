@@ -41,6 +41,17 @@ pub struct Fact {
     pub confidence: f64,
 }
 
+impl std::fmt::Display for Fact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let until = self.valid_to.as_deref().unwrap_or("…");
+        write!(
+            f,
+            "{} —{}→ {} [{}..{}] conf={}",
+            self.entity, self.relation, self.value, self.valid_from, until, self.confidence
+        )
+    }
+}
+
 /// Input for [`MemoryStore::add_fact`].
 #[derive(Debug, Clone)]
 pub struct FactToAdd {
@@ -465,25 +476,29 @@ impl MemoryStore {
     }
 }
 
-/// Canonicalize timestamps for lexicographic compare with SQLite `datetime('now')`.
-/// - `YYYY-MM-DD` → start of day
-/// - `YYYY-MM-DDTHH:MM:SS…` → space separator (ISO-8601 → SQLite style)
+/// Canonicalize to UTC `YYYY-MM-DD HH:MM:SS` for compare with SQLite `datetime('now')` (UTC).
 fn normalize_from(ts: &str) -> String {
     let ts = ts.trim();
     if is_date_only(ts) {
         return format!("{ts} 00:00:00");
     }
-    if let Some((date, rest)) = ts.split_once('T') {
-        if is_date_only(date) {
-            let time = rest.split(['+', 'Z']).next().unwrap_or(rest);
-            let time = if time.len() >= 8 { &time[..8] } else { time };
-            return format!("{date} {time}");
-        }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
     }
-    ts.to_string()
+    // ISO with T, no offset → treat as already-UTC wall clock.
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") {
+        return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    ts.replace('T', " ")
 }
 
-/// Date-only → end of day so "as of that day" includes the whole day.
+/// Date-only → end of UTC day so "as of that day" includes the whole day.
 fn normalize_as_of(ts: &str) -> String {
     let ts = ts.trim();
     if is_date_only(ts) {
@@ -738,9 +753,10 @@ mod tests {
             normalize_from("2025-06-01T12:00:00Z"),
             "2025-06-01 12:00:00"
         );
+        // Offset converted to UTC (+08 → 04:00Z).
         assert_eq!(
             normalize_from("2025-06-01T12:00:00+08:00"),
-            "2025-06-01 12:00:00"
+            "2025-06-01 04:00:00"
         );
     }
 }

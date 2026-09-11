@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
+use crate::utils::process::{kill_child, optional_timeout};
 
 pub struct ShellBackend {
     sandbox: PathBuf,
@@ -45,32 +45,30 @@ impl ShellBackend {
         }
         true
     }
+}
 
-    async fn kill_child(child: &mut tokio::process::Child) {
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+async fn drain_pipe(mut stream: tokio::process::ChildStdout) -> String {
+    let mut out = String::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
         }
-        let _ = child.kill().await;
-        let _ = child.wait().await;
     }
+    out
+}
 
-    async fn drain(stream: &mut Option<impl AsyncReadExt + Unpin>) -> String {
-        let mut out = String::new();
-        let mut buf = vec![0u8; 4096];
-        if let Some(s) = stream.as_mut() {
-            loop {
-                match s.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
-                }
-            }
+async fn drain_err(mut stream: tokio::process::ChildStderr) -> String {
+    let mut out = String::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
         }
-        out
     }
+    out
 }
 
 #[async_trait::async_trait]
@@ -115,15 +113,11 @@ impl Backend for ShellBackend {
             }
         };
 
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
-        let timeout_fut = async {
-            if timeout_secs == 0 {
-                std::future::pending::<()>().await;
-            } else {
-                tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
-            }
-        };
+        // Drain pipes concurrently so a large writer cannot block wait().
+        let stdout_handle = child.stdout.take().map(|s| tokio::spawn(drain_pipe(s)));
+        let stderr_handle = child.stderr.take().map(|s| tokio::spawn(drain_err(s)));
+
+        let timeout_fut = optional_timeout(timeout_secs);
         tokio::pin!(timeout_fut);
 
         let timed_out;
@@ -136,12 +130,18 @@ impl Backend for ShellBackend {
             _ = &mut timeout_fut => {
                 timed_out = true;
                 exit_code = -1;
-                Self::kill_child(&mut child).await;
+                kill_child(&mut child).await;
             }
         }
 
-        let stdout = Self::drain(&mut stdout_pipe).await;
-        let stderr = Self::drain(&mut stderr_pipe).await;
+        let stdout = match stdout_handle {
+            Some(h) => h.await.unwrap_or_default(),
+            None => String::new(),
+        };
+        let stderr = match stderr_handle {
+            Some(h) => h.await.unwrap_or_default(),
+            None => String::new(),
+        };
 
         if timed_out {
             job.status = JobStatus::Failed;
@@ -178,6 +178,7 @@ impl Backend for ShellBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn shell_backend_runs_echo_in_sandbox() {
@@ -237,6 +238,29 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5));
         assert!(matches!(out.status, JobStatus::Failed));
         assert!(out.errors.iter().any(|e| e.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn shell_backend_large_stdout_does_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = ShellBackend::new(dir.path().into(), 10);
+        // ~200KB of output — would fill the pipe and hang wait() without concurrent drain.
+        let mut job = crate::supervisor::job::Job::new(
+            "t",
+            crate::supervisor::job::JobType::ShellJob,
+            "shell",
+            "large",
+        );
+        job.prompt = Some("python3 -c \"print('x'*200000)\"".into());
+        job.timeout_secs = 10;
+        let start = std::time::Instant::now();
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "large stdout took too long (possible pipe deadlock)"
+        );
+        assert!(matches!(out.status, JobStatus::Succeeded));
+        assert!(out.summary.len() >= 100_000);
     }
 
     #[test]

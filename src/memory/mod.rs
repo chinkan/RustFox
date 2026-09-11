@@ -364,23 +364,16 @@ impl MemoryStore {
             ",
         )?;
 
-        // Close duplicate active facts (keep newest created_at) before UNIQUE index.
-        // Safe on fresh DBs (0 rows) and on DBs from intermediate non-unique builds.
+        // Close duplicate active facts (keep max rowid per pair) before UNIQUE index.
+        // rowid tiebreak handles same-second created_at collisions.
         conn.execute_batch(
             "
-            UPDATE facts SET valid_to = valid_from
-            WHERE rowid IN (
-                SELECT f.rowid
-                FROM facts f
-                INNER JOIN (
-                    SELECT entity, relation, MAX(created_at) AS mx
-                    FROM facts
-                    WHERE valid_to IS NULL
-                    GROUP BY entity, relation
-                    HAVING COUNT(*) > 1
-                ) d ON f.entity = d.entity AND f.relation = d.relation
-                WHERE f.valid_to IS NULL AND f.created_at < d.mx
-            );
+            UPDATE facts SET valid_to = COALESCE(valid_to, valid_from)
+            WHERE valid_to IS NULL
+              AND rowid NOT IN (
+                  SELECT MAX(rowid) FROM facts WHERE valid_to IS NULL
+                  GROUP BY entity, relation
+              );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_active
                 ON facts(entity, relation) WHERE valid_to IS NULL;
             ",

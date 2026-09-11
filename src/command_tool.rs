@@ -165,13 +165,7 @@ impl CommandTool {
         tokio::pin!(cancel_rx);
 
         let timeout_secs = self.execute_timeout_secs;
-        let timeout_fut = async {
-            if timeout_secs == 0 {
-                std::future::pending::<()>().await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
-            }
-        };
+        let timeout_fut = crate::utils::process::optional_timeout(timeout_secs);
         tokio::pin!(timeout_fut);
 
         loop {
@@ -198,12 +192,12 @@ impl CommandTool {
                 }
                 _ = &mut cancel_rx => {
                     cancelled = true;
-                    Self::kill_child(&mut child).await;
+                    crate::utils::process::kill_child(&mut child).await;
                     break;
                 }
                 _ = &mut timeout_fut => {
                     timed_out = true;
-                    Self::kill_child(&mut child).await;
+                    crate::utils::process::kill_child(&mut child).await;
                     break;
                 }
             }
@@ -302,17 +296,5 @@ impl CommandTool {
 
         self.cancel_registry.unregister(&cmd_id).await;
         Ok(result)
-    }
-
-    async fn kill_child(child: &mut tokio::process::Child) {
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
-        let _ = child.kill().await;
-        let _ = child.wait().await;
     }
 }

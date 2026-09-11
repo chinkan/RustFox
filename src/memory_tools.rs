@@ -223,13 +223,7 @@ impl ToolHandler for MemoryTools {
                     Ok(facts) if facts.is_empty() => Ok("No facts found.".into()),
                     Ok(facts) => Ok(facts
                         .iter()
-                        .map(|f| {
-                            let until = f.valid_to.as_deref().unwrap_or("…");
-                            format!(
-                                "{} —{}→ {} [{}..{}] conf={}",
-                                f.entity, f.relation, f.value, f.valid_from, until, f.confidence
-                            )
-                        })
+                        .map(|f| f.to_string())
                         .collect::<Vec<_>>()
                         .join("\n")),
                     Err(e) => Ok(format!("Failed to query facts: {e}")),
@@ -280,13 +274,7 @@ impl ToolHandler for MemoryTools {
                         Ok(facts) if facts.is_empty() => Ok("No fact history.".into()),
                         Ok(facts) => Ok(facts
                             .iter()
-                            .map(|f| {
-                                let until = f.valid_to.as_deref().unwrap_or("…");
-                                format!(
-                                    "{} —{}→ {} [{}..{}]",
-                                    f.entity, f.relation, f.value, f.valid_from, until
-                                )
-                            })
+                            .map(|f| f.to_string())
                             .collect::<Vec<_>>()
                             .join("\n")),
                         Err(e) => Ok(format!("Failed fact history: {e}")),
