@@ -361,11 +361,31 @@ impl MemoryStore {
             );
             CREATE INDEX IF NOT EXISTS idx_facts_entity_relation
                 ON facts(entity, relation, valid_from);
-            -- Enforce one active value per (entity, relation).
+            ",
+        )?;
+
+        // Close duplicate active facts (keep newest created_at) before UNIQUE index.
+        // Safe on fresh DBs (0 rows) and on DBs from intermediate non-unique builds.
+        conn.execute_batch(
+            "
+            UPDATE facts SET valid_to = valid_from
+            WHERE rowid IN (
+                SELECT f.rowid
+                FROM facts f
+                INNER JOIN (
+                    SELECT entity, relation, MAX(created_at) AS mx
+                    FROM facts
+                    WHERE valid_to IS NULL
+                    GROUP BY entity, relation
+                    HAVING COUNT(*) > 1
+                ) d ON f.entity = d.entity AND f.relation = d.relation
+                WHERE f.valid_to IS NULL AND f.created_at < d.mx
+            );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_active
                 ON facts(entity, relation) WHERE valid_to IS NULL;
             ",
-        )?;
+        )
+        .context("facts one-active index migration")?;
 
         // Migration: add is_summarized column (safe no-op if column already exists)
         conn.execute_batch("ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;")

@@ -424,6 +424,7 @@ async fn main() -> Result<()> {
     sup_registry.register(std::sync::Arc::new(
         rustfox::supervisor::backend::shell::ShellBackend::new(
             config.sandbox.allowed_directory.clone(),
+            config.sandbox.execute_timeout_secs,
         ),
     ));
 

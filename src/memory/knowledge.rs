@@ -296,7 +296,7 @@ impl MemoryStore {
         // Reverse-apply changes newer than as_of onto the live value.
         let mut val = current.as_ref().map(|(v, _)| v.clone());
         for h in &history {
-            if normalize_ts(&h.changed_at).as_str() <= as_of.as_str() {
+            if normalize_from(&h.changed_at).as_str() <= as_of.as_str() {
                 break;
             }
             val = h.old_value.clone();
@@ -304,12 +304,12 @@ impl MemoryStore {
 
         // Before first create and no residual history → absent.
         if let Some((_, ref created_at)) = current {
-            let created = normalize_ts(created_at);
+            let created = normalize_from(created_at);
             if as_of.as_str() < created.as_str() && history.is_empty() {
                 return Ok(None);
             }
             if as_of.as_str() < created.as_str() {
-                let earliest = history.iter().map(|h| normalize_ts(&h.changed_at)).min();
+                let earliest = history.iter().map(|h| normalize_from(&h.changed_at)).min();
                 if earliest
                     .as_ref()
                     .is_none_or(|e| as_of.as_str() < e.as_str())
@@ -465,30 +465,31 @@ impl MemoryStore {
     }
 }
 
-/// Date-only `YYYY-MM-DD` → start of day for lower bounds / stored from.
+/// Canonicalize timestamps for lexicographic compare with SQLite `datetime('now')`.
+/// - `YYYY-MM-DD` → start of day
+/// - `YYYY-MM-DDTHH:MM:SS…` → space separator (ISO-8601 → SQLite style)
 fn normalize_from(ts: &str) -> String {
+    let ts = ts.trim();
     if is_date_only(ts) {
-        format!("{ts} 00:00:00")
-    } else {
-        ts.to_string()
+        return format!("{ts} 00:00:00");
     }
+    if let Some((date, rest)) = ts.split_once('T') {
+        if is_date_only(date) {
+            let time = rest.split(['+', 'Z']).next().unwrap_or(rest);
+            let time = if time.len() >= 8 { &time[..8] } else { time };
+            return format!("{date} {time}");
+        }
+    }
+    ts.to_string()
 }
 
-/// Date-only `YYYY-MM-DD` → end of day so "as of that day" includes the whole day.
+/// Date-only → end of day so "as of that day" includes the whole day.
 fn normalize_as_of(ts: &str) -> String {
+    let ts = ts.trim();
     if is_date_only(ts) {
-        format!("{ts} 23:59:59")
-    } else {
-        ts.to_string()
+        return format!("{ts} 23:59:59");
     }
-}
-
-fn normalize_ts(ts: &str) -> String {
-    if is_date_only(ts) {
-        format!("{ts} 00:00:00")
-    } else {
-        ts.to_string()
-    }
+    normalize_from(ts)
 }
 
 fn is_date_only(ts: &str) -> bool {
@@ -732,8 +733,13 @@ mod tests {
     fn test_date_only_normalize() {
         assert_eq!(normalize_as_of("2025-06-01"), "2025-06-01 23:59:59");
         assert_eq!(normalize_from("2025-06-01"), "2025-06-01 00:00:00");
+        assert_eq!(normalize_from("2025-06-01 12:00:00"), "2025-06-01 12:00:00");
         assert_eq!(
-            normalize_as_of("2025-06-01 12:00:00"),
+            normalize_from("2025-06-01T12:00:00Z"),
+            "2025-06-01 12:00:00"
+        );
+        assert_eq!(
+            normalize_from("2025-06-01T12:00:00+08:00"),
             "2025-06-01 12:00:00"
         );
     }

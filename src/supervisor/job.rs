@@ -55,6 +55,19 @@ pub struct JobOutput {
     pub next_step: Option<String>,
 }
 
+impl JobOutput {
+    pub fn failed(errors: Vec<String>) -> Self {
+        Self {
+            status: JobStatus::Failed,
+            summary: String::new(),
+            evidence: vec![],
+            errors,
+            changed_files: vec![],
+            next_step: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
