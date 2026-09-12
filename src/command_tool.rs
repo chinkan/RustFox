@@ -3,8 +3,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use std::time::{Duration, Instant};
 use tokio::process::Command as TokioCommand;
 use tracing::warn;
 
@@ -13,21 +12,12 @@ use crate::llm::{FunctionDefinition, ToolDefinition};
 use crate::platform::sender::PlatformSender;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult, ToolUiMode};
 
-/// Controls how command execution messages are sent to Telegram.
-enum SendMode {
-    /// Full live output with cancel button.
-    Verbose,
-    /// Cancel button only, no live edits. Message deleted on completion.
-    Minimal,
-    /// No message sent. Tool notifier handles nothing (silent mode).
-    Silent,
-}
+enum SendMode { Verbose, Minimal, Silent }
 
 pub struct CommandTool {
     sandbox_dir: PathBuf,
     cancel_registry: Arc<CancelRegistry>,
     sender: Arc<dyn PlatformSender>,
-    /// 0 = no wall-clock timeout.
     execute_timeout_secs: u64,
 }
 
@@ -38,12 +28,7 @@ impl CommandTool {
         sender: Arc<dyn PlatformSender>,
         execute_timeout_secs: u64,
     ) -> Self {
-        Self {
-            sandbox_dir,
-            cancel_registry,
-            sender,
-            execute_timeout_secs,
-        }
+        Self { sandbox_dir, cancel_registry, sender, execute_timeout_secs }
     }
 }
 
@@ -93,66 +78,37 @@ impl CommandTool {
 
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
-        // Register cancel before showing the button so concurrent callbacks never miss.
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        self.cancel_registry
-            .register(cmd_id.clone(), cancel_tx)
-            .await;
+        self.cancel_registry.register(cmd_id.clone(), cancel_tx).await;
 
-        // Verbose: cancel button + live output + final result
-        // Minimal: cancel button (simple text) + no live output, delete on finish
-        // Silent: no message at all (tool_notifier handles nothing)
         let (msg_id, send_mode) = match ctx.tool_ui_mode {
             ToolUiMode::Verbose => {
-                let status_text =
-                    format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
-                let id = self
-                    .sender
-                    .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
-                    .await?;
+                let st = format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
+                let id = self.sender.show_cancel_button(&ctx.chat_id, &st, &cmd_id).await?;
                 (Some(id), SendMode::Verbose)
             }
             ToolUiMode::Minimal => {
-                let status_text = format!("⏳ Running: `{}`", escaped_cmd);
-                let id = self
-                    .sender
-                    .show_cancel_button(&ctx.chat_id, &status_text, &cmd_id)
-                    .await?;
+                let st = format!("⏳ Running: `{}`", escaped_cmd);
+                let id = self.sender.show_cancel_button(&ctx.chat_id, &st, &cmd_id).await?;
                 (Some(id), SendMode::Minimal)
             }
             ToolUiMode::Silent => (None, SendMode::Silent),
         };
 
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<String>(256);
-        let output_tx2 = output_tx.clone();
-        let mut child_stdout = child.stdout.take();
-        let mut child_stderr = child.stderr.take();
+        let stdout_tx = output_tx.clone();
+        let stderr_tx = output_tx.clone();
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
 
         let stdout_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            while let Some(stream) = child_stdout.as_mut() {
-                match stream.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let _ = output_tx
-                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
-                            .await;
-                    }
-                }
+            if let Some(reader) = child_stdout {
+                crate::utils::process::drain_pipe(reader, stdout_tx).await;
             }
         });
-
         let stderr_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            while let Some(stream) = child_stderr.as_mut() {
-                match stream.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let _ = output_tx2
-                            .send(String::from_utf8_lossy(&buf[..n]).to_string())
-                            .await;
-                    }
-                }
+            if let Some(reader) = child_stderr {
+                crate::utils::process::drain_pipe(reader, stderr_tx).await;
             }
         });
 
@@ -175,7 +131,7 @@ impl CommandTool {
                     if output_buffer.chars().count() > MAX_BUFFER_CHARS {
                         output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
                     }
-                    if matches!(send_mode, SendMode::Verbose) && last_edit.elapsed() >= std::time::Duration::from_millis(500) {
+                    if matches!(send_mode, SendMode::Verbose) && last_edit.elapsed() >= Duration::from_millis(500) {
                         let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
                         let text = format!("💻 Running: `{}`\n\n```\n{}\n```", escaped_cmd, capped);
                         if let Some(mid) = &msg_id {
@@ -203,7 +159,12 @@ impl CommandTool {
             }
         }
 
-        let _ = tokio::join!(stdout_handle, stderr_handle);
+        // Post-exit drain with timeout guard
+        let drain = tokio::time::timeout(Duration::from_secs(5), async move { tokio::join!(stdout_handle, stderr_handle) });
+        if drain.await.is_err() {
+            warn!("command_tool: drain timed out after child exit");
+        }
+
         while let Ok(chunk) = output_rx.try_recv() {
             output_buffer.push_str(&chunk);
         }
@@ -213,11 +174,7 @@ impl CommandTool {
 
         fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
             if buf.is_empty() {
-                if no_output_msg.is_empty() {
-                    None
-                } else {
-                    Some(no_output_msg.to_owned())
-                }
+                if no_output_msg.is_empty() { None } else { Some(no_output_msg.to_owned()) }
             } else {
                 let capped = crate::utils::strings::truncate_tail(buf, 3500);
                 Some(format!("```\n{}\n```", capped))
@@ -240,9 +197,7 @@ impl CommandTool {
                         };
                         let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
                     }
-                    SendMode::Minimal => {
-                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
-                    }
+                    SendMode::Minimal => { let _ = self.sender.delete_message(&ctx.chat_id, mid).await; }
                     SendMode::Silent => {}
                 }
             }
@@ -251,43 +206,23 @@ impl CommandTool {
             } else {
                 "⚠️ User cancelled the command".to_string()
             };
-            if !output_buffer.is_empty() {
-                msg.push('\n');
-                msg.push_str(output_buffer.trim_end());
-            }
+            if !output_buffer.is_empty() { msg.push('\n'); msg.push_str(output_buffer.trim_end()); }
             msg
         } else if let Some(code) = exit_code {
             if let Some(mid) = &msg_id {
                 match send_mode {
                     SendMode::Verbose => {
-                        let (icon, label) = if code == 0 {
-                            ("✅", "Completed")
-                        } else {
-                            ("❌", "Failed")
-                        };
+                        let (icon, label) = if code == 0 { ("✅", "Completed") } else { ("❌", "Failed") };
                         let body = format_body(&output_buffer, "Command completed with no output.");
-                        let text = format!(
-                            "{} {}: `{}`\n\n{}",
-                            icon,
-                            label,
-                            escaped_cmd,
-                            body.unwrap_or_default()
-                        );
+                        let text = format!("{} {}: `{}`\n\n{}", icon, label, escaped_cmd, body.unwrap_or_default());
                         let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
                     }
-                    SendMode::Minimal => {
-                        // Delete the minimal message
-                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
-                    }
-                    // Silent mode sends no message; nothing to clean up.
+                    SendMode::Minimal => { let _ = self.sender.delete_message(&ctx.chat_id, mid).await; }
                     SendMode::Silent => {}
                 }
             }
             let mut result = String::new();
-            if !output_buffer.is_empty() {
-                result.push_str(output_buffer.trim_end());
-                result.push('\n');
-            }
+            if !output_buffer.is_empty() { result.push_str(output_buffer.trim_end()); result.push('\n'); }
             result.push_str(&format!("Exit code: {}", code));
             result
         } else {
