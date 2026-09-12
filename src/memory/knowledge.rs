@@ -490,7 +490,7 @@ fn normalize_from(ts: &str) -> String {
     }
     // Handle Z suffix (e.g. "2025-06-01T12:00Z") — strip Z, optionally append :00 seconds.
     if ts.ends_with('Z') || ts.ends_with('z') {
-        let without_z = ts.trim_end_matches(|c| c == 'Z' || c == 'z');
+        let without_z = ts.trim_end_matches(['Z', 'z']);
         let with_secs = format!("{}:00", without_z);
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&with_secs, "%Y-%m-%dT%H:%M:%S") {
             return naive.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -774,6 +774,9 @@ mod tests {
     #[test]
     fn test_normalize_from_z_suffix() {
         assert_eq!(normalize_from("2025-06-01T12:00Z"), "2025-06-01 12:00:00");
-        assert_eq!(normalize_from("2025-06-01T12:00:00Z"), "2025-06-01 12:00:00");
+        assert_eq!(
+            normalize_from("2025-06-01T12:00:00Z"),
+            "2025-06-01 12:00:00"
+        );
     }
 }

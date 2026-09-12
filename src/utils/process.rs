@@ -26,7 +26,9 @@ where
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).await;
+                let _ = tx
+                    .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                    .await;
             }
         }
     }

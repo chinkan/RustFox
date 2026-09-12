@@ -1,7 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::time::timeout;
+use tracing::warn;
 
 use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
@@ -47,11 +51,17 @@ impl ShellBackend {
     }
 }
 
-async fn drain_pipe(mut stream: tokio::process::ChildStdout) -> String {
+/// Drain bytes from an async reader into a `String` until EOF.
+///
+/// Used for capturing `ChildStdout` / `ChildStderr` in the shell backend.
+async fn drain<R>(mut reader: R) -> String
+where
+    R: AsyncRead + Unpin,
+{
     let mut out = String::new();
     let mut buf = vec![0u8; 8192];
     loop {
-        match stream.read(&mut buf).await {
+        match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
         }
@@ -59,16 +69,20 @@ async fn drain_pipe(mut stream: tokio::process::ChildStdout) -> String {
     out
 }
 
-async fn drain_err(mut stream: tokio::process::ChildStderr) -> String {
-    let mut out = String::new();
-    let mut buf = vec![0u8; 8192];
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+/// Await a spawned drain handle, but cap the wait so a daemon that inherits
+/// the pipe cannot hang the shell backend indefinitely.
+async fn drain_with_timeout(handle: tokio::task::JoinHandle<String>) -> String {
+    match timeout(Duration::from_secs(5), handle).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(join_err)) => {
+            warn!("drain join error: {join_err}");
+            String::new()
+        }
+        Err(elapsed) => {
+            warn!("drain timed out after {elapsed:?}, pipe may be held by daemon");
+            String::new()
         }
     }
-    out
 }
 
 #[async_trait::async_trait]
@@ -114,8 +128,8 @@ impl Backend for ShellBackend {
         };
 
         // Drain pipes concurrently so a large writer cannot block wait().
-        let stdout_handle = child.stdout.take().map(|s| tokio::spawn(drain_pipe(s)));
-        let stderr_handle = child.stderr.take().map(|s| tokio::spawn(drain_err(s)));
+        let stdout_handle = child.stdout.take().map(|s| tokio::spawn(drain(s)));
+        let stderr_handle = child.stderr.take().map(|s| tokio::spawn(drain(s)));
 
         let timeout_fut = optional_timeout(timeout_secs);
         tokio::pin!(timeout_fut);
@@ -134,12 +148,13 @@ impl Backend for ShellBackend {
             }
         }
 
+        // Protect drain from daemon processes that hold pipe write end open.
         let stdout = match stdout_handle {
-            Some(h) => h.await.unwrap_or_default(),
+            Some(h) => drain_with_timeout(h).await,
             None => String::new(),
         };
         let stderr = match stderr_handle {
-            Some(h) => h.await.unwrap_or_default(),
+            Some(h) => drain_with_timeout(h).await,
             None => String::new(),
         };
 
