@@ -91,7 +91,9 @@ impl CommandTool {
         self.cancel_registry
             .register(cmd_id.clone(), cancel_tx)
             .await;
-
+        // Verbose: cancel button + live output + final result
+        // Minimal: cancel button (simple text) + no live output, delete on finish
+        // Silent: no message at all (tool_notifier handles nothing)
         let (msg_id, send_mode) = match ctx.tool_ui_mode {
             ToolUiMode::Verbose => {
                 let st = format!("💻 Running: `{}`\n\n```\n⏳ Starting...\n```", escaped_cmd);
@@ -232,8 +234,8 @@ impl CommandTool {
                 "⚠️ User cancelled the command".to_string()
             };
             if !output_buffer.is_empty() {
-                msg.push('\n');
-                msg.push_str(output_buffer.trim_end());
+                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                msg.push_str(&format!("\n\nPartial output:\n```\n{}\n```", capped));
             }
             msg
         } else if let Some(code) = exit_code {
