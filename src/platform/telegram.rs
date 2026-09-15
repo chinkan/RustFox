@@ -290,6 +290,11 @@ pub async fn run(
         // Commands (like /btw) bypass per-chat serialization for true concurrency.
         // Regular messages keep per-chat ordering to avoid race conditions.
         .distribution_function(|upd: &Update| {
+            // Callbacks (Cancel button) must run concurrent with the in-flight
+            // message handler — chat-keying them queues cancel behind execute_command.
+            if matches!(upd.kind, UpdateKind::CallbackQuery(_)) {
+                return None;
+            }
             let is_cmd = match &upd.kind {
                 UpdateKind::Message(m)
                 | UpdateKind::EditedMessage(m)
