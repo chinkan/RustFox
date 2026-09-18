@@ -131,7 +131,6 @@ impl CommandTool {
             }
         });
 
-        const MAX_BUFFER_CHARS: usize = 100_000;
         let mut output_buffer = String::new();
         let mut last_edit = Instant::now();
         let mut exit_code: Option<i32> = None;
@@ -147,8 +146,11 @@ impl CommandTool {
             tokio::select! {
                 Some(chunk) = output_rx.recv() => {
                     output_buffer.push_str(&chunk);
-                    if output_buffer.chars().count() > MAX_BUFFER_CHARS {
-                        output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
+                    if output_buffer.chars().count() > crate::utils::process::OUTPUT_BUFFER_CHARS {
+                        output_buffer = crate::utils::strings::truncate_tail(
+                            &output_buffer,
+                            crate::utils::process::OUTPUT_BUFFER_CHARS,
+                        );
                     }
                     if matches!(send_mode, SendMode::Verbose) && last_edit.elapsed() >= Duration::from_millis(500) {
                         let capped = crate::utils::strings::truncate_tail(
@@ -165,7 +167,10 @@ impl CommandTool {
                     }
                 }
                 status = child.wait() => {
-                    exit_code = Some(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1));
+                    exit_code = Some(match status {
+                        Ok(s) => s.code().unwrap_or(-1),
+                        Err(_) => -1,
+                    });
                     break;
                 }
                 _ = &mut cancel_rx => {
@@ -181,19 +186,21 @@ impl CommandTool {
             }
         }
 
-        // Post-exit drain with timeout guard
-        let drain = tokio::time::timeout(Duration::from_secs(5), async move {
-            tokio::join!(stdout_handle, stderr_handle)
-        });
-        if drain.await.is_err() {
-            warn!("command_tool: drain timed out after child exit");
-        }
+        // Abort orphan drain tasks (daemon holding pipe) — same as supervisor shell.
+        crate::utils::process::finish_drains(
+            vec![stdout_handle, stderr_handle],
+            crate::utils::process::DRAIN_JOIN_TIMEOUT,
+        )
+        .await;
 
         while let Ok(chunk) = output_rx.try_recv() {
             output_buffer.push_str(&chunk);
         }
-        if output_buffer.chars().count() > MAX_BUFFER_CHARS {
-            output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
+        if output_buffer.chars().count() > crate::utils::process::OUTPUT_BUFFER_CHARS {
+            output_buffer = crate::utils::strings::truncate_tail(
+                &output_buffer,
+                crate::utils::process::OUTPUT_BUFFER_CHARS,
+            );
         }
 
         fn format_body(buf: &str, no_output_msg: &str) -> Option<String> {
@@ -226,10 +233,14 @@ impl CommandTool {
                             None => format!("❌ {}: `{}`", label, escaped_cmd),
                             Some(b) => format!("❌ {}: `{}`\n\n{}", label, escaped_cmd, b),
                         };
-                        let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
+                        if let Err(e) = self.sender.edit_message(&ctx.chat_id, mid, &text).await {
+                            warn!("Failed to edit cancel/timeout message: {e}");
+                        }
                     }
                     SendMode::Minimal => {
-                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
+                        if let Err(e) = self.sender.delete_message(&ctx.chat_id, mid).await {
+                            warn!("Failed to delete minimal command message: {e}");
+                        }
                     }
                     SendMode::Silent => {}
                 }
@@ -264,10 +275,14 @@ impl CommandTool {
                             escaped_cmd,
                             body.unwrap_or_default()
                         );
-                        let _ = self.sender.edit_message(&ctx.chat_id, mid, &text).await;
+                        if let Err(e) = self.sender.edit_message(&ctx.chat_id, mid, &text).await {
+                            warn!("Failed to edit completed command message: {e}");
+                        }
                     }
                     SendMode::Minimal => {
-                        let _ = self.sender.delete_message(&ctx.chat_id, mid).await;
+                        if let Err(e) = self.sender.delete_message(&ctx.chat_id, mid).await {
+                            warn!("Failed to delete minimal command message: {e}");
+                        }
                     }
                     SendMode::Silent => {}
                 }

@@ -10,6 +10,9 @@ use tracing::warn;
 /// Cap for Telegram / LLM-facing command output snippets.
 pub const OUTPUT_SNIPPET_CHARS: usize = 3500;
 
+/// Cap for full captured command stdout kept in memory / job summary.
+pub const OUTPUT_BUFFER_CHARS: usize = 100_000;
+
 /// Max time to wait for pipe drains after the child exits or is killed.
 pub const DRAIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -132,7 +132,10 @@ impl Backend for ShellBackend {
                 errors.push(stderr);
             }
             let mut out = JobOutput::failed(errors);
-            out.summary = stdout.trim().to_string();
+            out.summary = crate::utils::strings::truncate_tail(
+                stdout.trim(),
+                crate::utils::process::OUTPUT_BUFFER_CHARS,
+            );
             return Ok(out);
         }
 
@@ -144,12 +147,18 @@ impl Backend for ShellBackend {
         job.status = status.clone();
         Ok(JobOutput {
             status,
-            summary: stdout.trim().to_string(),
+            summary: crate::utils::strings::truncate_tail(
+                stdout.trim(),
+                crate::utils::process::OUTPUT_BUFFER_CHARS,
+            ),
             evidence: vec![Evidence::ExitCode { code: exit_code }],
             errors: if stderr.is_empty() {
                 vec![]
             } else {
-                vec![stderr]
+                vec![crate::utils::strings::truncate_tail(
+                    &stderr,
+                    crate::utils::process::OUTPUT_BUFFER_CHARS,
+                )]
             },
             changed_files: vec![],
             next_step: None,
