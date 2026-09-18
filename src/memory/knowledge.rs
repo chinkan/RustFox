@@ -500,13 +500,22 @@ fn normalize_from(ts: &str) -> String {
         }
     }
     // ISO with T, no offset → treat as already-UTC wall clock.
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") {
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, fmt) {
+            return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
+    // Last resort: still force seconds so lexicographic order matches datetime('now').
+    let spaced = ts.replace('T', " ");
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&spaced, "%Y-%m-%d %H:%M") {
         return naive.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-        return naive.format("%Y-%m-%d %H:%M:%S").to_string();
-    }
-    ts.replace('T', " ")
+    spaced
 }
 
 /// Date-only → end of UTC day so "as of that day" includes the whole day.
@@ -769,6 +778,8 @@ mod tests {
             normalize_from("2025-06-01T12:00:00+08:00"),
             "2025-06-01 04:00:00"
         );
+        // Seconds-less no-Z must still pad to :00 for lexicographic order.
+        assert_eq!(normalize_from("2025-06-01T12:00"), "2025-06-01 12:00:00");
     }
 
     #[test]

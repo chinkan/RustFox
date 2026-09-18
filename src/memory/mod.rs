@@ -368,7 +368,7 @@ impl MemoryStore {
         // rowid tiebreak handles same-second created_at collisions.
         conn.execute_batch(
             "
-            UPDATE facts SET valid_to = COALESCE(valid_to, valid_from)
+            UPDATE facts SET valid_to = valid_from
             WHERE valid_to IS NULL
               AND rowid NOT IN (
                   SELECT MAX(rowid) FROM facts WHERE valid_to IS NULL

@@ -151,7 +151,10 @@ impl CommandTool {
                         output_buffer = crate::utils::strings::truncate_tail(&output_buffer, MAX_BUFFER_CHARS);
                     }
                     if matches!(send_mode, SendMode::Verbose) && last_edit.elapsed() >= Duration::from_millis(500) {
-                        let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                        let capped = crate::utils::strings::truncate_tail(
+                            &output_buffer,
+                            crate::utils::process::OUTPUT_SNIPPET_CHARS,
+                        );
                         let text = format!("💻 Running: `{}`\n\n```\n{}\n```", escaped_cmd, capped);
                         if let Some(mid) = &msg_id {
                             if let Err(e) = self.sender.edit_message(&ctx.chat_id, mid, &text).await {
@@ -201,7 +204,10 @@ impl CommandTool {
                     Some(no_output_msg.to_owned())
                 }
             } else {
-                let capped = crate::utils::strings::truncate_tail(buf, 3500);
+                let capped = crate::utils::strings::truncate_tail(
+                    buf,
+                    crate::utils::process::OUTPUT_SNIPPET_CHARS,
+                );
                 Some(format!("```\n{}\n```", capped))
             }
         }
@@ -234,7 +240,10 @@ impl CommandTool {
                 "⚠️ User cancelled the command".to_string()
             };
             if !output_buffer.is_empty() {
-                let capped = crate::utils::strings::truncate_tail(&output_buffer, 3500);
+                let capped = crate::utils::strings::truncate_tail(
+                    &output_buffer,
+                    crate::utils::process::OUTPUT_SNIPPET_CHARS,
+                );
                 msg.push_str(&format!("\n\nPartial output:\n```\n{}\n```", capped));
             }
             msg

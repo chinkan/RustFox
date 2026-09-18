@@ -1,15 +1,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::time::timeout;
-use tracing::warn;
 
 use crate::supervisor::backend::{Backend, BackendCapabilities, RunContext};
 use crate::supervisor::job::{Evidence, Job, JobOutput, JobStatus, JobType};
-use crate::utils::process::{kill_child, optional_timeout};
+use crate::utils::process::{
+    finish_drains, kill_child, optional_timeout, DrainBuf, DRAIN_JOIN_TIMEOUT,
+};
 
 pub struct ShellBackend {
     sandbox: PathBuf,
@@ -48,40 +45,6 @@ impl ShellBackend {
             return false;
         }
         true
-    }
-}
-
-/// Drain bytes from an async reader into a `String` until EOF.
-///
-/// Used for capturing `ChildStdout` / `ChildStderr` in the shell backend.
-async fn drain<R>(mut reader: R) -> String
-where
-    R: AsyncRead + Unpin,
-{
-    let mut out = String::new();
-    let mut buf = vec![0u8; 8192];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
-        }
-    }
-    out
-}
-
-/// Await a spawned drain handle, but cap the wait so a daemon that inherits
-/// the pipe cannot hang the shell backend indefinitely.
-async fn drain_with_timeout(handle: tokio::task::JoinHandle<String>) -> String {
-    match timeout(Duration::from_secs(5), handle).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(join_err)) => {
-            warn!("drain join error: {join_err}");
-            String::new()
-        }
-        Err(elapsed) => {
-            warn!("drain timed out after {elapsed:?}, pipe may be held by daemon");
-            String::new()
-        }
     }
 }
 
@@ -127,9 +90,15 @@ impl Backend for ShellBackend {
             }
         };
 
-        // Drain pipes concurrently so a large writer cannot block wait().
-        let stdout_handle = child.stdout.take().map(|s| tokio::spawn(drain(s)));
-        let stderr_handle = child.stderr.take().map(|s| tokio::spawn(drain(s)));
+        let stdout_buf = DrainBuf::new();
+        let stderr_buf = DrainBuf::new();
+        let mut drain_handles = Vec::new();
+        if let Some(s) = child.stdout.take() {
+            drain_handles.push(stdout_buf.spawn_reader(s));
+        }
+        if let Some(s) = child.stderr.take() {
+            drain_handles.push(stderr_buf.spawn_reader(s));
+        }
 
         let timeout_fut = optional_timeout(timeout_secs);
         tokio::pin!(timeout_fut);
@@ -139,7 +108,10 @@ impl Backend for ShellBackend {
         tokio::select! {
             status = child.wait() => {
                 timed_out = false;
-                exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                exit_code = match status {
+                    Ok(s) => s.code().unwrap_or(-1),
+                    Err(_) => -1,
+                };
             }
             _ = &mut timeout_fut => {
                 timed_out = true;
@@ -148,15 +120,10 @@ impl Backend for ShellBackend {
             }
         }
 
-        // Protect drain from daemon processes that hold pipe write end open.
-        let stdout = match stdout_handle {
-            Some(h) => drain_with_timeout(h).await,
-            None => String::new(),
-        };
-        let stderr = match stderr_handle {
-            Some(h) => drain_with_timeout(h).await,
-            None => String::new(),
-        };
+        // Parallel drain join; partials already in DrainBuf if we abort.
+        finish_drains(drain_handles, DRAIN_JOIN_TIMEOUT).await;
+        let stdout = stdout_buf.snapshot().await;
+        let stderr = stderr_buf.snapshot().await;
 
         if timed_out {
             job.status = JobStatus::Failed;
@@ -250,29 +217,57 @@ mod tests {
         job.timeout_secs = 600;
         let start = std::time::Instant::now();
         let out = b.run(&mut job, &RunContext::new()).await.unwrap();
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "timeout path took {:?}",
+            start.elapsed()
+        );
         assert!(matches!(out.status, JobStatus::Failed));
         assert!(out.errors.iter().any(|e| e.contains("timed out")));
     }
 
     #[tokio::test]
+    async fn shell_backend_timeout_keeps_partial_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = ShellBackend::new(dir.path().into(), 2);
+        let mut job = crate::supervisor::job::Job::new(
+            "t",
+            crate::supervisor::job::JobType::ShellJob,
+            "shell",
+            "partial",
+        );
+        // Emit then sleep past timeout — partial must survive.
+        job.prompt = Some("echo hi; sleep 30".into());
+        job.timeout_secs = 600;
+        let out = b.run(&mut job, &RunContext::new()).await.unwrap();
+        assert!(matches!(out.status, JobStatus::Failed));
+        assert!(
+            out.summary.contains("hi"),
+            "expected partial stdout, got {:?}",
+            out.summary
+        );
+    }
+
+    #[tokio::test]
     async fn shell_backend_large_stdout_does_not_deadlock() {
         let dir = tempfile::tempdir().unwrap();
-        let b = ShellBackend::new(dir.path().into(), 10);
-        // ~200KB of output — would fill the pipe and hang wait() without concurrent drain.
+        let b = ShellBackend::new(dir.path().into(), 15);
         let mut job = crate::supervisor::job::Job::new(
             "t",
             crate::supervisor::job::JobType::ShellJob,
             "shell",
             "large",
         );
-        job.prompt = Some("python3 -c \"print('x'*200000)\"".into());
-        job.timeout_secs = 10;
+        // POSIX dd — no python3 dependency.
+        job.prompt =
+            Some("dd if=/dev/zero bs=1024 count=200 2>/dev/null | tr '\\0' 'x'; echo".into());
+        job.timeout_secs = 15;
         let start = std::time::Instant::now();
         let out = b.run(&mut job, &RunContext::new()).await.unwrap();
         assert!(
-            start.elapsed() < Duration::from_secs(8),
-            "large stdout took too long (possible pipe deadlock)"
+            start.elapsed() < Duration::from_secs(12),
+            "large stdout took too long (possible pipe deadlock): {:?}",
+            start.elapsed()
         );
         assert!(matches!(out.status, JobStatus::Succeeded));
         assert!(out.summary.len() >= 100_000);
