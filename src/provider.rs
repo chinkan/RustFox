@@ -51,7 +51,7 @@ impl From<&ProviderSection> for ProviderConfig {
             discover_models: s.discover_models,
             context_window: s.context_window,
             context_window_cache: Arc::new(RwLock::new(None)),
-            parse_retry_limit: 0, // overwritten by build_registry
+            parse_retry_limit: 0,      // overwritten by build_registry
             rate_limit_retry_limit: 0, // overwritten by build_registry
         }
     }
@@ -103,8 +103,8 @@ async fn chat_completion_with_retry(
                 .map(|v| v.to_string());
             let body = response.text().await.unwrap_or_default();
             let err = anyhow::anyhow!("{} API error ({}): {}", provider_name, status, body);
-            let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error();
+            let retryable =
+                status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
             if !retryable || rate_limit_attempts >= config.rate_limit_retry_limit {
                 // 400/401/… fail fast (unchanged); 429/5xx after budget spent.
                 return Err(err);
@@ -210,13 +210,11 @@ fn parse_retry_after(raw: Option<&str>) -> Option<u64> {
     if let Ok(secs) = raw.parse::<i64>() {
         return Some(secs.max(0) as u64);
     }
-    chrono::DateTime::parse_from_rfc2822(raw)
-        .ok()
-        .map(|when| {
-            (when.with_timezone(&chrono::Utc) - chrono::Utc::now())
-                .num_seconds()
-                .max(0) as u64
-        })
+    chrono::DateTime::parse_from_rfc2822(raw).ok().map(|when| {
+        (when.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .num_seconds()
+            .max(0) as u64
+    })
 }
 
 /// Unified LLM provider abstraction.
@@ -906,7 +904,6 @@ mod tests {
         assert_eq!(ctx, 200_000);
     }
 
-
     // -----------------------------------------------------------------------
     // 429 / 5xx retry policy (see PLAN-2026-09-19-429-retry.md)
     // -----------------------------------------------------------------------
@@ -1000,7 +997,11 @@ mod tests {
         .await;
         let config = retry_config(server.uri(), 3, 3);
         let result = call_with_retry(&config).await;
-        assert!(result.is_ok(), "should succeed after one 429: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should succeed after one 429: {:?}",
+            result.err()
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
@@ -1046,7 +1047,11 @@ mod tests {
         .await;
         let config = retry_config(server.uri(), 3, 3);
         assert!(call_with_retry(&config).await.is_err());
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "4xx (except 429) must never retry");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "4xx (except 429) must never retry"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1088,7 +1093,11 @@ mod tests {
         let hits = mount_script(&server, vec![ResponseTemplate::new(429)]).await;
         let config = retry_config(server.uri(), 3, 0);
         assert!(call_with_retry(&config).await.is_err());
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "limit 0 = pre-fix fail-fast");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "limit 0 = pre-fix fail-fast"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1122,7 +1131,10 @@ mod tests {
     #[test]
     fn parse_retry_after_http_date_past_clamps_zero_future_in_range() {
         // clearly in the past -> 0
-        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")), Some(0));
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            Some(0)
+        );
         let future = (chrono::Utc::now() + chrono::Duration::seconds(45))
             .format("%a, %d %b %Y %H:%M:%S GMT")
             .to_string();
