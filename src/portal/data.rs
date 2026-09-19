@@ -23,10 +23,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 /// GET /api/agents — the main agent plus loaded subagent definitions.
 pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
-    let model = state.agent.current_model.read().await.clone();
+    let model = state.agent.current_model().await;
     let web_active = state.agent.is_processing(&state.config.user_name).await;
     let mut telegram_active = false;
-    for id in &state.agent.config.telegram.allowed_user_ids {
+    for id in &state.agent.config().telegram.allowed_user_ids {
         if state.agent.is_processing(&id.to_string()).await {
             telegram_active = true;
             break;
@@ -44,18 +44,15 @@ pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json:
         "platform": "telegram+web",
     }));
 
-    {
-        let agents = state.agent.agents.read().await;
-        for skill in agents.list() {
-            out.push(json!({
-                "id": format!("agent:{}", skill.name),
-                "name": skill.name,
-                "model": skill.model.clone().unwrap_or_else(|| model.clone()),
-                "status": "idle",
-                "lastActive": null,
-                "platform": "subagent",
-            }));
-        }
+    for skill in state.agent.agent_entries().await {
+        out.push(json!({
+            "id": format!("agent:{}", skill.name),
+            "name": skill.name,
+            "model": skill.model.clone().unwrap_or_else(|| model.clone()),
+            "status": "idle",
+            "lastActive": null,
+            "platform": "subagent",
+        }));
     }
     Ok(Json(serde_json::Value::Array(out)))
 }
@@ -63,25 +60,19 @@ pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json:
 /// GET /api/agents/skills — loaded skills + agent definitions.
 pub async fn skills(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
     let mut out = Vec::new();
-    {
-        let skills = state.agent.skills.read().await;
-        for s in skills.list() {
-            out.push(json!({
-                "name": s.name,
-                "description": truncate_chars(&s.description, 160),
-                "kind": "skill",
-            }));
-        }
+    for s in state.agent.skill_entries().await {
+        out.push(json!({
+            "name": s.name,
+            "description": truncate_chars(&s.description, 160),
+            "kind": "skill",
+        }));
     }
-    {
-        let agents = state.agent.agents.read().await;
-        for s in agents.list() {
-            out.push(json!({
-                "name": s.name,
-                "description": truncate_chars(&s.description, 160),
-                "kind": "agent",
-            }));
-        }
+    for s in state.agent.agent_entries().await {
+        out.push(json!({
+            "name": s.name,
+            "description": truncate_chars(&s.description, 160),
+            "kind": "agent",
+        }));
     }
     Ok(Json(serde_json::Value::Array(out)))
 }
@@ -249,7 +240,7 @@ pub async fn task_disable(
         .ok_or_else(|| PortalError::not_found("task"))?;
     if let Some(job_id) = task.scheduler_job_id.as_deref() {
         if let Ok(uuid) = job_id.parse::<uuid::Uuid>() {
-            let _ = state.agent.scheduler.remove_job(uuid).await;
+            state.agent.remove_scheduler_job(uuid).await;
         }
     }
     state
@@ -265,6 +256,10 @@ pub async fn task_disable(
 // ---------------------------------------------------------------------------
 
 /// GET /api/health — system vitals from /proc (Linux; best-effort elsewhere).
+///
+/// **Public** (no auth): the SPA polls it every 15 s and watches `bootId` to
+/// detect a process restart, then re-authenticates via its stateless cookie
+/// and reconciles chat history (ADR 0008B).
 pub async fn health(State(state): State<PortalState>) -> Json<serde_json::Value> {
     let (mut cpu, mut mem_used, mut mem_total, mut disk) = (0.0, 0.0, 0.0, 0.0);
     if let Ok(mem) = tokio::fs::read_to_string("/proc/meminfo").await {
@@ -313,13 +308,14 @@ pub async fn health(State(state): State<PortalState>) -> Json<serde_json::Value>
         "memTotalGb": (mem_total * 10.0).round() / 10.0,
         "diskUsedPercent": disk.round(),
         "uptimeHours": (state.started_at.elapsed().as_secs() as f64 / 3600.0).round(),
+        "bootId": state.boot_id,
     }))
 }
 
 /// GET /api/stats — counts for the dashboard stat tiles.
 pub async fn stats(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
-    let model = state.agent.current_model.read().await.clone();
-    let providers = state.agent.registry.provider_names();
+    let model = state.agent.current_model().await;
+    let providers = state.agent.provider_names();
     let conn = state.memory.connection();
     let conn = conn.lock().await;
     let message_count: i64 = conn
@@ -330,7 +326,7 @@ pub async fn stats(State(state): State<PortalState>) -> Result<Json<serde_json::
         .unwrap_or(0);
     drop(conn);
     let tasks = state.task_store.list_all_active().await.map_err(PortalError::from)?;
-    let skills = state.agent.skills.read().await.list().len();
+    let skills = state.agent.skill_entries().await.len();
     Ok(Json(json!({
         "model": model,
         "providers": providers,

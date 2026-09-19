@@ -42,8 +42,8 @@ fn mask_secret(secret: &str) -> String {
 pub async fn get_settings(
     State(state): State<PortalState>,
 ) -> Result<Json<Value>, PortalError> {
-    let cfg = &state.agent.config;
-    let model = state.agent.current_model.read().await.clone();
+    let cfg = state.agent.config();
+    let model = state.agent.current_model().await;
 
     let mut masked_providers = Vec::new();
     for p in &cfg.provider {
@@ -124,7 +124,7 @@ pub async fn patch_settings(
     if let Some(model) = patch.model.filter(|m| !m.trim().is_empty()) {
         state
             .agent
-            .set_model(model.trim())
+            .set_model(model.trim().to_string())
             .await
             .map_err(|e| PortalError::bad_request("model_rejected", e.to_string()))?;
         updated.push("model".to_string());
@@ -205,7 +205,7 @@ pub struct SoulWrite {
 
 /// Resolve a whitelisted soul file name to its path under the RustFox home.
 fn soul_path(state: &PortalState, name: &str) -> Option<std::path::PathBuf> {
-    let home = state.agent.config.resolved_home()?;
+    let home = state.agent.config().resolved_home()?;
     let file = match name {
         "SOUL.md" | "soul" => "SOUL.md",
         "USER.md" | "user" => "USER.md",
@@ -281,10 +281,7 @@ pub async fn put_soul(
     tokio::fs::write(&tmp, &body.content).await.map_err(PortalError::internal)?;
     tokio::fs::rename(&tmp, &path).await.map_err(PortalError::internal)?;
     // Nudge the agent so it re-reads identity before the next turn.
-    state
-        .agent
-        .soul_updated
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state.agent.set_soul_updated(true);
     tracing::info!("Portal: wrote soul file {}", path.display());
     Ok(Json(json!({ "ok": true, "name": body.name, "bytes": body.content.len() })))
 }

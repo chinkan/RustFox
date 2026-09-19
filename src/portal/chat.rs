@@ -128,7 +128,7 @@ pub async fn send(
         });
 
         let result = agent
-            .process_message(&incoming, Some(tool_tx), Some(token_tx), ToolUiMode::Verbose)
+            .process_message(incoming, Some(tool_tx), Some(token_tx), ToolUiMode::Verbose)
             .await;
 
         // process_message consumed/dropped the senders → relays see EOF now.
@@ -163,7 +163,7 @@ pub async fn send(
 /// cancellation registry (same mechanism as Telegram /stop). Cancellation
 /// takes effect at the next tool boundary inside the agent loop.
 pub async fn cancel(State(state): State<PortalState>) -> Json<serde_json::Value> {
-    let cancelled = state.agent.cancel_processing(&state.config.user_name).await;
+    let cancelled = state.agent.cancel_processing(state.config.user_name.clone()).await;
     Json(json!({ "cancelled": cancelled }))
 }
 

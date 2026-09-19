@@ -32,7 +32,10 @@ pub trait AgentOps: Send + Sync {
     fn set_model(&self, model_id: String) -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
     fn reload_skills_and_agents(&self) -> futures::future::BoxFuture<'_, (usize, usize)>;
     fn cancel_processing(&self, user_id: String) -> futures::future::BoxFuture<'_, bool>;
-    fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_>;
+    fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_, ()>;
+    fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
+    fn agent_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
+    fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool>;
     fn process_message(
         &self,
         incoming: crate::platform::IncomingMessage,
@@ -62,8 +65,33 @@ impl AgentOps for Agent {
     fn cancel_processing(&self, user_id: String) -> futures::future::BoxFuture<'_, bool> {
         Box::pin(async move { self.cancel_processing(&user_id).await })
     }
-    fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_> {
+    fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_, ()> {
         Box::pin(async move { self.clear_cancel_token(&user_id).await })
+    }
+    fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>> {
+        Box::pin(async move {
+            self.skills
+                .read()
+                .await
+                .list()
+                .into_iter()
+                .map(SkillInfo::from_skill)
+                .collect()
+        })
+    }
+    fn agent_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>> {
+        Box::pin(async move {
+            self.agents
+                .read()
+                .await
+                .list()
+                .into_iter()
+                .map(SkillInfo::from_skill)
+                .collect()
+        })
+    }
+    fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move { self.scheduler.remove_job(job_id).await.is_ok() })
     }
     fn process_message(
         &self,
@@ -85,6 +113,25 @@ impl AgentOps for Agent {
     }
 }
 
+/// Lightweight view of a loaded skill / agent definition for the API layer
+/// (keeps `SkillRegistry` out of handler code so tests can fake it).
+#[derive(Clone, Debug)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+}
+
+impl SkillInfo {
+    fn from_skill(s: &crate::skills::Skill) -> Self {
+        Self {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            model: s.model.clone(),
+        }
+    }
+}
+
 /// Shared state for all portal handlers.
 #[derive(Clone)]
 pub struct PortalState {
@@ -94,8 +141,18 @@ pub struct PortalState {
     pub config: Arc<PortalConfig>,
     /// Absolute path to the live `config.toml` (same file the bot loaded).
     pub config_path: Arc<std::path::PathBuf>,
-    /// In-memory sessions (ADR 0006): session token → username.
-    pub sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// RustFox home dir (resolved by `Config::resolve()`); where
+    /// `portal_secret.key` lives. `None` only in odd embedder setups —
+    /// cookie auth then fails closed with an internal error.
+    pub home_dir: Option<std::path::PathBuf>,
+    /// Cached HMAC signing secret (loaded lazily from portal_secret.key).
+    pub secret: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Tokens minted at startup when none is configured (process lifetime).
+    pub dev_tokens: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Random id for this process boot — the SPA polls `/api/health`,
+    /// compares `bootId` and re-authenticates/reconciles after a restart
+    /// (ADR 0008B).
+    pub boot_id: String,
     /// Serializes chat generations: one active run per web identity (ADR 0005).
     pub chat_busy: Arc<std::sync::atomic::AtomicBool>,
     pub started_at: std::time::Instant,
@@ -108,6 +165,7 @@ impl PortalState {
         task_store: ScheduledTaskStore,
         config: PortalConfig,
         config_path: std::path::PathBuf,
+        home_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             agent,
@@ -115,7 +173,10 @@ impl PortalState {
             task_store,
             config: Arc::new(config),
             config_path: Arc::new(config_path),
-            sessions: Arc::new(tokio::sync::Mutex::new(Default::default())),
+            home_dir,
+            secret: Arc::new(std::sync::OnceLock::new()),
+            dev_tokens: Arc::new(std::sync::Mutex::new(Vec::new())),
+            boot_id: uuid::Uuid::new_v4().simple().to_string(),
             chat_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             started_at: std::time::Instant::now(),
         }

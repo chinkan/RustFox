@@ -445,12 +445,14 @@ async fn main() -> Result<()> {
     // Opt-in embedded web portal (ADR 0004): spawned only when [portal] enabled.
     let portal_shutdown = tokio_util::sync::CancellationToken::new();
     if config.portal.enabled {
+        let portal_agent: std::sync::Arc<dyn rustfox::portal::AgentOps> = agent.clone();
         let portal_state = rustfox::portal::PortalState::new(
-            Arc::clone(&agent),
+            portal_agent,
             memory.clone(),
             task_store.clone(),
             config.portal.clone(),
             config_path.clone(),
+            config.resolved_home().cloned(),
         );
         rustfox::portal::auth::ensure_startup_token(&portal_state);
         if let Err(e) = rustfox::portal::serve(portal_state, portal_shutdown.clone()).await {

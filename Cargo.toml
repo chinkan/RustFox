@@ -81,6 +81,7 @@ infer = "0.19"
 
 # Base64 for vision API content parts and OAuth PKCE helpers
 base64 = "0.22"
+hmac = "0.12"
 
 # OAuth 2.0 / PKCE helpers (used by setup wizard)
 rand = "0.8"
