@@ -141,11 +141,7 @@ All jobs use `dtolnay/rust-toolchain@stable` and `Swatinem/rust-cache@v2` for ca
 
 ## Testing
 
-No automated tests exist yet. When adding tests:
-
-- Place unit tests in `#[cfg(test)] mod tests` blocks within each source file
-- Integration tests go in a top-level `tests/` directory
-- The sandbox path validation logic in `tools.rs` and message splitting in `bot.rs` are good candidates for unit tests
+Unit tests live in `#[cfg(test)] mod tests` within source files; integration tests in top-level `tests/`. Run `cargo test` (and `cargo clippy -- -D warnings`) before opening a PR. Memory knowledge/history/facts and supervisor backends already have unit coverage — extend those patterns when adding behavior.
 
 ## Common Tasks
 

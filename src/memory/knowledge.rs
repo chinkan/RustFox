@@ -15,6 +15,54 @@ pub struct KnowledgeEntry {
     pub source: Option<String>,
 }
 
+/// One archived knowledge change (trigger-written).
+#[derive(Debug, Clone)]
+pub struct KnowledgeVersion {
+    pub id: String,
+    pub category: String,
+    pub key: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub source: Option<String>,
+    pub change_type: String,
+    pub changed_at: String,
+}
+
+/// Time-bounded triple.
+#[derive(Debug, Clone)]
+pub struct Fact {
+    pub id: String,
+    pub entity: String,
+    pub relation: String,
+    pub value: String,
+    pub valid_from: String,
+    pub valid_to: Option<String>,
+    pub source: Option<String>,
+    pub confidence: f64,
+}
+
+impl std::fmt::Display for Fact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let until = self.valid_to.as_deref().unwrap_or("…");
+        write!(
+            f,
+            "{} —{}→ {} [{}..{}] conf={}",
+            self.entity, self.relation, self.value, self.valid_from, until, self.confidence
+        )
+    }
+}
+
+/// Input for [`MemoryStore::add_fact`].
+#[derive(Debug, Clone)]
+pub struct FactToAdd {
+    pub entity: String,
+    pub relation: String,
+    pub value: String,
+    pub valid_from: String,
+    pub source: Option<String>,
+    pub confidence: Option<f64>,
+}
+
 impl MemoryStore {
     /// Store or update a knowledge entry with vector embedding
     pub async fn remember(
@@ -206,6 +254,284 @@ impl MemoryStore {
         )?;
         Ok(rows > 0)
     }
+
+    /// Full version timeline for a (category, key) pair, oldest first.
+    pub async fn knowledge_timeline(
+        &self,
+        category: &str,
+        key: &str,
+    ) -> Result<Vec<KnowledgeVersion>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, category, key, old_value, new_value, source, change_type, changed_at
+             FROM knowledge_history
+             WHERE category = ?1 AND key = ?2
+             ORDER BY changed_at ASC, rowid ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![category, key], parse_knowledge_version)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load knowledge timeline")?;
+        Ok(rows)
+    }
+
+    /// Reconstruct knowledge value as of a SQLite datetime string.
+    pub async fn knowledge_as_of(
+        &self,
+        category: &str,
+        key: &str,
+        as_of: &str,
+    ) -> Result<Option<String>> {
+        let as_of = normalize_as_of(as_of);
+        let conn = self.conn.lock().await;
+
+        let current: Option<(String, String)> = conn
+            .query_row(
+                "SELECT value, created_at FROM knowledge WHERE category = ?1 AND key = ?2",
+                rusqlite::params![category, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, category, key, old_value, new_value, source, change_type, changed_at
+             FROM knowledge_history
+             WHERE category = ?1 AND key = ?2
+             ORDER BY changed_at DESC, rowid DESC",
+        )?;
+        let history: Vec<KnowledgeVersion> = stmt
+            .query_map(rusqlite::params![category, key], parse_knowledge_version)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load knowledge history for as_of")?;
+
+        // Reverse-apply changes newer than as_of onto the live value.
+        let mut val = current.as_ref().map(|(v, _)| v.clone());
+        for h in &history {
+            if normalize_from(&h.changed_at).as_str() <= as_of.as_str() {
+                break;
+            }
+            val = h.old_value.clone();
+        }
+
+        // Before first create and no residual history → absent.
+        if let Some((_, ref created_at)) = current {
+            let created = normalize_from(created_at);
+            if as_of.as_str() < created.as_str() && history.is_empty() {
+                return Ok(None);
+            }
+            if as_of.as_str() < created.as_str() {
+                let earliest = history.iter().map(|h| normalize_from(&h.changed_at)).min();
+                if earliest
+                    .as_ref()
+                    .is_none_or(|e| as_of.as_str() < e.as_str())
+                {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(val)
+    }
+
+    /// Insert fact; skip if identical active exists. Auto-closes prior active for pair.
+    /// Backdated inserts (valid_from before active start) land as closed history rows.
+    pub async fn add_fact(&self, fact: FactToAdd) -> Result<String> {
+        let conn = self.conn.lock().await;
+        let confidence = fact.confidence.unwrap_or(1.0);
+        let valid_from = normalize_from(&fact.valid_from);
+
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM facts
+                 WHERE entity = ?1 AND relation = ?2 AND value = ?3 AND valid_to IS NULL",
+                rusqlite::params![&fact.entity, &fact.relation, &fact.value],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        let active_from: Option<String> = conn
+            .query_row(
+                "SELECT valid_from FROM facts
+                 WHERE entity = ?1 AND relation = ?2 AND valid_to IS NULL",
+                rusqlite::params![&fact.entity, &fact.relation],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let id = Uuid::new_v4().to_string();
+
+        if let Some(ref active_vf) = active_from {
+            let active_vf_n = normalize_from(active_vf);
+            if valid_from.as_str() < active_vf_n.as_str() {
+                // Historical backfill: closed against active start; leave active alone.
+                conn.execute(
+                    "INSERT INTO facts
+                        (id, entity, relation, value, valid_from, valid_to, source, confidence)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        &id,
+                        &fact.entity,
+                        &fact.relation,
+                        &fact.value,
+                        &valid_from,
+                        &active_vf_n,
+                        &fact.source,
+                        confidence
+                    ],
+                )
+                .context("Failed to insert historical fact")?;
+                return Ok(id);
+            }
+
+            conn.execute(
+                "UPDATE facts SET valid_to = ?1
+                 WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL",
+                rusqlite::params![&valid_from, &fact.entity, &fact.relation],
+            )
+            .context("Failed to close prior active fact")?;
+        }
+
+        conn.execute(
+            "INSERT INTO facts (id, entity, relation, value, valid_from, source, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                &id,
+                &fact.entity,
+                &fact.relation,
+                &fact.value,
+                &valid_from,
+                &fact.source,
+                confidence
+            ],
+        )
+        .context("Failed to insert fact")?;
+        Ok(id)
+    }
+
+    /// End currently-active fact for (entity, relation).
+    pub async fn close_fact(&self, entity: &str, relation: &str, valid_to: &str) -> Result<bool> {
+        let valid_to = normalize_from(valid_to);
+        let conn = self.conn.lock().await;
+        let rows = conn
+            .execute(
+                "UPDATE facts SET valid_to = ?1
+                 WHERE entity = ?2 AND relation = ?3 AND valid_to IS NULL
+                   AND valid_from <= ?1",
+                rusqlite::params![&valid_to, entity, relation],
+            )
+            .context("Failed to close fact")?;
+        Ok(rows > 0)
+    }
+
+    /// Facts for entity; `as_of = None` → currently active only.
+    pub async fn query_facts(&self, entity: &str, as_of: Option<&str>) -> Result<Vec<Fact>> {
+        let conn = self.conn.lock().await;
+        if let Some(as_of) = as_of {
+            let as_of = normalize_as_of(as_of);
+            let mut stmt = conn.prepare(
+                "SELECT id, entity, relation, value, valid_from, valid_to, source, confidence
+                 FROM facts
+                 WHERE entity = ?1
+                   AND valid_from <= ?2
+                   AND (valid_to IS NULL OR valid_to > ?2)
+                 ORDER BY relation, valid_from",
+            )?;
+            let facts = stmt
+                .query_map(rusqlite::params![entity, as_of], parse_fact)?
+                .collect::<Result<Vec<_>, _>>()
+                .context("Failed to query facts as_of")?;
+            Ok(facts)
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, entity, relation, value, valid_from, valid_to, source, confidence
+                 FROM facts
+                 WHERE entity = ?1 AND valid_to IS NULL
+                 ORDER BY relation, valid_from",
+            )?;
+            let facts = stmt
+                .query_map(rusqlite::params![entity], parse_fact)?
+                .collect::<Result<Vec<_>, _>>()
+                .context("Failed to query active facts")?;
+            Ok(facts)
+        }
+    }
+
+    /// Full timeline for one relation, oldest first.
+    pub async fn fact_timeline(&self, entity: &str, relation: &str) -> Result<Vec<Fact>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, entity, relation, value, valid_from, valid_to, source, confidence
+             FROM facts
+             WHERE entity = ?1 AND relation = ?2
+             ORDER BY valid_from ASC, created_at ASC",
+        )?;
+        let facts = stmt
+            .query_map(rusqlite::params![entity, relation], parse_fact)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to load fact timeline")?;
+        Ok(facts)
+    }
+}
+
+/// Canonicalize to UTC `YYYY-MM-DD HH:MM:SS` for compare with SQLite `datetime('now')` (UTC).
+fn normalize_from(ts: &str) -> String {
+    let ts = ts.trim();
+    if is_date_only(ts) {
+        return format!("{ts} 00:00:00");
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+    }
+    // Handle Z suffix (e.g. "2025-06-01T12:00Z") — strip Z, optionally append :00 seconds.
+    if ts.ends_with('Z') || ts.ends_with('z') {
+        let without_z = ts.trim_end_matches(['Z', 'z']);
+        let with_secs = format!("{}:00", without_z);
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&with_secs, "%Y-%m-%dT%H:%M:%S") {
+            return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H:%M:%S") {
+            return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
+    // ISO with T, no offset → treat as already-UTC wall clock.
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, fmt) {
+            return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
+    // Last resort: still force seconds so lexicographic order matches datetime('now').
+    let spaced = ts.replace('T', " ");
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&spaced, "%Y-%m-%d %H:%M") {
+        return naive.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    spaced
+}
+
+/// Date-only → end of UTC day so "as of that day" includes the whole day.
+fn normalize_as_of(ts: &str) -> String {
+    let ts = ts.trim();
+    if is_date_only(ts) {
+        return format!("{ts} 23:59:59");
+    }
+    normalize_from(ts)
+}
+
+fn is_date_only(ts: &str) -> bool {
+    ts.len() == 10
+        && ts.as_bytes().get(4) == Some(&b'-')
+        && ts.as_bytes().get(7) == Some(&b'-')
+        && ts.bytes().all(|b| b.is_ascii_digit() || b == b'-')
 }
 
 fn parse_knowledge_row(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> {
@@ -216,4 +542,252 @@ fn parse_knowledge_row(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> 
         value: row.get(3)?,
         source: row.get(4)?,
     })
+}
+
+fn parse_knowledge_version(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeVersion> {
+    Ok(KnowledgeVersion {
+        id: row.get(0)?,
+        category: row.get(1)?,
+        key: row.get(2)?,
+        old_value: row.get(3)?,
+        new_value: row.get(4)?,
+        source: row.get(5)?,
+        change_type: row.get(6)?,
+        changed_at: row.get(7)?,
+    })
+}
+
+fn parse_fact(row: &rusqlite::Row) -> rusqlite::Result<Fact> {
+    Ok(Fact {
+        id: row.get(0)?,
+        entity: row.get(1)?,
+        relation: row.get(2)?,
+        value: row.get(3)?,
+        valid_from: row.get(4)?,
+        valid_to: row.get(5)?,
+        source: row.get(6)?,
+        confidence: row.get(7)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MemoryStore;
+
+    #[tokio::test]
+    async fn test_knowledge_history_archives_on_update() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember("pref", "brand", "Nike", None).await.unwrap();
+        store
+            .remember("pref", "brand", "Adidas", None)
+            .await
+            .unwrap();
+        let tl = store.knowledge_timeline("pref", "brand").await.unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].old_value.as_deref(), Some("Nike"));
+        assert_eq!(tl[0].new_value.as_deref(), Some("Adidas"));
+        assert_eq!(tl[0].change_type, "update");
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_history_archives_on_delete() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember("pref", "x", "1", None).await.unwrap();
+        assert!(store.forget("pref", "x").await.unwrap());
+        let tl = store.knowledge_timeline("pref", "x").await.unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].change_type, "delete");
+        assert_eq!(tl[0].old_value.as_deref(), Some("1"));
+        assert!(tl[0].new_value.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_as_of_point_in_time() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember("pref", "brand", "Nike", None).await.unwrap();
+        // before any write
+        assert!(store
+            .knowledge_as_of("pref", "brand", "2000-01-01")
+            .await
+            .unwrap()
+            .is_none());
+        // after write (current)
+        assert_eq!(
+            store
+                .knowledge_as_of("pref", "brand", "9999-01-01")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Nike")
+        );
+        store
+            .remember("pref", "brand", "Adidas", None)
+            .await
+            .unwrap();
+        let tl = store.knowledge_timeline("pref", "brand").await.unwrap();
+        let changed = &tl[0].changed_at;
+        // just before the change → Nike (changed_at is second-resolution; use reverse path)
+        // After full reverse of the Adidas update, old is Nike.
+        // as_of equal to changed_at keeps the change (changed_at <= as_of means applied).
+        assert_eq!(
+            store
+                .knowledge_as_of("pref", "brand", changed)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Adidas")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_and_query_fact() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let id = store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Nike".into(),
+                valid_from: "2024-09-01".into(),
+                source: None,
+                confidence: Some(0.9),
+            })
+            .await
+            .unwrap();
+        assert!(!id.is_empty());
+        let facts = store.query_facts("Kan", None).await.unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].value, "Nike");
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_add_and_auto_close() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let a = store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Nike".into(),
+                valid_from: "2024-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        let a2 = store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Nike".into(),
+                valid_from: "2024-06-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(a, a2);
+        let _ = store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Adidas".into(),
+                valid_from: "2026-03-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        let active = store.query_facts("Kan", None).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].value, "Adidas");
+        let past = store.query_facts("Kan", Some("2025-06-01")).await.unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].value, "Nike");
+        let tl = store.fact_timeline("Kan", "prefers").await.unwrap();
+        assert_eq!(tl.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_close_fact() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "lives_in".into(),
+                value: "HK".into(),
+                valid_from: "2020-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        assert!(store
+            .close_fact("Kan", "lives_in", "2026-01-01")
+            .await
+            .unwrap());
+        assert!(store.query_facts("Kan", None).await.unwrap().is_empty());
+        let past = store.query_facts("Kan", Some("2025-01-01")).await.unwrap();
+        assert_eq!(past[0].value, "HK");
+    }
+
+    #[tokio::test]
+    async fn test_add_fact_backfill_no_invert() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Adidas".into(),
+                valid_from: "2026-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        store
+            .add_fact(FactToAdd {
+                entity: "Kan".into(),
+                relation: "prefers".into(),
+                value: "Nike".into(),
+                valid_from: "2024-01-01".into(),
+                source: None,
+                confidence: None,
+            })
+            .await
+            .unwrap();
+        let active = store.query_facts("Kan", None).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].value, "Adidas");
+        let past = store.query_facts("Kan", Some("2025-06-01")).await.unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].value, "Nike");
+        assert!(past[0].valid_to.is_some());
+    }
+
+    #[test]
+    fn test_date_only_normalize() {
+        assert_eq!(normalize_as_of("2025-06-01"), "2025-06-01 23:59:59");
+        assert_eq!(normalize_from("2025-06-01"), "2025-06-01 00:00:00");
+        assert_eq!(normalize_from("2025-06-01 12:00:00"), "2025-06-01 12:00:00");
+        assert_eq!(
+            normalize_from("2025-06-01T12:00:00Z"),
+            "2025-06-01 12:00:00"
+        );
+        // Offset converted to UTC (+08 → 04:00Z).
+        assert_eq!(
+            normalize_from("2025-06-01T12:00:00+08:00"),
+            "2025-06-01 04:00:00"
+        );
+        // Seconds-less no-Z must still pad to :00 for lexicographic order.
+        assert_eq!(normalize_from("2025-06-01T12:00"), "2025-06-01 12:00:00");
+    }
+
+    #[test]
+    fn test_normalize_from_z_suffix() {
+        assert_eq!(normalize_from("2025-06-01T12:00Z"), "2025-06-01 12:00:00");
+        assert_eq!(
+            normalize_from("2025-06-01T12:00:00Z"),
+            "2025-06-01 12:00:00"
+        );
+    }
 }

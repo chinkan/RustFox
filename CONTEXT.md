@@ -30,4 +30,24 @@ Entry in Tool Notifier showing: friendly tool name, optional args preview, statu
 Human-readable label for built-in tools (e.g., "💻 Running a command" for `execute_command`).
 
 ### Args Preview
-Truncated (60 chars), redacted JSON args shown in Tool Notifier. Only in Verbose mode.
+Truncated (60 chars), redacted JSON args shown in Verbose mode.
+
+---
+
+## Memory
+
+### Knowledge
+Current key-value snapshot the agent stores under `(category, key) → value`. One live value per pair.
+_Avoid_: fact (when meaning KV), memory entry, note
+
+### Knowledge History
+Append-only archive of prior Knowledge values, written automatically on overwrite or delete.
+_Avoid_: audit log, version log (generic)
+
+### Fact
+Time-bounded triple `(entity, relation, value)` with `valid_from` / `valid_to`. At most one active value per `(entity, relation)` (`valid_to` null = still active).
+_Avoid_: subject/object_value, triple, statement, knowledge (KV sense)
+
+### valid_from / valid_to
+Inclusive start and exclusive-or-end bound of a Fact's validity window. `valid_to` null means still active. Stored as SQLite `datetime` TEXT.
+_Avoid_: valid_until, effective_from, learned_at (provenance, not validity)

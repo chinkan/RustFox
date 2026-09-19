@@ -242,6 +242,7 @@ async fn main() -> Result<()> {
         config.sandbox.allowed_directory.clone(),
         cancel_registry.clone(),
         sender.clone(),
+        config.sandbox.execute_timeout_secs,
     )));
 
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
@@ -424,6 +425,7 @@ async fn main() -> Result<()> {
     sup_registry.register(std::sync::Arc::new(
         rustfox::supervisor::backend::shell::ShellBackend::new(
             config.sandbox.allowed_directory.clone(),
+            config.sandbox.execute_timeout_secs,
         ),
     ));
 

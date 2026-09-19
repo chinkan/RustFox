@@ -309,8 +309,76 @@ impl MemoryStore {
                 FOREIGN KEY (task_id) REFERENCES sup_tasks(id)
             );
             CREATE INDEX IF NOT EXISTS idx_sup_artifacts_task ON sup_artifacts(task_id, kind);
+
+            -- Knowledge version history (auto-filled by triggers)
+            CREATE TABLE IF NOT EXISTS knowledge_history (
+                id          TEXT PRIMARY KEY,
+                category    TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                old_value   TEXT,
+                new_value   TEXT,
+                source      TEXT,
+                change_type TEXT NOT NULL CHECK(change_type IN ('update','delete')),
+                changed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_history_cat_key
+                ON knowledge_history(category, key, changed_at);
+
+            CREATE TRIGGER IF NOT EXISTS knowledge_history_update
+            AFTER UPDATE ON knowledge
+            WHEN OLD.value IS NOT NULL AND OLD.value != NEW.value
+            BEGIN
+                INSERT INTO knowledge_history
+                    (id, category, key, old_value, new_value, source, change_type)
+                VALUES (
+                    printf('hist_%s', lower(hex(randomblob(16)))),
+                    OLD.category, OLD.key, OLD.value, NEW.value, NEW.source, 'update'
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS knowledge_history_delete
+            AFTER DELETE ON knowledge
+            BEGIN
+                INSERT INTO knowledge_history
+                    (id, category, key, old_value, new_value, source, change_type)
+                VALUES (
+                    printf('hist_%s', lower(hex(randomblob(16)))),
+                    OLD.category, OLD.key, OLD.value, NULL, OLD.source, 'delete'
+                );
+            END;
+
+            -- Temporal facts (one active value per entity+relation)
+            CREATE TABLE IF NOT EXISTS facts (
+                id          TEXT PRIMARY KEY,
+                entity      TEXT NOT NULL,
+                relation    TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                valid_from  TEXT NOT NULL,
+                valid_to    TEXT,
+                source      TEXT,
+                confidence  REAL NOT NULL DEFAULT 1.0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_facts_entity_relation
+                ON facts(entity, relation, valid_from);
             ",
         )?;
+
+        // Close duplicate active facts (keep max rowid per pair) before UNIQUE index.
+        // rowid tiebreak handles same-second created_at collisions.
+        conn.execute_batch(
+            "
+            UPDATE facts SET valid_to = valid_from
+            WHERE valid_to IS NULL
+              AND rowid NOT IN (
+                  SELECT MAX(rowid) FROM facts WHERE valid_to IS NULL
+                  GROUP BY entity, relation
+              );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_one_active
+                ON facts(entity, relation) WHERE valid_to IS NULL;
+            ",
+        )
+        .context("facts one-active index migration")?;
 
         // Migration: add is_summarized column (safe no-op if column already exists)
         conn.execute_batch("ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;")

@@ -150,7 +150,10 @@ pub async fn run_cli_process(
         let _ = stdin.write_all(prompt.as_bytes()).await;
         let _ = stdin.shutdown().await;
     }
-    let output =
+    // 0 = no wall-clock limit (same semantics as optional_timeout / sandbox.execute_timeout_secs).
+    let output = if timeout_secs == 0 {
+        child.wait_with_output().await?
+    } else {
         match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
             .await
         {
@@ -166,7 +169,8 @@ pub async fn run_cli_process(
                     next_step: None,
                 });
             }
-        };
+        }
+    };
     let exit = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
