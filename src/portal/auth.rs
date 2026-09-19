@@ -239,7 +239,11 @@ pub fn issue_cookie(
     let payload = format!("{username}|{now}|{}|{gen}", now + SESSION_TTL_SECS);
     let mut mac = HmacSha256::new_from_slice(secret).map_err(PortalError::internal)?;
     mac.update(payload.as_bytes());
-    Ok(format!("{}.{}", b64(payload.as_bytes()), b64(&mac.finalize().into_bytes())))
+    Ok(format!(
+        "{}.{}",
+        b64(payload.as_bytes()),
+        b64(&mac.finalize().into_bytes())
+    ))
 }
 
 /// Parse a signed cookie into `(username, expires_at, gen)` after checking
@@ -284,9 +288,7 @@ pub async fn login(
     let cookie = issue_cookie(&secret, &username, chrono::Utc::now().timestamp(), gen)?;
 
     let mut res = Json(json!({ "username": username, "role": "admin" })).into_response();
-    if let Ok(v) =
-        format!("{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict").parse()
-    {
+    if let Ok(v) = format!("{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict").parse() {
         res.headers_mut().insert(header::SET_COOKIE, v);
     }
     Ok(res)
@@ -392,7 +394,10 @@ mod tests {
     #[test]
     fn sha256_hex_known_vector() {
         // echo -n "abc" | sha256sum
-        assert_eq!(sha256_hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -452,7 +457,11 @@ mod tests {
         // Payload tampering rejects.
         let (p, _t) = cookie.split_once('.').unwrap();
         let evil = format!("{}.", b64(b"admin|0|99999999999|0"));
-        assert!(parse_cookie(&secret, &format!("{evil}{}", cookie.split('.').nth(1).unwrap())).is_none());
+        assert!(parse_cookie(
+            &secret,
+            &format!("{evil}{}", cookie.split('.').nth(1).unwrap())
+        )
+        .is_none());
         assert!(!p.is_empty());
         // Garbage rejects.
         assert!(parse_cookie(&secret, "nonsense").is_none());

@@ -22,7 +22,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// GET /api/agents — the main agent plus loaded subagent definitions.
-pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn agents(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     let model = state.agent.current_model().await;
     let web_active = state.agent.is_processing(&state.config.user_name).await;
     let mut telegram_active = false;
@@ -34,7 +36,11 @@ pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json:
     }
 
     let mut out = Vec::new();
-    let status = if web_active || telegram_active { "running" } else { "idle" };
+    let status = if web_active || telegram_active {
+        "running"
+    } else {
+        "idle"
+    };
     out.push(json!({
         "id": "main",
         "name": "rustfox",
@@ -58,7 +64,9 @@ pub async fn agents(State(state): State<PortalState>) -> Result<Json<serde_json:
 }
 
 /// GET /api/agents/skills — loaded skills + agent definitions.
-pub async fn skills(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn skills(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     let mut out = Vec::new();
     for s in state.agent.skill_entries().await {
         out.push(json!({
@@ -83,7 +91,9 @@ pub async fn reload_skills(
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let (skills, agents) = state.agent.reload_skills_and_agents().await;
     tracing::info!("Portal: reloaded {skills} skills, {agents} agents");
-    Ok(Json(json!({ "skillsLoaded": skills, "agentsLoaded": agents })))
+    Ok(Json(
+        json!({ "skillsLoaded": skills, "agentsLoaded": agents }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +174,16 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
 
 /// GET /api/tasks — every scheduled task (all platforms; Telegram-created
 /// tasks remain listed and toggle-able).
-pub async fn tasks(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn tasks(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     // list_all_active only returns active; fetch all via the store's SQL when
     // possible, else merge active + recent runs. MVP: active list + status map.
-    let active = state.task_store.list_all_active().await.map_err(PortalError::from)?;
+    let active = state
+        .task_store
+        .list_all_active()
+        .await
+        .map_err(PortalError::from)?;
     // MVP: enumerate the active set. Paused/one-shot-completed tasks need a
     // `list_all_including_disabled` store method (follow-up).
     let out: Vec<serde_json::Value> = active.iter().map(task_json).collect();
@@ -224,7 +240,9 @@ pub async fn task_enable(
     // handle (fire closure captures it), which restore_scheduled_tasks owns.
     // MVP behaviour: status flip takes effect on next restart; the UI marks it.
     let _ = &task;
-    Ok(Json(json!({ "ok": true, "id": p.id, "enabled": true, "restartToSchedule": true })))
+    Ok(Json(
+        json!({ "ok": true, "id": p.id, "enabled": true, "restartToSchedule": true }),
+    ))
 }
 
 /// POST /api/tasks/{id}/disable — pause scheduling + mark inactive.
@@ -293,11 +311,19 @@ pub async fn health(State(state): State<PortalState>) -> Json<serde_json::Value>
             }
         }
     }
-    if let Ok(o) = tokio::process::Command::new("df").arg("-k").arg("/").output().await {
+    if let Ok(o) = tokio::process::Command::new("df")
+        .arg("-k")
+        .arg("/")
+        .output()
+        .await
+    {
         let text = String::from_utf8_lossy(&o.stdout);
         if let Some(line) = text.lines().nth(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(pct) = parts.get(4).and_then(|p| p.trim_end_matches('%').parse::<f64>().ok()) {
+            if let Some(pct) = parts
+                .get(4)
+                .and_then(|p| p.trim_end_matches('%').parse::<f64>().ok())
+            {
                 disk = pct;
             }
         }
@@ -313,7 +339,9 @@ pub async fn health(State(state): State<PortalState>) -> Json<serde_json::Value>
 }
 
 /// GET /api/stats — counts for the dashboard stat tiles.
-pub async fn stats(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn stats(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     let model = state.agent.current_model().await;
     let providers = state.agent.provider_names();
     let conn = state.memory.connection();
@@ -325,7 +353,11 @@ pub async fn stats(State(state): State<PortalState>) -> Result<Json<serde_json::
         .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
         .unwrap_or(0);
     drop(conn);
-    let tasks = state.task_store.list_all_active().await.map_err(PortalError::from)?;
+    let tasks = state
+        .task_store
+        .list_all_active()
+        .await
+        .map_err(PortalError::from)?;
     let skills = state.agent.skill_entries().await.len();
     Ok(Json(json!({
         "model": model,

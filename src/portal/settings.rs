@@ -34,14 +34,19 @@ fn mask_secret(secret: &str) -> String {
         return "••••".to_string();
     }
     let head: String = chars.iter().take(5).collect();
-    let tail: String = chars.iter().rev().take(4).collect::<String>().chars().rev().collect();
+    let tail: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!("{head}…{tail}")
 }
 
 /// GET /api/settings — whitelisted, typed projection with masked secrets.
-pub async fn get_settings(
-    State(state): State<PortalState>,
-) -> Result<Json<Value>, PortalError> {
+pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value>, PortalError> {
     let cfg = state.agent.config();
     let model = state.agent.current_model().await;
 
@@ -74,23 +79,28 @@ pub async fn get_settings(
 }
 
 /// Back up `config.toml` → `config.toml.bak`, then atomically write new content.
-async fn write_config_with_backup(
-    path: &Path,
-    new_content: &str,
-) -> Result<(), PortalError> {
+async fn write_config_with_backup(path: &Path, new_content: &str) -> Result<(), PortalError> {
     if path.exists() {
         let bak = path.with_extension("toml.bak");
-        tokio::fs::copy(path, &bak).await.map_err(PortalError::internal)?;
+        tokio::fs::copy(path, &bak)
+            .await
+            .map_err(PortalError::internal)?;
     }
     let tmp = path.with_extension("toml.tmp");
-    tokio::fs::write(&tmp, new_content).await.map_err(PortalError::internal)?;
-    tokio::fs::rename(&tmp, path).await.map_err(PortalError::internal)?;
+    tokio::fs::write(&tmp, new_content)
+        .await
+        .map_err(PortalError::internal)?;
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(PortalError::internal)?;
     Ok(())
 }
 
 /// Read → parse TOML document as a generic table (lossless-ish for our use).
 async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
-    let content = tokio::fs::read_to_string(path).await.map_err(PortalError::internal)?;
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(PortalError::internal)?;
     content
         .parse::<toml::Value>()
         .map_err(|e| PortalError::internal(format!("Config parse error: {e}")))
@@ -99,10 +109,7 @@ async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
 fn doc_table<'a>(doc: &'a mut toml::Value, section: &str) -> &'a mut toml::value::Table {
     if doc.get(section).is_none() {
         if let Some(t) = doc.as_table_mut() {
-            t.insert(
-                section.to_string(),
-                toml::Value::Table(Default::default()),
-            );
+            t.insert(section.to_string(), toml::Value::Table(Default::default()));
         }
     }
     doc.get_mut(section)
@@ -138,16 +145,15 @@ pub async fn patch_settings(
             }
             // model already persisted; keep the file edits minimal on failure
             tracing::warn!("Portal settings: reload failed after model change: {:?}", e);
-            return Ok(Json(json!({ "updated": updated, "restartRequired": restart_required })));
+            return Ok(Json(
+                json!({ "updated": updated, "restartRequired": restart_required }),
+            ));
         }
     };
     let mut dirty = false;
 
     if let Some(loc) = patch.general_location {
-        doc_table(&mut doc, "general").insert(
-            "location".to_string(),
-            toml::Value::String(loc),
-        );
+        doc_table(&mut doc, "general").insert("location".to_string(), toml::Value::String(loc));
         dirty = true;
         updated.push("generalLocation".to_string());
         restart_required.push("generalLocation".to_string());
@@ -272,16 +278,24 @@ pub async fn put_soul(
             "{}.bak",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("soul")
         ));
-        tokio::fs::copy(&path, &bak).await.map_err(PortalError::internal)?;
+        tokio::fs::copy(&path, &bak)
+            .await
+            .map_err(PortalError::internal)?;
     }
     let tmp = path.with_file_name(format!(
         "{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("soul")
     ));
-    tokio::fs::write(&tmp, &body.content).await.map_err(PortalError::internal)?;
-    tokio::fs::rename(&tmp, &path).await.map_err(PortalError::internal)?;
+    tokio::fs::write(&tmp, &body.content)
+        .await
+        .map_err(PortalError::internal)?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(PortalError::internal)?;
     // Nudge the agent so it re-reads identity before the next turn.
     state.agent.set_soul_updated(true);
     tracing::info!("Portal: wrote soul file {}", path.display());
-    Ok(Json(json!({ "ok": true, "name": body.name, "bytes": body.content.len() })))
+    Ok(Json(
+        json!({ "ok": true, "name": body.name, "bytes": body.content.len() }),
+    ))
 }

@@ -100,10 +100,14 @@ impl AgentOps for Agent {
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         ui_mode: ToolUiMode,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<String>> {
-        Box::pin(async move { self.process_message(&incoming, tool_event_tx, stream_token_tx, ui_mode).await })
+        Box::pin(async move {
+            self.process_message(&incoming, tool_event_tx, stream_token_tx, ui_mode)
+                .await
+        })
     }
     fn set_soul_updated(&self, value: bool) {
-        self.soul_updated.store(value, std::sync::atomic::Ordering::Relaxed);
+        self.soul_updated
+            .store(value, std::sync::atomic::Ordering::Relaxed);
     }
     fn provider_names(&self) -> Vec<String> {
         self.registry.provider_names()
@@ -214,8 +218,7 @@ pub fn router(state: PortalState) -> Router {
         .route("/settings", get(settings::get_settings))
         .route("/settings", axum::routing::patch(settings::patch_settings))
         .route("/soul", get(settings::get_soul))
-        .route("/soul", axum::routing::put(settings::put_soul))
-        ;
+        .route("/soul", axum::routing::put(settings::put_soul));
     let protected = protected.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         auth::require_auth,
@@ -231,11 +234,9 @@ pub fn router(state: PortalState) -> Router {
 /// a spawned task until `shutdown` fires.
 pub async fn serve(state: PortalState, shutdown: CancellationToken) -> anyhow::Result<()> {
     let addr = format!("{}:{}", state.config.bind, state.config.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("Portal failed to bind {addr}: {e} (privileged port? try port > 1024)")
-        })?;
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        anyhow::anyhow!("Portal failed to bind {addr}: {e} (privileged port? try port > 1024)")
+    })?;
     let local = listener.local_addr().map(|a| a.to_string()).unwrap_or(addr);
     tracing::info!("Portal: serving on http://{local}/");
 

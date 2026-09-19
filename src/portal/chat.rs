@@ -101,7 +101,11 @@ pub async fn send(
         let token_relay = tokio::spawn(async move {
             while let Some(tok) = token_rx.recv().await {
                 let data = json!({ "delta": tok }).to_string();
-                if evt.send(Event::default().event("token").data(data)).await.is_err() {
+                if evt
+                    .send(Event::default().event("token").data(data))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -121,7 +125,11 @@ pub async fn send(
                     }
                 }
                 .to_string();
-                if evt.send(Event::default().event("tool").data(data)).await.is_err() {
+                if evt
+                    .send(Event::default().event("tool").data(data))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -141,7 +149,9 @@ pub async fn send(
             }
             Err(e) => {
                 let data = json!({ "message": e.to_string() }).to_string();
-                let _ = evt_tx.send(Event::default().event("error").data(data)).await;
+                let _ = evt_tx
+                    .send(Event::default().event("error").data(data))
+                    .await;
             }
         }
     });
@@ -163,12 +173,17 @@ pub async fn send(
 /// cancellation registry (same mechanism as Telegram /stop). Cancellation
 /// takes effect at the next tool boundary inside the agent loop.
 pub async fn cancel(State(state): State<PortalState>) -> Json<serde_json::Value> {
-    let cancelled = state.agent.cancel_processing(state.config.user_name.clone()).await;
+    let cancelled = state
+        .agent
+        .cancel_processing(state.config.user_name.clone())
+        .await;
     Json(json!({ "cancelled": cancelled }))
 }
 
 /// GET /api/chat/history — messages of the active web conversation.
-pub async fn history(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn history(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     let user = state.config.user_name.clone();
     let conv_id = state
         .memory
@@ -198,12 +213,16 @@ pub async fn history(State(state): State<PortalState>) -> Result<Json<serde_json
         }));
     }
 
-    Ok(Json(json!({ "conversationId": conv_id, "messages": items })))
+    Ok(Json(
+        json!({ "conversationId": conv_id, "messages": items }),
+    ))
 }
 
 /// GET /api/chat/threads — one row for the active web conversation (MVP;
 /// multi-thread browsing is a follow-up).
-pub async fn threads(State(state): State<PortalState>) -> Result<Json<serde_json::Value>, PortalError> {
+pub async fn threads(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
     let user = state.config.user_name.clone();
     let conv_id = state
         .memory
@@ -217,7 +236,15 @@ pub async fn threads(State(state): State<PortalState>) -> Result<Json<serde_json
         .map_err(PortalError::from)?;
     let count = messages
         .iter()
-        .filter(|m| (m.role == "user" || m.role == "assistant") && m.content.as_ref().map(|c| c.as_text()).unwrap_or_default().trim() != "")
+        .filter(|m| {
+            (m.role == "user" || m.role == "assistant")
+                && m.content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .unwrap_or_default()
+                    .trim()
+                    != ""
+        })
         .count();
     let title = messages
         .iter()
