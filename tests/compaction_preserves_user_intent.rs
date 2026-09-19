@@ -25,6 +25,7 @@ fn failing_llm() -> LlmClient {
         context_window: 4096,
         context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
         parse_retry_limit: 0,
+        rate_limit_retry_limit: 0,
     };
     let provider: Arc<dyn rustfox::provider::Provider> = Arc::new(OpenRouterProvider::new(config));
     let mut providers = HashMap::new();

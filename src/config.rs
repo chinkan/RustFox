@@ -325,6 +325,9 @@ pub struct AgentConfig {
     pub empty_response_retry_limit: u32,
     #[serde(default = "default_parse_retry_limit")]
     pub parse_retry_limit: u32,
+    /// Retries when a provider answers 429/5xx (honouring `Retry-After`).
+    #[serde(default = "default_rate_limit_retry_limit")]
+    pub rate_limit_retry_limit: u32,
     #[serde(default)]
     pub loop_detection: LoopDetectionConfig,
 }
@@ -507,11 +510,16 @@ fn default_parse_retry_limit() -> u32 {
     3
 }
 
+fn default_rate_limit_retry_limit() -> u32 {
+    3
+}
+
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         max_iterations: default_max_iterations(),
         empty_response_retry_limit: default_empty_response_retry_limit(),
         parse_retry_limit: default_parse_retry_limit(),
+        rate_limit_retry_limit: default_rate_limit_retry_limit(),
         loop_detection: LoopDetectionConfig::default(),
     }
 }
@@ -594,6 +602,12 @@ impl Config {
     /// Parse retry limit for missing 'choices' field (from [agent] parse_retry_limit, default 3).
     pub fn parse_retry_limit(&self) -> u32 {
         self.agent.parse_retry_limit
+    }
+
+    /// Retry limit for 429/5xx rate-limit statuses (from
+    /// [agent] rate_limit_retry_limit, default 3; 0 disables).
+    pub fn rate_limit_retry_limit(&self) -> u32 {
+        self.agent.rate_limit_retry_limit
     }
 
     /// Loop detection tunables (from [agent.loop_detection], defaults: enabled,
@@ -1091,6 +1105,40 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.agent.empty_response_retry_limit, 3);
         assert_eq!(cfg.empty_response_retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_agent_rate_limit_retry_limit_defaults_to_three() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.rate_limit_retry_limit, 3);
+        assert_eq!(cfg.rate_limit_retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_agent_rate_limit_retry_limit_can_be_configured_to_zero() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent]
+            rate_limit_retry_limit = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.rate_limit_retry_limit, 0);
+        assert_eq!(cfg.rate_limit_retry_limit(), 0);
     }
 
     #[test]

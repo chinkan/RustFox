@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
             &provider_sections,
             &default_provider,
             config.parse_retry_limit(),
+            config.rate_limit_retry_limit(),
         )
         .context("Failed to build LLM provider registry")?,
     );
