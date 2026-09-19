@@ -442,6 +442,25 @@ async fn main() -> Result<()> {
         Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
     }
 
+    // Opt-in embedded web portal (ADR 0004): spawned only when [portal] enabled.
+    let portal_shutdown = tokio_util::sync::CancellationToken::new();
+    if config.portal.enabled {
+        let portal_agent: std::sync::Arc<dyn rustfox::portal::AgentOps> = agent.clone();
+        let portal_state = rustfox::portal::PortalState::new(
+            portal_agent,
+            memory.clone(),
+            task_store.clone(),
+            config.portal.clone(),
+            config_path.clone(),
+            config.resolved_home().cloned(),
+        );
+        rustfox::portal::auth::ensure_startup_token(&portal_state);
+        if let Err(e) = rustfox::portal::serve(portal_state, portal_shutdown.clone()).await {
+            // Portal is best-effort: a bind failure must not kill the bot.
+            tracing::error!("Portal: failed to start — {e}");
+        }
+    }
+
     // Run the Telegram platform with signal-driven graceful shutdown
     info!("Bot is starting...");
 
@@ -481,6 +500,8 @@ async fn main() -> Result<()> {
 
     // Brief grace period for message delivery
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    portal_shutdown.cancel();
 
     info!("Shutdown complete.");
 
