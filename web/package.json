@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "RustFox Web Portal \u2014 TanStack Router + TanStack Query prototype",
+  "description": "RustFox Web Portal — TanStack Router + TanStack Query prototype",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -17,8 +17,10 @@
   "dependencies": {
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-router": "^1.170.38",
+    "i18next": "^25.10.10",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "react-i18next": "^16.6.6",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -1,0 +1,148 @@
+{
+  "app": {
+    "name": "RustFox",
+    "tagline": "Web Portal"
+  },
+  "nav": {
+    "workspace": "Workspace",
+    "system": "System",
+    "dashboard": "Dashboard",
+    "chat": "Chat",
+    "agents": "Agents",
+    "memory": "Memory",
+    "tasks": "Scheduled Tasks",
+    "settings": "Settings",
+    "signOut": "Sign out",
+    "signOutEverywhere": "Sign out everywhere"
+  },
+  "login": {
+    "title": "RustFox Portal",
+    "subtitle": "Sign in with your portal token to manage agents, memory and settings.",
+    "tokenLabel": "Portal token",
+    "tokenPlaceholder": "portal token",
+    "signIn": "Sign in",
+    "hint": "The token is set in config.toml [portal] (token or token_sha256). Sessions survive restarts via a signed cookie.",
+    "badToken": "Invalid portal token.",
+    "offline": "Cannot reach the portal API — is RustFox running?"
+  },
+  "common": {
+    "loading": "Loading…",
+    "retry": "Retry",
+    "enabled": "enabled",
+    "paused": "paused",
+    "restarting": "Server restarting — reconnecting…"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "subtitle": "System health, agent status and live stats.",
+    "cpu": "CPU",
+    "memory": "Memory",
+    "disk": "Disk",
+    "agentsRunning": "Agents running",
+    "skills": "Skills loaded",
+    "messages": "Messages stored",
+    "conversations": "Conversations",
+    "scheduledTasks": "Scheduled tasks",
+    "uptime": "uptime",
+    "host": "host machine",
+    "total": "total",
+    "allHealthy": "all healthy",
+    "inError": "{{count}} in error",
+    "agentsSection": "Agents",
+    "statsSection": "Counts",
+    "col": {
+      "agent": "Agent",
+      "platform": "Platform",
+      "model": "Model",
+      "status": "Status",
+      "lastActive": "Last active"
+    },
+    "providers": "Providers"
+  },
+  "chat": {
+    "title": "Chat",
+    "subtitle": "Direct line to the same agent that answers Telegram.",
+    "placeholder": "Message RustFox…",
+    "send": "Send",
+    "stop": "Stop",
+    "busy": "A generation is already running.",
+    "streamDied": "Connection lost — history reconciles after reconnect.",
+    "noMessages": "No messages yet. Say hi 👋",
+    "threadRunning": "generating…"
+  },
+  "agents": {
+    "title": "Agents",
+    "subtitle": "The main agent plus every loaded subagent definition.",
+    "searchPlaceholder": "Search agents…",
+    "allStatuses": "All statuses",
+    "running": "Running",
+    "idle": "Idle",
+    "error": "Error",
+    "sortName": "Sort: name",
+    "sortStatus": "Sort: status",
+    "shown": "{{count}} shown",
+    "noneFound": "No agents match this filter.",
+    "reload": "Reload skills & agents",
+    "reloadDone": "Reloaded {{skills}} skills, {{agents}} agents.",
+    "col": {
+      "agent": "Agent",
+      "platform": "Platform",
+      "model": "Model",
+      "status": "Status"
+    }
+  },
+  "memory": {
+    "title": "Memory",
+    "subtitle": "Long-term memory browser — semantic + full-text search.",
+    "searchPlaceholder": "Search memory…",
+    "all": "All",
+    "fact": "Fact",
+    "knowledge": "Knowledge",
+    "conversation": "Conversation",
+    "noneFound": "Nothing matched “{{q}}”."
+  },
+  "tasks": {
+    "title": "Scheduled Tasks",
+    "subtitle": "Recurring agent runs — no crontab required.",
+    "col": {
+      "task": "Task",
+      "cron": "Cron",
+      "nextRun": "Next run",
+      "status": "Status"
+    },
+    "enable": "Enable",
+    "disable": "Disable",
+    "runs": "Runs",
+    "hideRuns": "Hide runs",
+    "noRuns": "No runs recorded yet.",
+    "restartNote": "Enabled — re-arms on next restart."
+  },
+  "settings": {
+    "title": "Settings",
+    "subtitle": "Whitelisted fields only — secrets are masked and never round-trip.",
+    "editable": "Editable",
+    "model": "Model",
+    "generalLocation": "Location",
+    "defaultAutonomyMode": "Autonomy mode",
+    "portalPort": "Portal port",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved.",
+    "saveFailed": "Save failed: {{message}}",
+    "restartBanner": "Changes pending a restart: {{fields}}",
+    "maskedTitle": "Secrets (read-only)",
+    "telegramBotToken": "Telegram bot token",
+    "openrouterApiKey": "OpenRouter API key",
+    "providers": "Providers",
+    "soulTitle": "Soul files",
+    "soulHint": "SOUL.md / USER.md / AGENTS.md — plain markdown, backed up on save.",
+    "soulOpen": "Edit {{name}}",
+    "soulSave": "Save file",
+    "soulSaved": "Saved {{name}} ({{bytes}} bytes).",
+    "soulLoadFailed": "Could not load {{name}}."
+  },
+  "notFound": {
+    "title": "404 — Route not found",
+    "back": "Back to dashboard"
+  }
+}

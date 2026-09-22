@@ -1,5 +1,6 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 
 export const Route = createFileRoute('/_auth/dashboard')({
   component: DashboardPage,
@@ -7,12 +8,12 @@ export const Route = createFileRoute('/_auth/dashboard')({
 
 function DashboardPage() {
   const { api } = Route.useRouteContext()
+  const { t } = useTranslation()
 
-  // TanStack Query drives all data fetching. Each query is keyed and cached;
-  // switching routes never refetches within `staleTime`.
+  // TanStack Query drives all data fetching against the real Axum API.
   const health = useQuery({ queryKey: ['health'], queryFn: api.getHealth })
-  const agents = useQuery({ queryKey: ['agents'], queryFn: () => api.listAgents() })
-  const workspaces = useQuery({ queryKey: ['workspaces'], queryFn: api.listWorkspaces })
+  const stats = useQuery({ queryKey: ['stats'], queryFn: api.getStats })
+  const agents = useQuery({ queryKey: ['agents'], queryFn: api.listAgents })
   const tasks = useQuery({ queryKey: ['tasks'], queryFn: api.listTasks })
 
   const running = agents.data?.filter((a) => a.status === 'running').length ?? 0
@@ -21,55 +22,82 @@ function DashboardPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Dashboard</h1>
-        <p>System health, agent status and workspace overview.</p>
+        <h1>{t('dashboard.title')}</h1>
+        <p>{t('dashboard.subtitle')}</p>
       </div>
 
       <section className="section">
         <div className="grid cols-3">
           <Stat
-            k="CPU"
+            k={t('dashboard.cpu')}
             v={health.data ? `${health.data.cpuPercent}%` : '—'}
-            sub={health.data ? `uptime ${Math.floor(health.data.uptimeHours / 24)}d ${health.data.uptimeHours % 24}h` : ''}
+            sub={
+              health.data
+                ? `${t('dashboard.uptime')} ${Math.floor(health.data.uptimeHours / 24)}d ${Math.round(health.data.uptimeHours % 24)}h`
+                : ''
+            }
             bar={health.data?.cpuPercent}
           />
           <Stat
-            k="Memory"
-            v={health.data ? `${health.data.memUsedGb} / ${health.data.memTotalGb} GB` : '—'}
-            sub="host machine"
-            bar={health.data ? (health.data.memUsedGb / health.data.memTotalGb) * 100 : undefined}
+            k={t('dashboard.memory')}
+            v={
+              health.data
+                ? `${health.data.memUsedGb} / ${health.data.memTotalGb} GB`
+                : '—'
+            }
+            sub={t('dashboard.host')}
+            bar={
+              health.data && health.data.memTotalGb > 0
+                ? (health.data.memUsedGb / health.data.memTotalGb) * 100
+                : undefined
+            }
           />
           <Stat
-            k="Disk"
+            k={t('dashboard.disk')}
             v={health.data ? `${health.data.diskUsedPercent}%` : '—'}
-            sub="1 TB SSD"
             bar={health.data?.diskUsedPercent}
           />
           <Stat
-            k="Agents running"
-            v={`${running} / ${agents.data?.length ?? 0}`}
-            sub={errored > 0 ? `${errored} in error` : 'all healthy'}
+            k={t('dashboard.agentsRunning')}
+            v={`${running} / ${agents.data?.length ?? '—'}`}
+            sub={errored > 0 ? t('dashboard.inError', { count: errored }) : t('dashboard.allHealthy')}
           />
-          <Stat k="Workspaces" v={String(workspaces.data?.length ?? '—')} sub="active" />
           <Stat
-            k="Scheduled tasks"
-            v={String(tasks.data?.filter((t) => t.enabled).length ?? '—')}
-            sub={`${tasks.data?.length ?? 0} total`}
+            k={t('dashboard.skills')}
+            v={stats.data ? String(stats.data.skills) : '—'}
+            sub={stats.data ? stats.data.model : ''}
+          />
+          <Stat
+            k={t('dashboard.scheduledTasks')}
+            v={tasks.data ? String(tasks.data.filter((x) => x.enabled).length) : '—'}
+            sub={tasks.data ? `${tasks.data.length} ${t('dashboard.total')}` : ''}
           />
         </div>
+
+        {stats.data ? (
+          <div className="grid cols-3" style={{ marginTop: 14 }}>
+            <Stat k={t('dashboard.messages')} v={String(stats.data.messageCount)} />
+            <Stat k={t('dashboard.conversations')} v={String(stats.data.conversationCount)} />
+            <Stat
+              k={t('dashboard.providers')}
+              v={String(stats.data.providers.length)}
+              sub={stats.data.providers.join(', ')}
+            />
+          </div>
+        ) : null}
       </section>
 
       <section className="section">
-        <h2 className="section-title">Agents</h2>
+        <h2 className="section-title">{t('dashboard.agentsSection')}</h2>
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           <table>
             <thead>
               <tr>
-                <th>Agent</th>
-                <th>Workspace</th>
-                <th>Model</th>
-                <th>Status</th>
-                <th>Last active</th>
+                <th>{t('dashboard.col.agent')}</th>
+                <th>{t('dashboard.col.platform')}</th>
+                <th>{t('dashboard.col.model')}</th>
+                <th>{t('dashboard.col.status')}</th>
+                <th>{t('dashboard.col.lastActive')}</th>
               </tr>
             </thead>
             <tbody>
@@ -78,37 +106,16 @@ function DashboardPage() {
                   <td>
                     <strong>{a.name}</strong>
                   </td>
-                  <td className="mono">{a.workspaceId}</td>
+                  <td className="mono">{a.platform}</td>
                   <td className="mono">{a.model}</td>
                   <td>
                     <span className={`badge dot ${a.status}`}>{a.status}</span>
                   </td>
-                  <td className="mono">{fmtTime(a.lastActive)}</td>
+                  <td className="mono">{a.lastActive ? fmtTime(a.lastActive) : '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-      </section>
-
-      <section className="section">
-        <h2 className="section-title">Workspaces</h2>
-        <div className="grid cols-2">
-          {workspaces.data?.map((w) => (
-            <div key={w.id} className="card">
-              <div className="row">
-                <strong style={{ fontSize: 14 }}>{w.name}</strong>
-                <span className="spacer" />
-                <span className="badge">{w.agentCount} agents</span>
-              </div>
-              <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 12px' }}>
-                {w.description}
-              </p>
-              <Link to="/agents" className="btn sm">
-                View agents →
-              </Link>
-            </div>
-          ))}
         </div>
       </section>
     </>

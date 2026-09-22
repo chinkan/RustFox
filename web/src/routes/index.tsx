@@ -1,11 +1,15 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
+import { ensureAuthBootstrapped } from '../auth'
 
 /**
  * `/` — redirect to the dashboard (or login if unauthenticated).
- * A `beforeLoad` on the index route keeps the entry point deterministic.
+ * Awaits the cookie-restore round-trip first so a returning session never
+ * sees the login screen flash (the guard runs before authStore.restore
+ * resolves on cold boot otherwise).
  */
 export const Route = createFileRoute('/')({
-  beforeLoad: ({ context }) => {
+  beforeLoad: async ({ context }) => {
+    await ensureAuthBootstrapped()
     throw redirect({
       to: context.auth.isAuthenticated ? '/dashboard' : '/login',
     })

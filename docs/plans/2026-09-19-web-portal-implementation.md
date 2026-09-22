@@ -4,14 +4,15 @@ Date: 2026-09-19 · Branch: `feat/web-portal-impl` · ADRs: 0004–0008 · Contr
 
 ## Milestones
 
-### M1 — Vendored frontend compiles against real API shape (this PR)
+### M1 — Vendored frontend wired to the real API ✅ complete 2026-09-22
 - [x] Copy `rustfox-portal/` → `web/` (no node_modules/dist), commit
-- [ ] `web/src/api/client.ts`: replace mock `delay()` with `fetch` against `/api/*`; same exported `api` object + types so **zero component changes**
-- [ ] `useChatStream.ts`: `fetch` POST + ReadableStream SSE parser (token/tool/done/error frames); drop `useWebSocket.ts` from chat
-- [ ] SSE reconnect state machine (ADR 0008B): bootId watch + banner + history reconcile; Vitest with dropped-stream mock
-- [ ] Login screen posts token → signed cookie (ADR 0008A); `authStore` backed by `/api/auth/me`
-- [ ] i18n scaffolding (grill 8b): react-i18next wired, all copy into `en.json`; components unchanged beyond `t()` swap — zh-HK lands in M3
-- [ ] CI: `web` job runs `npm run verify` (tsc + build + vitest)
+- [x] `web/src/api/client.ts`: fetch-based client + `ApiError` envelope; all 20 endpoints typed; every page switched from fixtures to real data (workspaces concept dropped — the backend never had it)
+- [x] `api/sse.ts`: `fetch` POST + ReadableStream SSE parser (token/tool/done/error/ping, CRLF-safe, split-chunk safe); WS path abandoned per ADR 0005
+- [x] Reconnect state machine (ADR 0008B): `hooks/useBootWatcher.ts` polls public `/api/health`, bootId change → re-`/auth/me` + invalidate caches + chat reconcile (never auto-replay POST); sticky offline banner; Vitest mocks for offline/restart/same-boot recovery
+- [x] Chat stream: `hooks/useChatStream.ts` store — optimistic bubble, token deltas, tool notes, 409 busy, `error` frame, stream-death → reconcile from DB; drop `chat.index` auto-redirects to the active conversation id
+- [x] Login screen posts token → signed cookie (ADR 0008A); `authStore` backed by `/api/auth/me` (guards `await ensureAuthBootstrapped()` so a returning cookie never bounces on cold boot)
+- [x] i18n (grill 8b): react-i18next wired, all copy in `en.json`; zh-HK landed early (Cantonese locale + EN/粵 toggle in shell + login)
+- [x] CI: `web` job runs `npm run verify` (tsc + vite build + 27 vitest); `build` now gates on it
 
 ### M2 — Backend `src/portal/` (this PR) ✅ complete 2026-09-22
 - [x] `config.rs`: `PortalConfig` (`enabled=false`, `port=8090`, `bind="127.0.0.1"`, `token`, `token_sha256`, `user_name="web"`)

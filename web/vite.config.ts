@@ -19,7 +19,7 @@ export default defineConfig({
     // SPA from dist/ and owns /api/* itself, so no proxy is needed.
     proxy: {
       '/api': {
-        target: process.env.RUSTFOX_API ?? 'http://127.0.0.1:8080',
+        target: process.env.RUSTFOX_API ?? 'http://127.0.0.1:8090',
         changeOrigin: true,
       },
     },

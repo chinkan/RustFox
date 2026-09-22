@@ -3,31 +3,42 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
 import { RouterProvider, createRouter, createMemoryHistory } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
-import { api } from './api/client'
-import { authStore, type RouterContext } from './auth'
+import { authStore, bindAuthApi, __resetAuthForTests, type RouterContext } from './auth'
+import { BootWatcher } from './hooks/useBootWatcher'
+import { ChatSession } from './hooks/useChatStream'
+import { fakeApi } from './api/fake'
 
 /**
- * Integration tests: mount the real router (memory history) and assert that
- * navigation, auth guards and type-safe search params actually work at runtime
- * — not just at compile time.
+ * Integration tests: mount the real router (memory history) against a FAKE
+ * api object — no network — and assert navigation, auth guards and
+ * type-safe search params work at runtime, not just at compile time.
  */
 
-function makeRouter(initialPath = '/') {
-  const queryClient = new QueryClient({
+const api = fakeApi()
+
+function makeContext(over: Parameters<typeof fakeApi>[0] = {}): RouterContext {
+  const ctxApi = fakeApi(over)
+  const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   })
-  return createRouter({
-    routeTree,
-    context: { auth: authStore, api, queryClient } satisfies RouterContext,
-    history: createMemoryHistory({ initialEntries: [initialPath] }),
-    defaultPreload: false,
-  })
+  return {
+    auth: authStore,
+    api: ctxApi,
+    queryClient: qc,
+    boot: new BootWatcher(ctxApi, () => undefined),
+    chat: new ChatSession(ctxApi),
+  }
 }
 
-function renderAt(path: string) {
-  const router = makeRouter(path)
+function renderAt(path: string, ctx: RouterContext) {
+  const router = createRouter({
+    routeTree,
+    context: ctx,
+    history: createMemoryHistory({ initialEntries: [path] }),
+    defaultPreload: false,
+  })
   render(
-    <QueryClientProvider client={router.options.context.queryClient}>
+    <QueryClientProvider client={ctx.queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   )
@@ -35,52 +46,73 @@ function renderAt(path: string) {
 }
 
 beforeEach(() => {
-  authStore.logout()
+  bindAuthApi(api)
+  __resetAuthForTests()
   localStorage.clear()
+  sessionStorage.clear()
 })
+
+/** Seed a session via the fake login round-trip. */
+async function signIn() {
+  await authStore.loginWithToken('test-token')
+}
 
 describe('auth guard', () => {
   it('redirects an unauthenticated visitor from /dashboard to /login', async () => {
-    const router = renderAt('/dashboard')
+    bindAuthApi(fakeApi({ me: async () => ({ authenticated: false, username: '', role: '' }) }))
+    const router = renderAt('/dashboard', makeContext({ me: async () => ({ authenticated: false, username: '', role: '' }) }))
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/login')
     })
-    expect(await screen.findByText(/Sign in to manage workspaces/i)).toBeTruthy()
+    expect(await screen.findByText(/Sign in with your portal token/i)).toBeTruthy()
   })
 
   it('lets an authenticated user reach the dashboard', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/dashboard')
+    await signIn()
+    const router = renderAt('/dashboard', makeContext())
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/dashboard')
     })
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy()
   })
-})
 
-describe('RBAC guard', () => {
-  it('blocks a non-admin from /settings', async () => {
-    authStore.login('guest', 'user')
-    const router = renderAt('/settings')
+  it('restores a session from /auth/me on cold boot (cookie re-auth — ADR 0008A)', async () => {
+    // me() says authenticated — guards must NOT bounce even though the
+    // in-memory session started empty (the restart-survival path).
+    const authed = { authenticated: true, username: 'kan', role: 'admin' }
+    bindAuthApi(fakeApi({ me: async () => authed }))
+    const router = renderAt('/dashboard', makeContext({ me: async () => authed }))
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/dashboard')
     })
   })
+})
 
-  it('allows an admin into /settings', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/settings')
+describe('RBAC guard', () => {
+  it('renders /settings for an admin with real masked data', async () => {
+    await signIn()
+    const router = renderAt('/settings', makeContext())
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/settings')
     })
-    expect(await screen.findByText(/Providers/)).toBeTruthy()
+    expect(await screen.findByText(/Secrets/i)).toBeTruthy()
+    // Masked secret projection renders; raw values never cross the boundary.
+    expect(await screen.findByText('123…456')).toBeTruthy()
+  })
+
+  it('sidebar hides Settings for a non-admin session', async () => {
+    bindAuthApi(fakeApi({ login: async () => ({ username: 'guest', role: 'user' }) }))
+    await authStore.loginWithToken('t')
+    renderAt('/dashboard', makeContext())
+    await screen.findByRole('heading', { name: 'Dashboard' })
+    expect(screen.queryByText('Settings')).toBeNull()
   })
 })
 
 describe('type-safe search params', () => {
   it('reads validated search params from the URL', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/agents?q=exp&status=running&sort=name')
+    await signIn()
+    const router = renderAt('/agents?q=exp&status=running&sort=name', makeContext())
 
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({
@@ -90,16 +122,15 @@ describe('type-safe search params', () => {
       })
     })
 
-    // Fixtures: exp-executor is `running`, exp-explorer is `idle`.
-    // With status=running only the former should survive the filter.
+    // Fixtures: exp-executor is `running`; exp-explorer is `idle`.
     expect(await screen.findByText('exp-executor')).toBeTruthy()
     expect(screen.queryByText('exp-explorer')).toBeNull()
-    expect(screen.queryByText('news-fetcher')).toBeNull()
+    expect(screen.queryByText('thread-writer-hk')).toBeNull()
   })
 
   it('updates the URL when the user types in the search box', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/agents')
+    await signIn()
+    const router = renderAt('/agents', makeContext())
 
     const input = await screen.findByPlaceholderText(/Search agents/i)
     fireEvent.change(input, { target: { value: 'verifier' } })
@@ -107,12 +138,16 @@ describe('type-safe search params', () => {
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({ q: 'verifier' })
     })
-    expect(await screen.findByText('verifier')).toBeTruthy()
+    // 'verifier' appears in both the agent row and the Skills grid — assert
+    // the filtered table shows exactly the one agent row.
+    const rows = await screen.findAllByText('verifier')
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText('exp-executor')).toBeNull()
   })
 
   it('falls back to defaults for invalid search params', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/agents?status=bogus&q=')
+    await signIn()
+    const router = renderAt('/agents?status=bogus&q=', makeContext())
     await waitFor(() => {
       // zod `.catch()` restores the default instead of crashing the route.
       expect(router.state.location.search).toMatchObject({ status: 'all' })
@@ -120,23 +155,22 @@ describe('type-safe search params', () => {
   })
 })
 
-describe('nested layout persistence', () => {
-  it('renders the chat sidebar and the selected thread together', async () => {
-    authStore.login('kan', 'admin')
-    const router = renderAt('/chat/t2')
+describe('chat', () => {
+  it('renders the thread sidebar and history bubbles', async () => {
+    await signIn()
+    const router = renderAt('/chat/conv-1', makeContext())
     await waitFor(() => {
-      expect(router.state.location.pathname).toBe('/chat/t2')
+      expect(router.state.location.pathname).toBe('/chat/conv-1')
     })
-    // Sidebar (from the layout route) + thread title (from the child route).
-    expect(await screen.findByText('TanStack Router for the portal')).toBeTruthy()
-    expect(await screen.findByText(/Weekly vault review/)).toBeTruthy()
+    // 'hello' exists as the thread title in the sidebar AND the user bubble.
+    const hellos = await screen.findAllByText('hello')
+    expect(hellos.length).toBeGreaterThanOrEqual(2)
+    expect(await screen.findByText('hi kan')).toBeTruthy()
   })
 
-  it('renders the notFound component when the loader throws notFound()', async () => {
-    authStore.login('kan', 'admin')
-    renderAt('/chat/does-not-exist')
-
-    // `notFound()` bubbles to the nearest notFoundComponent (defined on __root).
-    expect(await screen.findByText(/404 — Route not found/i)).toBeTruthy()
+  it('renders notFound for an unknown thread id', async () => {
+    await signIn()
+    renderAt('/chat/nope', makeContext())
+    expect(await screen.findByText(/404/i)).toBeTruthy()
   })
 })

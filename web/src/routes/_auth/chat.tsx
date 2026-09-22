@@ -1,51 +1,58 @@
 import { createFileRoute, Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
+import { useChatSession } from '../../hooks/useChatStream'
 
 /**
  * `/chat` layout route.
  *
- * Renders the thread sidebar once and lets the child routes
- * (`/chat/` and `/chat/$threadId`) swap only the conversation pane. This is
- * the key TanStack Router pattern: layout persistence without unmounting the
- * sidebar on every navigation.
+ * Renders the thread sidebar once; children swap only the conversation pane.
+ * MVP backend keeps a single active web conversation (docs/portal-api.md),
+ * so the list normally has one row — it is still fetched from the API rather
+ * than invented client-side.
  */
 export const Route = createFileRoute('/_auth/chat')({
   component: ChatLayout,
 })
 
 function ChatLayout() {
-  const { api } = Route.useRouteContext()
+  const { api, chat } = Route.useRouteContext()
+  const { t } = useTranslation()
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const { state: session } = useChatSession(chat)
 
   const threads = useQuery({
     queryKey: ['threads'],
     queryFn: () => api.listThreads(),
   })
 
+  const rows = threads.data ?? []
+
   return (
     <>
       <div className="page-head">
-        <h1>Chat</h1>
-        <p>Threads persist across navigation — the sidebar never re-mounts.</p>
+        <h1>{t('chat.title')}</h1>
+        <p>{t('chat.subtitle')}</p>
       </div>
 
       <div className="chat-layout">
         <div className="thread-list">
           {threads.isLoading ? (
-            <div className="loading">Loading…</div>
+            <div className="loading">{t('common.loading')}</div>
           ) : (
-            threads.data?.map((t) => {
-              const active = pathname === `/chat/${t.id}`
+            rows.map((th) => {
+              const active = pathname === `/chat/${th.id}`
               return (
                 <Link
-                  key={t.id}
+                  key={th.id}
                   to="/chat/$threadId"
-                  params={{ threadId: t.id }}
+                  params={{ threadId: th.id }}
                   className={`thread-item${active ? ' active' : ''}`}
                 >
-                  <div className="t">{t.title}</div>
+                  <div className="t">{th.title}</div>
                   <div className="m">
-                    {t.messageCount} messages · {t.workspaceId}
+                    {th.messageCount} messages
+                    {active && session.streaming ? ` · ${t('chat.threadRunning')}` : ''}
                   </div>
                 </Link>
               )

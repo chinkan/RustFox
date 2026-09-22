@@ -1,14 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
 
 /**
  * Type-safe search params — the TanStack Router killer feature.
- *
- * `validateSearch` parses + validates the URL. `Route.useSearch()` then
- * returns a *fully inferred* type, and `<Link search={...}>` is checked at
- * compile time. The URL stays shareable / bookmarkable, and every filter is
- * in the address bar.
+ * Every filter lives in the URL and is validated + inferred by zod.
  */
 const agentSearchSchema = z.object({
   q: z.string().default('').catch(''),
@@ -25,8 +23,21 @@ function AgentsPage() {
   const { api } = Route.useRouteContext()
   const { q, status, sort } = Route.useSearch()
   const navigate = Route.useNavigate()
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [reloadMsg, setReloadMsg] = useState<string | null>(null)
 
-  const agents = useQuery({ queryKey: ['agents'], queryFn: () => api.listAgents() })
+  const agents = useQuery({ queryKey: ['agents'], queryFn: api.listAgents })
+  const skills = useQuery({ queryKey: ['skills'], queryFn: api.listSkills })
+
+  const reload = useMutation({
+    mutationFn: api.reloadAgents,
+    onSuccess: (r) => {
+      setReloadMsg(t('agents.reloadDone', { skills: r.skillsLoaded, agents: r.agentsLoaded }))
+      void queryClient.invalidateQueries({ queryKey: ['agents'] })
+      void queryClient.invalidateQueries({ queryKey: ['skills'] })
+    },
+  })
 
   const filtered = (agents.data ?? [])
     .filter((a) => (status === 'all' ? true : a.status === status))
@@ -38,17 +49,14 @@ function AgentsPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Agents</h1>
-        <p>
-          Every filter lives in the URL — copy the address bar to share this exact
-          view.
-        </p>
+        <h1>{t('agents.title')}</h1>
+        <p>{t('agents.subtitle')}</p>
       </div>
 
       <div className="row" style={{ marginBottom: 18 }}>
         <input
           type="search"
-          placeholder="Search agents…"
+          placeholder={t('agents.searchPlaceholder')}
           value={q}
           onChange={(e) =>
             // Functional update preserves the other search params.
@@ -65,10 +73,10 @@ function AgentsPage() {
             })
           }
         >
-          <option value="all">All statuses</option>
-          <option value="running">Running</option>
-          <option value="idle">Idle</option>
-          <option value="error">Error</option>
+          <option value="all">{t('agents.allStatuses')}</option>
+          <option value="running">{t('agents.running')}</option>
+          <option value="idle">{t('agents.idle')}</option>
+          <option value="error">{t('agents.error')}</option>
         </select>
 
         <select
@@ -79,22 +87,31 @@ function AgentsPage() {
             })
           }
         >
-          <option value="name">Sort: name</option>
-          <option value="status">Sort: status</option>
+          <option value="name">{t('agents.sortName')}</option>
+          <option value="status">{t('agents.sortStatus')}</option>
         </select>
 
         <span className="spacer" />
-        <span className="badge">{filtered.length} shown</span>
+        <button
+          className="ghost sm"
+          onClick={() => reload.mutate()}
+          disabled={reload.isPending}
+        >
+          {t('agents.reload')}
+        </button>
+        <span className="badge">{t('agents.shown', { count: filtered.length })}</span>
       </div>
+
+      {reloadMsg ? <div className="hint" style={{ marginBottom: 12 }}>{reloadMsg}</div> : null}
 
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <table>
           <thead>
             <tr>
-              <th>Agent</th>
-              <th>Workspace</th>
-              <th>Model</th>
-              <th>Status</th>
+              <th>{t('agents.col.agent')}</th>
+              <th>{t('agents.col.platform')}</th>
+              <th>{t('agents.col.model')}</th>
+              <th>{t('agents.col.status')}</th>
             </tr>
           </thead>
           <tbody>
@@ -103,7 +120,7 @@ function AgentsPage() {
                 <td>
                   <strong>{a.name}</strong>
                 </td>
-                <td className="mono">{a.workspaceId}</td>
+                <td className="mono">{a.platform}</td>
                 <td className="mono">{a.model}</td>
                 <td>
                   <span className={`badge dot ${a.status}`}>{a.status}</span>
@@ -115,14 +132,28 @@ function AgentsPage() {
         {filtered.length === 0 ? (
           <div className="empty">
             <div className="big">🔍</div>
-            <p>No agents match this filter.</p>
+            <p>{t('agents.noneFound')}</p>
           </div>
         ) : null}
       </div>
 
-      <p className="mono" style={{ marginTop: 16 }}>
-        Current URL state → q=&quot;{q}&quot; status={status} sort={sort}
-      </p>
+      <section className="section">
+        <h2 className="section-title">Skills ({skills.data?.length ?? '…'})</h2>
+        <div className="grid cols-2">
+          {skills.data?.map((s) => (
+            <div key={s.name} className="card">
+              <div className="row">
+                <strong style={{ fontSize: 13.5 }}>{s.name}</strong>
+                <span className="spacer" />
+                <span className="badge">{s.kind}</span>
+              </div>
+              <p style={{ color: 'var(--text-dim)', fontSize: 12.5, margin: '6px 0 0' }}>
+                {s.description}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
     </>
   )
 }

@@ -1,6 +1,9 @@
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
+import { ensureAuthBootstrapped } from '../auth'
+import { LANGS, setLang, type Lang } from '../i18n'
 
 /** Post-login redirect target, validated & typed. */
 const searchSchema = z.object({
@@ -9,8 +12,9 @@ const searchSchema = z.object({
 
 export const Route = createFileRoute('/login')({
   validateSearch: searchSchema,
-  beforeLoad: ({ context, search }) => {
-    // Already signed in? Skip the login screen.
+  beforeLoad: async ({ context, search }) => {
+    await ensureAuthBootstrapped()
+    // Returning visitor with a valid cookie? Skip the login screen.
     if (context.auth.isAuthenticated) {
       throw redirect({ to: search.redirect ?? '/dashboard' })
     }
@@ -22,54 +26,67 @@ function LoginPage() {
   const { auth } = Route.useRouteContext()
   const { redirect: redirectTo } = Route.useSearch()
   const navigate = useNavigate()
+  const { t, i18n } = useTranslation()
 
-  const [username, setUsername] = useState('kan')
-  const [role, setRole] = useState<'admin' | 'user'>('admin')
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
-    auth.login(username.trim() || 'guest', role)
-    void navigate({ to: redirectTo ?? '/dashboard' })
+    const trimmed = token.trim()
+    if (!trimmed || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await auth.loginWithToken(trimmed)
+      void navigate({ to: redirectTo ?? '/dashboard' })
+    } catch (err) {
+      // ApiError: 401 ⇒ bad token; 0/network ⇒ server unreachable.
+      const status = (err as { status?: number }).status
+      setError(status === 0 || status === undefined ? t('login.offline') : t('login.badToken'))
+      setBusy(false)
+    }
   }
 
   return (
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
-        <h1>🦊 RustFox Portal</h1>
-        <p>Sign in to manage workspaces, agents and memory.</p>
+        <h1>🦊 {t('login.title')}</h1>
+        <p>{t('login.subtitle')}</p>
 
         <div className="field">
-          <label htmlFor="username">Username</label>
+          <label htmlFor="token">{t('login.tokenLabel')}</label>
           <input
-            id="username"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="kan"
-            autoComplete="username"
+            id="token"
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder={t('login.tokenPlaceholder')}
+            autoComplete="current-password"
+            autoFocus
           />
         </div>
 
-        <div className="field">
-          <label htmlFor="role">Role</label>
-          <select
-            id="role"
-            value={role}
-            onChange={(e) => setRole(e.target.value as 'admin' | 'user')}
-          >
-            <option value="admin">admin — full access</option>
-            <option value="user">user — chat only</option>
-          </select>
-        </div>
+        {error ? <div className="login-error">{error}</div> : null}
 
-        <button type="submit" className="primary" style={{ width: '100%' }}>
-          Sign in
+        <button type="submit" className="primary" style={{ width: '100%' }} disabled={busy || !token.trim()}>
+          {busy ? t('common.loading') : t('login.signIn')}
         </button>
 
-        <div className="hint">
-          <strong>Prototype auth.</strong> No backend call yet — the session is
-          stored in <code>localStorage</code>. Pick <code>user</code> to see the
-          RBAC guard block <code>/settings</code>.
+        <div className="hint">{t('login.hint')}</div>
+
+        <div className="lang-row">
+          {LANGS.map((l) => (
+            <button
+              key={l}
+              type="button"
+              className={i18n.language === l ? 'sm primary' : 'sm'}
+              onClick={() => setLang(l as Lang)}
+            >
+              {l === 'en' ? 'EN' : '粵'}
+            </button>
+          ))}
         </div>
       </form>
     </div>
