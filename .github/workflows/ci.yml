@@ -47,6 +47,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Build the SPA so the embedded-assets regression tests in
+      # src/portal/static_serve.rs assert against a real dist instead of
+      # the tracked stub (they skip when no /assets/ refs are embedded).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web portal
+        run: cd web && npm ci && npm run build
       - run: cargo test
 
   build:
