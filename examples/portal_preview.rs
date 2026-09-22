@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustfox::config::{Config, PortalConfig};
-use rustfox::memory::MemoryStore;
 use rustfox::llm::{ChatMessage, MessageContent};
+use rustfox::memory::MemoryStore;
 use rustfox::platform::tool_notifier::ToolEvent;
 use rustfox::platform::IncomingMessage;
-use rustfox::scheduler::reminders::ScheduledTask;
 use rustfox::portal::{auth, AgentOps, PortalState, SkillInfo};
+use rustfox::scheduler::reminders::ScheduledTask;
 use rustfox::scheduler::reminders::ScheduledTaskStore;
 use rustfox::tool_registry::ToolUiMode;
 
@@ -220,17 +220,36 @@ user_name = "web"
     // Embeddings are unavailable in-memory → hybrid search falls back to FTS5.
     // ---------------------------------------------------------------------
     memory
-        .remember("fact", "favourite_author", "Favorite author: The Death of Portia", None)
+        .remember(
+            "fact",
+            "favourite_author",
+            "Favorite author: The Death of Portia",
+            None,
+        )
         .await?;
     memory
-        .remember("project", "rustfox", "RustFox is a self-hosted Telegram AI assistant", None)
+        .remember(
+            "project",
+            "rustfox",
+            "RustFox is a self-hosted Telegram AI assistant",
+            None,
+        )
         .await?;
     let conv = memory.get_or_create_conversation("web", "web").await?;
     for (role, content) in [
-        ("user", "Which Patrick Rothfuss book comes after The Wise Man's Fear?"),
-        ("assistant", "The Door into Fire… fan sequel aside, official roadmap says The Winds of Winter."),
+        (
+            "user",
+            "Which Patrick Rothfuss book comes after The Wise Man's Fear?",
+        ),
+        (
+            "assistant",
+            "The Door into Fire… fan sequel aside, official roadmap says The Winds of Winter.",
+        ),
         ("user", "Ignore that — what is The Death of Portia?"),
-        ("assistant", "The Death of Portia is a 2021 sci-fi novel by Mur Lafferty."),
+        (
+            "assistant",
+            "The Death of Portia is a 2021 sci-fi novel by Mur Lafferty.",
+        ),
     ] {
         memory
             .save_message(

@@ -88,7 +88,11 @@ impl ScheduledTaskStore {
     /// paused task can be re-enabled from the UI instead of vanishing.
     pub async fn list_browsable(&self) -> Result<Vec<ScheduledTask>> {
         let conn = self.conn.lock().await;
-        self.query_tasks(&conn, "WHERE status IN ('active', 'paused')", rusqlite::params![])
+        self.query_tasks(
+            &conn,
+            "WHERE status IN ('active', 'paused')",
+            rusqlite::params![],
+        )
     }
 
     pub async fn set_status(&self, id: &str, status: &str) -> Result<()> {
