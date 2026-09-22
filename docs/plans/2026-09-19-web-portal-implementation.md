@@ -29,7 +29,7 @@ Date: 2026-09-19 · Branch: `feat/web-portal-impl` · ADRs: 0004–0008 · Contr
 
 ### M3 — Access + polish (separate PRs, ordered)
 - [ ] **Telegram WebView auto-login** (initData HMAC) — promoted from backlog: daily out-and-about friction (ADR 0007)
-- [ ] `zh-HK` Cantonese locale file + language toggle (grill 8b)
+- [x] ~~`zh-HK` Cantonese locale file + language toggle~~ — landed early in M1 (118/118 keys, EN/粵 toggle)
 - [ ] Playwright E2E suite in CI: 5 journeys × (Chromium desktop + Pixel mobile viewport) — login → chat stream → dashboard real data → settings PATCH + restart banner → logout (grill 10a)
 - [ ] WebSocket live dashboard push; memory/knowledge editing; PWA service worker; token rotation UI
 
