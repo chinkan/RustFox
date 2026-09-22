@@ -16,7 +16,11 @@ use super::error::PortalError;
 use super::PortalState;
 
 /// Whitelisted editable scalar fields (docs/portal-api.md → Settings).
+/// The wire format is camelCase (the SPA's contract), the Rust fields are
+/// snake_case — `rename_all` keeps both honest. Without it, unknown keys
+/// silently deserialized to `None` and PATCHes no-oped with a 200.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
     #[serde(default)]
     pub model: Option<String>,

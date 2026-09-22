@@ -10,6 +10,7 @@ pub mod data;
 pub mod error;
 pub mod settings;
 pub mod static_serve;
+pub mod url;
 
 use std::sync::Arc;
 
@@ -195,10 +196,15 @@ impl PortalState {
 /// Build the portal router (auth middleware applied to the API group).
 pub fn router(state: PortalState) -> Router {
     // Public: login/logout/me (me reports anonymous as unauthenticated).
+    // Public: login/logout/me + health. `/health` must stay unauthenticated
+    // (ADR 0008B): it is the SPA's restart detector — it polls bootId every
+    // 15 s *before* re-auth runs, so gating it would blind the reconnect
+    // state machine (docs/portal-api.md marks it Public explicitly).
     let public = Router::new()
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
-        .route("/auth/me", get(auth::me));
+        .route("/auth/me", get(auth::me))
+        .route("/health", get(data::health));
 
     let protected = Router::new()
         .route("/chat/history", get(chat::history))
@@ -213,7 +219,6 @@ pub fn router(state: PortalState) -> Router {
         .route("/tasks/{id}/runs", get(data::task_runs))
         .route("/tasks/{id}/enable", post(data::task_enable))
         .route("/tasks/{id}/disable", post(data::task_disable))
-        .route("/health", get(data::health))
         .route("/stats", get(data::stats))
         .route("/settings", get(settings::get_settings))
         .route("/settings", axum::routing::patch(settings::patch_settings))
@@ -224,8 +229,19 @@ pub fn router(state: PortalState) -> Router {
         auth::require_auth,
     ));
 
+    // Unmatched /api/* paths must 404 as JSON, not leak the SPA index.html
+    // via the static fallback (clients branch on the error envelope).
+    let api = public.merge(protected).fallback(|| async {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": { "code": "not_found", "message": "unknown API endpoint" }
+            })),
+        )
+    });
+
     Router::new()
-        .nest("/api", public.merge(protected))
+        .nest("/api", api)
         .merge(static_serve::router())
         .with_state(state)
 }

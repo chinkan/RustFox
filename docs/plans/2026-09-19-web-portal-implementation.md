@@ -13,18 +13,18 @@ Date: 2026-09-19 · Branch: `feat/web-portal-impl` · ADRs: 0004–0008 · Contr
 - [ ] i18n scaffolding (grill 8b): react-i18next wired, all copy into `en.json`; components unchanged beyond `t()` swap — zh-HK lands in M3
 - [ ] CI: `web` job runs `npm run verify` (tsc + build + vitest)
 
-### M2 — Backend `src/portal/` (this PR)
-- [ ] `config.rs`: `PortalConfig` (`enabled=false`, `port=8090`, `bind="127.0.0.1"`, `token`, `token_sha256`, `user_name="web"`)
-- [ ] `portal/mod.rs`: `serve(Arc<PortalState>)` — Axum Router mirroring wizard pattern + graceful shutdown
-- [ ] `auth.rs`: sha256 compare (constant-time), **stateless HMAC session cookie + `portal_secret.key` + SQLite `kv` gen counter** (ADR 0008A), middleware extractor
-- [ ] `chat.rs`: SSE via `tokio::sync::mpsc` bridged from `process_message` channels; 409 busy guard; cancel endpoint
-- [ ] `data.rs`: agents/skills/memory/tasks/health/stats read-only handlers; **`GET /api/health` public with bootId** (ADR 0008B)
-- [ ] `settings.rs`: GET projection (masked secrets) + PATCH whitelist + `.bak`; `/api/soul` GET/PUT; `restart_required` + sticky banner support
-- [ ] `static_serve.rs`: `include_dir!("web/dist")` + SPA fallback
-- [ ] `main.rs`: spawn when `config.portal.enabled`, wire into shutdown select
-- [ ] Telegram `/portal` command → reply LAN + tailnet (best-effort `tailscale ip -4`) URLs (ADR 0007)
-- [ ] `docs/portal-access.md` runbook: LAN bind, Tailscale setup, WebView tips (ADR 0007)
-- [ ] Tests: in-memory `tower::ServiceExt` per router group (auth gate 401s, cookie sign/verify + gen-bump invalidation, settings PATCH whitelist, chat 409/cancel, tasks mapping)
+### M2 — Backend `src/portal/` (this PR) ✅ complete 2026-09-22
+- [x] `config.rs`: `PortalConfig` (`enabled=false`, `port=8090`, `bind="127.0.0.1"`, `token`, `token_sha256`, `user_name="web"`)
+- [x] `portal/mod.rs`: `serve(Arc<PortalState>)` — Axum Router mirroring wizard pattern + graceful shutdown
+- [x] `auth.rs`: sha256 compare (constant-time), **stateless HMAC session cookie + `portal_secret.key` + SQLite `kv` gen counter** (ADR 0008A), middleware extractor
+- [x] `chat.rs`: SSE via `tokio::sync::mpsc` bridged from `process_message` channels; 409 busy guard; cancel endpoint
+- [x] `data.rs`: agents/skills/memory/tasks/health/stats read-only handlers; **`GET /api/health` public with bootId** (ADR 0008B)
+- [x] `settings.rs`: GET projection (masked secrets) + PATCH whitelist + `.bak`; `/api/soul` GET/PUT; `restart_required` + sticky banner support
+- [x] `static_serve.rs`: `include_dir!("web/dist")` + SPA fallback
+- [x] `main.rs`: spawn when `config.portal.enabled`, wire into shutdown select
+- [x] Telegram `/portal` command → reply LAN + tailnet (best-effort `tailscale ip -4`) URLs (ADR 0007)
+- [x] `docs/portal-access.md` runbook: LAN bind, Tailscale setup, WebView tips (ADR 0007)
+- [x] Tests: in-memory `tower::ServiceExt` per router group (auth gate 401s, cookie sign/verify + gen-bump invalidation, settings PATCH whitelist, chat 409/cancel, tasks mapping)
 
 ### M3 — Access + polish (separate PRs, ordered)
 - [ ] **Telegram WebView auto-login** (initData HMAC) — promoted from backlog: daily out-and-about friction (ADR 0007)

@@ -159,6 +159,10 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "format",
             "Switch message format: rich (native), markdown (web), auto",
         ),
+        BotCommand::new(
+            "portal",
+            "Portal URLs — how to reach the web UI from this device",
+        ),
     ]
 }
 
@@ -790,7 +794,8 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
              **/selfupgrade** — Upgrade the bot (source or release binary)\n\
              **/models** — Browse and change the model\n\
              **/stop** — Cancel the current processing gracefully\n\
-             **/btw** — Ask a parallel question while the bot is busy";
+             **/btw** — Ask a parallel question while the bot is busy\n\
+             **/portal** — Portal URLs (web UI) for this network";
         return send_markdown_message(&bot, msg.chat.id, help, msg_format).await;
     }
 
@@ -895,6 +900,11 @@ async fn handle_message(bot: Bot, msg: Message, agent: Arc<Agent>) -> ResponseRe
         lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
 
         return send_markdown_message(&bot, msg.chat.id, &lines.join("\n"), msg_format).await;
+    }
+
+    if text == "/portal" {
+        let reply = crate::portal::url::portal_reply(&agent.config.portal).await;
+        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format).await;
     }
 
     if text == "/verbose" {
