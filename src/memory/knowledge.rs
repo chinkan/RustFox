@@ -161,6 +161,22 @@ impl MemoryStore {
         }
     }
 
+    /// Most recently updated knowledge entries (no query — for browsing).
+    pub async fn recent_knowledge(&self, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, category, key, value, source
+             FROM knowledge
+             ORDER BY updated_at DESC
+             LIMIT ?1",
+        )?;
+        let entries = stmt
+            .query_map(rusqlite::params![limit as i64], parse_knowledge_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to list recent knowledge")?;
+        Ok(entries)
+    }
+
     /// List all knowledge in a category
     #[allow(dead_code)]
     pub async fn list_knowledge(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {

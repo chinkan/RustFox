@@ -119,6 +119,28 @@ pub async fn memory_search(
     let want_kind = q.kind.as_deref();
     let mut items = Vec::new();
 
+    // Empty query = browse mode (the Memory page loads with q="" on mount;
+    // an empty FTS MATCH is a syntax error, so list recent knowledge instead).
+    if q.q.trim().is_empty() {
+        if matches!(want_kind, None | Some("fact") | Some("knowledge")) {
+            let entries = state
+                .memory
+                .recent_knowledge(limit)
+                .await
+                .map_err(PortalError::from)?;
+            for (rank, e) in entries.into_iter().enumerate() {
+                items.push(json!({
+                    "id": e.id,
+                    "kind": if e.category == "fact" { "fact" } else { "knowledge" },
+                    "text": format!("{}: {} — {}", e.category, e.key, e.value),
+                    "score": 1.0 - (rank as f64 / (limit.max(1) as f64 + 1.0)),
+                    "createdAt": null,
+                }));
+            }
+        }
+        return Ok(Json(serde_json::Value::Array(items)));
+    }
+
     if matches!(want_kind, None | Some("fact") | Some("knowledge")) {
         let entries = state
             .memory
@@ -177,15 +199,13 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
 pub async fn tasks(
     State(state): State<PortalState>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
-    // list_all_active only returns active; fetch all via the store's SQL when
-    // possible, else merge active + recent runs. MVP: active list + status map.
+    // Active + paused (completed/cancelled one-shots stay hidden). Paused
+    // rows must remain visible so the UI's Enable button can bring them back.
     let active = state
         .task_store
-        .list_all_active()
+        .list_browsable()
         .await
         .map_err(PortalError::from)?;
-    // MVP: enumerate the active set. Paused/one-shot-completed tasks need a
-    // `list_all_including_disabled` store method (follow-up).
     let out: Vec<serde_json::Value> = active.iter().map(task_json).collect();
     Ok(Json(serde_json::Value::Array(out)))
 }

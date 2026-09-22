@@ -16,14 +16,20 @@ use std::sync::Arc;
 
 use rustfox::config::{Config, PortalConfig};
 use rustfox::memory::MemoryStore;
+use rustfox::llm::{ChatMessage, MessageContent};
+use rustfox::platform::tool_notifier::ToolEvent;
 use rustfox::platform::IncomingMessage;
+use rustfox::scheduler::reminders::ScheduledTask;
 use rustfox::portal::{auth, AgentOps, PortalState, SkillInfo};
 use rustfox::scheduler::reminders::ScheduledTaskStore;
 use rustfox::tool_registry::ToolUiMode;
 
-/// Minimal AgentOps for a UI smoke test. Returns canned data; never calls an LLM.
+/// Minimal AgentOps for a UI smoke test. Returns canned data; never calls an
+/// LLM. Chat messages ARE persisted to the memory store, so the e2e exercises
+/// the full write → reload → history path against real SQLite.
 struct PreviewAgent {
     config: Config,
+    memory: MemoryStore,
 }
 
 impl AgentOps for PreviewAgent {
@@ -68,15 +74,72 @@ impl AgentOps for PreviewAgent {
     }
     fn process_message(
         &self,
-        _incoming: IncomingMessage,
-        _tool_event_tx: Option<
+        incoming: IncomingMessage,
+        tool_event_tx: Option<
             tokio::sync::mpsc::Sender<rustfox::platform::tool_notifier::ToolEvent>,
         >,
-        _stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         _ui_mode: ToolUiMode,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<String>> {
-        Box::pin(async {
-            Ok("preview: no LLM attached — this is a UI smoke server.".into())
+        // Scripted streaming reply: tool events + token deltas, so the e2e
+        // exercises the real SSE bridge (token/tool/done frames) without an
+        // LLM. The returned string becomes the `done` frame content.
+        Box::pin(async move {
+            let text = incoming.text.clone();
+            let memory = self.memory.clone();
+            let conv = memory
+                .get_or_create_conversation(&incoming.platform, &incoming.user_id)
+                .await
+                .unwrap_or_default();
+            if !conv.is_empty() {
+                let _ = memory
+                    .save_message(
+                        &conv,
+                        &ChatMessage {
+                            role: "user".into(),
+                            content: Some(MessageContent::Text(incoming.text.clone())),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        },
+                    )
+                    .await;
+            }
+            if let Some(tt) = tool_event_tx {
+                let _ = tt
+                    .send(ToolEvent::Started {
+                        name: "read_file".into(),
+                        args_preview: "{\"path\"".into(),
+                        arguments_json: "{}".into(),
+                    })
+                    .await;
+                let _ = tt
+                    .send(ToolEvent::Completed {
+                        name: "read_file".into(),
+                        success: true,
+                    })
+                    .await;
+            }
+            let reply = format!("Preview reply to: {}", text);
+            if let Some(st) = stream_token_tx {
+                for word in reply.split_inclusive(' ') {
+                    let _ = st.send(word.to_string()).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                }
+            }
+            if !conv.is_empty() {
+                let _ = memory
+                    .save_message(
+                        &conv,
+                        &ChatMessage {
+                            role: "assistant".into(),
+                            content: Some(MessageContent::Text(reply.clone())),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        },
+                    )
+                    .await;
+            }
+            Ok(reply)
         })
     }
     fn set_soul_updated(&self, _value: bool) {}
@@ -141,13 +204,99 @@ user_name = "web"
     let memory = MemoryStore::open_in_memory()?;
     let task_store = ScheduledTaskStore::new(memory.connection());
     let state = PortalState::new(
-        Arc::new(PreviewAgent { config }),
-        memory,
-        task_store,
+        Arc::new(PreviewAgent {
+            config,
+            memory: memory.clone(),
+        }),
+        memory.clone(),
+        task_store.clone(),
         portal_config,
         config_path,
         Some(tmp.clone()),
     );
+    // ---------------------------------------------------------------------
+    // Deterministic fixtures so the e2e gate can assert per-page rendering:
+    // knowledge rows, a web conversation with messages, scheduled tasks+runs.
+    // Embeddings are unavailable in-memory → hybrid search falls back to FTS5.
+    // ---------------------------------------------------------------------
+    memory
+        .remember("fact", "favourite_author", "Favorite author: The Death of Portia", None)
+        .await?;
+    memory
+        .remember("project", "rustfox", "RustFox is a self-hosted Telegram AI assistant", None)
+        .await?;
+    let conv = memory.get_or_create_conversation("web", "web").await?;
+    for (role, content) in [
+        ("user", "Which Patrick Rothfuss book comes after The Wise Man's Fear?"),
+        ("assistant", "The Door into Fire… fan sequel aside, official roadmap says The Winds of Winter."),
+        ("user", "Ignore that — what is The Death of Portia?"),
+        ("assistant", "The Death of Portia is a 2021 sci-fi novel by Mur Lafferty."),
+    ] {
+        memory
+            .save_message(
+                &conv,
+                &ChatMessage {
+                    role: role.into(),
+                    content: Some(MessageContent::Text(content.into())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            )
+            .await?;
+    }
+    task_store
+        .create(&ScheduledTask {
+            id: "preview-task-weather".into(),
+            scheduler_job_id: None,
+            user_id: "1".into(),
+            chat_id: "1".into(),
+            platform: "telegram".into(),
+            trigger_type: "recurring".into(),
+            trigger_value: "0 2 * * 0".into(),
+            prompt: "Fetch the HK weather briefing".into(),
+            description: "Daily weather briefing".into(),
+            status: "active".into(),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            next_run_at: Some("2026-09-23T00:00:00Z".into()),
+        })
+        .await?;
+    task_store
+        .create(&ScheduledTask {
+            id: "preview-task-sweep".into(),
+            scheduler_job_id: None,
+            user_id: "1".into(),
+            chat_id: "1".into(),
+            platform: "web".into(),
+            trigger_type: "one_shot".into(),
+            trigger_value: "2026-09-23T12:00:00Z".into(),
+            prompt: "Sweep the vault inbox".into(),
+            description: "Inbox sweep".into(),
+            status: "active".into(),
+            created_at: "2026-09-20T00:00:00Z".into(),
+            next_run_at: Some("2026-09-23T12:00:00Z".into()),
+        })
+        .await?;
+    task_store
+        .insert_run(
+            "run-1",
+            "preview-task-weather",
+            "2026-09-21T23:30:00Z",
+            Some("done: 42 messages"),
+            None,
+            "completed",
+        )
+        .await?;
+    task_store
+        .insert_run(
+            "run-2",
+            "preview-task-weather",
+            "2026-09-20T23:30:00Z",
+            None,
+            Some("timeout after 60s"),
+            "failed",
+        )
+        .await?;
+
     auth::ensure_startup_token(&state);
 
     let app = rustfox::portal::router(state);
