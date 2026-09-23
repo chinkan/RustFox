@@ -37,6 +37,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # web/dist is gitignored (it is a build artifact embedded via
+      # include_dir!), so it MUST be produced before cargo compiles or the
+      # portal ships without a frontend (white screen). Same ordering as
+      # scripts/build-all.sh / CI's test job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web portal (embed via include_dir!)
+        run: cd web && npm ci && npm run build
       - name: Build
         run: cargo build --release
 

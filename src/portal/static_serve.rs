@@ -17,6 +17,12 @@ fn lookup(path: &str) -> Option<&'static DirEntry<'static>> {
     if path.is_empty() {
         return None;
     }
+    // Never serve dotfiles. The committed `dist/.gitkeep` placeholder (keeps
+    // the dir alive so `include_dir!` has something to embed on a fresh
+    // clone) must not become publicly fetchable.
+    if path.split('/').any(|seg| seg.starts_with('.')) {
+        return None;
+    }
     // `Dir::get_entry` searches recursively, comparing the candidate against
     // each entry's *full* path relative to the embedded root (e.g.
     // "assets/index-abc.js"). Paths containing `..`/`.` never match an
@@ -115,12 +121,13 @@ mod tests {
         out
     }
 
-    fn embedded_index() -> &'static str {
+    /// The embedded `index.html`, if the frontend was built before compiling.
+    /// On a fresh clone `web/dist` only holds the `.gitkeep` placeholder, so
+    /// dist-dependent tests skip instead of panicking (CI builds web first).
+    fn embedded_index() -> Option<&'static str> {
         WEB_DIST
             .get_file("index.html")
-            .expect("embedded dist must contain index.html")
-            .contents_utf8()
-            .expect("index.html must be utf-8")
+            .map(|f| f.contents_utf8().expect("index.html must be utf-8"))
     }
 
     #[test]
@@ -152,7 +159,18 @@ mod tests {
 
     #[test]
     fn lookup_finds_top_level_index() {
+        if embedded_index().is_none() {
+            return; // frontend not built — nothing to assert
+        }
         assert!(matches!(lookup("index.html"), Some(DirEntry::File(_))));
+    }
+
+    #[test]
+    fn lookup_rejects_dotfiles() {
+        // The tracked placeholder must never be fetchable.
+        assert!(lookup(".gitkeep").is_none());
+        assert!(lookup("/.gitkeep").is_none());
+        assert!(lookup("assets/.hidden.js").is_none());
     }
 
     /// Regression test for the MIME-type bug that made the SPA unbootable.
@@ -170,7 +188,10 @@ mod tests {
     /// in a real portal build any mismatch fails the test.
     #[test]
     fn every_asset_referenced_by_embedded_index_is_servable() {
-        let refs = asset_refs(embedded_index());
+        let Some(index) = embedded_index() else {
+            return;
+        }; // not built — skip
+        let refs = asset_refs(index);
         assert!(
             !refs.iter().any(|r| lookup(r).is_none()),
             "some /assets/ URLs referenced by index.html do not resolve in the \
@@ -188,10 +209,12 @@ mod tests {
         use axum::body::to_bytes;
         use tower::ServiceExt;
 
-        let Some(js_ref) = asset_refs(embedded_index())
-            .into_iter()
-            .find(|r| r.ends_with(".js"))
-        else {
+        let Some(index) = embedded_index() else {
+            // Frontend not built — CI's build-web step guarantees dist;
+            // plain `cargo test` without npm stays green.
+            return;
+        };
+        let Some(js_ref) = asset_refs(index).into_iter().find(|r| r.ends_with(".js")) else {
             // Stub dist (frontend not built) — CI's build-web step guarantees
             // the real dist is present, so only assert when there's something
             // to assert about. Plain `cargo test` without npm stays green.
