@@ -1,7 +1,7 @@
 # ADR 0011: Skills Control Plane, Provenance Ledger, and Native GitHub Installer
 
 ## Status
-Accepted
+Accepted — **supplemented by [ADR 0011a](0011a-control-plane-grill-resolutions.md)** (grill Round 1–3 resolutions; where they disagree, 0011a wins — notably the quarantine `.trash` fix and soft-delete task history).
 
 ## Date
 2026-09-25

@@ -4,6 +4,12 @@ Date: 2026-09-25 · Status: APPROVED (grill rounds: order = Skills → Tasks →
 
 ## Decisions locked (from grilling)
 
+> **2026-09-25 update:** Round 1–3 grill resolved 9 open questions. See
+> `docs/adr/0011a-control-plane-grill-resolutions.md` — it supersedes this plan wherever
+> they conflict (quarantine→`.trash` + loader filter, baseHash/409 optimistic locking,
+> POST-create vs PUT-update split, soft-delete tasks (no CASCADE), acknowledgedWarnings
+> gate, system-prompt file pointer = new T7 slice).
+
 1. **Order**: Skills control plane (editor + installer together) → Task CRUD → Agent editor.
 2. **Installer**: native Rust (reqwest → GitHub API), **no** `npx skills` shell-out.
 3. Branch: stacked on `feat/web-portal-impl` (PR #57). Draft PR targets #57's branch.
