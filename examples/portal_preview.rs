@@ -72,6 +72,18 @@ impl AgentOps for PreviewAgent {
     fn remove_scheduler_job(&self, _job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool> {
         Box::pin(async { true })
     }
+    fn arm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        Box::pin(async { Ok(uuid::Uuid::new_v4()) })
+    }
+    fn disarm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
     fn process_message(
         &self,
         incoming: IncomingMessage,
@@ -287,6 +299,7 @@ user_name = "web"
             status: "active".into(),
             created_at: "2026-09-01T00:00:00Z".into(),
             next_run_at: Some("2026-09-23T00:00:00Z".into()),
+            deleted_at: None,
         })
         .await?;
     task_store
@@ -303,6 +316,7 @@ user_name = "web"
             status: "active".into(),
             created_at: "2026-09-20T00:00:00Z".into(),
             next_run_at: Some("2026-09-23T12:00:00Z".into()),
+            deleted_at: None,
         })
         .await?;
     task_store

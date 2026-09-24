@@ -12,6 +12,7 @@ pub mod error;
 pub mod install;
 pub mod settings;
 pub mod static_serve;
+pub mod tasks_admin;
 pub mod url;
 
 use std::sync::Arc;
@@ -39,6 +40,19 @@ pub trait AgentOps: Send + Sync {
     fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn agent_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool>;
+    /// Schedule `task` with the live JobScheduler and persist its job id.
+    /// Err = arming failed (bad trigger, scheduler down) — the row must NOT
+    /// be left active-and-unarmed (portal rolls back; restore logs + retires).
+    fn arm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<uuid::Uuid>>;
+    /// Remove the task's live job if any. Idempotent (no job = success).
+    /// Returns whether a live job was actually removed.
+    fn disarm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, bool>;
     fn process_message(
         &self,
         incoming: crate::platform::IncomingMessage,
@@ -98,6 +112,18 @@ impl AgentOps for Agent {
     }
     fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool> {
         Box::pin(async move { self.scheduler.remove_job(job_id).await.is_ok() })
+    }
+    fn arm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        Box::pin(async move { self.arm_task(&task).await })
+    }
+    fn disarm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move { self.disarm_task(&task).await })
     }
     fn process_message(
         &self,
@@ -256,10 +282,14 @@ pub fn router(state: PortalState) -> Router {
             get(control::read_agent_file).put(control::write_agent_file),
         )
         .route("/memory/search", get(data::memory_search))
-        .route("/tasks", get(data::tasks))
+        .route("/tasks", get(data::tasks).post(tasks_admin::task_create))
+        .route(
+            "/tasks/{id}",
+            axum::routing::put(tasks_admin::task_update).delete(tasks_admin::task_delete),
+        )
         .route("/tasks/{id}/runs", get(data::task_runs))
-        .route("/tasks/{id}/enable", post(data::task_enable))
-        .route("/tasks/{id}/disable", post(data::task_disable))
+        .route("/tasks/{id}/enable", post(tasks_admin::task_enable))
+        .route("/tasks/{id}/disable", post(tasks_admin::task_disable))
         .route("/stats", get(data::stats))
         .route("/settings", get(settings::get_settings))
         .route("/settings", axum::routing::patch(settings::patch_settings))

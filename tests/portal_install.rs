@@ -67,6 +67,18 @@ impl AgentOps for FakeAgent {
     fn remove_scheduler_job(&self, _job_id: uuid::Uuid) -> BoxFuture<'_, bool> {
         Box::pin(async { true })
     }
+    fn arm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        Box::pin(async { Ok(uuid::Uuid::new_v4()) })
+    }
+    fn disarm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
     fn process_message(
         &self,
         _incoming: IncomingMessage,

@@ -36,6 +36,10 @@ struct FakeCounters {
     cancel_calls: AtomicUsize,
     set_model_calls: AtomicUsize,
     reload_calls: AtomicUsize,
+    arm_calls: AtomicUsize,
+    disarm_calls: AtomicUsize,
+    /// When set, arm_task fails — drives the portal rollback tests.
+    arm_fail: AtomicBool,
 }
 
 /// Scripted AgentOps. `hold_processing` keeps process_message "running"
@@ -104,6 +108,27 @@ impl AgentOps for FakeAgent {
     fn remove_scheduler_job(&self, _job_id: uuid::Uuid) -> BoxFuture<'_, bool> {
         Box::pin(async { true })
     }
+    fn arm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        self.counters.arm_calls.fetch_add(1, Ordering::SeqCst);
+        let fail = self.counters.arm_fail.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if fail {
+                Err(anyhow::anyhow!("fake scheduler down"))
+            } else {
+                Ok(uuid::Uuid::new_v4())
+            }
+        })
+    }
+    fn disarm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, bool> {
+        self.counters.disarm_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { true })
+    }
     fn process_message(
         &self,
         _incoming: IncomingMessage,
@@ -145,6 +170,7 @@ impl AgentOps for FakeAgent {
 struct Fixture {
     app: axum::Router,
     state: PortalState,
+    fake: Arc<FakeAgent>,
     _dir: tempfile::TempDir,
 }
 
@@ -201,8 +227,9 @@ async fn fixture(portal: PortalConfig) -> Fixture {
 
     let memory = MemoryStore::open_in_memory().unwrap();
     let task_store = ScheduledTaskStore::new(memory.connection());
+    let fake = Arc::new(FakeAgent::new(config));
     let state = PortalState::new(
-        Arc::new(FakeAgent::new(config)),
+        fake.clone(),
         memory,
         task_store,
         portal,
@@ -212,6 +239,7 @@ async fn fixture(portal: PortalConfig) -> Fixture {
     Fixture {
         app: rustfox::portal::router(state.clone()),
         state,
+        fake,
         _dir: dir,
     }
 }
@@ -864,15 +892,415 @@ fn make_task(id: &str) -> ScheduledTask {
         chat_id: "1".into(),
         platform: "telegram".into(),
         trigger_type: "recurring".into(),
-        trigger_value: "30 7 * * *".into(),
+        trigger_value: "0 30 7 * * *".into(),
         prompt: "weather report".into(),
         description: "Daily weather".into(),
         status: "active".into(),
         created_at: "2026-09-01T00:00:00Z".into(),
         next_run_at: Some("2026-09-23T07:30:00+08:00".into()),
+        deleted_at: None,
     }
 }
 
+// ---------------------------------------------------------------------------
+// T3 — task CRUD + real re-arm (ADR-0011a R6)
+// ---------------------------------------------------------------------------
+
+fn put_json(path: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn post_empty(path: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn task_create_validates_and_arms() {
+    let f = fixture(with_token_token()).await;
+    // 5-field cron is rejected (validate_cron_expr wants 6)
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"x","prompt":"p","triggerType":"recurring","triggerValue":"30 7 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_cron");
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), 0);
+
+    // valid 6-field cron → 201 + armed + persisted with scheduler id
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"Standup nudge","prompt":"ping me","triggerType":"recurring","triggerValue":"0 30 9 * * 1-5"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = body_json(res).await;
+    let id = body["id"].as_str().unwrap().to_string();
+    assert!(body["schedulerJobId"].is_string());
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), 1);
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(row.status, "active");
+    assert!(
+        row.scheduler_job_id.is_some(),
+        "job id must persist for disable"
+    );
+}
+
+#[tokio::test]
+async fn task_create_rejects_past_oneshot_and_blank_prompt() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"old","prompt":"p","triggerType":"one_shot","triggerValue":"2020-01-01T09:00:00"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_trigger");
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"blank","prompt":"   ","triggerType":"recurring","triggerValue":"0 0 0 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "empty_prompt");
+}
+
+#[tokio::test]
+async fn task_create_rolls_back_row_when_arm_fails() {
+    let f = fixture(with_token_token()).await;
+    f.fake.counters.arm_fail.store(true, Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"Doomed","prompt":"p","triggerType":"recurring","triggerValue":"0 0 0 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "arm_failed");
+    // The row must NOT linger as an active-but-unarmed zombie (silently
+    // resurface on restart): it is soft-deleted by the rollback.
+    let listed = f.state.task_store.list_all_active().await.unwrap();
+    assert!(
+        listed.iter().all(|t| t.description != "Doomed"),
+        "rolled-back task still active"
+    );
+}
+
+#[tokio::test]
+async fn task_update_rearms_active_and_refuses_type_change() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("u1")).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"prompt":"new prompt","name":"Renamed"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["rearmed"], true);
+    assert!(body["schedulerJobId"].is_string());
+    let ac = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+    assert_eq!(ac, before + 1, "active task edit must re-arm exactly once");
+    let row = f.state.task_store.get_by_id("u1").await.unwrap().unwrap();
+    assert_eq!(row.prompt, "new prompt");
+    assert_eq!(row.description, "Renamed");
+
+    // triggerType is immutable (different mechanism → delete + recreate)
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"triggerType":"one_shot","triggerValue":"2099-01-01T09:00:00"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(res).await["error"]["code"],
+        "trigger_type_immutable"
+    );
+
+    // bad cron on a recurring task → invalid_cron, row untouched
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"triggerValue":"not a cron at all here"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_cron");
+    let row = f.state.task_store.get_by_id("u1").await.unwrap().unwrap();
+    assert_eq!(
+        row.trigger_value, "0 30 7 * * *",
+        "rejected edit must not touch row"
+    );
+
+    // unknown id → 404
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/nope", json!({"prompt":"x"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn task_delete_is_soft_and_preserves_history() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("d1")).await.unwrap();
+    f.state
+        .task_store
+        .insert_run(
+            "r1",
+            "d1",
+            "2026-09-24T07:30:00",
+            Some("ok"),
+            None,
+            "completed",
+        )
+        .await
+        .unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/tasks/d1")
+                .body(Body::empty())
+                .unwrap(),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["softDeleted"], true);
+    assert_eq!(body["historyPreserved"], true);
+    assert_eq!(f.fake.counters.disarm_calls.load(Ordering::SeqCst), 1);
+
+    // hidden from listing (GET /api/tasks), gone from active queries…
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(res).await;
+    assert!(
+        body.as_array().unwrap().iter().all(|t| t["id"] != "d1"),
+        "deleted task listed"
+    );
+    // …but the row and ALL run history survive as evidence (R6).
+    let raw = f.state.task_store.get_by_id("d1").await.unwrap();
+    assert!(raw.is_some(), "soft-deleted row must survive");
+    assert!(raw.unwrap().deleted_at.is_some());
+    let runs = f.state.task_store.get_task_runs("d1", 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "run history must survive task deletion");
+
+    // second delete / edit of a deleted task → 404
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/tasks/d1")
+                .body(Body::empty())
+                .unwrap(),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn task_enable_really_arms_no_restart_lie() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("e1");
+    t.status = "paused".into();
+    f.state.task_store.create(&t).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(post_empty("/api/tasks/e1/enable"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["enabled"], true);
+    // The restartToSchedule fib is dead: a real job id comes back instead.
+    assert_eq!(body.get("restartToSchedule"), None);
+    assert!(body["schedulerJobId"].is_string());
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("e1")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "active"
+    );
+}
+
+#[tokio::test]
+async fn task_enable_past_oneshot_400_and_status_rolls_back() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("e2");
+    t.status = "paused".into();
+    t.trigger_type = "one_shot".into();
+    t.trigger_value = "2020-01-01T09:00:00".into();
+    f.state.task_store.create(&t).await.unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(post_empty("/api/tasks/e2/enable"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "trigger_passed");
+    // status must roll back to paused — not left "active" but unarmed
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("e2")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "paused"
+    );
+}
+
+#[tokio::test]
+async fn tasks_listing_exposes_editable_fields() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("l1")).await.unwrap();
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(res).await;
+    let t = &body.as_array().unwrap()[0];
+    assert_eq!(t["id"], "l1");
+    assert_eq!(t["prompt"], "weather report");
+    assert_eq!(t["triggerType"], "recurring");
+    assert_eq!(t["triggerValue"], "0 30 7 * * *");
+    assert_eq!(t["status"], "active");
+    assert_eq!(t["platform"], "telegram");
+}
+
+#[tokio::test]
+async fn task_update_paused_saves_without_rearming() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("u2");
+    t.status = "paused".into();
+    f.state.task_store.create(&t).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/u2", json!({"prompt":"edited while paused"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["rearmed"], false);
+    assert_eq!(
+        f.fake.counters.arm_calls.load(Ordering::SeqCst),
+        before,
+        "paused edit must not arm"
+    );
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("u2")
+            .await
+            .unwrap()
+            .unwrap()
+            .prompt,
+        "edited while paused"
+    );
+}
 #[tokio::test]
 async fn tasks_listing_maps_fields() {
     let f = fixture(with_token_token()).await;
@@ -884,7 +1312,7 @@ async fn tasks_listing_maps_fields() {
     assert_eq!(body.as_array().unwrap().len(), 1);
     assert_eq!(body[0]["id"], "t1");
     assert_eq!(body[0]["name"], "Daily weather");
-    assert_eq!(body[0]["cron"], "30 7 * * *");
+    assert_eq!(body[0]["cron"], "0 30 7 * * *");
     assert_eq!(body[0]["enabled"], true);
     assert_eq!(body[0]["nextRun"], "2026-09-23T07:30:00+08:00");
 }
@@ -1066,8 +1494,9 @@ async fn control_fixture() -> Fixture {
     config.agents.directory = agents;
 
     let memory = MemoryStore::open_in_memory().unwrap();
+    let fake = Arc::new(FakeAgent::new(config));
     let state = PortalState::new(
-        Arc::new(FakeAgent::new(config)),
+        fake.clone(),
         memory.clone(),
         ScheduledTaskStore::new(memory.connection()),
         portal,
@@ -1077,6 +1506,7 @@ async fn control_fixture() -> Fixture {
     Fixture {
         app: rustfox::portal::router(state.clone()),
         state,
+        fake,
         _dir: dir,
     }
 }

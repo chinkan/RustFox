@@ -53,7 +53,7 @@ Date: 2026-09-25 · Status: APPROVED (grill rounds: order = Skills → Tasks →
 - Routes: `GET /api/skills/installed` (provenance list), `POST /api/skills/install`.
 - Tests: fake fetcher fixtures (tree JSON + raw contents); cover: discovery, depth cap, executable refusal, secret refusal, size cap, collision 409, force, provenance round-trip, dry-run writes nothing, bundled-name refusal.
 
-### T3 — Task CRUD + live re-arm
+### T3 — Task CRUD + live re-arm ✅ DONE (supervisor: arm/disarm via AgentOps; soft delete; 10 new tests; `validate_cron_expr` upgraded to real croner parser — see commit msg)
 - `ScheduledTaskStore`: add `update_task_fields(id, prompt, trigger_type, trigger_value, description)`, `delete_task(id)` (runs have FK → `PRAGMA foreign_keys=ON` + `ON DELETE CASCADE` — verify schema first; if missing, DELETE runs manually in same txn).
 - `agent.rs`: extract the fire-closure builder from `restore_scheduled_tasks` into a shared helper; add `pub async fn arm_task(&self, task: &ScheduledTask, bot: Arc<Bot>) -> anyhow::Result<Uuid>` + `disarm_task(&self, uuid)`. New `AgentOps` methods: `arm_task`, `disarm_task` (tests' FakeAgent records calls instead of scheduling).
   - `PortalState` gains `bot: Arc<teloxide::Bot>` (main.rs passes the live bot; test fixtures use `Bot::new("42:dummy")` — constructing a Bot does no network I/O).

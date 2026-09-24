@@ -20,7 +20,7 @@ use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::platform::sender::PlatformSender;
 use crate::platform::IncomingMessage;
-use crate::scheduler::reminders::ScheduledTaskStore;
+use crate::scheduler::reminders::{ScheduledTask, ScheduledTaskStore};
 use crate::scheduler::Scheduler;
 use crate::skills::{format_listed_section, SkillRegistry};
 use crate::tool_registry::{ToolContext, ToolRegistry};
@@ -94,6 +94,10 @@ pub struct Agent {
     pub cancel_registry: Arc<CancelRegistry>,
     pub tool_registry: ToolRegistry,
     pub sender: Arc<dyn PlatformSender>,
+    /// Telegram bot handle — captured by scheduled-task fire closures
+    /// (`build_fire_closure`). Cloned from main's Arc so every arm path
+    /// dispatches to the same bot without threading it through handlers.
+    pub bot: Arc<Bot>,
     /// Per-user CancellationTokens for /stop — created at process_message entry,
     /// removed on exit. Checked at each iteration boundary.
     pub cancel_token_registry: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
@@ -167,6 +171,7 @@ impl Agent {
         cancel_registry: Arc<CancelRegistry>,
         tool_registry: ToolRegistry,
         sender: Arc<dyn PlatformSender>,
+        bot: Arc<Bot>,
         restart_pending: Arc<AtomicBool>,
         soul_updated: Arc<AtomicBool>,
     ) -> Self {
@@ -192,6 +197,7 @@ impl Agent {
             cancel_registry,
             tool_registry,
             sender,
+            bot,
             cancel_token_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_injections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_loop_callbacks: Arc::new(tokio::sync::Mutex::new(
@@ -928,9 +934,100 @@ impl Agent {
         }
     }
 
+    /// Build the fire closure shared by every scheduled-task arming path
+    /// (startup restore, Telegram tool, portal CRUD). Dispatches a synthetic
+    /// agent turn to the background job runner; the response delivery is the
+    /// runner's `reply_to` choice, so no platform-specific delivery logic
+    /// lives here. `bot` is passed in (rather than read from self) because
+    /// the closure must own an Arc and callers like `restore_scheduled_tasks`
+    /// run against `&self`.
+    pub(crate) fn build_fire_closure(
+        job_tx: tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+        bot: Arc<Bot>,
+        store: ScheduledTaskStore,
+        task: &ScheduledTask,
+    ) -> impl Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static {
+        let tid = task.id.clone();
+        let uid = task.user_id.clone();
+        let cid = task.chat_id.clone();
+        let prompt = task.prompt.clone();
+        let is_recurring = task.trigger_type == "recurring";
+        move || {
+            let tx = job_tx.clone();
+            let bot = bot.clone();
+            let store = store.clone();
+            let tid = tid.clone();
+            let uid = uid.clone();
+            let cid = cid.clone();
+            let prompt = prompt.clone();
+            let recurring = is_recurring;
+            Box::pin(async move {
+                let incoming = crate::platform::IncomingMessage {
+                    platform: "scheduled_task".to_string(),
+                    user_id: format!("{uid}:{tid}"),
+                    chat_id: cid,
+                    user_name: String::new(),
+                    text: prompt,
+                    attachments: vec![],
+                };
+                let req = ScheduledJobRequest {
+                    incoming,
+                    bot,
+                    is_recurring: recurring,
+                    task_store: store,
+                    task_id: tid,
+                };
+                if let Err(e) = tx.send(req) {
+                    tracing::error!("Failed to dispatch scheduled job: {}", e);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }
+    }
+
+    /// Arm (schedule) a task with the live JobScheduler and persist the job
+    /// id back onto the DB row. One-shot triggers that already passed return
+    /// Err (caller decides: restore marks them `completed`, portal 400s).
+    pub async fn arm_task(&self, task: &ScheduledTask) -> Result<uuid::Uuid> {
+        let fire = Self::build_fire_closure(
+            self.job_tx.clone(),
+            Arc::clone(&self.bot),
+            self.task_store.clone(),
+            task,
+        );
+        let job_id = if task.trigger_type == "one_shot" {
+            let delay = parse_one_shot_delay(&task.trigger_value)?;
+            self.scheduler
+                .add_one_shot_job(delay, &task.description, fire)
+                .await?
+        } else {
+            self.scheduler
+                .add_cron_job(&task.trigger_value, &task.description, fire)
+                .await?
+        };
+        // Persist the new job id so disable/delete can find it again.
+        self.task_store
+            .update_scheduler_job_id(&task.id, &job_id.to_string())
+            .await?;
+        Ok(job_id)
+    }
+
+    /// Remove a task's live job (if any). Idempotent: an unparseable or
+    /// missing scheduler_job_id (already-fired one-shot, pre-restart row)
+    /// counts as success — there is simply nothing left to disarm.
+    pub async fn disarm_task(&self, task: &ScheduledTask) -> bool {
+        match task
+            .scheduler_job_id
+            .as_deref()
+            .map(|j| j.parse::<uuid::Uuid>())
+        {
+            Some(Ok(job_id)) => self.scheduler.remove_job(job_id).await.is_ok(),
+            _ => true,
+        }
+    }
+
     /// Re-register all active scheduled tasks from the DB into the scheduler.
     /// Called once at startup after the agent is constructed.
-    pub async fn restore_scheduled_tasks(&self, bot: Arc<Bot>) {
+    pub async fn restore_scheduled_tasks(&self) {
         let tasks = match self.task_store.list_all_active().await {
             Ok(t) => t,
             Err(e) => {
@@ -941,99 +1038,33 @@ impl Agent {
 
         let count = tasks.len();
         for task in tasks {
-            // Build the same fire closure as in schedule_task handler
-            let job_tx = self.job_tx.clone();
-            let bot_clone = Arc::clone(&bot);
-            let tid = task.id.clone();
-            let uid = task.user_id.clone();
-            let cid = task.chat_id.clone();
-            let prompt_cap = task.prompt.clone();
-            let is_recurring = task.trigger_type == "recurring";
-            let store_clone = self.task_store.clone();
-
-            let fire = move || {
-                let tx = job_tx.clone();
-                let bot = bot_clone.clone();
-                let store = store_clone.clone();
-                let tid = tid.clone();
-                let uid = uid.clone();
-                let cid = cid.clone();
-                let prompt = prompt_cap.clone();
-                let recurring = is_recurring;
-                Box::pin(async move {
-                    let incoming = crate::platform::IncomingMessage {
-                        platform: "scheduled_task".to_string(),
-                        user_id: format!("{uid}:{tid}"),
-                        chat_id: cid,
-                        user_name: String::new(),
-                        text: prompt,
-                        attachments: vec![],
-                    };
-                    let req = ScheduledJobRequest {
-                        incoming,
-                        bot,
-                        task_id: tid,
-                        is_recurring: recurring,
-                        task_store: store,
-                    };
-                    if let Err(e) = tx.send(req) {
-                        tracing::error!("Failed to dispatch restored scheduled job: {}", e);
-                    }
-                })
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            };
-
-            // Register with the right scheduler method based on trigger_type
-            let sched_result = if task.trigger_type == "one_shot" {
-                match parse_one_shot_delay(&task.trigger_value) {
-                    Ok(delay) => {
-                        self.scheduler
-                            .add_one_shot_job(delay, &task.description, fire)
-                            .await
-                    }
-                    Err(e) => {
+            match self.arm_task(&task).await {
+                Ok(sched_id) => {
+                    tracing::info!(
+                        "Restored scheduled task: {} ({}, job {})",
+                        task.id,
+                        task.description,
+                        sched_id
+                    );
+                }
+                Err(e) => {
+                    if task.trigger_type == "one_shot" {
+                        // Trigger time passed while the bot was down — the
+                        // fire can never happen; retire it like before.
                         tracing::warn!(
                             "Skipping restore of one-shot task {} (trigger has passed or invalid: {})",
                             task.id,
                             e
                         );
-                        // Mark as completed since its time has passed
                         let _ = self.task_store.set_status(&task.id, "completed").await;
-                        continue;
-                    }
-                }
-            } else {
-                self.scheduler
-                    .add_cron_job(&task.trigger_value, &task.description, fire)
-                    .await
-            };
-
-            match sched_result {
-                Ok(sched_id) => {
-                    if let Err(e) = self
-                        .task_store
-                        .update_scheduler_job_id(&task.id, &sched_id.to_string())
-                        .await
-                    {
-                        tracing::warn!(
-                            "Failed to update scheduler_job_id for restored task {}: {}",
+                    } else {
+                        tracing::error!(
+                            "Failed to restore scheduled task {} ({}): {}",
                             task.id,
+                            task.description,
                             e
                         );
                     }
-                    tracing::info!(
-                        "Restored scheduled task: {} ({})",
-                        task.id,
-                        task.description
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to restore scheduled task {} ({}): {}",
-                        task.id,
-                        task.description,
-                        e
-                    );
                 }
             }
         }
@@ -1633,6 +1664,13 @@ pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::t
 }
 
 /// Validate a 6-field cron expression (sec min hour day month weekday).
+///
+/// Uses the SAME parser configuration tokio-cron-scheduler uses internally
+/// (`croner` with `with_seconds_required()` + `with_dom_and_dow()`), so
+/// anything that passes here is guaranteed to be accepted by `Job::new_async`.
+/// The previous implementation only counted whitespace-separated fields — a
+/// gate that let "not a cron at all here" through (six words, zero meaning)
+/// and surfaced the real failure later as an opaque scheduler error.
 pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 6 {
@@ -1642,6 +1680,11 @@ pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
             expr
         );
     }
+    croner::Cron::new(expr)
+        .with_seconds_required()
+        .with_dom_and_dow()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", expr, e))?;
     Ok(())
 }
 
@@ -1824,6 +1867,27 @@ mod tests {
     fn test_validate_cron_expr_wrong_field_count() {
         assert!(validate_cron_expr("0 9 * * *").is_err()); // 5 fields
         assert!(validate_cron_expr("0 0 9 1 * * MON").is_err()); // 7 fields
+    }
+
+    #[test]
+    fn test_validate_cron_expr_rejects_garbage_with_six_words() {
+        // Regression: the old gate only counted fields, so six random words
+        // sailed through and the failure surfaced later as an opaque
+        // arm_failed from the scheduler.
+        assert!(validate_cron_expr("not a cron at all here").is_err());
+        assert!(validate_cron_expr("0 30 9 * * BADDAY").is_err());
+        assert!(validate_cron_expr("99 99 99 99 99 99").is_err());
+    }
+
+    #[test]
+    fn test_validate_cron_expr_accepts_what_scheduler_accepts() {
+        for ok in [
+            "0 30 7 * * *",      // every day 07:30:00 (weather-report shape)
+            "0 0 9 * * MON-FRI", // weekday mornings
+            "15 30 12 1,15 * *", // 12:30:15 on the 1st and 15th
+        ] {
+            assert!(validate_cron_expr(ok).is_ok(), "{ok} must validate");
+        }
     }
 
     #[test]

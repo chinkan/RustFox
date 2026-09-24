@@ -213,7 +213,8 @@ impl MemoryStore {
                 description      TEXT NOT NULL,
                 status           TEXT NOT NULL DEFAULT 'active',
                 created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-                next_run_at      TEXT
+                next_run_at      TEXT,
+                deleted_at       TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
@@ -318,6 +319,12 @@ impl MemoryStore {
 
         conn.execute_batch("ALTER TABLE conversations ADD COLUMN is_archived INTEGER DEFAULT 0;")
             .ok(); // safe no-op: ALTER TABLE fails with "duplicate column" on re-run
+
+        // Migration: soft-delete marker for scheduled tasks (T3 / ADR-0011a R6).
+        // A portal DELETE disarms + stamps deleted_at; the row and ALL its
+        // scheduled_task_runs history survive as evidence (RRSI ledger input).
+        conn.execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN deleted_at TEXT;")
+            .ok(); // safe no-op on re-run
 
         // Stored embedding dimension (None if legacy DB without schema_meta row)
         let raw: Option<String> = conn

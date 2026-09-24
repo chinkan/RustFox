@@ -18,6 +18,10 @@ pub struct ScheduledTask {
     pub status: String,
     pub created_at: String,
     pub next_run_at: Option<String>,
+    /// Soft-delete stamp (T3 / ADR-0011a R6). `None` = live row. A portal
+    /// DELETE sets this instead of removing the row, so run history and the
+    /// definition survive as evidence.
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,8 +53,9 @@ impl ScheduledTaskStore {
         conn.execute(
             "INSERT INTO scheduled_tasks
              (id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
-              trigger_value, prompt, description, status, created_at, next_run_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+              trigger_value, prompt, description, status, created_at, next_run_at,
+              deleted_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             rusqlite::params![
                 task.id,
                 task.scheduler_job_id,
@@ -64,6 +69,7 @@ impl ScheduledTaskStore {
                 task.status,
                 task.created_at,
                 task.next_run_at,
+                task.deleted_at,
             ],
         )
         .context("Failed to insert scheduled task")?;
@@ -74,14 +80,18 @@ impl ScheduledTaskStore {
         let conn = self.conn.lock().await;
         self.query_tasks(
             &conn,
-            "WHERE user_id = ?1 AND status = 'active'",
+            "WHERE user_id = ?1 AND status = 'active' AND deleted_at IS NULL",
             rusqlite::params![user_id],
         )
     }
 
     pub async fn list_all_active(&self) -> Result<Vec<ScheduledTask>> {
         let conn = self.conn.lock().await;
-        self.query_tasks(&conn, "WHERE status = 'active'", rusqlite::params![])
+        self.query_tasks(
+            &conn,
+            "WHERE status = 'active' AND deleted_at IS NULL",
+            rusqlite::params![],
+        )
     }
 
     /// Active + paused tasks — what the portal Tasks page should show so a
@@ -90,7 +100,7 @@ impl ScheduledTaskStore {
         let conn = self.conn.lock().await;
         self.query_tasks(
             &conn,
-            "WHERE status IN ('active', 'paused')",
+            "WHERE status IN ('active', 'paused') AND deleted_at IS NULL",
             rusqlite::params![],
         )
     }
@@ -120,7 +130,7 @@ impl ScheduledTaskStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
-                        trigger_value, prompt, description, status, created_at, next_run_at
+                        trigger_value, prompt, description, status, created_at, next_run_at, deleted_at
                  FROM scheduled_tasks WHERE id = ?1",
             )
             .context("Failed to prepare get_by_id query")?;
@@ -139,6 +149,7 @@ impl ScheduledTaskStore {
                     status: row.get(9)?,
                     created_at: row.get(10)?,
                     next_run_at: row.get(11)?,
+                    deleted_at: row.get(12)?,
                 })
             })
             .context("Failed to query task by id")?;
@@ -147,6 +158,54 @@ impl ScheduledTaskStore {
             Some(Err(e)) => Err(e).context("Failed to deserialize task"),
             None => Ok(None),
         }
+    }
+
+    /// Partial update for the portal task editor (T3). `None` arguments are
+    /// left untouched (COALESCE); `next_run = Some(x)` writes `x` (which may
+    /// be NULL to clear it for recurring edits). Returns rows affected
+    /// (0 = id not found or already soft-deleted).
+    pub async fn update_task_fields(
+        &self,
+        id: &str,
+        prompt: Option<&str>,
+        trigger_value: Option<&str>,
+        description: Option<&str>,
+        next_run: Option<Option<&str>>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_tasks
+                 SET prompt        = COALESCE(?1, prompt),
+                     trigger_value = COALESCE(?2, trigger_value),
+                     description   = COALESCE(?3, description),
+                     next_run_at   = CASE WHEN ?4 THEN ?5 ELSE next_run_at END
+                 WHERE id = ?6 AND deleted_at IS NULL",
+                rusqlite::params![
+                    prompt,
+                    trigger_value,
+                    description,
+                    next_run.is_some(),
+                    next_run.flatten(),
+                    id
+                ],
+            )
+            .context("Failed to update task fields")?;
+        Ok(n)
+    }
+
+    /// Soft delete (T3 / ADR-0011a R6): stamp `deleted_at`, keep the row and
+    /// its entire `scheduled_task_runs` history. Returns rows affected.
+    pub async fn soft_delete(&self, id: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_tasks SET deleted_at = datetime('now'), status = 'cancelled'
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                rusqlite::params![id],
+            )
+            .context("Failed to soft-delete task")?;
+        Ok(n)
     }
 
     pub async fn update_next_run_at(&self, id: &str, next_run_at: &str) -> Result<()> {
@@ -237,7 +296,7 @@ impl ScheduledTaskStore {
     ) -> Result<Vec<ScheduledTask>> {
         let sql = format!(
             "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
-                    trigger_value, prompt, description, status, created_at, next_run_at
+                    trigger_value, prompt, description, status, created_at, next_run_at, deleted_at
              FROM scheduled_tasks {}
              ORDER BY created_at ASC",
             where_clause
@@ -258,6 +317,7 @@ impl ScheduledTaskStore {
                     status: row.get(9)?,
                     created_at: row.get(10)?,
                     next_run_at: row.get(11)?,
+                    deleted_at: row.get(12)?,
                 })
             })
             .context("Failed to map rows")?
@@ -286,6 +346,7 @@ mod tests {
             status: "active".to_string(),
             created_at: "2026-01-01T00:00:00".to_string(),
             next_run_at: Some("2099-01-01T09:00:00".to_string()),
+            deleted_at: None,
         }
     }
 
