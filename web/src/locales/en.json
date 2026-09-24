@@ -13,7 +13,8 @@
     "tasks": "Scheduled Tasks",
     "settings": "Settings",
     "signOut": "Sign out",
-    "signOutEverywhere": "Sign out everywhere"
+    "signOutEverywhere": "Sign out everywhere",
+    "skills": "Skills"
   },
   "login": {
     "title": "RustFox Portal",
@@ -30,7 +31,8 @@
     "retry": "Retry",
     "enabled": "enabled",
     "paused": "paused",
-    "restarting": "Server restarting — reconnecting…"
+    "restarting": "Server restarting — reconnecting…",
+    "cancel": "Cancel"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -115,7 +117,29 @@
     "runs": "Runs",
     "hideRuns": "Hide runs",
     "noRuns": "No runs recorded yet.",
-    "restartNote": "Enabled — re-arms on next restart."
+    "restartNote": "Enabled — re-arms on next restart.",
+    "newTask": "New task",
+    "editTask": "Edit task",
+    "edit": "Edit",
+    "delete": "Delete",
+    "save": "Save",
+    "create": "Create",
+    "triggerType": "Trigger",
+    "recurring": "Recurring (cron)",
+    "oneShot": "One-shot",
+    "triggerTypeLocked": "Trigger type cannot be changed after creation.",
+    "cronExpr": "Cron (6-field)",
+    "runAt": "Run at (ISO-8601)",
+    "cronHint": "sec min hour day month weekday — e.g. 0 30 7 * * *",
+    "triggerInvalid": "Invalid trigger value (need 6-field cron / future ISO time).",
+    "prompt": "Prompt",
+    "rearmed": "Re-armed live — next run {{next}}",
+    "created": "Task created — next run {{next}}",
+    "updated": "Task updated",
+    "updatedRearmed": "Task updated & re-armed — next run {{next}}",
+    "deleted": "Task deleted — run history preserved",
+    "deleteConfirmTitle": "Delete task?",
+    "deleteConfirm": "Delete “{{name}}”? The schedule is cancelled; run history stays available."
   },
   "settings": {
     "title": "Settings",
@@ -144,5 +168,49 @@
   "notFound": {
     "title": "404 — Route not found",
     "back": "Back to dashboard"
+  },
+  "skills": {
+    "title": "Skills",
+    "subtitle": "Edit SKILL.md files, manage agents, install from GitHub.",
+    "col.name": "Name",
+    "col.source": "Source",
+    "col.files": "Files",
+    "newSkill": "New skill",
+    "reload": "Reload",
+    "reloadDone": "Reloaded: {{skills}} skills, {{agents}} agents",
+    "openEditor": "Open",
+    "editorTitle": "{{name}} · {{path}}",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "delete": "Delete",
+    "deleteConfirm": "Quarantine “{{name}}” to .trash? History is kept, the loader stops seeing it.",
+    "bundledNoDelete": "bundled skills cannot be deleted here",
+    "conflict409": "Changed since you read it (OpenCode or another tab saved). Re-read, then retry.",
+    "reread": "Re-read",
+    "modifiedMark": "modified",
+    "unknownTools": "Some tools are not registered. Save anyway?",
+    "warnings": "Warnings",
+    "name": "Skill name",
+    "content": "SKILL.md content",
+    "created2": "Skill created"
+  },
+  "install": {
+    "title": "Install from GitHub",
+    "subtitle": "owner/repo[:subpath][@ref] — scanned before anything touches disk.",
+    "source": "Source repo",
+    "dryRun": "Dry run",
+    "install": "Install",
+    "force": "Replace same-name skills (quarantine first)",
+    "wouldInstall": "Would install",
+    "refused": "Refused (hard rules)",
+    "warningsNeedAck": "Warnings — tick each to acknowledge",
+    "ackAll": "Acknowledge all",
+    "notes": "Notes",
+    "installedOk": "Installed: {{names}}",
+    "skipped": "Skipped: {{count}}",
+    "noWarnings": "No warnings — clean verdict.",
+    "ledger": "Installed ledger",
+    "ledgerEmpty": "Nothing installed via this portal yet."
   }
 }

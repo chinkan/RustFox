@@ -1,24 +1,41 @@
 import { SseHttpError, streamSse } from './sse'
 import type {
   Agent,
+  AgentDetail,
   ChatHistory,
+  CreateEntryBody,
+  CreateEntryResult,
+  EntryDetail,
+  FileWriteResult,
+  InstallRequest,
+  InstallResult,
+  InstalledLedgerView,
+  InstallDryRunResult,
   LoginResponse,
   MeResponse,
   MemoryEntry,
   MemoryKind,
+  QuarantineResult,
   ReloadResult,
   ScheduledTask,
   Settings,
   SettingsPatch,
   SettingsPatchResult,
   Skill,
+  SkillEntry,
   SoulFile,
   SoulName,
   Stats,
   StreamFrame,
   SystemHealth,
+  TaskCreateBody,
+  TaskCreateResult,
+  TaskDeleteResult,
+  TaskEnableResult,
   TaskRun,
   TaskToggleResult,
+  TaskUpdateBody,
+  TaskUpdateResult,
   Thread,
 } from './types'
 
@@ -129,10 +146,7 @@ export const api = {
   // ── tasks ───────────────────────────────────────────────────────────────
   listTasks: () => get<ScheduledTask[]>('/tasks'),
   getTaskRuns: (id: string) => get<TaskRun[]>(`/tasks/${encodeURIComponent(id)}/runs`),
-  enableTask: (id: string) =>
-    request<TaskToggleResult>(`/tasks/${encodeURIComponent(id)}/enable`, { method: 'POST' }),
-  disableTask: (id: string) =>
-    request<TaskToggleResult>(`/tasks/${encodeURIComponent(id)}/disable`, { method: 'POST' }),
+  // enableTask / disableTask live in the task-CRUD section below (T3: real re-arm).
 
   // ── settings & soul ─────────────────────────────────────────────────────
   getSettings: () => get<Settings>('/settings'),
@@ -144,6 +158,85 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ name, content }),
     }),
+
+  // ── control plane: skills (ADR 0011) ────────────────────────────────────
+  /** Rich list with provenance/drift. kind = 'skills' | 'agents' | 'all'. */
+  listEntries: (kind?: 'skills' | 'agents') =>
+    get<SkillEntry[]>(`/skills${kind ? `?kind=${kind}` : ''}`),
+  getSkill: (name: string) => get<EntryDetail>(`/skills/${encodeURIComponent(name)}`),
+  getSkillFile: (name: string, path: string) =>
+    get<{ path: string; content: string; size: number }>(
+      `/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`,
+    ),
+  /**
+   * Update-only file write. Pass `baseHash` (from detail `hash` / primary
+   * `fileHash` / `files[].hash`) for the optimistic lock (ADR 0011a R4) —
+   * omit to force-write (CLI parity). 409 skill_changed_since_read means
+   * somebody else (OpenCode, another tab) touched the file: re-read first.
+   */
+  putSkillFile: (
+    name: string,
+    body: { path: string; content: string; baseHash?: string },
+  ) =>
+    request<FileWriteResult>(`/skills/${encodeURIComponent(name)}/file`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  createSkill: (body: CreateEntryBody) =>
+    request<CreateEntryResult>('/skills', { method: 'POST', body: JSON.stringify(body) }),
+  deleteSkill: (name: string) =>
+    request<QuarantineResult>(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // ── control plane: agents ───────────────────────────────────────────────
+  getAgentDetail: (name: string) => get<AgentDetail>(`/agents/${encodeURIComponent(name)}`),
+  getAgentFile: (name: string, path: string) =>
+    get<{ path: string; content: string; size: number }>(
+      `/agents/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`,
+    ),
+  /** `allowMissing` = escape hatch for unknown tools (400 unknown_tools). */
+  putAgentFile: (
+    name: string,
+    body: { path: string; content: string; baseHash?: string },
+    allowMissing = false,
+  ) =>
+    request<FileWriteResult>(
+      `/agents/${encodeURIComponent(name)}/file${allowMissing ? '?allowMissing=1' : ''}`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+  createAgent: (body: CreateEntryBody) =>
+    request<CreateEntryResult>(`/agents`, { method: 'POST', body: JSON.stringify(body) }),
+  deleteAgent: (name: string) =>
+    request<QuarantineResult>(`/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // ── GitHub skill installer ──────────────────────────────────────────────
+  /**
+   * POST /api/skills/install. Two-step (ADR 0011a R2): dryRun:true first →
+   * verdict; then dryRun:false with acknowledgedWarnings = exact warningKey()
+   * strings the owner ticked. Unacked warnings come back as 409
+   * warnings_unacknowledged.
+   */
+  installSkill: (req: InstallRequest) =>
+    request<InstallResult | InstallDryRunResult>('/skills/install', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+  listInstalled: () => get<InstalledLedgerView>('/skills/installed'),
+
+  // ── task CRUD (T3) — real re-arm, soft delete ───────────────────────────
+  createTask: (body: TaskCreateBody) =>
+    request<TaskCreateResult>('/tasks', { method: 'POST', body: JSON.stringify(body) }),
+  updateTask: (id: string, body: TaskUpdateBody) =>
+    request<TaskUpdateResult>(`/tasks/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteTask: (id: string) =>
+    request<TaskDeleteResult>(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Real re-arm: the returned schedulerJobId/nextRun are live, no restart needed. */
+  enableTask: (id: string) =>
+    request<TaskEnableResult>(`/tasks/${encodeURIComponent(id)}/enable`, { method: 'POST' }),
+  disableTask: (id: string) =>
+    request<TaskToggleResult>(`/tasks/${encodeURIComponent(id)}/disable`, { method: 'POST' }),
 }
 
 export type Api = typeof api

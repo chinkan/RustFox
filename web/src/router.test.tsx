@@ -174,3 +174,210 @@ describe('chat', () => {
     expect(await screen.findByText(/404/i)).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// T5 control-plane: skills list/editor/install + task CRUD through the router
+// ---------------------------------------------------------------------------
+
+describe('skills page (T5)', () => {
+  it('lists entries with provenance badges + modified dot, bundled not deletable', async () => {
+    await signIn()
+    renderAt('/skills', makeContext())
+    await waitFor(() => expect(screen.getByText('hko-weather')).toBeTruthy())
+    expect(screen.getByText('bundled')).toBeTruthy()
+    expect(screen.getByText('installed')).toBeTruthy()
+    expect(document.querySelector('.dirty-dot')).toBeTruthy()
+    const row = screen.getByText('hko-weather').closest('tr')!
+    expect(row.textContent).toContain('bundled skills cannot be deleted here')
+  })
+
+  it('editor drawer saves with baseHash (optimistic lock)', async () => {
+    await signIn()
+    let savedBody: { path: string; content: string; baseHash?: string } | null = null
+    renderAt(
+      '/skills',
+      makeContext({
+        putSkillFile: async (name, body) => {
+          savedBody = body
+          return {
+            ok: true, name, path: body.path, bytes: body.content.length,
+            provenance: 'user' as const, skillsLoaded: 92, warnings: [],
+          }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('my-experiment')).toBeTruthy())
+    fireEvent.click(screen.getAllByText('Open')[1]!)
+    const textarea = await waitFor(() => {
+      const el = document.querySelector('.drawer textarea') as HTMLTextAreaElement | null
+      expect(el).toBeTruthy()
+      return el!
+    })
+    fireEvent.change(textarea, { target: { value: '# edited content' } })
+    fireEvent.click(screen.getByText('Save'))
+    await waitFor(() => expect(savedBody).toBeTruthy())
+    expect(savedBody!.content).toBe('# edited content')
+    expect(savedBody!.baseHash).toBe('cafebabe')
+  })
+
+  it('409 conflict surfaces the re-read path', async () => {
+    await signIn()
+    const { ApiError } = await import('./api/client')
+    renderAt(
+      '/skills',
+      makeContext({
+        putSkillFile: async () => {
+          throw new ApiError('changed', 409, 'skill_changed_since_read')
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('my-experiment')).toBeTruthy())
+    fireEvent.click(screen.getAllByText('Open')[1]!)
+    const textarea = await waitFor(() => {
+      const el = document.querySelector('.drawer textarea') as HTMLTextAreaElement | null
+      expect(el).toBeTruthy()
+      return el!
+    })
+    fireEvent.change(textarea, { target: { value: 'x' } })
+    fireEvent.click(screen.getByText('Save'))
+    await waitFor(() => expect(screen.getByText('Re-read')).toBeTruthy())
+  })
+
+  it('install dialog: dry-run then warning must be ticked then install sends acks', async () => {
+    await signIn()
+    const calls: Array<{ dryRun?: boolean; acknowledgedWarnings?: string[] }> = []
+    renderAt(
+      '/skills',
+      makeContext({
+        installSkill: async (req) => {
+          calls.push(req)
+          return req.dryRun
+            ? {
+                dryRun: true as const,
+                source: { owner: 'foo', repo: 'bar', ref: 'abc123' },
+                skills: [
+                  {
+                    name: 'cool-skill',
+                    description: 'does cool things',
+                    files: [{ path: 'SKILL.md', size: 1200 }],
+                    sizeBytes: 1200,
+                  },
+                ],
+                verdict: {
+                  refused: [],
+                  warnings: [
+                    { skill: 'cool-skill', file: 'scripts/run.sh', rule: 'executable', detail: 'contains a shell script' },
+                  ],
+                  notes: [],
+                },
+              }
+            : {
+                dryRun: false as const,
+                installed: ['cool-skill'],
+                skipped: [],
+                verdict: { refused: [], warnings: [], notes: [] },
+                reload: { skillsLoaded: 92, agentsLoaded: 10 },
+              }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('my-experiment')).toBeTruthy())
+    fireEvent.click(screen.getByText('Install from GitHub'))
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/), { target: { value: 'foo/bar' } })
+    fireEvent.click(screen.getByText('Dry run'))
+    await waitFor(() => expect(screen.getByText('cool-skill')).toBeTruthy())
+    const installBtn = screen.getByText('Install') as HTMLButtonElement
+    expect(installBtn.disabled).toBe(true) // R2 gate: warning unacked
+    fireEvent.click(screen.getByText('Acknowledge all'))
+    await waitFor(() => expect((screen.getByText('Install') as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByText('Install'))
+    await waitFor(() => expect(calls.filter((c) => c.dryRun === false).length).toBe(1))
+    expect(calls.find((c) => c.dryRun === false)!.acknowledgedWarnings).toHaveLength(1)
+  })
+
+  it('installed ledger is visible in the dialog', async () => {
+    await signIn()
+    renderAt('/skills', makeContext())
+    await waitFor(() => expect(screen.getByText('my-experiment')).toBeTruthy())
+    fireEvent.click(screen.getByText('Install from GitHub'))
+    await waitFor(() => expect(screen.getByText(/foo\/bar@abc123de/)).toBeTruthy())
+  })
+})
+
+describe('tasks page (T5)', () => {
+  it('create flow validates the 6-field cron gate', async () => {
+    await signIn()
+    const created: unknown[] = []
+    renderAt(
+      '/tasks',
+      makeContext({
+        createTask: async (body) => {
+          created.push(body)
+          return { id: 'c9', name: body.name, schedulerJobId: 'job-9', nextRun: '2026-09-26T12:00:00+08:00' }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getByText('New task'))
+    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'standup' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'nag me' } })
+    const cronInput = screen.getByPlaceholderText('0 30 7 * * *') as HTMLInputElement
+    const submit = () => screen.getByText('Create') as HTMLButtonElement
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    fireEvent.change(cronInput, { target: { value: '0 12 * *' } }) // 5 fields
+    await waitFor(() => expect(submit().disabled).toBe(true))
+    expect(screen.getByText(/Invalid trigger value/)).toBeTruthy()
+    fireEvent.change(cronInput, { target: { value: '0 0 9 * * 1-5' } })
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    fireEvent.click(submit())
+    await waitFor(() => expect(created.length).toBe(1))
+    expect(created[0]).toMatchObject({ name: 'standup', triggerValue: '0 0 9 * * 1-5' })
+  })
+
+  it('enable really re-arms and shows the live next-run (no restart fib)', async () => {
+    await signIn()
+    let enabledId: string | null = null
+    renderAt(
+      '/tasks',
+      makeContext({
+        enableTask: async (id) => {
+          enabledId = id
+          return { ok: true, id, enabled: true, schedulerJobId: 'job-x', nextRun: '2026-09-27T07:30:00+08:00' }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('arXiv 簡報')).toBeTruthy())
+    fireEvent.click(screen.getByText('Enable'))
+    await waitFor(() => expect(enabledId).toBe('c2'))
+    await waitFor(() => expect(screen.getByText(/Re-armed live/)).toBeTruthy())
+  })
+
+  it('delete confirm promises preserved history (soft delete, R6)', async () => {
+    await signIn()
+    let deletedId: string | null = null
+    renderAt(
+      '/tasks',
+      makeContext({
+        deleteTask: async (id) => {
+          deletedId = id
+          return { ok: true, id, softDeleted: true, historyPreserved: true }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getAllByText('Delete')[0]!)
+    expect(screen.getByText(/run history stays available/)).toBeTruthy()
+    fireEvent.click(document.querySelector('.modal button.danger')!)
+    await waitFor(() => expect(deletedId).toBeTruthy())
+  })
+
+  it('edit form locks the trigger type', async () => {
+    await signIn()
+    renderAt('/tasks', makeContext())
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getAllByText('Edit')[0]!)
+    const select = screen.getByText('Recurring (cron)').closest('select') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect(screen.getByText('Trigger type cannot be changed after creation.')).toBeTruthy()
+  })
+})
