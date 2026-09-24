@@ -146,6 +146,16 @@ impl AgentOps for PreviewAgent {
     fn provider_names(&self) -> Vec<String> {
         vec!["preview".into()]
     }
+    fn tool_names(&self) -> Vec<String> {
+        vec![
+            "read_file".into(),
+            "write_file".into(),
+            "list_files".into(),
+            "execute_command".into(),
+            "plan_create".into(),
+            "plan_update".into(),
+        ]
+    }
     fn config(&self) -> &Config {
         &self.config
     }

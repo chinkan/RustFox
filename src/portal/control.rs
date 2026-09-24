@@ -129,7 +129,7 @@ pub use crate::skills::is_hidden_entry;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn kind_root(state: &PortalState, kind: &str) -> PathBuf {
+pub(crate) fn kind_root(state: &PortalState, kind: &str) -> PathBuf {
     let cfg = state.agent.config();
     if kind == "agents" {
         cfg.agents.directory.clone()
@@ -138,7 +138,7 @@ fn kind_root(state: &PortalState, kind: &str) -> PathBuf {
     }
 }
 
-fn dir_for(state: &PortalState, kind: &str, name: &str) -> PathBuf {
+pub(crate) fn dir_for(state: &PortalState, kind: &str, name: &str) -> PathBuf {
     kind_root(state, kind).join(name)
 }
 
@@ -151,12 +151,12 @@ fn primary_name(kind: &str) -> &'static str {
     }
 }
 
-fn checked_name(name: &str) -> Result<(), PortalError> {
+pub(crate) fn checked_name(name: &str) -> Result<(), PortalError> {
     validate_skill_name(name).map_err(|e| PortalError::bad_request("invalid_name", e))?;
     Ok(())
 }
 
-fn home_dir(state: &PortalState) -> Result<PathBuf, PortalError> {
+pub(crate) fn home_dir(state: &PortalState) -> Result<PathBuf, PortalError> {
     state
         .agent
         .config()
@@ -196,7 +196,7 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-fn is_bundled(kind: &str, name: &str) -> bool {
+pub(crate) fn is_bundled(kind: &str, name: &str) -> bool {
     if kind == "agents" {
         crate::skills::embed::is_bundled_agent(name)
     } else {
@@ -204,7 +204,7 @@ fn is_bundled(kind: &str, name: &str) -> bool {
     }
 }
 
-fn ledger_has(kind: &str, ledger: &InstalledLedger, name: &str) -> bool {
+pub(crate) fn ledger_has(kind: &str, ledger: &InstalledLedger, name: &str) -> bool {
     if kind == "agents" {
         ledger.agents.contains_key(name)
     } else {
@@ -213,7 +213,7 @@ fn ledger_has(kind: &str, ledger: &InstalledLedger, name: &str) -> bool {
 }
 
 /// If the markdown starts with YAML frontmatter, return its `name:` value.
-fn frontmatter_name(content: &str) -> Option<String> {
+pub(crate) fn frontmatter_name(content: &str) -> Option<String> {
     frontmatter_value(content, "name:")
 }
 
@@ -346,7 +346,7 @@ async fn read_if_exists(path: &Path) -> Result<Option<String>, PortalError> {
 }
 
 /// `.bak` + atomic tmp+rename (same pattern as settings/soul writes).
-async fn write_with_backup(path: &Path, content: &str) -> Result<(), PortalError> {
+pub(crate) async fn write_with_backup(path: &Path, content: &str) -> Result<(), PortalError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -468,7 +468,7 @@ pub struct NameParams {
     pub name: String,
 }
 
-async fn detail_json(
+pub(crate) async fn detail_json(
     state: &PortalState,
     kind: &'static str,
     name: &str,
@@ -1047,7 +1047,7 @@ pub async fn create_agent(
 // DELETE — quarantine, never hard-remove; bundled refused (ADR 0011 A)
 // ---------------------------------------------------------------------------
 
-async fn quarantine(
+pub(crate) async fn quarantine(
     state: &PortalState,
     kind: &'static str,
     name: &str,

@@ -9,6 +9,7 @@ pub mod chat;
 pub mod control;
 pub mod data;
 pub mod error;
+pub mod install;
 pub mod settings;
 pub mod static_serve;
 pub mod url;
@@ -170,6 +171,9 @@ pub struct PortalState {
     pub boot_id: String,
     /// Serializes chat generations: one active run per web identity (ADR 0005).
     pub chat_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// GitHub API client for the skill installer (ADR 0011 B). Swappable for
+    /// tests — production default is the reqwest-backed fetcher.
+    pub fetcher: Arc<dyn install::GitHubFetcher>,
     pub started_at: std::time::Instant,
 }
 
@@ -193,6 +197,7 @@ impl PortalState {
             dev_tokens: Arc::new(std::sync::Mutex::new(Vec::new())),
             boot_id: uuid::Uuid::new_v4().simple().to_string(),
             chat_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fetcher: Arc::new(install::ReqwestFetcher::new()),
             started_at: std::time::Instant::now(),
         }
     }
@@ -231,6 +236,8 @@ pub fn router(state: PortalState) -> Router {
             "/skills",
             get(control::list_entries).post(control::create_skill),
         )
+        .route("/skills/installed", get(install::installed_list))
+        .route("/skills/install", post(install::install_skill))
         .route(
             "/skills/{name}",
             get(control::entry_detail).delete(control::delete_entry),

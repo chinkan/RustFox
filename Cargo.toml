@@ -106,6 +106,7 @@ name = "rustfox"
 path = "src/main.rs"
 
 [dev-dependencies]
+serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["full", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"
