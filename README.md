@@ -36,6 +36,7 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 | 🧬 **Skills & Agents** | Folder-based skill instructions auto-loaded at startup; subagent skills with own model and tool whitelist |
 | 🤝 **Agent Layer** | Isolated agentic mini-loops in `agents/` with own model/tools; `invoke_agent`, `spawn_agents`, zero-trust verifier |
 | 🔄 **Task Scheduling** | Cron and one-shot task scheduler with SQLite persistence |
+| 🌐 **Web Portal** | Built-in browser UI (chat, agents, memory, tasks, settings) served from the same binary — token-auth, loopback by default |
 | 📦 **Self-Hosting** | Single binary, 2-min setup wizard, background service (systemd/launchd/Windows Service) |
 
 → Full feature reference: [docs/GUIDE.md](docs/GUIDE.md#advanced-features)
@@ -84,11 +85,17 @@ Download from the [Releases page](https://github.com/chinkan/RustFox/releases):
 tar xzf rustfox-*.tar.gz
 ```
 
-**Option B — Build from source**
+**Option B — Build from source (recommended script)**
 
 ```bash
-cargo install --path . --locked
+git clone https://github.com/chinkan/RustFox && cd RustFox
+./scripts/build-all.sh --install
 ```
+
+`build-all.sh` builds the web portal frontend first (`npm ci` + `vite build`), *then*
+the Rust binary — the portal UI is compiled into the binary via `include_dir!`, so
+build order matters (see [Building & Verifying](#-building--verifying)). If you don't
+need the portal, plain `cargo install --path . --locked` still works.
 
 ### 2. Configure
 
@@ -134,6 +141,42 @@ rustfox --service status
 
 ---
 
+## 🌐 Web Portal
+
+RustFox can serve a built-in web UI from the **same binary** — no separate frontend
+deploy. Open `http://127.0.0.1:8090` in your browser to chat with the agent (live
+SSE token streaming), browse memory, manage scheduled tasks and sub-agents, and
+inspect your config.
+
+Enable it in `config.toml`:
+
+```toml
+[portal]
+enabled = true
+port = 8090
+bind = "127.0.0.1"        # keep loopback/private-network only
+token_sha256 = "<sha256>" # hash of your login token (preferred over plaintext)
+```
+
+Generate a token + hash:
+
+```bash
+python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t); print("token_sha256:", hashlib.sha256(t.encode()).hexdigest())'
+```
+
+| Page | What you can do |
+|------|-----------------|
+| 💬 **Chat** | Talk to the agent in the browser, watch tool calls stream live; history persisted and isolated from Telegram |
+| 🧬 **Agents** | Browse configured sub-agents, filter by name |
+| 🧠 **Memory** | Search conversation/knowledge store (FTS5 hybrid), browse recent entries |
+| 🔄 **Tasks** | List cron/one-shot tasks, view run history, pause/resume |
+| ⚙️ **Settings** | Inspect active config (secrets masked) |
+
+> 🔒 The portal is **off by default** and intended for loopback/private networks
+> (e.g. a Tailscale IP). Public exposure/TLS is out of scope for now.
+
+---
+
 ## Quick Tool Overview
 
 | Tool | Description |
@@ -158,6 +201,46 @@ rustfox --service status
 RustFox runs an agentic loop: user message → LLM (OpenRouter) → tool calls → execute → loop until final response. Tools dispatch to built-in functions, MCP servers, or skill/agent directories.
 
 → Full architecture with source tree and data flow: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+---
+
+## 🛠 Building & Verifying
+
+### One-command build (portal-safe)
+
+```bash
+./scripts/build-all.sh                # web (vite) → dist → cargo build --release
+./scripts/build-all.sh --install      # ...then install to ~/.cargo/bin/rustfox
+./scripts/build-all.sh --skip-web     # reuse existing web/dist (Rust only)
+./scripts/build-all.sh --profile dev  # debug build (faster compile)
+```
+
+Why a script? The portal frontend is **embedded into the binary at compile time**
+(`include_dir!("web/dist")`). Two traps this guards against:
+
+1. **Build order** — cargo before `vite build` embeds a stale/empty dist → the
+   portal renders a white screen. `build-all.sh` enforces web-first and fails
+   fast if `web/dist/index.html` is missing.
+2. **Stale embedding** — `include_dir!` has no cargo change-fingerprint, so
+   updating dist alone won't trigger a rebuild. The script touches the embedding
+   module to force re-embedding.
+
+### Try the portal without Telegram/LLM
+
+```bash
+cargo run --release --example portal_preview   # serves the real embedded UI + seeded demo data
+```
+
+### End-to-end regression gate (35 checks)
+
+```bash
+node e2e-verify.mjs     # Playwright: login → chat SSE → agents → memory → tasks → settings
+```
+
+Covers every portal page against the **real embedded-dist binary** (same code path
+as production), including a stub-dist control test that catches white-screen
+regressions. Zero console errors is part of the gate. CI runs the web build before
+cargo tests, and the same sequence applies to release builds.
 
 ---
 

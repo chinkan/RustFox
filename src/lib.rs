@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_tools;
 pub mod platform;
+pub mod portal;
 pub mod provider;
 pub mod scheduler;
 pub mod scheduling_tools;

@@ -40,6 +40,10 @@ pub struct Config {
     /// the primary call fails.
     #[serde(default)]
     pub fallback: FallbackConfig,
+
+    /// Opt-in embedded web portal (ADR 0004). Absent section = disabled.
+    #[serde(default)]
+    pub portal: PortalConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -108,6 +112,37 @@ pub struct EmbeddingApiConfig {
     pub model: String,
     #[serde(default = "default_embedding_dimensions")]
     pub dimensions: usize,
+}
+
+/// Opt-in embedded web portal settings (ADR 0004).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PortalConfig {
+    /// Master switch; the portal server only starts when true.
+    pub enabled: bool,
+    /// TCP port for the portal HTTP server.
+    pub port: u16,
+    /// Bind address — keep loopback/private-network only (ADR 0006 security note).
+    pub bind: String,
+    /// Optional plaintext portal token (dev convenience). Prefer token_sha256.
+    pub token: Option<String>,
+    /// SHA-256 hex of the portal token (preferred; safe to store in config).
+    pub token_sha256: Option<String>,
+    /// Identity used for web chat conversations in memory (ADR 0005).
+    pub user_name: String,
+}
+
+impl Default for PortalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8090,
+            bind: "127.0.0.1".to_string(),
+            token: None,
+            token_sha256: None,
+            user_name: "web".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

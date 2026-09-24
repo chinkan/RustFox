@@ -254,3 +254,29 @@ Be concise and helpful."""
 # user_model_update_interval = 10             # Update user model every N user messages
 # user_model_cron = "0 0 3 * * SUN"           # Weekly user model refresh (6-field cron)
 # compaction_model = "qwen/qwen3-8b"          # Cheaper model for compaction summary + USER.md flush (default: current model)
+
+# ── Web Portal (optional; disabled unless the section exists AND enabled = true) ──
+# Opt-in embedded web UI + REST/SSE API (ADR 0004). When enabled, the same
+# binary serves the portal (chat, agents, memory, settings) over HTTP.
+# Absent section or enabled = false → no server starts.
+#
+# [portal]
+# enabled = true                     # Master switch (default: false)
+# port = 8090                        # TCP port for the portal HTTP server (default: 8090)
+# bind = "127.0.0.1"                 # Bind address (default: loopback). Keep it
+#                                    # loopback/private-network only (e.g. a Tailscale
+#                                    # IP). Public exposure/TLS is out of MVP scope.
+# user_name = "web"                  # Identity used for portal chat conversations
+#                                    # in memory, isolated from Telegram (default: "web")
+#
+# Auth — static token, hashed comparison (ADR 0006). Pick ONE:
+#   1. token_sha256 (preferred): store only the SHA-256 hash of your token,
+#      never the plaintext. Generate a token + hash with:
+#        python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t); print("token_sha256:", hashlib.sha256(t.encode()).hexdigest())'
+#      Type the raw token at the login page; put the hash in config.
+#   2. token (dev convenience): plaintext token in config.
+#   3. Neither set: the server generates a temporary login token at startup
+#      and logs it once — log in with it, then pin token_sha256 for stable auth.
+#
+# token_sha256 = "sha256-hex-of-your-token"
+# token = "your-plaintext-dev-token"

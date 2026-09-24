@@ -1,0 +1,148 @@
+{
+  "app": {
+    "name": "RustFox",
+    "tagline": "Web Portal"
+  },
+  "nav": {
+    "workspace": "Workspace",
+    "system": "系統",
+    "dashboard": "儀表板",
+    "chat": "對話",
+    "agents": "Agents",
+    "memory": "記憶",
+    "tasks": "定時任務",
+    "settings": "設定",
+    "signOut": "登出",
+    "signOutEverywhere": "所有裝置登出"
+  },
+  "login": {
+    "title": "RustFox Portal",
+    "subtitle": "輸入 Portal Token 登入，管理 Agent、記憶同設定。",
+    "tokenLabel": "Portal Token",
+    "tokenPlaceholder": "portal token",
+    "signIn": "登入",
+    "hint": "Token 喺 config.toml [portal] 設定（token 或 token_sha256）。Session 靠 signed cookie 跨重啟存活。",
+    "badToken": "Portal Token 唔正確。",
+    "offline": "聯絡唔到 Portal API — RustFox 有運行緊嗎？"
+  },
+  "common": {
+    "loading": "載入中…",
+    "retry": "重試",
+    "enabled": "啟用",
+    "paused": "暫停",
+    "restarting": "伺服器重啟中 — 重新連線…"
+  },
+  "dashboard": {
+    "title": "儀表板",
+    "subtitle": "系統狀態、Agent 形勢同實時統計。",
+    "cpu": "CPU",
+    "memory": "記憶體",
+    "disk": "磁碟",
+    "agentsRunning": "運行中 Agent",
+    "skills": "已載入 Skills",
+    "messages": "訊息總數",
+    "conversations": "對話數",
+    "scheduledTasks": "定時任務",
+    "uptime": "運行",
+    "host": "主機",
+    "total": "總數",
+    "allHealthy": "全部正常",
+    "inError": "{{count}} 個出錯",
+    "agentsSection": "Agents",
+    "statsSection": "統計",
+    "col": {
+      "agent": "Agent",
+      "platform": "平台",
+      "model": "模型",
+      "status": "狀態",
+      "lastActive": "最近活動"
+    },
+    "providers": "Providers"
+  },
+  "chat": {
+    "title": "對話",
+    "subtitle": "直接同 Telegram 後面嗰個 agent 傾偈。",
+    "placeholder": "同 RustFox 講嘢…",
+    "send": "發送",
+    "stop": "停止",
+    "busy": "已經有個生成緊進行中。",
+    "streamDied": "連線斷咗 — 重連後會自動對返歷史。",
+    "noMessages": "未有訊息。打個招呼先 👋",
+    "threadRunning": "生成緊…"
+  },
+  "agents": {
+    "title": "Agents",
+    "subtitle": "主 agent 加上所有已載入嘅 subagent 定義。",
+    "searchPlaceholder": "搜尋 agents…",
+    "allStatuses": "全部狀態",
+    "running": "運行中",
+    "idle": "閒置",
+    "error": "出錯",
+    "sortName": "排序：名稱",
+    "sortStatus": "排序：狀態",
+    "shown": "顯示 {{count}} 個",
+    "noneFound": "冇 agent 符合篩選。",
+    "reload": "重載 skills & agents",
+    "reloadDone": "已重載 {{skills}} 個 skills、{{agents}} 個 agents。",
+    "col": {
+      "agent": "Agent",
+      "platform": "平台",
+      "model": "模型",
+      "status": "狀態"
+    }
+  },
+  "memory": {
+    "title": "記憶",
+    "subtitle": "長期記憶瀏覽器 — 語義 + 全文搜尋。",
+    "searchPlaceholder": "搜尋記憶…",
+    "all": "全部",
+    "fact": "事實",
+    "knowledge": "知識",
+    "conversation": "對話",
+    "noneFound": "冇嘢符合「{{q}}」。"
+  },
+  "tasks": {
+    "title": "定時任務",
+    "subtitle": "定期 agent 執行 — 唔使改 crontab。",
+    "col": {
+      "task": "任務",
+      "cron": "Cron",
+      "nextRun": "下次執行",
+      "status": "狀態"
+    },
+    "enable": "啟用",
+    "disable": "停用",
+    "runs": "執行紀錄",
+    "hideRuns": "收起紀錄",
+    "noRuns": "未有執行紀錄。",
+    "restartNote": "已啟用 — 重啟後先排程。"
+  },
+  "settings": {
+    "title": "設定",
+    "subtitle": "只限白名單欄位 — 密鑰會被 mask，永遠唔會 round-trip。",
+    "editable": "可編輯",
+    "model": "模型",
+    "generalLocation": "地點",
+    "defaultAutonomyMode": "Autonomy 模式",
+    "portalPort": "Portal 端口",
+    "save": "儲存",
+    "saving": "儲存中…",
+    "saved": "已儲存。",
+    "saveFailed": "儲存失敗：{{message}}",
+    "restartBanner": "等緊重啟嘅變更：{{fields}}",
+    "maskedTitle": "密鑰（唯讀）",
+    "telegramBotToken": "Telegram Bot Token",
+    "openrouterApiKey": "OpenRouter API Key",
+    "providers": "Providers",
+    "soulTitle": "Soul 檔案",
+    "soulHint": "SOUL.md / USER.md / AGENTS.md — 純 markdown，儲存時自動備份。",
+    "soulOpen": "編輯 {{name}}",
+    "soulSave": "儲存檔案",
+    "soulSaved": "已儲存 {{name}}（{{bytes}} bytes）。",
+    "soulLoadFailed": "載入唔到 {{name}}。"
+  },
+  "notFound": {
+    "title": "404 — 搵唔到呢頁",
+    "back": "返去儀表板"
+  }
+}
