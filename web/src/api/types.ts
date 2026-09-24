@@ -412,11 +412,23 @@ export interface SettingsMasked {
   mcpServers: Array<{ name: string }>
 }
 
+/** ADR 0011 R7 — system-prompt provenance projection. */
+export interface SystemPromptInfo {
+  /** Which layer is actually feeding the live prompt. */
+  source: 'file' | 'inline' | 'builtin'
+  /** Configured pointer (null when the operator hasn't set one). */
+  pointer: string | null
+  /** Both file pointer AND a customised inline prompt are set — the file
+   *  wins, so the inline copy is dead weight. UI must warn. */
+  divergence: boolean
+}
+
 export interface Settings {
   editable: SettingsEditable
   masked: SettingsMasked
   /** Fields whose change needs a restart before they take effect. */
   restartRequired: string[]
+  systemPrompt: SystemPromptInfo
 }
 
 export type AutonomyMode = 'default' | 'autopilot' | 'plan'
@@ -440,4 +452,4 @@ export interface SoulFile {
   mtime: string
 }
 
-export type SoulName = 'SOUL.md' | 'USER.md' | 'AGENTS.md' | 'MEMORY.md'
+export type SoulName = 'SOUL.md' | 'USER.md' | 'AGENTS.md' | 'MEMORY.md' | 'system'

@@ -163,7 +163,14 @@
     "soulOpen": "編輯 {{name}}",
     "soulSave": "儲存檔案",
     "soulSaved": "已儲存 {{name}}（{{bytes}} bytes）。",
-    "soulLoadFailed": "載入唔到 {{name}}。"
+    "soulLoadFailed": "載入唔到 {{name}}。",
+    "promptTitle": "System Prompt",
+    "promptSourceFile": "生效來源：prompt 檔案（{{pointer}}）",
+    "promptSourceInline": "生效來源：inline [openrouter] system_prompt",
+    "promptSourceBuiltin": "生效來源：內置 default（未有任何自訂）",
+    "promptDivergence": "分叉警告：同時設定咗 prompt 檔案指標 AND 自訂咗 inline prompt —— 檔案會勝出，inline 嗰份係死字。刪走一個。",
+    "promptHint": "透過下面嘅 soul editor 改 prompt 檔案（名：system）。改動下一個 turn 即刻生效，唔使重啟。",
+    "promptNotEnabled": "未設檔案指標 —— 編輯會寫入 prompts/system.md，但喺 config.toml 嘅 [openrouter] 加返 system_prompt_file 之前，bot 仍然用 inline prompt。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",

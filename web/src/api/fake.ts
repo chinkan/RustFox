@@ -80,6 +80,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         mcpServers: [{ name: 'google-workspace' }],
       },
       restartRequired: ['portalPort'],
+      systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
     }),
     patchSettings: async (p) => ({
       updated: Object.keys(p),

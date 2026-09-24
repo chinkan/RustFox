@@ -163,7 +163,14 @@
     "soulOpen": "Edit {{name}}",
     "soulSave": "Save file",
     "soulSaved": "Saved {{name}} ({{bytes}} bytes).",
-    "soulLoadFailed": "Could not load {{name}}."
+    "soulLoadFailed": "Could not load {{name}}.",
+    "promptTitle": "System prompt",
+    "promptSourceFile": "Live source: prompts file ({{pointer}})",
+    "promptSourceInline": "Live source: inline [openrouter] system_prompt",
+    "promptSourceBuiltin": "Live source: built-in default (nothing customised yet)",
+    "promptDivergence": "Divergence warning: a prompt file pointer is set AND the inline prompt is customised — the file wins, the inline copy is dead weight. Remove one.",
+    "promptHint": "Edit the prompts file through the soul editor below (name: system). Changes apply on the very next turn — no restart.",
+    "promptNotEnabled": "The file pointer is unset — edits go to prompts/system.md but the bot still uses the inline prompt until you add system_prompt_file to [openrouter] in config.toml."
   },
   "notFound": {
     "title": "404 — Route not found",

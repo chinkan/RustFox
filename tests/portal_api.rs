@@ -217,6 +217,12 @@ bind = "{}"
 /// A fixture with a temp home (secret file), temp config.toml, in-memory
 /// SQLite, and the given portal token config.
 async fn fixture(portal: PortalConfig) -> Fixture {
+    fixture_with(portal, |_| {}).await
+}
+
+/// Same fixture, but lets a test tweak the loaded `Config` before the fake
+/// agent is built (e.g. set `system_prompt_file` for ADR 0011 R7 tests).
+async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -224,6 +230,7 @@ async fn fixture(portal: PortalConfig) -> Fixture {
 
     let mut config = Config::load(&config_path).unwrap();
     config.resolved_home = Some(home.clone());
+    tweak(&mut config);
 
     let memory = MemoryStore::open_in_memory().unwrap();
     let task_store = ScheduledTaskStore::new(memory.connection());
@@ -2024,4 +2031,143 @@ async fn agents_static_routes_not_shadowed_by_param_route() {
     let (status, body) = cget(&fx.app, "/api/agents/skills").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array(), "legacy listing unchanged: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0011 R7 — system prompt file pointer (portal surface)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn soul_system_entry_writes_prompt_file_and_reports_source() {
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/system.md"));
+    })
+    .await;
+    let prompt = f.state.home_dir.as_ref().unwrap().join("prompts/system.md");
+
+    // Before the file exists: GET reports the builtin fallback honestly.
+    let req = bearer(get("/api/soul?name=system"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["content"], "", "missing file reads as empty, not 404");
+
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(
+        body["systemPrompt"]["source"], "builtin",
+        "absent file + serde-default inline => builtin: {body}"
+    );
+    assert_eq!(body["systemPrompt"]["divergence"], false);
+
+    // PUT through the soul machinery creates the subdir + file with backup.
+    let put = |content: &str| {
+        bearer(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/soul")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "name": "system", "content": content }).to_string(),
+                ))
+                .unwrap(),
+            TEST_TOKEN,
+        )
+    };
+    let res = f.app.clone().oneshot(put("# live prompt")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "# live prompt");
+
+    // Now the source flips to file, and reads round-trip.
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "file", "{body}");
+
+    let req = bearer(get("/api/soul?name=system"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["content"], "# live prompt");
+
+    // Second write leaves a .bak of the first.
+    let res = f.app.clone().oneshot(put("# v2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(prompt.with_file_name("system.md.bak")).unwrap(),
+        "# live prompt"
+    );
+}
+
+#[tokio::test]
+async fn system_prompt_divergence_flag_surfaces_via_settings() {
+    // Pointer set AND a customised inline prompt -> the trap: the file wins,
+    // so the inline copy is dead weight. The SPA reads `divergence` to warn.
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/system.md"));
+        cfg.openrouter.system_prompt = "custom inline that no longer applies".into();
+    })
+    .await;
+
+    // File absent: effective source falls back to the (custom) inline, but
+    // divergence still reports true because both layers are populated.
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "inline", "{body}");
+    assert_eq!(body["systemPrompt"]["divergence"], true);
+
+    // Create the file: it wins, divergence stays true (warning persists
+    // until the operator removes the stale inline copy).
+    std::fs::create_dir_all(f.state.home_dir.as_ref().unwrap().join("prompts")).unwrap();
+    std::fs::write(
+        f.state.home_dir.as_ref().unwrap().join("prompts/system.md"),
+        "file wins",
+    )
+    .unwrap();
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "file");
+    assert_eq!(body["systemPrompt"]["divergence"], true);
+}
+
+#[tokio::test]
+async fn soul_system_alias_names_and_empty_guard() {
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/sys.md"));
+    })
+    .await;
+    // All accepted aliases resolve to the pointer.
+    for alias in ["system", "SYSTEM.md", "prompts/system.md"] {
+        let req = bearer(get(&format!("/api/soul?name={alias}")), TEST_TOKEN);
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "alias {alias} rejected");
+    }
+    // Empty write refused (same guard as SOUL.md).
+    let req = bearer(
+        Request::builder()
+            .method("PUT")
+            .uri("/api/soul")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "name": "system", "content": "" }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "empty_soul", "{body}");
+}
+
+#[tokio::test]
+async fn settings_get_reports_system_prompt_projection() {
+    let f = fixture(with_token_token()).await;
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    // Default fixture config: no pointer, serde-default inline -> builtin.
+    assert_eq!(body["systemPrompt"]["source"], "builtin");
+    assert_eq!(body["systemPrompt"]["pointer"], Value::Null);
+    assert_eq!(body["systemPrompt"]["divergence"], false);
 }

@@ -165,8 +165,15 @@ Before write: copy current file to `config.toml.bak`. Response:
 `200 {"updated":["model","portalPort"], "restartRequired":["portalPort"], "applied":{"model":"<new>"}}`
 
 ### GET /api/soul · PUT /api/soul
-Markdown soul files, whitelisted names only (`SOUL.md`, `USER.md`, `AGENTS.md`).
+Markdown files, whitelisted names only: `SOUL.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, and `system` (ADR 0011 R7 — the system-prompt file).
 GET → `200 {"name","content","mtime"}`; PUT body `{"name","content"}` → backup `*.bak` then write; fires the `soul_updated` notification so the agent re-reads identity files.
+The `system` entry resolves to `[openrouter] system_prompt_file` (lazily, relative paths under `RUSTFOX_HOME`); with no pointer configured it falls back to `prompts/system.md` so the file can be prepared ahead of enabling. Missing files read as empty content (200), parent dirs are created on write. Empty writes are refused (`empty_soul`).
+
+### GET /api/settings — systemPrompt projection
+`GET /api/settings` includes `systemPrompt: {"source","pointer","divergence"}` (ADR 0011 R7):
+- `source`: which layer is live — `file` | `inline` | `builtin`. An absent/empty/missing prompt file honestly reports the fallback, never `file`.
+- `pointer`: the configured `system_prompt_file` value (null if unset).
+- `divergence`: true when the pointer is set AND the inline prompt differs from the built-in default — the file wins, so the inline copy is dead weight (divergence trap). The SPA surfaces a warning.
 
 ## Static hosting
 - `GET /` → SPA `index.html` (embedded); unknown non-`/api` paths → same `index.html` (client-side routing); `/assets/*` hashed files with long cache.

@@ -19,11 +19,19 @@ base_url = "https://openrouter.ai/api/v1"
 # Maximum tokens in response
 max_tokens = 4096
 # supports_vision = false  # Set to true if your model supports image inputs
-# System prompt for the AI assistant
+# System prompt for the AI assistant (inline).
+# NOTE: if `system_prompt_file` below is set, THIS value is ignored.
 system_prompt = """You are a helpful AI assistant with access to tools. \
 Use the available tools to help the user with their tasks. \
 When using file or terminal tools, operate only within the allowed sandbox directory. \
 Be concise and helpful."""
+
+# Optional: load the system prompt from a markdown file instead of the
+# inline value above (ADR 0011 R7). Relative paths resolve under
+# RUSTFOX_HOME (~/.rustfox). Precedence: file > inline > built-in default.
+# Edit the file live via the web portal (Settings → System prompt) —
+# changes apply on the next turn, no restart needed.
+# system_prompt_file = "prompts/system.md"
 
 # ── Multi-Provider Configuration (optional) ────────────────────────────
 # Define additional LLM providers alongside OpenRouter.

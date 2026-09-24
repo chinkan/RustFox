@@ -208,7 +208,10 @@ impl Agent {
 
     /// Build the system prompt, incorporating loaded skills and agents
     async fn build_system_prompt(&self) -> String {
-        let mut prompt = self.config.openrouter.system_prompt.clone();
+        // ADR 0011 R7: effective prompt follows file > inline > builtin
+        // precedence, re-read every turn (the portal can edit the file
+        // live — no restart needed).
+        let mut prompt = self.config.resolve_system_prompt().0;
 
         let skills = self.skills.read().await;
         let skill_context = skills.build_context();
