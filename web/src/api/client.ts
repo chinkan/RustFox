@@ -171,7 +171,7 @@ export const api = {
   /**
    * Update-only file write. Pass `baseHash` (from detail `hash` / primary
    * `fileHash` / `files[].hash`) for the optimistic lock (ADR 0011a R4) —
-   * omit to force-write (CLI parity). 409 skill_changed_since_read means
+   * omit to force-write (CLI parity). 409 changed_since_read means
    * somebody else (OpenCode, another tab) touched the file: re-read first.
    */
   putSkillFile: (
