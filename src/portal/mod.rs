@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod chat;
+pub mod control;
 pub mod data;
 pub mod error;
 pub mod settings;
@@ -46,6 +47,9 @@ pub trait AgentOps: Send + Sync {
     ) -> futures::future::BoxFuture<'_, anyhow::Result<String>>;
     fn set_soul_updated(&self, value: bool);
     fn provider_names(&self) -> Vec<String>;
+    /// Names of every tool available at runtime (builtin registry + MCP),
+    /// used by the agents editor to gate `tools:` frontmatter (ADR 0011).
+    fn tool_names(&self) -> Vec<String>;
     fn config(&self) -> &Config;
 }
 
@@ -112,6 +116,12 @@ impl AgentOps for Agent {
     }
     fn provider_names(&self) -> Vec<String> {
         self.registry.provider_names()
+    }
+    fn tool_names(&self) -> Vec<String> {
+        self.all_tool_definitions()
+            .into_iter()
+            .map(|td| td.function.name)
+            .collect()
     }
     fn config(&self) -> &Config {
         &self.config
@@ -214,6 +224,30 @@ pub fn router(state: PortalState) -> Router {
         .route("/agents", get(data::agents))
         .route("/agents/skills", get(data::skills))
         .route("/agents/reload", post(data::reload_skills))
+        // Skills/agents control plane (ADR 0011). `/agents/{name}` never
+        // collides with the static `/agents/skills`|`/agents/reload` — axum
+        // prefers static segments over path params.
+        .route(
+            "/skills",
+            get(control::list_entries).post(control::create_skill),
+        )
+        .route(
+            "/skills/{name}",
+            get(control::entry_detail).delete(control::delete_entry),
+        )
+        .route(
+            "/skills/{name}/file",
+            get(control::read_file).put(control::write_file),
+        )
+        .route("/agents", post(control::create_agent))
+        .route(
+            "/agents/{name}",
+            get(control::agent_detail).delete(control::delete_agent),
+        )
+        .route(
+            "/agents/{name}/file",
+            get(control::read_agent_file).put(control::write_agent_file),
+        )
         .route("/memory/search", get(data::memory_search))
         .route("/tasks", get(data::tasks))
         .route("/tasks/{id}/runs", get(data::task_runs))

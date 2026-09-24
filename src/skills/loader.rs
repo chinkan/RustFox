@@ -34,6 +34,19 @@ pub async fn load_skills_from_dir(dir: &Path, base_dir: PathBuf) -> Result<Skill
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
 
+        // Skip update-engine backups and portal quarantines (`foo.bak`,
+        // `foo.deleted-<ts>`, `.trash/`, dotfiles). A quarantined dir still
+        // contains a valid SKILL.md whose *frontmatter* name is the original
+        // — without this filter a "deleted" skill silently revives in the
+        // registry under its old key (ADR 0011a R3).
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(super::is_hidden_entry)
+        {
+            continue;
+        }
+
         // Support .md files and directories containing SKILL.md or AGENT.md
         let skill_path = if path.is_dir() {
             let skill_file = path.join("SKILL.md");
@@ -245,6 +258,49 @@ fn first_line_or_heading(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hidden_entries_never_load() {
+        // ADR 0011a R3 regression: a quarantined/backup dir still contains a
+        // valid SKILL.md whose frontmatter name is the ORIGINAL — if the
+        // loader picks it up, a "deleted" skill revives under its old key.
+        let dir =
+            std::env::temp_dir().join(format!("rustfox-loader-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("live")).unwrap();
+        std::fs::write(dir.join("live/SKILL.md"), "---\nname: live\n---\nok").unwrap();
+
+        for artifact in ["doomed.deleted-20260925", "old.bak", ".trash"] {
+            let d = dir.join(artifact);
+            let leaf = if artifact == ".trash" {
+                d.join("doomed-1")
+            } else {
+                d.clone()
+            };
+            std::fs::create_dir_all(leaf).unwrap();
+            let f = if artifact == ".trash" {
+                d.join("doomed-1/SKILL.md")
+            } else {
+                d.join("SKILL.md")
+            };
+            std::fs::write(f, "---\nname: doomed\n---\nrevive?").unwrap();
+        }
+        // standalone backup file too
+        std::fs::write(dir.join("solo.md.bak"), "# old").unwrap();
+
+        let reg = load_skills_from_dir(&dir, dir.clone()).await.unwrap();
+        assert!(reg.get("live").is_some(), "real skill loads");
+        assert!(
+            reg.get("doomed").is_none(),
+            "quarantined skill must NOT revive"
+        );
+        assert!(reg.get("old").is_none(), ".bak dir must not load");
+        assert!(
+            reg.get("solo.md").is_none() && reg.get("solo").is_none(),
+            ".bak file must not load"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn test_extract_u32_field_present() {

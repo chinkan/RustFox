@@ -1,5 +1,13 @@
 pub mod embed;
 pub mod loader;
+/// Names that are never real skills/agents: update-engine backups
+/// (`foo.bak`), portal quarantines (`foo.deleted-<ts>`), and dot-prefixed
+/// entries (`.trash/`, `.DS_Store`, `.git`). Shared by the filesystem loader
+/// and the portal listings so both agree on what exists (ADR 0011a R3).
+pub fn is_hidden_entry(name: &str) -> bool {
+    name.ends_with(".bak") || name.contains(".deleted-") || name.starts_with('.')
+}
+
 pub mod seed;
 pub mod update;
 

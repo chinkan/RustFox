@@ -132,6 +132,18 @@ pub async fn update_skills(
     Ok(report)
 }
 
+/// Read `skills-lock.json` from the home dir as a plain name→hash map.
+/// Portal code uses this for provenance/modified checks and must NOT mutate
+/// the lock (that file is the bundled seed/update contract).
+pub fn lock_map_from_file(home: &Path) -> BTreeMap<String, String> {
+    read_lock(&home.join("skills-lock.json")).skills
+}
+
+/// Read the agents lock (`agents-lock.json` in the home dir), same shape.
+pub fn agents_lock_map_from_file(home: &Path) -> BTreeMap<String, String> {
+    read_lock(&home.join("agents-lock.json")).skills
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::seed::lock_map_for;

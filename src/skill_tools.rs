@@ -10,7 +10,7 @@ use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 
 /// Validate skill/agent name: alphanumeric, hyphens, underscores, 1–64 chars.
-fn validate_skill_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Skill name cannot be empty".to_string());
     }
@@ -27,7 +27,7 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 /// Validate a relative path within a skill/agent directory: no '..' components, non-empty, not absolute.
-fn validate_skill_path(path: &str) -> Result<(), String> {
+pub(crate) fn validate_skill_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Path cannot be empty".to_string());
     }
