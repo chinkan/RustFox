@@ -227,7 +227,7 @@ describe('skills page (T5)', () => {
       '/skills',
       makeContext({
         putSkillFile: async () => {
-          throw new ApiError('changed', 409, 'skill_changed_since_read')
+          throw new ApiError('changed', 409, 'changed_since_read')
         },
       }),
     )
