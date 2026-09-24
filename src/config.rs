@@ -813,8 +813,24 @@ mod tests {
         );
     }
 
+    /// Tests that assert `[general].home` precedence must not see an ambient
+    /// `RUSTFOX_HOME` — env beats config in `resolve_home`, and this test
+    /// binary can legitimately run *inside* a live RustFox install (which
+    /// exports RUSTFOX_HOME). Serialize all env-sensitive tests through one
+    /// lock and clear the var; non-locked tests are assertion-immune.
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn isolate_home_env() -> std::sync::MutexGuard<'static, ()> {
+        let guard = HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("RUSTFOX_HOME");
+        guard
+    }
+
     #[test]
     fn resolved_home_returns_some_after_resolve() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let mut cfg: Config = toml::from_str(base_toml()).unwrap();
@@ -831,6 +847,7 @@ mod tests {
 
     #[test]
     fn resolve_fills_unset_paths_under_home() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let mut cfg: Config = toml::from_str(base_toml()).unwrap();
@@ -884,6 +901,7 @@ mod tests {
 
     #[test]
     fn load_resolves_paths_to_absolute() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let cfg_path = tmp.path().join("config.toml");
