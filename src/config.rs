@@ -741,6 +741,13 @@ impl Config {
         self.agent.rate_limit_retry_limit
     }
 
+    /// Ordered model fallback chain (`[fallback] chain`, ADR-0012). Each entry
+    /// is a fully-qualified `provider/model` tried after the primary fails
+    /// with a transient (429/5xx) error. Empty = feature off.
+    pub fn fallback_chain(&self) -> Vec<String> {
+        self.fallback.chain.clone()
+    }
+
     /// Loop detection tunables (from [agent.loop_detection], defaults: enabled,
     /// threshold 3, timeout 120s). Used by the agent loop to short-circuit
     /// exact-repetition cycles and surface a `LoopDetected` event to the user.

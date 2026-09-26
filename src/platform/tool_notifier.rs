@@ -295,6 +295,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "cancel_scheduled_task" => return "🗓️ Cancelling a task".to_string(),
         "get_scheduled_task_history" => return "📋 Checking task history".to_string(),
         "rerun_scheduled_task" => return "🔄 Re-running scheduled task".to_string(),
+        "task_reruns" => return "🗂️ Checking failed tasks".to_string(),
         "invoke_agent" => return "🤖 Calling a specialist".to_string(),
         "plan_create" | "plan_update" | "plan_view" => return "📋 Managing plan".to_string(),
         "read_skill_file" => return "📖 Reading skill".to_string(),
@@ -1150,6 +1151,14 @@ mod tests {
         assert_eq!(
             friendly_tool_name("get_scheduled_task_history"),
             "📋 Checking task history"
+        );
+    }
+
+    #[test]
+    fn test_friendly_tool_name_task_reruns() {
+        assert_eq!(
+            friendly_tool_name("task_reruns"),
+            "🗂️ Checking failed tasks"
         );
     }
 

@@ -57,6 +57,48 @@ impl From<&ProviderSection> for ProviderConfig {
     }
 }
 
+/// Typed HTTP failure from a provider's chat-completion call.
+///
+/// Carrying the status as *data* (ADR-0012) lets upper layers — the fallback
+/// chain in [`crate::llm::LlmClient`] and the dead-letter queue in the job
+/// runner (ADR-0013) — classify by downcast instead of string-matching the
+/// error message. Display is byte-identical to the pre-existing
+/// `"{provider} API error ({status}): {body}"` so log greps, existing tests,
+/// and the dream-audit heuristics all keep working.
+#[derive(Debug, Clone)]
+pub struct LlmHttpError {
+    pub provider: String,
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for LlmHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} API error ({}): {}",
+            self.provider, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for LlmHttpError {}
+
+impl LlmHttpError {
+    /// Transient = worth another model or another hour: 429 or any 5xx.
+    /// Everything else (400/401/403/404) can never succeed on resend.
+    pub fn is_transient(&self) -> bool {
+        self.status == reqwest::StatusCode::TOO_MANY_REQUESTS || self.status.is_server_error()
+    }
+}
+
+/// Classify a bubbled error: does its cause chain contain a transient LLM HTTP
+/// failure? Used by the job runner to decide dead-letter queueing (ADR-0013).
+pub fn is_transient_llm_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<LlmHttpError>()
+        .is_some_and(|e| e.is_transient())
+}
+
 /// Internal helper: send a chat completion request with retry logic for
 /// missing/empty `choices` field. Returns the first valid `Choice` on success.
 ///
@@ -102,7 +144,11 @@ async fn chat_completion_with_retry(
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string());
             let body = response.text().await.unwrap_or_default();
-            let err = anyhow::anyhow!("{} API error ({}): {}", provider_name, status, body);
+            let err = anyhow::Error::from(LlmHttpError {
+                provider: provider_name.to_string(),
+                status,
+                body,
+            });
             let retryable =
                 status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
             if !retryable || rate_limit_attempts >= config.rate_limit_retry_limit {

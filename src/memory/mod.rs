@@ -235,6 +235,26 @@ impl MemoryStore {
             CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
                 ON scheduled_task_runs(task_id, run_at);
 
+            -- Dead-letter re-run queue (ADR-0013): control state for scheduled
+            -- tasks that died on a transient LLM error. `scheduled_task_runs`
+            -- stays append-only audit evidence; this table drives re-fires.
+            CREATE TABLE IF NOT EXISTS pending_reruns (
+                id                TEXT PRIMARY KEY,
+                task_id           TEXT NOT NULL,
+                original_run_id   TEXT NOT NULL,
+                fail_reason       TEXT NOT NULL,
+                attempts          INTEGER NOT NULL DEFAULT 0,
+                state             TEXT NOT NULL DEFAULT 'queued',
+                next_eligible_at  TEXT NOT NULL,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pending_reruns_due
+                ON pending_reruns(state, next_eligible_at);
+            CREATE INDEX IF NOT EXISTS idx_pending_reruns_task
+                ON pending_reruns(task_id, state);
+
             -- Supervisor: tasks
             CREATE TABLE IF NOT EXISTS sup_tasks (
                 id              TEXT PRIMARY KEY,

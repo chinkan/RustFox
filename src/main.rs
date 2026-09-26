@@ -81,6 +81,17 @@ async fn main() -> Result<()> {
         registry.default_provider_name(),
         fallback_chain.len()
     );
+    // Fail loudly at boot for typos that would otherwise silently no-op
+    // at call time (ADR-0012 safety: unknown provider prefix → skipped).
+    for entry in &fallback_chain {
+        if let Some((prefix, _)) = entry.split_once('/') {
+            if registry.get_provider(prefix).is_none() {
+                tracing::warn!(
+                    "[fallback] chain entry '{entry}' names unknown provider '{prefix}' — it will be skipped at call time"
+                );
+            }
+        }
+    }
 
     // Spawn background task to warm context_window_cache for all providers
     {
@@ -195,6 +206,14 @@ async fn main() -> Result<()> {
     // Create ScheduledTaskStore sharing the existing SQLite connection
     let task_store = rustfox::scheduler::reminders::ScheduledTaskStore::new(memory.connection());
 
+    // Dead-letter re-run queue (ADR-0013) shares the same connection.
+    let rerun_queue = rustfox::scheduler::reruns::RerunQueue::new(memory.connection());
+    match rerun_queue.reset_inflight_on_boot().await {
+        Ok(n) if n > 0 => info!("  Rerun queue: reset {n} in-flight row(s) after restart"),
+        Ok(_) => {}
+        Err(e) => warn!("  Rerun queue boot reset failed: {e:#}"),
+    }
+
     // Create scheduler as Arc so Agent can hold it and closures can reference it
     let scheduler = Arc::new(Scheduler::new().await?);
 
@@ -231,6 +250,7 @@ async fn main() -> Result<()> {
         Arc::clone(&scheduler),
         job_tx.clone(),
         Arc::clone(&bot),
+        rerun_queue.clone(),
     )));
     tool_registry.register(Box::new(rustfox::skill_tools::SkillTools::new(
         config.skills.directory.clone(),
@@ -256,7 +276,7 @@ async fn main() -> Result<()> {
             task_store.clone(),
             Arc::clone(&scheduler),
             weak.clone(),
-            job_tx,
+            job_tx.clone(),
             Arc::clone(&langsmith),
             config_path.clone(),
             cancel_registry.clone(),
@@ -270,6 +290,7 @@ async fn main() -> Result<()> {
 
     // Spawn background runner: receives ScheduledJobRequest, calls process_message, persists result, sends reply
     let agent_for_runner = Arc::clone(&agent);
+    let queue_for_runner = rerun_queue.clone();
     tokio::spawn(async move {
         while let Some(req) = job_rx.recv().await {
             let agent = Arc::clone(&agent_for_runner);
@@ -286,16 +307,124 @@ async fn main() -> Result<()> {
             }
 
             let response = match agent
-                .process_message(&req.incoming, None, None, ToolUiMode::Minimal)
+                .process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal)
                 .await
             {
-                Ok(r) => {
+                Ok(outcome) => {
+                    // Read the stop reason before moving the text out.
+                    let hit_iteration_cap = outcome.is_max_iterations();
+                    let r = outcome.text;
+                    // A budget-exhausted run is NOT a success: the loop stopped
+                    // mid-task, possibly after side effects. Record it failed
+                    // and hand it to the human gate (ADR-0013) instead of
+                    // reporting a clean completion.
+                    if hit_iteration_cap {
+                        let reason = format!(
+                            "Reached max iterations ({}) without a final response",
+                            agent.config.max_iterations()
+                        );
+                        tracing::warn!(
+                            "Scheduled task {} exhausted its iteration budget: {}",
+                            req.task_id,
+                            reason
+                        );
+                        if let Err(e) = req
+                            .task_store
+                            .update_run(&run_id, Some(&r), Some(&reason), "failed")
+                            .await
+                        {
+                            tracing::warn!("Failed to update run record: {}", e);
+                        }
+                        match &req.rerun_id {
+                            // A re-fire that exhausted its budget → ask, never auto again.
+                            Some(rid) => {
+                                if let Err(e) =
+                                    queue_for_runner.mark_awaiting_user(rid, &reason).await
+                                {
+                                    tracing::warn!(
+                                        "Failed to mark rerun {rid} awaiting_user: {e:#}"
+                                    );
+                                }
+                                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                                    let ask = format!(
+                                        "**Scheduled task needs your call** — the re-run ran out of iteration budget.
+
+{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
+                                        reason,
+                                        rid
+                                    );
+                                    let _ = rustfox::platform::telegram::send_markdown_message(
+                                        &req.bot,
+                                        teloxide::types::ChatId(cv),
+                                        &ask,
+                                        rustfox::platform::telegram::MessageFormat::Auto,
+                                    )
+                                    .await;
+                                }
+                            }
+                            // First strike: record a human-gated row (never auto-fired).
+                            None => {
+                                match queue_for_runner
+                                    .enqueue_manual(&req.task_id, &run_id, &reason)
+                                    .await
+                                {
+                                    Ok(qid) => {
+                                        tracing::info!(
+                                            "Max-iterations on task {} → human-gated queue row {qid}",
+                                            req.task_id
+                                        );
+                                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                                            let note = format!(
+                                                "**Scheduled task stalled:** it hit the iteration cap ({}) without finishing, so I did NOT auto-retry (it may have half-done work).\n\n{}",
+                                                agent.config.max_iterations(),
+                                                reason
+                                            );
+                                            let _ = rustfox::platform::telegram::send_markdown_message(
+                                                &req.bot,
+                                                teloxide::types::ChatId(cv),
+                                                &note,
+                                                rustfox::platform::telegram::MessageFormat::Auto,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    Err(qe) => {
+                                        tracing::warn!(
+                                            "Failed to record stalled run for {}: {qe:#}",
+                                            req.task_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // Deliver whatever partial text the loop produced, then stop.
+                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                            let _ = rustfox::platform::telegram::send_markdown_message(
+                                &req.bot,
+                                teloxide::types::ChatId(cv),
+                                &r,
+                                rustfox::platform::telegram::MessageFormat::Auto,
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
                     if let Err(e) = req
                         .task_store
                         .update_run(&run_id, Some(&r), None, "completed")
                         .await
                     {
                         tracing::warn!("Failed to update scheduled task run record: {}", e);
+                    }
+                    // ADR-0013: a re-fire that succeeded closes its queue row.
+                    // Output delivery below is byte-identical to a normal run
+                    // (Kan Q4: no "♻️ delayed" marker anywhere).
+                    if let Some(rid) = &req.rerun_id {
+                        if let Err(e) = queue_for_runner.mark_done(rid).await {
+                            tracing::warn!("Failed to mark rerun {rid} done: {e:#}");
+                        } else {
+                            tracing::info!("Rerun {rid} succeeded — queue row closed");
+                        }
                     }
                     r
                 }
@@ -311,6 +440,70 @@ async fn main() -> Result<()> {
                     }
                     if !req.is_recurring {
                         let _ = req.task_store.set_status(&req.task_id, "failed").await;
+                    }
+                    // --- ADR-0013 two-strike dead-letter handling ---
+                    let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
+                    match &req.rerun_id {
+                        // Second strike: the re-fire itself died → ask Kan, never auto again.
+                        Some(rid) => {
+                            if let Err(e) = queue_for_runner.mark_awaiting_user(rid, &err_str).await
+                            {
+                                tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+                            }
+                            if let Some(cv) = chat_id_opt {
+                                let ask = format!(
+                                    "**Scheduled task failed twice** (re-run {}), holding for your decision.\n\nLast error: {}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
+                                    &rid[..8.min(rid.len())],
+                                    err_str,
+                                    rid
+                                );
+                                let _ = rustfox::platform::telegram::send_markdown_message(
+                                    &req.bot,
+                                    teloxide::types::ChatId(cv),
+                                    &ask,
+                                    rustfox::platform::telegram::MessageFormat::Auto,
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
+                        // First strike: transient LLM death → queue for one auto re-fire.
+                        // (is_transient_llm_error downcasts the typed LlmHttpError —
+                        // 429/5xx only; 400/401 and non-LLM errors fall through to
+                        // the plain failure notice below, unchanged.)
+                        None if rustfox::provider::is_transient_llm_error(&e) => {
+                            match queue_for_runner
+                                .enqueue(&req.task_id, &run_id, &err_str)
+                                .await
+                            {
+                                Ok(qid) => {
+                                    tracing::info!(
+                                        "Transient failure on task {} → re-fire queued ({qid}), checking hourly",
+                                        req.task_id
+                                    );
+                                    if let Some(cv) = chat_id_opt {
+                                        let note = format!(
+                                            "**Scheduled task hiccup:** transient provider failure (429/5xx), auto re-fire queued — I'll retry within the hour and only nag you if it fails again.\n\n(queue id: `{qid}`)"
+                                        );
+                                        let _ = rustfox::platform::telegram::send_markdown_message(
+                                            &req.bot,
+                                            teloxide::types::ChatId(cv),
+                                            &note,
+                                            rustfox::platform::telegram::MessageFormat::Auto,
+                                        )
+                                        .await;
+                                    }
+                                    continue;
+                                }
+                                Err(qe) => {
+                                    tracing::warn!(
+                                        "Failed to enqueue rerun for {}: {qe:#}",
+                                        req.task_id
+                                    );
+                                }
+                            }
+                        }
+                        None => {}
                     }
                     // Send error to user via rich message
                     let chat_id_val: i64 = match req.incoming.chat_id.parse() {
@@ -362,6 +555,79 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn dead-letter watchdog (ADR-0013): hourly sweep of pending_reruns.
+    // System-level interval job — deliberately NOT a user scheduled_task row
+    // (can't be edited/deleted by accident, doesn't pollute the task list).
+    {
+        let queue = rerun_queue.clone();
+        let store = task_store.clone();
+        let tx = job_tx.clone();
+        let bot2 = Arc::clone(&bot);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                // 1. Due re-fires.
+                let due = match queue.due().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!("Rerun watchdog due-scan failed: {e:#}");
+                        Vec::new()
+                    }
+                };
+                for row in due {
+                    let task = match store.get_by_id(&row.task_id).await {
+                        Ok(Some(t)) => t,
+                        Ok(None) => {
+                            let _ = queue.mark_abandoned(&row.id).await;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Rerun watchdog task lookup failed: {e:#}");
+                            continue;
+                        }
+                    };
+                    // Only fire tasks still live & un-soft-deleted (ADR-0013).
+                    if task.status != "active" || task.deleted_at.is_some() {
+                        tracing::info!(
+                            "Rerun {} skipped: task {} is {} — abandoning",
+                            row.id,
+                            row.task_id,
+                            task.status
+                        );
+                        let _ = queue.mark_abandoned(&row.id).await;
+                        continue;
+                    }
+                    if let Err(e) = rustfox::agent::Agent::build_rerun_request(
+                        &tx,
+                        Arc::clone(&bot2),
+                        store.clone(),
+                        &task,
+                        &row.id,
+                    ) {
+                        tracing::warn!("Rerun dispatch failed for {}: {e:#}", row.id);
+                    } else if let Err(e) = queue.mark_dispatched(&row.id).await {
+                        tracing::warn!("Rerun bump-attempts failed for {}: {e:#}", row.id);
+                    }
+                }
+                // 2. Age out unanswered awaiting_user rows (one-line DM each).
+                match queue.expire_awaiting().await {
+                    Ok(ids) => {
+                        for id in ids {
+                            tracing::info!("Rerun {id} expired unanswered → abandoned");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Rerun expiry failed: {e:#}"),
+                }
+                // 3. Purge old terminal rows.
+                if let Err(e) = queue.purge_terminal().await {
+                    tracing::warn!("Rerun purge failed: {e:#}");
+                }
+            }
+        });
+    }
+
     // Spawn background OAuth token refresh task: checks every 30 minutes.
     // `cfgs` is kept across ticks so that updated token_expires_at values
     // are remembered and a freshly-rotated refresh token isn't re-used.
@@ -398,7 +664,7 @@ async fn main() -> Result<()> {
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
-        rustfox::llm::LlmClient::new(registry.clone()),
+        rustfox::llm::LlmClient::new(registry.clone()).with_fallback_chain(config.fallback_chain()),
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
