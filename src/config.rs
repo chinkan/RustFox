@@ -162,11 +162,28 @@ pub struct OpenRouterConfig {
     pub max_tokens: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Optional file holding the system prompt (ADR 0011 R7). Relative paths
+    /// resolve under `RUSTFOX_HOME`. Precedence: file > inline
+    /// `system_prompt` > built-in default. Edits go through the portal soul
+    /// writer, never through the TOML round-trip (which would kill comments).
+    #[serde(default)]
+    pub system_prompt_file: Option<PathBuf>,
     /// Whether the configured model supports vision (image inputs).
     /// When true, images are sent as base64-encoded content parts.
     /// When false, OCR is used to extract text from images.
     #[serde(default)]
     pub supports_vision: bool,
+}
+
+/// Which layer supplied the effective system prompt (ADR 0011 R7).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SystemPromptSource {
+    /// Read from the `system_prompt_file` pointer (wins).
+    File(PathBuf),
+    /// Inline `[openrouter] system_prompt`.
+    Inline,
+    /// The compiled-in default.
+    Builtin,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -611,6 +628,85 @@ fn default_learning_config() -> LearningConfig {
 }
 
 impl Config {
+    /// Resolve the effective system prompt (ADR 0011 R7).
+    ///
+    /// Precedence: **file > inline > built-in default**. When the pointer is
+    /// set but the file is missing or empty, we degrade honestly: fall back
+    /// to inline/default and emit a warning instead of silently booting with
+    /// a prompt the operator believes is live.
+    pub fn resolve_system_prompt(&self) -> (String, SystemPromptSource) {
+        if let Some(ptr) = self
+            .openrouter
+            .system_prompt_file
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let path = self.resolve_prompt_path(ptr);
+            match std::fs::read_to_string(&path) {
+                Ok(content) if !content.trim().is_empty() => {
+                    return (content, SystemPromptSource::File(path));
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "system_prompt_file {} is empty — falling back to inline system_prompt",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "system_prompt_file {} unreadable ({e}) — falling back to inline system_prompt",
+                        path.display()
+                    );
+                }
+            }
+        }
+        if !self.openrouter.system_prompt.trim().is_empty() {
+            // Serde fills the built-in default when the key is absent — if the
+            // live value still *equals* the default, report "builtin" honestly
+            // instead of implying the operator customised the inline copy.
+            let source = if self.openrouter.system_prompt == default_system_prompt() {
+                SystemPromptSource::Builtin
+            } else {
+                SystemPromptSource::Inline
+            };
+            return (self.openrouter.system_prompt.clone(), source);
+        }
+        (default_system_prompt(), SystemPromptSource::Builtin)
+    }
+
+    /// Where the effective system prompt came from (for API warnings).
+    pub fn system_prompt_source(&self) -> SystemPromptSource {
+        self.resolve_system_prompt().1
+    }
+
+    /// True when BOTH the file pointer and a *customised* inline prompt are
+    /// set — the divergence trap from ADR 0011 R7 (the file wins, so editing
+    /// the inline copy silently does nothing). The inline value is compared
+    /// against the built-in default because serde fills it in when the key
+    /// is absent: "non-empty" would always be true and warn on every config.
+    pub fn system_prompt_divergence(&self) -> bool {
+        let pointer_set = self
+            .openrouter
+            .system_prompt_file
+            .as_ref()
+            .is_some_and(|p| !p.as_os_str().is_empty());
+        let inline_customised = self.openrouter.system_prompt != default_system_prompt();
+        pointer_set && inline_customised
+    }
+
+    /// Absolute path for a `system_prompt_file` value: relative paths resolve
+    /// under the home root (falling back to the config dir's parent before
+    /// `resolve()` has run, which only matters in tests).
+    pub fn resolve_prompt_path(&self, ptr: &Path) -> PathBuf {
+        if ptr.is_absolute() {
+            return ptr.to_path_buf();
+        }
+        match self.resolved_home() {
+            Some(home) => home.join(ptr),
+            None => PathBuf::from(ptr),
+        }
+    }
+
     /// Location string from [general], injected into the system prompt.
     pub fn user_location(&self) -> Option<&str> {
         self.general.as_ref().and_then(|g| g.location.as_deref())
@@ -698,6 +794,9 @@ impl Config {
             &self.supervisor.artifacts_dir,
             "artifacts",
         );
+        // ADR 0011 R7: system_prompt_file is resolved lazily by
+        // resolve_prompt_path() (so portal overrides of resolved_home take
+        // effect without re-running resolve()).
 
         // Soul files are hardcoded siblings of the home dir; not configurable.
         let soul = home.join("SOUL.md");
@@ -813,8 +912,24 @@ mod tests {
         );
     }
 
+    /// Tests that assert `[general].home` precedence must not see an ambient
+    /// `RUSTFOX_HOME` — env beats config in `resolve_home`, and this test
+    /// binary can legitimately run *inside* a live RustFox install (which
+    /// exports RUSTFOX_HOME). Serialize all env-sensitive tests through one
+    /// lock and clear the var; non-locked tests are assertion-immune.
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn isolate_home_env() -> std::sync::MutexGuard<'static, ()> {
+        let guard = HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("RUSTFOX_HOME");
+        guard
+    }
+
     #[test]
     fn resolved_home_returns_some_after_resolve() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let mut cfg: Config = toml::from_str(base_toml()).unwrap();
@@ -831,6 +946,7 @@ mod tests {
 
     #[test]
     fn resolve_fills_unset_paths_under_home() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let mut cfg: Config = toml::from_str(base_toml()).unwrap();
@@ -884,6 +1000,7 @@ mod tests {
 
     #[test]
     fn load_resolves_paths_to_absolute() {
+        let _env = isolate_home_env();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".rustfox");
         let cfg_path = tmp.path().join("config.toml");
@@ -1380,6 +1497,138 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.fallback.chain.len(), 2);
         assert_eq!(cfg.fallback.chain[0], "openrouter/model-a");
+    }
+
+    // ---- ADR 0011 R7: system_prompt_file precedence ----
+
+    #[test]
+    fn resolve_system_prompt_prefers_file_over_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(&format!(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            system_prompt = "inline prompt"
+            system_prompt_file = "prompts/system.md"
+            [general]
+            home = "{}"
+            "#,
+            home.display()
+        ))
+        .unwrap();
+        cfg.resolve().unwrap();
+        // File missing -> honest fallback to inline.
+        let (prompt, source) = cfg.resolve_system_prompt();
+        assert_eq!(prompt, "inline prompt");
+        assert_eq!(source, SystemPromptSource::Inline);
+        assert!(cfg.system_prompt_divergence(), "pointer + custom inline");
+
+        std::fs::create_dir_all(home.join("prompts")).unwrap();
+        std::fs::write(home.join("prompts/system.md"), "file prompt").unwrap();
+        let (prompt, source) = cfg.resolve_system_prompt();
+        assert_eq!(prompt, "file prompt", "file must win");
+        assert!(matches!(source, SystemPromptSource::File(_)));
+
+        // Empty file -> still falls back (never boots on a silent blank).
+        std::fs::write(home.join("prompts/system.md"), "   \n").unwrap();
+        let (prompt, _) = cfg.resolve_system_prompt();
+        assert_eq!(prompt, "inline prompt");
+    }
+
+    #[test]
+    fn resolve_system_prompt_absolute_pointer_skips_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt_file = tmp.path().join("custom-prompt.md");
+        std::fs::write(&prompt_file, "absolute wins").unwrap();
+        let mut cfg: Config = toml::from_str(&format!(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            system_prompt_file = "{}"
+            "#,
+            prompt_file.display()
+        ))
+        .unwrap();
+        let home = tmp.path().join(".rustfox");
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home),
+        });
+        cfg.resolve().unwrap();
+        let (prompt, source) = cfg.resolve_system_prompt();
+        assert_eq!(prompt, "absolute wins");
+        assert_eq!(source, SystemPromptSource::File(prompt_file));
+    }
+
+    #[test]
+    fn system_prompt_source_labels_serde_filled_default_as_builtin() {
+        // No system_prompt key at all: serde fills the default; the API should
+        // report "builtin", and divergence must not fire against it.
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.system_prompt_source(), SystemPromptSource::Builtin);
+        assert!(!cfg.system_prompt_divergence());
+    }
+
+    #[test]
+    fn divergence_requires_pointer_and_customised_inline() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            system_prompt_file = "prompts/system.md"
+            "#,
+        )
+        .unwrap();
+        // Pointer set but inline is only the serde default -> no divergence.
+        assert!(!cfg.system_prompt_divergence());
+    }
+
+    #[test]
+    fn prompt_pointer_resolves_lazily_via_home() {
+        // resolve() never mutates the raw pointer field; resolve_prompt_path
+        // joins relative values with the *current* resolved_home (so portal
+        // test fixtures that override resolved_home after load still work).
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let abs = tmp.path().join("p.md");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        cfg.openrouter.system_prompt_file = Some(abs.clone());
+        cfg.resolve().unwrap();
+        // Absolute kept verbatim; relative joined with home.
+        assert_eq!(cfg.resolve_prompt_path(&abs), abs);
+        let rel = PathBuf::from("prompts/system.md");
+        assert_eq!(
+            cfg.resolve_prompt_path(&rel),
+            home.join("prompts/system.md")
+        );
+        // Raw field untouched by resolve() (lazy contract).
+        assert_eq!(
+            cfg.openrouter.system_prompt_file.as_deref(),
+            Some(abs.as_path())
+        );
     }
 
     #[test]

@@ -13,7 +13,8 @@
     "tasks": "定時任務",
     "settings": "設定",
     "signOut": "登出",
-    "signOutEverywhere": "所有裝置登出"
+    "signOutEverywhere": "所有裝置登出",
+    "skills": "技能"
   },
   "login": {
     "title": "RustFox Portal",
@@ -30,7 +31,8 @@
     "retry": "重試",
     "enabled": "啟用",
     "paused": "暫停",
-    "restarting": "伺服器重啟中 — 重新連線…"
+    "restarting": "伺服器重啟中 — 重新連線…",
+    "cancel": "取消"
   },
   "dashboard": {
     "title": "儀表板",
@@ -115,7 +117,29 @@
     "runs": "執行紀錄",
     "hideRuns": "收起紀錄",
     "noRuns": "未有執行紀錄。",
-    "restartNote": "已啟用 — 重啟後先排程。"
+    "restartNote": "已啟用 — 重啟後先排程。",
+    "newTask": "新增任務",
+    "editTask": "編輯任務",
+    "edit": "編輯",
+    "delete": "刪除",
+    "save": "儲存",
+    "create": "建立",
+    "triggerType": "觸發方式",
+    "recurring": "定期 (cron)",
+    "oneShot": "一次",
+    "triggerTypeLocked": "建立後不可更改觸發方式。",
+    "cronExpr": "Cron（6 欄）",
+    "runAt": "執行時間 (ISO-8601)",
+    "cronHint": "秒 分 時 日 月 星期 — 例 0 30 7 * * *",
+    "triggerInvalid": "觸發值無效（需要 6 欄 cron／將來嘅 ISO 時間）。",
+    "prompt": "Prompt",
+    "rearmed": "已即時重新排程 — 下次執行 {{next}}",
+    "created": "任務已建立 — 下次執行 {{next}}",
+    "updated": "任務已更新",
+    "updatedRearmed": "任務已更新並重新排程 — 下次執行 {{next}}",
+    "deleted": "任務已刪除 — 執行歷史保留",
+    "deleteConfirmTitle": "刪除任務？",
+    "deleteConfirm": "刪除「{{name}}」？排程會取消；執行歷史保留。"
   },
   "settings": {
     "title": "設定",
@@ -139,10 +163,61 @@
     "soulOpen": "編輯 {{name}}",
     "soulSave": "儲存檔案",
     "soulSaved": "已儲存 {{name}}（{{bytes}} bytes）。",
-    "soulLoadFailed": "載入唔到 {{name}}。"
+    "soulLoadFailed": "載入唔到 {{name}}。",
+    "promptTitle": "System Prompt",
+    "promptSourceFile": "生效來源：prompt 檔案（{{pointer}}）",
+    "promptSourceInline": "生效來源：inline [openrouter] system_prompt",
+    "promptSourceBuiltin": "生效來源：內置 default（未有任何自訂）",
+    "promptDivergence": "分叉警告：同時設定咗 prompt 檔案指標 AND 自訂咗 inline prompt —— 檔案會勝出，inline 嗰份係死字。刪走一個。",
+    "promptHint": "透過下面嘅 soul editor 改 prompt 檔案（名：system）。改動下一個 turn 即刻生效，唔使重啟。",
+    "promptNotEnabled": "未設檔案指標 —— 編輯會寫入 prompts/system.md，但喺 config.toml 嘅 [openrouter] 加返 system_prompt_file 之前，bot 仍然用 inline prompt。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",
     "back": "返去儀表板"
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "編輯 SKILL.md、管理 agent、由 GitHub 安裝。",
+    "col.name": "名稱",
+    "col.source": "來源",
+    "col.files": "檔案",
+    "newSkill": "新增技能",
+    "reload": "重載",
+    "reloadDone": "已重載：{{skills}} 個技能、{{agents}} 個 agent",
+    "openEditor": "開啟",
+    "editorTitle": "{{name}} · {{path}}",
+    "save": "儲存",
+    "saving": "儲存中…",
+    "saved": "已儲存",
+    "delete": "刪除",
+    "deleteConfirm": "將「{{name}}」隔離去 .trash？歷史保留，載入器唔再見到佢。",
+    "bundledNoDelete": "bundled 技能唔喺度刪",
+    "conflict409": "由你讀取之後已被改動（OpenCode 或另一個分頁）。請重讀再試。",
+    "reread": "重讀",
+    "modifiedMark": "已修改",
+    "unknownTools": "有部分 tool 未註冊。仍要儲存？",
+    "warnings": "警告",
+    "name": "技能名稱",
+    "content": "SKILL.md 內容",
+    "created2": "技能已建立"
+  },
+  "install": {
+    "title": "由 GitHub 安裝",
+    "subtitle": "owner/repo[:subpath][@ref] — 落盤之前會先掃描。",
+    "source": "來源 repo",
+    "dryRun": "預檢",
+    "install": "安裝",
+    "force": "取代同名技能（先隔離）",
+    "wouldInstall": "將安裝",
+    "refused": "被拒（硬性規則）",
+    "warningsNeedAck": "警告 — 逐項剔選確認",
+    "ackAll": "全部確認",
+    "notes": "備註",
+    "installedOk": "已安裝：{{names}}",
+    "skipped": "跳過：{{count}}",
+    "noWarnings": "冇警告 — 乾淨嘅結果。",
+    "ledger": "已安裝紀錄",
+    "ledgerEmpty": "而家未有透過 portal 安裝過嘅技能。"
   }
 }

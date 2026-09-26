@@ -143,7 +143,6 @@ impl ToolHandler for SchedulingTools {
                 };
 
                 let task_id = Uuid::new_v4().to_string();
-                let task_id_for_sched = task_id.clone();
                 let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                 let task = ScheduledTask {
                     id: task_id.clone(),
@@ -158,54 +157,25 @@ impl ToolHandler for SchedulingTools {
                     status: "active".to_string(),
                     created_at: now.clone(),
                     next_run_at: Some(trigger_value.clone()),
+                    deleted_at: None,
                 };
                 if let Err(e) = self.task_store.create(&task).await {
                     return Ok(format!("Failed to save task: {}", e));
                 }
 
-                let job_tx = self.job_tx.clone();
-                let bot_clone = self.bot.clone();
-                let store_clone = self.task_store.clone();
-                let uid = ctx.user_id.clone();
-                let cid = ctx.chat_id.clone();
-                let prompt_cap = prompt_text.clone();
-                let is_recurring = trigger_type == "recurring";
-                let tv = trigger_value.clone();
-
-                let fire = move || {
-                    let tx = job_tx.clone();
-                    let bot = bot_clone.clone();
-                    let store = store_clone.clone();
-                    let uid = uid.clone();
-                    let cid = cid.clone();
-                    let prompt = prompt_cap.clone();
-                    let tid = task_id_for_sched.clone();
-                    let recurring = is_recurring;
-                    Box::pin(async move {
-                        let incoming = crate::platform::IncomingMessage {
-                            platform: "scheduled_task".to_string(),
-                            user_id: format!("{uid}:{tid}"),
-                            chat_id: cid,
-                            user_name: String::new(),
-                            text: prompt,
-                            attachments: vec![],
-                        };
-                        let req = ScheduledJobRequest {
-                            incoming,
-                            bot,
-                            task_id: tid,
-                            is_recurring: recurring,
-                            task_store: store,
-                        };
-                        let _ = tx.send(req);
-                    })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                };
+                let fire = crate::agent::Agent::build_fire_closure(
+                    self.job_tx.clone(),
+                    Arc::clone(&self.bot),
+                    self.task_store.clone(),
+                    &task,
+                );
 
                 let sched_result = if let Some(d) = delay {
                     self.scheduler.add_one_shot_job(d, &description, fire).await
                 } else {
-                    self.scheduler.add_cron_job(&tv, &description, fire).await
+                    self.scheduler
+                        .add_cron_job(&trigger_value, &description, fire)
+                        .await
                 };
 
                 match sched_result {
@@ -273,41 +243,12 @@ impl ToolHandler for SchedulingTools {
                     Ok(None) => return Ok(format!("Task not found: {task_id}")),
                     Err(e) => return Ok(format!("Task not found: {}", e)),
                 };
-                let job_tx = self.job_tx.clone();
-                let bot_clone = self.bot.clone();
-                let store_clone = self.task_store.clone();
-                let tid = task_id.to_string();
-                let uid = task.user_id.clone();
-                let cid = task.chat_id.clone();
-                let prompt_cap = task.prompt.clone();
-                let fire = move || {
-                    let tx = job_tx.clone();
-                    let bot = bot_clone.clone();
-                    let store = store_clone.clone();
-                    let tid = tid.clone();
-                    let uid = uid.clone();
-                    let cid = cid.clone();
-                    let prompt = prompt_cap.clone();
-                    Box::pin(async move {
-                        let incoming = crate::platform::IncomingMessage {
-                            platform: "scheduled_task".to_string(),
-                            user_id: format!("{uid}:{tid}"),
-                            chat_id: cid,
-                            user_name: String::new(),
-                            text: prompt,
-                            attachments: vec![],
-                        };
-                        let req = ScheduledJobRequest {
-                            incoming,
-                            bot,
-                            task_id: tid,
-                            is_recurring: false,
-                            task_store: store,
-                        };
-                        let _ = tx.send(req);
-                    })
-                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                };
+                let fire = crate::agent::Agent::build_fire_closure(
+                    self.job_tx.clone(),
+                    Arc::clone(&self.bot),
+                    self.task_store.clone(),
+                    &task,
+                );
                 match self
                     .scheduler
                     .add_one_shot_job(std::time::Duration::from_secs(1), &task.description, fire)

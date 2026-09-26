@@ -262,6 +262,7 @@ async fn main() -> Result<()> {
             cancel_registry.clone(),
             tool_registry,
             sender.clone(),
+            Arc::clone(&bot),
             restart_pending.clone(),
             soul_updated.clone(),
         )
@@ -406,7 +407,7 @@ async fn main() -> Result<()> {
     .await?;
     scheduler.start().await?;
     info!("  Scheduler: active");
-    agent.restore_scheduled_tasks(Arc::clone(&bot)).await;
+    agent.restore_scheduled_tasks().await;
     info!("  Scheduled tasks: restored from DB");
 
     // Construct Supervisor with a populated backend Registry so resume /

@@ -191,6 +191,13 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
         "cron": if t.trigger_type == "recurring" { t.trigger_value.clone() } else { "once".to_string() },
         "enabled": t.status == "active",
         "nextRun": t.next_run_at.clone().unwrap_or_else(|| "—".to_string()),
+        // Full editable state (T3/T5): the edit form needs prompt + trigger
+        // verbatim; status distinguishes paused vs completed one-shots.
+        "prompt": t.prompt,
+        "triggerType": t.trigger_type,
+        "triggerValue": t.trigger_value,
+        "status": t.status,
+        "platform": t.platform,
     })
 }
 
@@ -238,55 +245,6 @@ pub async fn task_runs(
         })
         .collect();
     Ok(Json(serde_json::Value::Array(out)))
-}
-
-/// POST /api/tasks/{id}/enable — set status active and re-register the job.
-pub async fn task_enable(
-    State(state): State<PortalState>,
-    Path(p): Path<TaskId>,
-) -> Result<Json<serde_json::Value>, PortalError> {
-    let task = state
-        .task_store
-        .get_by_id(&p.id)
-        .await
-        .map_err(PortalError::from)?
-        .ok_or_else(|| PortalError::not_found("task"))?;
-    state
-        .task_store
-        .set_status(&p.id, "active")
-        .await
-        .map_err(PortalError::from)?;
-    // Re-arming the live cron job from an Arc<Agent> needs the Telegram bot
-    // handle (fire closure captures it), which restore_scheduled_tasks owns.
-    // MVP behaviour: status flip takes effect on next restart; the UI marks it.
-    let _ = &task;
-    Ok(Json(
-        json!({ "ok": true, "id": p.id, "enabled": true, "restartToSchedule": true }),
-    ))
-}
-
-/// POST /api/tasks/{id}/disable — pause scheduling + mark inactive.
-pub async fn task_disable(
-    State(state): State<PortalState>,
-    Path(p): Path<TaskId>,
-) -> Result<Json<serde_json::Value>, PortalError> {
-    let task = state
-        .task_store
-        .get_by_id(&p.id)
-        .await
-        .map_err(PortalError::from)?
-        .ok_or_else(|| PortalError::not_found("task"))?;
-    if let Some(job_id) = task.scheduler_job_id.as_deref() {
-        if let Ok(uuid) = job_id.parse::<uuid::Uuid>() {
-            state.agent.remove_scheduler_job(uuid).await;
-        }
-    }
-    state
-        .task_store
-        .set_status(&p.id, "paused")
-        .await
-        .map_err(PortalError::from)?;
-    Ok(Json(json!({ "ok": true, "id": p.id, "enabled": false })))
 }
 
 // ---------------------------------------------------------------------------

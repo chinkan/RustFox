@@ -2,6 +2,10 @@ use rustfox::config::Config;
 
 #[test]
 fn sandbox_defaults_to_home_workspace_and_excludes_secrets() {
+    // Env RUSTFOX_HOME beats [general].home in resolve_home — this test
+    // asserts the CONFIG value wins, so the ambient env must be clear.
+    // (RustFox itself exports RUSTFOX_HOME; test binaries inherit it.)
+    std::env::remove_var("RUSTFOX_HOME");
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join(".rustfox");
     let cfg_path = tmp.path().join("config.toml");

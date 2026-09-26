@@ -45,7 +45,7 @@ One generation per portal user at a time; concurrent `POST` → `409 chat_in_pro
 ### POST /api/chat/cancel
 → `200 {"cancelled": true|false}` (false when nothing is running). Uses `register_cancel_token`/`cancel_processing` on the web identity.
 
-## Agents (read-only)
+## Agents (runtime status)
 
 ### GET /api/agents
 → `200 [{"id":"main","name":"RustFox","model":"<current model>","status":"idle|running","lastActive":"<ISO8601|null>","subagents":n}]` — status from `is_processing("web"|"telegram")`; `subagents` = count of loaded agent definitions.
@@ -54,7 +54,59 @@ One generation per portal user at a time; concurrent `POST` → `409 chat_in_pro
 → `200 [{"name","description","path","instruction":true|false}]` from the live `SkillRegistry`.
 
 ### POST /api/agents/reload
-→ `200 {"skillsLoaded": n, "agentsLoaded": n}` — calls `Agent::reload_skills_and_agents`.
+→ `200 {"skillsLoaded": n, "agentsLoaded": n}` — calls `Agent::reload_skills_and_agents`. (Writes below auto-reload; this endpoint is for out-of-band edits, e.g. via the agent's own tools or OpenCode.)
+
+## Skills & Agents control plane (ADR 0011 / 0011a)
+
+Full CRUD over the two editable-behavior surfaces: `~/.rustfox/skills/` and `~/.rustfox/agents/`. Shared semantics:
+
+- **Provenance** (every list/detail item): `"bundled"` (shipped in the binary, re-seeded on update — editable, never deletable), `"installed"` (GitHub installer, recorded in `installed-skills.json`), `"user"` (created by hand / agent tools / portal "new"). Classification order: ledger > bundled > user.
+- **Optimistic lock (R4)**: `GET detail` returns `hash` (dir hash for dir-form entries, file sha256 for standalone) and per-file `files[].hash`. `PUT .../file` may carry `baseHash`; mismatch/missing-since-read → `409 changed_since_read`. Omit `baseHash` → force-write (CLI parity).
+- **Quarantine, never hard-remove (R3)**: `DELETE` moves the entry into `<root>/.trash/<name>-<timestamp>` (structural: the dot-dir is invisible to the loader scan; the loader additionally skips hidden dirs). Bundled → `403 bundled_readonly` with fork advice. The installed-ledger record is removed on quarantine.
+- **Writes auto-reload** the skill/agent registry; responses carry `skillsLoaded`/`agentsLoaded` so the UI can show the new count without a second round-trip.
+- **Name/content gates**: `invalid_name` (slug rules from `validate_skill_name`), `invalid_path` (escape/symlink-outside), `empty_primary_file`, `frontmatter_name_mismatch` (a `name:` that disagrees with the directory — this is what revives ghost skills).
+- **Agent tool whitelist (T4)**: writing an `AGENT.md` whose `tools:` list contains names the running agent doesn't have → `400 unknown_tools` (lists them). Escape hatch: `?allowMissing=1` (query) saves anyway with a `warnings` entry.
+
+### GET /api/skills?kind=skills|agents|all
+→ `200 [{"name","kind":"skill|agent","provenance","modified":bool,"deletable":bool}]` — merged listing of both roots (dir-form entries + loader-supported standalone `<name>.md`). `modified` = current hash drifted from the bundled lock-file / installed-ledger baseline.
+
+### GET /api/skills/{name} · GET /api/agents/{name}
+→ `200 {"name","kind","provenance","deletable","modified","hash","standalone","fileHash","content","files":[{"path","size","hash"}],"sourceRepo","commitSha","installedAt"}` (last three non-null only for installed entries). Agent details add `"tools":[...]` and `"model"` parsed from frontmatter. 404 `skill not found` / `agent not found`.
+
+### GET /api/skills/{name}/file?path=SKILL.md · GET /api/agents/{name}/file?path=AGENT.md
+→ `200 {"path","content","size"}`. Standalone `.md` skills expose only their primary file (anything else → `400 invalid_path`).
+
+### PUT /api/skills/{name}/file · PUT /api/agents/{name}/file
+Body `{"path","content","baseHash"?}` + optional `?allowMissing=1`. **Update-only**: the entry must already exist (404 otherwise — creation is a separate intent, R5). Primary-file writes re-run the content gates; `SKILL.md`/`AGENT.md` naming is enforced by `validate_primary_content`.
+→ `200 {"ok":true,"name","path","bytes","provenance","skillsLoaded"|"agentsLoaded","warnings":[]}`. `.bak` written before overwrite. Files > 512 KB → `400 file_too_large`.
+
+### POST /api/skills?allowMissing=1 — create skill
+Body `{"name","content"}` (content = the full `SKILL.md`). Creates `<skills>/<name>/SKILL.md` via the same gate chain as writes; rolls the directory back if a gate refuses. Existing name → `409 already_exists`.
+→ `200 {"ok":true,"name","kind":"skill","path","bytes","provenance":"user","skillsLoaded":n,"agentsLoaded":n,"warnings":[]}`
+
+### POST /api/agents?allowMissing=1 — create subagent (structured, R5)
+Body `{"name","content":<instructions body — no frontmatter>,"description"?,"model"?,"tools"?:[...],"maxIterations"?:n,"skipBootstrap"?:bool}`. The server **renders** `AGENT.md` frontmatter from the structured fields (guaranteed-valid YAML; `name` forced to the directory name), then runs the shared gates incl. the tool whitelist.
+→ same shape as skill create.
+
+### DELETE /api/skills/{name} · DELETE /api/agents/{name}
+→ `200 {"ok":true,"name","kind","quarantinedTo":"<name>-<ts>","skillsLoaded":n,"agentsLoaded":n}` — quarantine, see above. Bundled → 403.
+
+## GitHub skill installer (ADR 0011 B)
+
+### POST /api/skills/install
+Body `{"source":"owner/repo[:subpath][@ref]","dryRun":bool,"acknowledgedWarnings"?:[...],"force"?:bool}`. Browser-pasted `https://github.com/...` prefixes are accepted and stripped. Native Rust fetcher (GitHub contents API, recursive tree), no `npx`.
+
+Caps: 10 skills/request, 20 files/skill, 512 KB/file, 2 MB/skill, dir depth 3. Skipped dirs: `.git`/`node_modules`/`__pycache__` etc. **Hard refusals**: secret-shaped content (`GOCSPX-`, `sk-`, `AKIA`, PEM blocks, `1//…` refresh tokens…), executable-extension files (`.sh`/`.exe`/…), binary content — the skill is knocked out of the plan entirely. **Warnings** (soft): bundled-name collision, file/size caps.
+
+Two-step flow (R2 — reject *before* it scores):
+1. `dryRun:true` → `200 {"dryRun":true,"source":{"owner","repo","ref":sha},"skills":[{"name","description","files":[{"path","size"}],"sizeBytes"}],"verdict":{"refused":[{"skill","file","rule","detail"}],"warnings":[{"skill","file","rule","detail"}],"notes":[]}}`
+2. Real install (`dryRun:false`) must echo every warning's exact key `[rule] skill: file — detail` in `acknowledgedWarnings`; any unacknowledged warning → `409 warnings_unacknowledged` and **nothing is written**.
+
+Existing same-name entry → skipped with reason (unless `force:true`, which quarantines first). Successful installs land in `~/.rustfox/installed-skills.json` with `sourceRepo`, commit sha, git ref, `installedAt`, and install-time content hash (drift detection). GitHub rate limit → `400 github_rate_limited` with honest wait advice (no silent token use — `[github]` token support deferred with the OAuth-storage decision).
+→ `200 {"dryRun":false,"installed":["<skill-name>",…],"skipped":[{"name","reason"}],"verdict":{...},"reload":{"skillsLoaded":n,"agentsLoaded":n}}`
+
+### GET /api/skills/installed
+→ `200 {"skills":{"<name>":{"sourceRepo","commitSha","ref","installedAt","contentHash"}},"agents":{...}}` — the provenance ledger, straight off `installed-skills.json`.
 
 ## Memory
 
@@ -64,16 +116,33 @@ One generation per portal user at a time; concurrent `POST` → `409 chat_in_pro
 - `kind` omitted: both, interleaved, score-ordered.
 → `200 [{"id","kind","text","score","createdAt"}]`. `q` empty → most recent entries.
 
-## Tasks (from `ScheduledTaskStore`)
+## Tasks (from `ScheduledTaskStore`) — full CRUD (ADR 0011a R6)
+
+Write paths go through `AgentOps::arm_task`/`disarm_task` against the **live** scheduler (the old `restartToSchedule` fib is gone). Create/update/enable share ONE arming path with restore + the Telegram tool (`build_fire_closure`). `triggerType` is immutable (delete + recreate); in-flight runs are untouched by edits/disarm (already-spawned jobs naturally survive — the UI doesn't pretend otherwise).
 
 ### GET /api/tasks
-→ `200 [{"id","name","cron","enabled","nextRun"}]` — `name`=description, `cron`=trigger_value when `trigger_type="recurring"` (one-shot tasks show `"once"`), `enabled`= `status=="active"`.
+→ `200 [{"id","name","cron","enabled","nextRun","prompt","triggerType","triggerValue","status","platform"}]` — active + paused (completed/cancelled one-shots hidden; soft-deleted always hidden). `name`=description (or first 40 chars of prompt), `cron`=trigger_value when recurring (`"once"` for one-shot), `enabled`=`status=="active"`. Full editable state included so the edit form needs no second fetch.
+
+### POST /api/tasks — create + arm immediately
+Body `{"name"?,"prompt","triggerType":"recurring|one_shot","triggerValue":"<6-field cron | ISO-8601 local>"}`.
+Validation: non-empty prompt; recurring values run through the **exact** croner config the tokio-cron-scheduler uses internally (`invalid_cron` otherwise — portal gate == scheduler reality, no "accepted here, silently dead there"); one-shot parses to a future datetime (`invalid_trigger`, and `bad_request` if in the past).
+→ `201 {"id","name","schedulerJobId","nextRun"}`. If arming fails the DB row is **rolled back** (`arm_failed`) — a task that exists in the DB but never fires is the worst outcome.
+
+### PUT /api/tasks/{id} — edit + re-arm (partial)
+Body any subset of `{"name"?,"prompt"?,"triggerValue"?,"triggerType"?}`; `triggerType` present-but-different → `400 trigger_type_immutable`. Active tasks: disarm → update → re-arm. Paused tasks: DB-only edit (stays disarmed). Re-arm failure surfaces as `arm_failed` (row saved but honestly flagged).
+→ `200 {"id","updated":{...},"rearmed":bool,"schedulerJobId":null|"<id>","nextRun"}`
+
+### DELETE /api/tasks/{id} — soft delete, history preserved
+Disarms the live job and stamps `deleted_at`; the row and **all** `scheduled_task_runs` history survive (`{"ok":true,"id","softDeleted":true,"historyPreserved":true}`) — run history is the evidence base for replay/noise-floor work (RRSI), never burned with the definition. Hard purge is not exposed.
 
 ### GET /api/tasks/{id}/runs?limit=20
 → `200 [{"id","runAt","status":"running|completed|failed","error"?:null,"response"?:null}]` newest first (truncated to 400 chars).
 
-### POST /api/tasks/{id}/enable · POST /api/tasks/{id}/disable
-→ `200 {"ok": true}` — `set_status("active"|"paused")` + scheduler pause/resume. Deleting/pausing non-web-owned tasks (Telegram-created) is allowed; they run wherever they were created.
+### POST /api/tasks/{id}/enable
+Re-arms against the live scheduler → `200 {"ok":true,"id","enabled":true,"schedulerJobId","nextRun"}`. One-shot whose time already passed → `400 trigger_passed` (edit the time first); status change rolls back on `arm_failed`.
+
+### POST /api/tasks/{id}/disable
+Disarm live job + `status → paused` → `200 {"ok":true,"id","enabled":false,"jobRemoved":bool}`. Telegram-created tasks are listed and toggle-able; they run wherever they were created.
 
 ## Dashboard
 
@@ -96,8 +165,15 @@ Before write: copy current file to `config.toml.bak`. Response:
 `200 {"updated":["model","portalPort"], "restartRequired":["portalPort"], "applied":{"model":"<new>"}}`
 
 ### GET /api/soul · PUT /api/soul
-Markdown soul files, whitelisted names only (`SOUL.md`, `USER.md`, `AGENTS.md`).
+Markdown files, whitelisted names only: `SOUL.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, and `system` (ADR 0011 R7 — the system-prompt file).
 GET → `200 {"name","content","mtime"}`; PUT body `{"name","content"}` → backup `*.bak` then write; fires the `soul_updated` notification so the agent re-reads identity files.
+The `system` entry resolves to `[openrouter] system_prompt_file` (lazily, relative paths under `RUSTFOX_HOME`); with no pointer configured it falls back to `prompts/system.md` so the file can be prepared ahead of enabling. Missing files read as empty content (200), parent dirs are created on write. Empty writes are refused (`empty_soul`).
+
+### GET /api/settings — systemPrompt projection
+`GET /api/settings` includes `systemPrompt: {"source","pointer","divergence"}` (ADR 0011 R7):
+- `source`: which layer is live — `file` | `inline` | `builtin`. An absent/empty/missing prompt file honestly reports the fallback, never `file`.
+- `pointer`: the configured `system_prompt_file` value (null if unset).
+- `divergence`: true when the pointer is set AND the inline prompt differs from the built-in default — the file wins, so the inline copy is dead weight (divergence trap). The SPA surfaces a warning.
 
 ## Static hosting
 - `GET /` → SPA `index.html` (embedded); unknown non-`/api` paths → same `index.html` (client-side routing); `/assets/*` hashed files with long cache.

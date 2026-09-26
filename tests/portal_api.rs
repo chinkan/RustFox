@@ -36,6 +36,10 @@ struct FakeCounters {
     cancel_calls: AtomicUsize,
     set_model_calls: AtomicUsize,
     reload_calls: AtomicUsize,
+    arm_calls: AtomicUsize,
+    disarm_calls: AtomicUsize,
+    /// When set, arm_task fails — drives the portal rollback tests.
+    arm_fail: AtomicBool,
 }
 
 /// Scripted AgentOps. `hold_processing` keeps process_message "running"
@@ -104,6 +108,27 @@ impl AgentOps for FakeAgent {
     fn remove_scheduler_job(&self, _job_id: uuid::Uuid) -> BoxFuture<'_, bool> {
         Box::pin(async { true })
     }
+    fn arm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        self.counters.arm_calls.fetch_add(1, Ordering::SeqCst);
+        let fail = self.counters.arm_fail.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if fail {
+                Err(anyhow::anyhow!("fake scheduler down"))
+            } else {
+                Ok(uuid::Uuid::new_v4())
+            }
+        })
+    }
+    fn disarm_task(
+        &self,
+        _task: rustfox::scheduler::reminders::ScheduledTask,
+    ) -> BoxFuture<'_, bool> {
+        self.counters.disarm_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { true })
+    }
     fn process_message(
         &self,
         _incoming: IncomingMessage,
@@ -128,6 +153,11 @@ impl AgentOps for FakeAgent {
     fn provider_names(&self) -> Vec<String> {
         vec!["openrouter".into()]
     }
+    fn tool_names(&self) -> Vec<String> {
+        // Mirrors what the agents editor gates against: read_file/write_file
+        // exist; everything else is "not available at runtime".
+        vec!["read_file".into(), "write_file".into(), "list_files".into()]
+    }
     fn config(&self) -> &Config {
         &self.config
     }
@@ -140,6 +170,7 @@ impl AgentOps for FakeAgent {
 struct Fixture {
     app: axum::Router,
     state: PortalState,
+    fake: Arc<FakeAgent>,
     _dir: tempfile::TempDir,
 }
 
@@ -186,6 +217,12 @@ bind = "{}"
 /// A fixture with a temp home (secret file), temp config.toml, in-memory
 /// SQLite, and the given portal token config.
 async fn fixture(portal: PortalConfig) -> Fixture {
+    fixture_with(portal, |_| {}).await
+}
+
+/// Same fixture, but lets a test tweak the loaded `Config` before the fake
+/// agent is built (e.g. set `system_prompt_file` for ADR 0011 R7 tests).
+async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -193,11 +230,13 @@ async fn fixture(portal: PortalConfig) -> Fixture {
 
     let mut config = Config::load(&config_path).unwrap();
     config.resolved_home = Some(home.clone());
+    tweak(&mut config);
 
     let memory = MemoryStore::open_in_memory().unwrap();
     let task_store = ScheduledTaskStore::new(memory.connection());
+    let fake = Arc::new(FakeAgent::new(config));
     let state = PortalState::new(
-        Arc::new(FakeAgent::new(config)),
+        fake.clone(),
         memory,
         task_store,
         portal,
@@ -207,6 +246,7 @@ async fn fixture(portal: PortalConfig) -> Fixture {
     Fixture {
         app: rustfox::portal::router(state.clone()),
         state,
+        fake,
         _dir: dir,
     }
 }
@@ -859,15 +899,415 @@ fn make_task(id: &str) -> ScheduledTask {
         chat_id: "1".into(),
         platform: "telegram".into(),
         trigger_type: "recurring".into(),
-        trigger_value: "30 7 * * *".into(),
+        trigger_value: "0 30 7 * * *".into(),
         prompt: "weather report".into(),
         description: "Daily weather".into(),
         status: "active".into(),
         created_at: "2026-09-01T00:00:00Z".into(),
         next_run_at: Some("2026-09-23T07:30:00+08:00".into()),
+        deleted_at: None,
     }
 }
 
+// ---------------------------------------------------------------------------
+// T3 — task CRUD + real re-arm (ADR-0011a R6)
+// ---------------------------------------------------------------------------
+
+fn put_json(path: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn post_empty(path: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn task_create_validates_and_arms() {
+    let f = fixture(with_token_token()).await;
+    // 5-field cron is rejected (validate_cron_expr wants 6)
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"x","prompt":"p","triggerType":"recurring","triggerValue":"30 7 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_cron");
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), 0);
+
+    // valid 6-field cron → 201 + armed + persisted with scheduler id
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"Standup nudge","prompt":"ping me","triggerType":"recurring","triggerValue":"0 30 9 * * 1-5"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = body_json(res).await;
+    let id = body["id"].as_str().unwrap().to_string();
+    assert!(body["schedulerJobId"].is_string());
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), 1);
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(row.status, "active");
+    assert!(
+        row.scheduler_job_id.is_some(),
+        "job id must persist for disable"
+    );
+}
+
+#[tokio::test]
+async fn task_create_rejects_past_oneshot_and_blank_prompt() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"old","prompt":"p","triggerType":"one_shot","triggerValue":"2020-01-01T09:00:00"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_trigger");
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"blank","prompt":"   ","triggerType":"recurring","triggerValue":"0 0 0 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "empty_prompt");
+}
+
+#[tokio::test]
+async fn task_create_rolls_back_row_when_arm_fails() {
+    let f = fixture(with_token_token()).await;
+    f.fake.counters.arm_fail.store(true, Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"Doomed","prompt":"p","triggerType":"recurring","triggerValue":"0 0 0 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "arm_failed");
+    // The row must NOT linger as an active-but-unarmed zombie (silently
+    // resurface on restart): it is soft-deleted by the rollback.
+    let listed = f.state.task_store.list_all_active().await.unwrap();
+    assert!(
+        listed.iter().all(|t| t.description != "Doomed"),
+        "rolled-back task still active"
+    );
+}
+
+#[tokio::test]
+async fn task_update_rearms_active_and_refuses_type_change() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("u1")).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"prompt":"new prompt","name":"Renamed"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["rearmed"], true);
+    assert!(body["schedulerJobId"].is_string());
+    let ac = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+    assert_eq!(ac, before + 1, "active task edit must re-arm exactly once");
+    let row = f.state.task_store.get_by_id("u1").await.unwrap().unwrap();
+    assert_eq!(row.prompt, "new prompt");
+    assert_eq!(row.description, "Renamed");
+
+    // triggerType is immutable (different mechanism → delete + recreate)
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"triggerType":"one_shot","triggerValue":"2099-01-01T09:00:00"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(res).await["error"]["code"],
+        "trigger_type_immutable"
+    );
+
+    // bad cron on a recurring task → invalid_cron, row untouched
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/u1",
+                json!({"triggerValue":"not a cron at all here"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_cron");
+    let row = f.state.task_store.get_by_id("u1").await.unwrap().unwrap();
+    assert_eq!(
+        row.trigger_value, "0 30 7 * * *",
+        "rejected edit must not touch row"
+    );
+
+    // unknown id → 404
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/nope", json!({"prompt":"x"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn task_delete_is_soft_and_preserves_history() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("d1")).await.unwrap();
+    f.state
+        .task_store
+        .insert_run(
+            "r1",
+            "d1",
+            "2026-09-24T07:30:00",
+            Some("ok"),
+            None,
+            "completed",
+        )
+        .await
+        .unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/tasks/d1")
+                .body(Body::empty())
+                .unwrap(),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["softDeleted"], true);
+    assert_eq!(body["historyPreserved"], true);
+    assert_eq!(f.fake.counters.disarm_calls.load(Ordering::SeqCst), 1);
+
+    // hidden from listing (GET /api/tasks), gone from active queries…
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(res).await;
+    assert!(
+        body.as_array().unwrap().iter().all(|t| t["id"] != "d1"),
+        "deleted task listed"
+    );
+    // …but the row and ALL run history survive as evidence (R6).
+    let raw = f.state.task_store.get_by_id("d1").await.unwrap();
+    assert!(raw.is_some(), "soft-deleted row must survive");
+    assert!(raw.unwrap().deleted_at.is_some());
+    let runs = f.state.task_store.get_task_runs("d1", 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "run history must survive task deletion");
+
+    // second delete / edit of a deleted task → 404
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/tasks/d1")
+                .body(Body::empty())
+                .unwrap(),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn task_enable_really_arms_no_restart_lie() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("e1");
+    t.status = "paused".into();
+    f.state.task_store.create(&t).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(post_empty("/api/tasks/e1/enable"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["enabled"], true);
+    // The restartToSchedule fib is dead: a real job id comes back instead.
+    assert_eq!(body.get("restartToSchedule"), None);
+    assert!(body["schedulerJobId"].is_string());
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("e1")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "active"
+    );
+}
+
+#[tokio::test]
+async fn task_enable_past_oneshot_400_and_status_rolls_back() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("e2");
+    t.status = "paused".into();
+    t.trigger_type = "one_shot".into();
+    t.trigger_value = "2020-01-01T09:00:00".into();
+    f.state.task_store.create(&t).await.unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(post_empty("/api/tasks/e2/enable"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "trigger_passed");
+    // status must roll back to paused — not left "active" but unarmed
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("e2")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "paused"
+    );
+}
+
+#[tokio::test]
+async fn tasks_listing_exposes_editable_fields() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("l1")).await.unwrap();
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(res).await;
+    let t = &body.as_array().unwrap()[0];
+    assert_eq!(t["id"], "l1");
+    assert_eq!(t["prompt"], "weather report");
+    assert_eq!(t["triggerType"], "recurring");
+    assert_eq!(t["triggerValue"], "0 30 7 * * *");
+    assert_eq!(t["status"], "active");
+    assert_eq!(t["platform"], "telegram");
+}
+
+#[tokio::test]
+async fn task_update_paused_saves_without_rearming() {
+    let f = fixture(with_token_token()).await;
+    let mut t = make_task("u2");
+    t.status = "paused".into();
+    f.state.task_store.create(&t).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/u2", json!({"prompt":"edited while paused"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["rearmed"], false);
+    assert_eq!(
+        f.fake.counters.arm_calls.load(Ordering::SeqCst),
+        before,
+        "paused edit must not arm"
+    );
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("u2")
+            .await
+            .unwrap()
+            .unwrap()
+            .prompt,
+        "edited while paused"
+    );
+}
 #[tokio::test]
 async fn tasks_listing_maps_fields() {
     let f = fixture(with_token_token()).await;
@@ -879,7 +1319,7 @@ async fn tasks_listing_maps_fields() {
     assert_eq!(body.as_array().unwrap().len(), 1);
     assert_eq!(body[0]["id"], "t1");
     assert_eq!(body[0]["name"], "Daily weather");
-    assert_eq!(body[0]["cron"], "30 7 * * *");
+    assert_eq!(body[0]["cron"], "0 30 7 * * *");
     assert_eq!(body[0]["enabled"], true);
     assert_eq!(body[0]["nextRun"], "2026-09-23T07:30:00+08:00");
 }
@@ -1035,4 +1475,699 @@ async fn unknown_api_path_404_json_not_spa() {
         ct.contains("application/json") || ct.contains("text/plain"),
         "ct={ct}"
     );
+}
+
+// ===========================================================================
+// Skills/agents control plane (ADR 0011) — T1
+// ===========================================================================
+
+/// Fixture with skills/agents directories pointed at temp dirs.
+/// (Config::load leaves them empty without resolve(); control handlers join
+/// against them directly.)
+async fn control_fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let skills = dir.path().join("skills");
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::create_dir_all(&agents).unwrap();
+
+    let portal = with_token_token();
+    let config_path = write_config(dir.path(), portal.clone());
+    let mut config = Config::load(&config_path).unwrap();
+    config.resolved_home = Some(home.clone());
+    config.skills.directory = skills;
+    config.agents.directory = agents;
+
+    let memory = MemoryStore::open_in_memory().unwrap();
+    let fake = Arc::new(FakeAgent::new(config));
+    let state = PortalState::new(
+        fake.clone(),
+        memory.clone(),
+        ScheduledTaskStore::new(memory.connection()),
+        portal,
+        config_path,
+        Some(home),
+    );
+    Fixture {
+        app: rustfox::portal::router(state.clone()),
+        state,
+        fake,
+        _dir: dir,
+    }
+}
+
+impl Fixture {
+    fn skills_dir(&self) -> PathBuf {
+        self.state.agent.config().skills.directory.clone()
+    }
+    fn agents_dir(&self) -> PathBuf {
+        self.state.agent.config().agents.directory.clone()
+    }
+}
+
+fn write_skill_at(root: &Path, name: &str, body: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+async fn cget(app: &axum::Router, path: &str) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(bearer(get(path), TEST_TOKEN))
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, body_json(res).await)
+}
+
+async fn cput(app: &axum::Router, path: &str, payload: Value) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, body_json(res).await)
+}
+
+async fn cpost(app: &axum::Router, path: &str, payload: Value) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, body_json(res).await)
+}
+
+async fn cdel(app: &axum::Router, path: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(bearer(req, TEST_TOKEN)).await.unwrap();
+    let status = res.status();
+    (status, body_json(res).await)
+}
+
+#[tokio::test]
+async fn control_plane_requires_auth() {
+    let fx = control_fixture().await;
+    for path in ["/api/skills", "/api/skills/any", "/api/agents/any"] {
+        let res = fx.app.clone().oneshot(get(path)).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} must be gated"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skills_list_has_kind_provenance_and_hides_artifacts() {
+    let fx = control_fixture().await;
+    write_skill_at(
+        &fx.skills_dir(),
+        "my-skill",
+        "---\nname: my-skill\ndescription: d\n---\nbody",
+    );
+    std::fs::write(fx.skills_dir().join("solo.md"), "# solo").unwrap();
+    write_skill_at(&fx.skills_dir(), "gone.deleted-20260925000000", "x");
+    write_skill_at(&fx.skills_dir(), "alpha.bak", "x");
+
+    let (status, body) = cget(&fx.app, "/api/skills").await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"my-skill"), "dir-form listed: {names:?}");
+    assert!(names.contains(&"solo"), "standalone .md listed by stem");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains(".deleted-") || n.ends_with(".bak")),
+        "quarantine/backup artifacts leaked: {names:?}"
+    );
+
+    let entry = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "my-skill")
+        .unwrap();
+    assert_eq!(entry["kind"], "skill");
+    assert_eq!(entry["provenance"], "user");
+    assert_eq!(entry["modified"], true, "never recorded in lock → user");
+    assert_eq!(entry["deletable"], true);
+}
+
+#[tokio::test]
+async fn skills_list_marks_bundled_names_not_deletable() {
+    let fx = control_fixture().await;
+    let bundled = rustfox::skills::embed::bundled_skill_names();
+    assert!(!bundled.is_empty(), "builds embed the repo skills dir");
+    write_skill_at(&fx.skills_dir(), &bundled[0], "# bundled copy");
+    let (status, body) = cget(&fx.app, "/api/skills").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"].as_str() == Some(bundled[0].as_str()))
+        .expect("bundled name listed");
+    assert_eq!(entry["provenance"], "bundled");
+    assert_eq!(entry["deletable"], false);
+}
+
+#[tokio::test]
+async fn skill_detail_shape_and_file_list() {
+    let fx = control_fixture().await;
+    let dir = fx.skills_dir().join("rich");
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: rich\n---\nhi").unwrap();
+    std::fs::write(dir.join("scripts/run.md"), "x").unwrap();
+    std::fs::write(dir.join("notes.bak"), "old").unwrap();
+
+    let (status, body) = cget(&fx.app, "/api/skills/rich").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["provenance"], "user");
+    assert_eq!(body["content"], "---\nname: rich\n---\nhi");
+    let paths: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"SKILL.md"));
+    assert!(paths.contains(&"scripts/run.md"));
+    assert!(
+        !paths.iter().any(|p| p.ends_with(".bak")),
+        "bak leak: {paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn skill_detail_404_and_invalid_name_400() {
+    let fx = control_fixture().await;
+    let (status, _) = cget(&fx.app, "/api/skills/nope-not-here").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // %20 → space fails validate_skill_name (URL-decoding happens in axum)
+    let (status, body) = cget(&fx.app, "/api/skills/not%20a%20name").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_name");
+}
+
+#[tokio::test]
+async fn file_read_roundtrip() {
+    let fx = control_fixture().await;
+    let dir = fx.skills_dir().join("readable");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/guide.md"), "guide body").unwrap();
+    let (status, body) = cget(&fx.app, "/api/skills/readable/file?path=sub%2Fguide.md").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"], "guide body");
+}
+
+#[tokio::test]
+async fn write_gates_aux_ok_traversal_empty_mismatch() {
+    let fx = control_fixture().await;
+    write_skill_at(&fx.skills_dir(), "wr", "---\nname: wr\n---\nold");
+
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/wr/file",
+        json!({"path": "docs/x.md", "content": "v1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "aux write: {body}");
+    assert_eq!(body["bytes"], 2);
+    assert!(fx.skills_dir().join("wr/docs/x.md").is_file());
+
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/wr/file",
+        json!({"path": "../evil.md", "content": "x"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/wr/file",
+        json!({"path": "SKILL.md", "content": "   "}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "empty_primary_file");
+
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/wr/file",
+        json!({"path": "SKILL.md", "content": "---\nname: other\n---\nbody"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "frontmatter_name_mismatch");
+}
+
+#[tokio::test]
+async fn write_primary_backs_up_old_content() {
+    let fx = control_fixture().await;
+    write_skill_at(&fx.skills_dir(), "ed", "v1 content");
+    let (status, _) = cput(
+        &fx.app,
+        "/api/skills/ed/file",
+        json!({"path": "SKILL.md", "content": "v2 content"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(fx.skills_dir().join("ed/SKILL.md")).unwrap(),
+        "v2 content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.skills_dir().join("ed/SKILL.md.bak")).unwrap(),
+        "v1 content",
+        "overwritten version must survive as .bak"
+    );
+}
+
+#[tokio::test]
+async fn put_update_only_404s_missing_entry() {
+    // ADR 0011a R5: PUT is update-only; creation is POST with its own gate.
+    let fx = control_fixture().await;
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/fresh/file",
+        json!({"path": "SKILL.md", "content": "---\nname: fresh\n---\nhello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "PUT must not create: {body}");
+    assert!(!fx.skills_dir().join("fresh").exists(), "no dir fabricated");
+}
+
+#[tokio::test]
+async fn post_creates_skill_and_enforces_gates() {
+    let fx = control_fixture().await;
+    // happy path
+    let (status, body) = cpost(
+        &fx.app,
+        "/api/skills",
+        json!({"name": "fresh", "content": "---\nname: fresh\n---\nhello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create path: {body}");
+    assert_eq!(body["provenance"], "user");
+    assert!(fx.skills_dir().join("fresh/SKILL.md").is_file());
+    let (status, _) = cget(&fx.app, "/api/skills/fresh").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // duplicate create -> 409
+    let (status, body) = cpost(
+        &fx.app,
+        "/api/skills",
+        json!({"name": "fresh", "content": "whatever"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "dup create: {body}");
+
+    // frontmatter mismatch refused AND the rolled-back dir must not linger
+    let (status, body) = cpost(
+        &fx.app,
+        "/api/skills",
+        json!({"name": "ghost", "content": "---\nname: other\n---\nx"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "fm gate: {body}");
+    assert!(
+        !fx.skills_dir().join("ghost").exists(),
+        "rollback on gate failure"
+    );
+}
+
+#[tokio::test]
+async fn post_creates_agent_with_rendered_frontmatter() {
+    // ADR 0011a R5: agents POST renders AGENT.md from structured fields.
+    let fx = control_fixture().await;
+    let (status, body) = cpost(
+        &fx.app,
+        "/api/agents",
+        json!({
+            "name": "scribe",
+            "description": "Docs writer \"quoted\"",
+            "model": "openai/gpt-5.5",
+            "tools": ["read_file", "write_file"],
+            "maxIterations": 6,
+            "skipBootstrap": true,
+            "content": "Write the docs.\nBe terse."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "agent create: {body}");
+    let raw = std::fs::read_to_string(fx.agents_dir().join("scribe/AGENT.md")).unwrap();
+    assert!(raw.starts_with("---\n"), "frontmatter block: {raw}");
+    assert!(raw.contains("name: scribe\n"));
+    assert!(raw.contains("model: openai/gpt-5.5"));
+    assert!(raw.contains("  - read_file"));
+    assert!(raw.contains("max_iterations: 6"));
+    assert!(raw.contains("skip_bootstrap: true"));
+    assert!(raw.contains("Write the docs."), "body preserved");
+
+    // tool gate applies to create too: unknown tool -> 400 + rollback
+    let (status, body) = cpost(
+        &fx.app,
+        "/api/agents",
+        json!({"name": "broken", "tools": ["nope_not_real"], "content": "x"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "tool gate on create: {body}"
+    );
+    assert_eq!(body["error"]["code"], "unknown_tools");
+    assert!(
+        !fx.agents_dir().join("broken").exists(),
+        "rollback on tool gate"
+    );
+}
+
+#[tokio::test]
+async fn put_base_hash_conflict_and_force() {
+    // ADR 0011a R4: optimistic locking for the Kan-vs-OpenCode race.
+    let fx = control_fixture().await;
+    write_skill_at(&fx.skills_dir(), "racy", "---\nname: racy\n---\noriginal");
+    let (_, detail) = cget(&fx.app, "/api/skills/racy").await;
+    let stale_hash = detail["fileHash"].as_str().unwrap().to_string();
+
+    // simulate the other writer landing first (direct fs write, no hash loop)
+    write_skill_at(
+        &fx.skills_dir(),
+        "racy",
+        "---\nname: racy\n---\nsomeone else won",
+    );
+
+    // our save carries the stale ETag -> 409, file untouched
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/racy/file",
+        json!({"path": "SKILL.md", "content": "---\nname: racy\n---\nmy edit",
+               "baseHash": stale_hash}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "stale ETag: {body}");
+    assert_eq!(body["error"]["code"], "changed_since_read");
+    let on_disk = std::fs::read_to_string(fx.skills_dir().join("racy/SKILL.md")).unwrap();
+    assert!(
+        on_disk.contains("someone else won"),
+        "refused write must not land"
+    );
+
+    // force path (no baseHash) still works — CLI parity escape hatch
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/racy/file",
+        json!({"path": "SKILL.md", "content": "---\nname: racy\n---\nmy edit"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "force write: {body}");
+
+    // fresh hash after reload succeeds cleanly
+    let (_, detail) = cget(&fx.app, "/api/skills/racy").await;
+    let (status, body) = cput(
+        &fx.app,
+        "/api/skills/racy/file",
+        json!({"path": "SKILL.md", "content": "---\nname: racy\n---\nsecond edit",
+               "baseHash": detail["fileHash"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "matching hash: {body}");
+}
+
+#[tokio::test]
+async fn delete_quarantines_instead_of_removing() {
+    let fx = control_fixture().await;
+    write_skill_at(&fx.skills_dir(), "doomed", "x");
+    let (status, body) = cdel(&fx.app, "/api/skills/doomed").await;
+    assert_eq!(status, StatusCode::OK);
+    let q = body["quarantinedTo"].as_str().unwrap().to_string();
+    assert!(q.starts_with("doomed-"), "quarantine name: {q}");
+    assert!(!fx.skills_dir().join("doomed").exists());
+    assert!(
+        fx.skills_dir().join(".trash").join(&q).is_dir(),
+        "content preserved in structural .trash (ADR 0011a R3)"
+    );
+    let (status, _) = cget(&fx.app, "/api/skills/doomed").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // and it must not reappear in listings
+    let (_, list) = cget(&fx.app, "/api/skills").await;
+    assert!(list
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| v["name"].as_str() != Some("doomed")));
+}
+
+#[tokio::test]
+async fn delete_bundled_skill_refused_with_guidance() {
+    let fx = control_fixture().await;
+    let bundled = rustfox::skills::embed::bundled_skill_names();
+    write_skill_at(&fx.skills_dir(), &bundled[0], "local copy");
+    let (status, body) = cdel(&fx.app, &format!("/api/skills/{}", bundled[0])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "bundled_readonly");
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("binary"), "guidance should explain: {msg}");
+    assert!(
+        fx.skills_dir().join(&bundled[0]).is_dir(),
+        "bundled dir must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn agents_detail_parses_frontmatter_and_tool_gate() {
+    let fx = control_fixture().await;
+    let dir = fx.agents_dir().join("helper");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("AGENT.md"),
+        "---\nname: helper\ntools: [read_file, invoke_agent]\n---\nbody",
+    )
+    .unwrap();
+
+    let (status, body) = cget(&fx.app, "/api/agents/helper").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "agent");
+    assert_eq!(body["provenance"], "user");
+    assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+
+    // saving an AGENT.md that declares a non-existent tool is gated…
+    let (status, body) = cput(
+        &fx.app,
+        "/api/agents/helper/file",
+        json!({"path": "AGENT.md", "content": "---\nname: helper\ntools: [definitely_not_a_tool_xyz]\n---\nb"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "unknown_tools");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("definitely_not_a_tool_xyz"));
+
+    // …unless the escape hatch is used, which still records a warning.
+    let (status, body) = cput(
+        &fx.app,
+        "/api/agents/helper/file?allowMissing=1",
+        json!({"path": "AGENT.md", "content": "---\nname: helper\ntools: [definitely_not_a_tool_xyz]\n---\nb"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("definitely_not_a_tool_xyz")));
+
+    // a valid tool set saves clean
+    let (status, body) = cput(
+        &fx.app,
+        "/api/agents/helper/file",
+        json!({"path": "AGENT.md", "content": "---\nname: helper\ntools: [read_file, write_file]\n---\nb"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid tools must save: {body}");
+    assert!(body["warnings"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn agents_static_routes_not_shadowed_by_param_route() {
+    // /api/agents/skills and /api/agents/{name} coexist: static wins.
+    let fx = control_fixture().await;
+    let (status, body) = cget(&fx.app, "/api/agents/skills").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_array(), "legacy listing unchanged: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0011 R7 — system prompt file pointer (portal surface)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn soul_system_entry_writes_prompt_file_and_reports_source() {
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/system.md"));
+    })
+    .await;
+    let prompt = f.state.home_dir.as_ref().unwrap().join("prompts/system.md");
+
+    // Before the file exists: GET reports the builtin fallback honestly.
+    let req = bearer(get("/api/soul?name=system"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["content"], "", "missing file reads as empty, not 404");
+
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(
+        body["systemPrompt"]["source"], "builtin",
+        "absent file + serde-default inline => builtin: {body}"
+    );
+    assert_eq!(body["systemPrompt"]["divergence"], false);
+
+    // PUT through the soul machinery creates the subdir + file with backup.
+    let put = |content: &str| {
+        bearer(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/soul")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "name": "system", "content": content }).to_string(),
+                ))
+                .unwrap(),
+            TEST_TOKEN,
+        )
+    };
+    let res = f.app.clone().oneshot(put("# live prompt")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "# live prompt");
+
+    // Now the source flips to file, and reads round-trip.
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "file", "{body}");
+
+    let req = bearer(get("/api/soul?name=system"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["content"], "# live prompt");
+
+    // Second write leaves a .bak of the first.
+    let res = f.app.clone().oneshot(put("# v2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(prompt.with_file_name("system.md.bak")).unwrap(),
+        "# live prompt"
+    );
+}
+
+#[tokio::test]
+async fn system_prompt_divergence_flag_surfaces_via_settings() {
+    // Pointer set AND a customised inline prompt -> the trap: the file wins,
+    // so the inline copy is dead weight. The SPA reads `divergence` to warn.
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/system.md"));
+        cfg.openrouter.system_prompt = "custom inline that no longer applies".into();
+    })
+    .await;
+
+    // File absent: effective source falls back to the (custom) inline, but
+    // divergence still reports true because both layers are populated.
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "inline", "{body}");
+    assert_eq!(body["systemPrompt"]["divergence"], true);
+
+    // Create the file: it wins, divergence stays true (warning persists
+    // until the operator removes the stale inline copy).
+    std::fs::create_dir_all(f.state.home_dir.as_ref().unwrap().join("prompts")).unwrap();
+    std::fs::write(
+        f.state.home_dir.as_ref().unwrap().join("prompts/system.md"),
+        "file wins",
+    )
+    .unwrap();
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["systemPrompt"]["source"], "file");
+    assert_eq!(body["systemPrompt"]["divergence"], true);
+}
+
+#[tokio::test]
+async fn soul_system_alias_names_and_empty_guard() {
+    let f = fixture_with(with_token_token(), |cfg| {
+        cfg.openrouter.system_prompt_file = Some(std::path::PathBuf::from("prompts/sys.md"));
+    })
+    .await;
+    // All accepted aliases resolve to the pointer.
+    for alias in ["system", "SYSTEM.md", "prompts/system.md"] {
+        let req = bearer(get(&format!("/api/soul?name={alias}")), TEST_TOKEN);
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "alias {alias} rejected");
+    }
+    // Empty write refused (same guard as SOUL.md).
+    let req = bearer(
+        Request::builder()
+            .method("PUT")
+            .uri("/api/soul")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "name": "system", "content": "" }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "empty_soul", "{body}");
+}
+
+#[tokio::test]
+async fn settings_get_reports_system_prompt_projection() {
+    let f = fixture(with_token_token()).await;
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    // Default fixture config: no pointer, serde-default inline -> builtin.
+    assert_eq!(body["systemPrompt"]["source"], "builtin");
+    assert_eq!(body["systemPrompt"]["pointer"], Value::Null);
+    assert_eq!(body["systemPrompt"]["divergence"], false);
 }

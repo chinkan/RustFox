@@ -179,3 +179,51 @@ mod tests {
         assert!(n > 0, "should seed at least one agent file");
     }
 }
+
+/// True when `name` is a skill directory shipped inside the binary.
+pub fn is_bundled_skill(name: &str) -> bool {
+    BUNDLED_SKILLS.get_dir(name).is_some()
+}
+
+/// True when `name` is an agent directory shipped inside the binary.
+pub fn is_bundled_agent(name: &str) -> bool {
+    BUNDLED_AGENTS.get_dir(name).is_some()
+}
+
+#[cfg(test)]
+mod bundled_membership_tests {
+    use super::*;
+
+    #[test]
+    fn known_bundled_skill_is_detected() {
+        // The repo's own skills dir ships bundled; grab one name from it.
+        let any = BUNDLED_SKILLS
+            .dirs()
+            .next()
+            .expect("repo embeds at least one skill");
+        assert!(is_bundled_skill(any.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn arbitrary_name_is_not_bundled() {
+        assert!(!is_bundled_skill("definitely-not-a-bundled-skill-9f3a"));
+        assert!(!is_bundled_agent("nope-agent-1234"));
+    }
+}
+
+/// Names of all top-level bundled skill directories (embedded at compile
+/// time). Used as the authoritative "bundled" set for portal provenance.
+pub fn bundled_skill_names() -> Vec<String> {
+    BUNDLED_SKILLS
+        .dirs()
+        .filter_map(|d| d.path().to_str().map(str::to_string))
+        .collect()
+}
+
+/// Names of all top-level bundled agent directories.
+pub fn bundled_agent_names() -> Vec<String> {
+    BUNDLED_AGENTS
+        .dirs()
+        .filter_map(|d| d.path().to_str().map(str::to_string))
+        .collect()
+}

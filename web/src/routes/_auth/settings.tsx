@@ -20,7 +20,12 @@ export const Route = createFileRoute('/_auth/settings')({
   component: SettingsPage,
 })
 
-const SOUL_FILES: SoulName[] = ['SOUL.md', 'USER.md', 'AGENTS.md']
+const SOUL_FILES: SoulName[] = ['SOUL.md', 'USER.md', 'AGENTS.md', 'system']
+
+/** Label for the soul buttons; 'system' reads as the prompt file, not a .md. */
+function soulLabel(f: SoulName): string {
+  return f === 'system' ? 'prompts/system.md' : f
+}
 
 function SettingsPage() {
   const { api, auth } = Route.useRouteContext()
@@ -78,12 +83,16 @@ function SettingsPage() {
     onSuccess: (r) => {
       setSoulMsg(t('settings.soulSaved', { name: r.name, bytes: r.bytes }))
       void queryClient.invalidateQueries({ queryKey: ['soul', r.name] })
+      // A prompt-file save can flip the live source (builtin/inline → file),
+      // so refresh the provenance card too.
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (e: Error) => setSoulMsg(e.message),
   })
 
   const editable = settings.data?.editable
   const masked = settings.data?.masked
+  const promptInfo = settings.data?.systemPrompt
   const dirty =
     !!editable &&
     ((form.model ?? '') !== editable.model ||
@@ -204,6 +213,34 @@ function SettingsPage() {
           </section>
 
           <section className="section" style={{ gridColumn: '1 / -1' }}>
+            <h2 className="section-title">{t('settings.promptTitle')}</h2>
+            {promptInfo ? (
+              <div className="card">
+                <div className="hint" role="status" style={{ marginBottom: 6 }}>
+                  {promptInfo.source === 'file'
+                    ? t('settings.promptSourceFile', { pointer: promptInfo.pointer ?? '' })
+                    : promptInfo.source === 'inline'
+                      ? t('settings.promptSourceInline')
+                      : t('settings.promptSourceBuiltin')}
+                </div>
+                {promptInfo.divergence ? (
+                  <div className="banner warn" role="alert">
+                    {t('settings.promptDivergence')}
+                  </div>
+                ) : null}
+                {promptInfo.pointer === null ? (
+                  <div className="hint" style={{ marginTop: 4 }}>
+                    {t('settings.promptNotEnabled')}
+                  </div>
+                ) : null}
+                <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 6 }}>
+                  {t('settings.promptHint')}
+                </p>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="section" style={{ gridColumn: '1 / -1' }}>
             <h2 className="section-title">{t('settings.soulTitle')}</h2>
             <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>{t('settings.soulHint')}</p>
             <div className="tag-list" style={{ marginBottom: 12 }}>
@@ -213,7 +250,7 @@ function SettingsPage() {
                   className={soulFile === f ? 'sm primary' : 'sm'}
                   onClick={() => setSoulFile(f)}
                 >
-                  {t('settings.soulOpen', { name: f })}
+                  {t('settings.soulOpen', { name: soulLabel(f) })}
                 </button>
               ))}
             </div>

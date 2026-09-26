@@ -17,6 +17,7 @@ import { Route as AuthChatRouteImport } from './routes/_auth/chat'
 import { Route as AuthDashboardRouteImport } from './routes/_auth/dashboard'
 import { Route as AuthMemoryRouteImport } from './routes/_auth/memory'
 import { Route as AuthSettingsRouteImport } from './routes/_auth/settings'
+import { Route as AuthSkillsRouteImport } from './routes/_auth/skills'
 import { Route as AuthTasksRouteImport } from './routes/_auth/tasks'
 import { Route as AuthChatIndexRouteImport } from './routes/_auth/chat.index'
 import { Route as AuthChatThreadIdRouteImport } from './routes/_auth/chat.$threadId'
@@ -60,6 +61,11 @@ const AuthSettingsRoute = AuthSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthSkillsRoute = AuthSkillsRouteImport.update({
+  id: '/skills',
+  path: '/skills',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthTasksRoute = AuthTasksRouteImport.update({
   id: '/tasks',
   path: '/tasks',
@@ -84,6 +90,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthDashboardRoute
   '/memory': typeof AuthMemoryRoute
   '/settings': typeof AuthSettingsRoute
+  '/skills': typeof AuthSkillsRoute
   '/tasks': typeof AuthTasksRoute
   '/chat/$threadId': typeof AuthChatThreadIdRoute
   '/chat/': typeof AuthChatIndexRoute
@@ -95,6 +102,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthDashboardRoute
   '/memory': typeof AuthMemoryRoute
   '/settings': typeof AuthSettingsRoute
+  '/skills': typeof AuthSkillsRoute
   '/tasks': typeof AuthTasksRoute
   '/chat/$threadId': typeof AuthChatThreadIdRoute
   '/chat': typeof AuthChatIndexRoute
@@ -109,6 +117,7 @@ export interface FileRoutesById {
   '/_auth/dashboard': typeof AuthDashboardRoute
   '/_auth/memory': typeof AuthMemoryRoute
   '/_auth/settings': typeof AuthSettingsRoute
+  '/_auth/skills': typeof AuthSkillsRoute
   '/_auth/tasks': typeof AuthTasksRoute
   '/_auth/chat/$threadId': typeof AuthChatThreadIdRoute
   '/_auth/chat/': typeof AuthChatIndexRoute
@@ -123,6 +132,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/memory'
     | '/settings'
+    | '/skills'
     | '/tasks'
     | '/chat/$threadId'
     | '/chat/'
@@ -134,6 +144,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/memory'
     | '/settings'
+    | '/skills'
     | '/tasks'
     | '/chat/$threadId'
     | '/chat'
@@ -147,6 +158,7 @@ export interface FileRouteTypes {
     | '/_auth/dashboard'
     | '/_auth/memory'
     | '/_auth/settings'
+    | '/_auth/skills'
     | '/_auth/tasks'
     | '/_auth/chat/$threadId'
     | '/_auth/chat/'
@@ -216,6 +228,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthSettingsRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/skills': {
+      id: '/_auth/skills'
+      path: '/skills'
+      fullPath: '/skills'
+      preLoaderRoute: typeof AuthSkillsRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/tasks': {
       id: '/_auth/tasks'
       path: '/tasks'
@@ -260,6 +279,7 @@ interface AuthRouteChildren {
   AuthDashboardRoute: typeof AuthDashboardRoute
   AuthMemoryRoute: typeof AuthMemoryRoute
   AuthSettingsRoute: typeof AuthSettingsRoute
+  AuthSkillsRoute: typeof AuthSkillsRoute
   AuthTasksRoute: typeof AuthTasksRoute
 }
 
@@ -269,6 +289,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthDashboardRoute: AuthDashboardRoute,
   AuthMemoryRoute: AuthMemoryRoute,
   AuthSettingsRoute: AuthSettingsRoute,
+  AuthSkillsRoute: AuthSkillsRoute,
   AuthTasksRoute: AuthTasksRoute,
 }
 

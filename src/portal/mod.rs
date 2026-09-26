@@ -6,10 +6,13 @@
 
 pub mod auth;
 pub mod chat;
+pub mod control;
 pub mod data;
 pub mod error;
+pub mod install;
 pub mod settings;
 pub mod static_serve;
+pub mod tasks_admin;
 pub mod url;
 
 use std::sync::Arc;
@@ -37,6 +40,19 @@ pub trait AgentOps: Send + Sync {
     fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn agent_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool>;
+    /// Schedule `task` with the live JobScheduler and persist its job id.
+    /// Err = arming failed (bad trigger, scheduler down) — the row must NOT
+    /// be left active-and-unarmed (portal rolls back; restore logs + retires).
+    fn arm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<uuid::Uuid>>;
+    /// Remove the task's live job if any. Idempotent (no job = success).
+    /// Returns whether a live job was actually removed.
+    fn disarm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, bool>;
     fn process_message(
         &self,
         incoming: crate::platform::IncomingMessage,
@@ -46,6 +62,9 @@ pub trait AgentOps: Send + Sync {
     ) -> futures::future::BoxFuture<'_, anyhow::Result<String>>;
     fn set_soul_updated(&self, value: bool);
     fn provider_names(&self) -> Vec<String>;
+    /// Names of every tool available at runtime (builtin registry + MCP),
+    /// used by the agents editor to gate `tools:` frontmatter (ADR 0011).
+    fn tool_names(&self) -> Vec<String>;
     fn config(&self) -> &Config;
 }
 
@@ -94,6 +113,18 @@ impl AgentOps for Agent {
     fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool> {
         Box::pin(async move { self.scheduler.remove_job(job_id).await.is_ok() })
     }
+    fn arm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
+        Box::pin(async move { self.arm_task(&task).await })
+    }
+    fn disarm_task(
+        &self,
+        task: crate::scheduler::reminders::ScheduledTask,
+    ) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move { self.disarm_task(&task).await })
+    }
     fn process_message(
         &self,
         incoming: crate::platform::IncomingMessage,
@@ -112,6 +143,12 @@ impl AgentOps for Agent {
     }
     fn provider_names(&self) -> Vec<String> {
         self.registry.provider_names()
+    }
+    fn tool_names(&self) -> Vec<String> {
+        self.all_tool_definitions()
+            .into_iter()
+            .map(|td| td.function.name)
+            .collect()
     }
     fn config(&self) -> &Config {
         &self.config
@@ -160,6 +197,9 @@ pub struct PortalState {
     pub boot_id: String,
     /// Serializes chat generations: one active run per web identity (ADR 0005).
     pub chat_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// GitHub API client for the skill installer (ADR 0011 B). Swappable for
+    /// tests — production default is the reqwest-backed fetcher.
+    pub fetcher: Arc<dyn install::GitHubFetcher>,
     pub started_at: std::time::Instant,
 }
 
@@ -183,6 +223,7 @@ impl PortalState {
             dev_tokens: Arc::new(std::sync::Mutex::new(Vec::new())),
             boot_id: uuid::Uuid::new_v4().simple().to_string(),
             chat_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fetcher: Arc::new(install::ReqwestFetcher::new()),
             started_at: std::time::Instant::now(),
         }
     }
@@ -214,11 +255,41 @@ pub fn router(state: PortalState) -> Router {
         .route("/agents", get(data::agents))
         .route("/agents/skills", get(data::skills))
         .route("/agents/reload", post(data::reload_skills))
+        // Skills/agents control plane (ADR 0011). `/agents/{name}` never
+        // collides with the static `/agents/skills`|`/agents/reload` — axum
+        // prefers static segments over path params.
+        .route(
+            "/skills",
+            get(control::list_entries).post(control::create_skill),
+        )
+        .route("/skills/installed", get(install::installed_list))
+        .route("/skills/install", post(install::install_skill))
+        .route(
+            "/skills/{name}",
+            get(control::entry_detail).delete(control::delete_entry),
+        )
+        .route(
+            "/skills/{name}/file",
+            get(control::read_file).put(control::write_file),
+        )
+        .route("/agents", post(control::create_agent))
+        .route(
+            "/agents/{name}",
+            get(control::agent_detail).delete(control::delete_agent),
+        )
+        .route(
+            "/agents/{name}/file",
+            get(control::read_agent_file).put(control::write_agent_file),
+        )
         .route("/memory/search", get(data::memory_search))
-        .route("/tasks", get(data::tasks))
+        .route("/tasks", get(data::tasks).post(tasks_admin::task_create))
+        .route(
+            "/tasks/{id}",
+            axum::routing::put(tasks_admin::task_update).delete(tasks_admin::task_delete),
+        )
         .route("/tasks/{id}/runs", get(data::task_runs))
-        .route("/tasks/{id}/enable", post(data::task_enable))
-        .route("/tasks/{id}/disable", post(data::task_disable))
+        .route("/tasks/{id}/enable", post(tasks_admin::task_enable))
+        .route("/tasks/{id}/disable", post(tasks_admin::task_disable))
         .route("/stats", get(data::stats))
         .route("/settings", get(settings::get_settings))
         .route("/settings", axum::routing::patch(settings::patch_settings))

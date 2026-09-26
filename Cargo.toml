@@ -49,6 +49,9 @@ uuid = { version = "1", features = ["v4"] }
 
 # Chrono for timestamps
 chrono = { version = "0.4", features = ["serde"] }
+# Cron expression parsing (same crate tokio-cron-scheduler uses internally —
+# validating here means the portal/scheduler-tool gate matches what Job::new_async accepts)
+croner = "2"
 
 # Background task scheduler
 tokio-cron-scheduler = "0.13"
@@ -106,6 +109,7 @@ name = "rustfox"
 path = "src/main.rs"
 
 [dev-dependencies]
+serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["full", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"

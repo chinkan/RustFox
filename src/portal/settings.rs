@@ -71,6 +71,17 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "defaultAutonomyMode": cfg.supervisor.default_autonomy_mode,
             "portalPort": cfg.portal.port,
         },
+        // ADR 0011 R7: system-prompt provenance so the SPA can show which
+        // layer is live and warn about the divergence trap.
+        "systemPrompt": {
+            "source": match cfg.system_prompt_source() {
+                crate::config::SystemPromptSource::File(_) => "file",
+                crate::config::SystemPromptSource::Inline => "inline",
+                crate::config::SystemPromptSource::Builtin => "builtin",
+            },
+            "pointer": cfg.openrouter.system_prompt_file.as_ref().map(|p| p.display().to_string()),
+            "divergence": cfg.system_prompt_divergence(),
+        },
         "masked": {
             "telegramBotToken": mask_secret(&cfg.telegram.bot_token),
             "openrouterApiKey": mask_secret(&cfg.openrouter.api_key),
@@ -215,7 +226,26 @@ pub struct SoulWrite {
 
 /// Resolve a whitelisted soul file name to its path under the RustFox home.
 fn soul_path(state: &PortalState, name: &str) -> Option<std::path::PathBuf> {
-    let home = state.agent.config().resolved_home()?;
+    let cfg = state.agent.config();
+    let home = cfg.resolved_home()?;
+    // ADR 0011 R7: "system" is the prompt-file editor. It resolves to the
+    // configured system_prompt_file pointer; when the pointer is unset it
+    // falls back to the conventional prompts/system.md so the file can be
+    // prepared — enabling it still requires the one-line config pointer
+    // (GET /api/settings reports which source is live).
+    if matches!(name, "system" | "SYSTEM.md" | "prompts/system.md") {
+        return Some(
+            match cfg
+                .openrouter
+                .system_prompt_file
+                .as_deref()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                Some(ptr) => cfg.resolve_prompt_path(ptr),
+                None => home.join("prompts/system.md"),
+            },
+        );
+    }
     let file = match name {
         "SOUL.md" | "soul" => "SOUL.md",
         "USER.md" | "user" => "USER.md",
@@ -276,6 +306,13 @@ pub async fn put_soul(
             "empty_soul",
             "Refusing to write an empty soul file",
         ));
+    }
+    // The system-prompt entry may live in a not-yet-created subdir
+    // (prompts/); soul siblings of home always exist.
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(PortalError::internal)?;
     }
     if path.exists() {
         let bak = path.with_file_name(format!(

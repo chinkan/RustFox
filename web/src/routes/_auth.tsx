@@ -38,6 +38,7 @@ const WORKSPACE_NAV: NavItem[] = [
   { to: '/dashboard', labelKey: 'nav.dashboard', icon: '📊' },
   { to: '/chat', labelKey: 'nav.chat', icon: '💬' },
   { to: '/agents', labelKey: 'nav.agents', icon: '🤖' },
+  { to: '/skills', labelKey: 'nav.skills', icon: '🧩' },
   { to: '/memory', labelKey: 'nav.memory', icon: '📚' },
   { to: '/tasks', labelKey: 'nav.tasks', icon: '⏰' },
 ]
