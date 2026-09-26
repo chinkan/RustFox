@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -68,6 +68,45 @@ pub struct ScheduledJobRequest {
     pub task_id: String,
     pub is_recurring: bool,
     pub task_store: ScheduledTaskStore,
+    /// Some(id) when this dispatch is a dead-letter re-fire (ADR-0013):
+    /// `id` is the `pending_reruns` row driving it. The runner must not
+    /// re-queue a rerun (two-strike rule); it resolves the row instead.
+    pub rerun_id: Option<String>,
+}
+
+/// Why an agent run stopped short of a clean final answer.
+///
+/// A *typed* stop reason (rather than an error string) is what lets the job
+/// runner decide policy: `MaxIterations` means the loop ran out of budget
+/// mid-task — possibly after side effects — so it is notified, never
+/// auto-replayed. `Llm` is a hard failure (see `provider::LlmHttpError` for
+/// transient classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStop {
+    FinalResponse,
+    Cancelled,
+    MaxIterations,
+    Llm,
+}
+
+/// Outcome of one agent run: the text to deliver *and* how the run ended.
+///
+/// `process_message` collapses this to the text for ordinary callers (chat,
+/// portal, subagents); the scheduled-task runner inspects `stop` so a
+/// budget-exhausted run is surfaced to the human instead of vanishing.
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub text: String,
+    pub stop: RunStop,
+}
+
+impl RunOutcome {
+    /// True when the run stopped because the agent loop exhausted its tool-call
+    /// budget. Such a run may have performed side effects already (files
+    /// written, posts published), so it must never be silently replayed.
+    pub fn is_max_iterations(&self) -> bool {
+        self.stop == RunStop::MaxIterations
+    }
 }
 
 /// The core agent that processes messages through LLM + tools.
@@ -175,7 +214,7 @@ impl Agent {
         restart_pending: Arc<AtomicBool>,
         soul_updated: Arc<AtomicBool>,
     ) -> Self {
-        let llm = LlmClient::new(registry.clone());
+        let llm = LlmClient::new(registry.clone()).with_fallback_chain(config.fallback_chain());
         let initial_model = registry.default_qualified_model();
         Self {
             llm,
@@ -635,6 +674,12 @@ impl Agent {
         })
     }
 
+    /// Run the agent for one turn, returning only the delivered text.
+    ///
+    /// Thin wrapper over [`Self::process_message_outcome`] for callers that
+    /// don't care *why* a run ended (chat, portal, subagents). The
+    /// scheduled-task runner uses the outcome form to distinguish a
+    /// budget-exhausted run from a clean one.
     pub async fn process_message(
         &self,
         incoming: &IncomingMessage,
@@ -642,6 +687,24 @@ impl Agent {
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
+        Ok(self
+            .process_message_outcome(incoming, tool_event_tx, stream_token_tx, tool_ui_mode)
+            .await?
+            .text)
+    }
+
+    /// Run the agent for one turn, reporting *how* it ended alongside the text.
+    ///
+    /// Stop reasons matter downstream: a `MaxIterations` finish is a run that
+    /// ran out of budget mid-task, which the dead-letter queue records as a
+    /// human-gated failure rather than a success (ADR-0013).
+    pub async fn process_message_outcome(
+        &self,
+        incoming: &IncomingMessage,
+        tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
+        stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        tool_ui_mode: crate::tool_registry::ToolUiMode,
+    ) -> Result<RunOutcome> {
         let platform = &incoming.platform;
         let user_id = &incoming.user_id;
         let _parsed_chat_id: ChatId = incoming
@@ -890,7 +953,10 @@ impl Agent {
                     // No need to fire a second reflection.
                 }
 
-                Ok(final_content)
+                Ok(RunOutcome {
+                    text: final_content,
+                    stop: RunStop::FinalResponse,
+                })
             }
             Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
                 info!(
@@ -904,7 +970,10 @@ impl Agent {
                     end_time: Self::now_iso8601_static(),
                 });
                 self.clear_cancel_token(user_id).await;
-                Ok("Processing was cancelled.".to_string())
+                Ok(RunOutcome {
+                    text: "Processing was cancelled.".to_string(),
+                    stop: RunStop::Cancelled,
+                })
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
                 warn!(
@@ -922,7 +991,10 @@ impl Agent {
                     end_time: Self::now_iso8601_static(),
                 });
                 self.clear_cancel_token(user_id).await;
-                Ok("I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string())
+                Ok(RunOutcome {
+                    text: "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
+                    stop: RunStop::MaxIterations,
+                })
             }
             Err(e) => {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
@@ -979,12 +1051,46 @@ impl Agent {
                     is_recurring: recurring,
                     task_store: store,
                     task_id: tid,
+                    rerun_id: None,
                 };
                 if let Err(e) = tx.send(req) {
                     tracing::error!("Failed to dispatch scheduled job: {}", e);
                 }
             }) as Pin<Box<dyn Future<Output = ()> + Send>>
         }
+    }
+
+    /// Build the dispatch payload for a dead-letter re-fire (ADR-0013).
+    /// Mirrors [`Self::build_fire_closure`] exactly (same synthetic
+    /// IncomingMessage shape) so the agent processes a re-run identically to
+    /// a cron-fired run — the only difference is `rerun_id`, which tells the
+    /// runner to resolve the queue row on outcome. Public so main's watchdog
+    /// can dispatch without reaching into internals.
+    pub fn build_rerun_request(
+        job_tx: &tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+        bot: Arc<Bot>,
+        store: ScheduledTaskStore,
+        task: &ScheduledTask,
+        rerun_id: &str,
+    ) -> Result<()> {
+        let incoming = crate::platform::IncomingMessage {
+            platform: "scheduled_task".to_string(),
+            user_id: format!("{}:{}", task.user_id, task.id),
+            chat_id: task.chat_id.clone(),
+            user_name: String::new(),
+            text: task.prompt.clone(),
+            attachments: vec![],
+        };
+        let req = ScheduledJobRequest {
+            incoming,
+            bot,
+            is_recurring: task.trigger_type == "recurring",
+            task_store: store,
+            task_id: task.id.clone(),
+            rerun_id: Some(rerun_id.to_string()),
+        };
+        job_tx.send(req).context("Failed to dispatch rerun")?;
+        Ok(())
     }
 
     /// Arm (schedule) a task with the live JobScheduler and persist the job
@@ -2167,5 +2273,84 @@ mod tests {
             .map(|c| c.as_text())
             .unwrap_or_default()
             .contains("question"));
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0013: run-stop classification (max-iterations notify policy)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn run_outcome_flags_max_iterations_for_the_runner() {
+        let stalled = RunOutcome {
+            text: "I've reached the maximum number of tool call iterations.".to_string(),
+            stop: RunStop::MaxIterations,
+        };
+        assert!(
+            stalled.is_max_iterations(),
+            "the runner must be able to tell a budget-exhausted run from a clean one"
+        );
+    }
+
+    #[test]
+    fn clean_runs_are_never_treated_as_stalled() {
+        for stop in [RunStop::FinalResponse, RunStop::Cancelled, RunStop::Llm] {
+            let o = RunOutcome {
+                text: "x".to_string(),
+                stop,
+            };
+            assert!(
+                !o.is_max_iterations(),
+                "stop reason {stop:?} must not trigger the human gate"
+            );
+        }
+    }
+
+    /// The two-strike policy hinges on this: a max-iterations run is recorded
+    /// as a human-gated row, never an auto-fire one. Guard the distinction at
+    /// the type level so a future refactor can't quietly swap them.
+    #[tokio::test]
+    async fn manual_enqueue_is_awaiting_user_and_never_due() {
+        use crate::scheduler::reruns::{RerunQueue, RerunState};
+        use rusqlite::Connection;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let conn: Arc<Mutex<Connection>> =
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock().await;
+            c.execute_batch(
+                "CREATE TABLE pending_reruns (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, original_run_id TEXT NOT NULL,
+                    fail_reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'queued', next_eligible_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')));",
+            )
+            .unwrap();
+        }
+        let q = RerunQueue::new(conn.clone());
+        let id = q
+            .enqueue_manual("t1", "run-1", "Reached max iterations (25)")
+            .await
+            .unwrap();
+        let row = q.get(&id).await.unwrap().unwrap();
+        assert_eq!(row.state, RerunState::AwaitingUser);
+        assert_eq!(
+            row.attempts, 1,
+            "pre-burned attempt: no auto re-fire budget"
+        );
+        {
+            let c = conn.lock().await;
+            c.execute(
+                "UPDATE pending_reruns SET next_eligible_at = datetime('now','-1 hour') WHERE id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        assert!(
+            q.due().await.unwrap().is_empty(),
+            "a stalled run must never be auto-dispatched, even when overdue"
+        );
     }
 }

@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::agent::ScheduledJobRequest;
 use crate::llm::{FunctionDefinition, ToolDefinition};
 use crate::scheduler::reminders::ScheduledTaskStore;
-use crate::scheduler::{reminders::ScheduledTask, Scheduler};
+use crate::scheduler::{reminders::ScheduledTask, reruns::RerunQueue, Scheduler};
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 use teloxide::prelude::Bot;
 use uuid::Uuid;
@@ -17,6 +17,7 @@ pub struct SchedulingTools {
     scheduler: Arc<Scheduler>,
     job_tx: UnboundedSender<ScheduledJobRequest>,
     bot: Arc<Bot>,
+    rerun_queue: RerunQueue,
 }
 
 impl SchedulingTools {
@@ -25,12 +26,14 @@ impl SchedulingTools {
         scheduler: Arc<Scheduler>,
         job_tx: UnboundedSender<ScheduledJobRequest>,
         bot: Arc<Bot>,
+        rerun_queue: RerunQueue,
     ) -> Self {
         Self {
             task_store,
             scheduler,
             job_tx,
             bot,
+            rerun_queue,
         }
     }
 }
@@ -98,6 +101,28 @@ impl ToolHandler for SchedulingTools {
                         "type": "object", "properties": {
                             "task_id": { "type": "string" }
                         }, "required": ["task_id"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "task_reruns".to_string(),
+                    description: "Inspect and resolve the dead-letter queue of scheduled tasks that died on a transient provider failure or hit their iteration cap. `list` shows what is waiting; `retry` re-arms one for another attempt; `cancel` gives up on one.".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["list", "retry", "cancel"],
+                                "description": "list active queue rows, or resolve one by id"
+                            },
+                            "queue_id": {
+                                "type": "string",
+                                "description": "Queue row id (required for retry/cancel)"
+                            }
+                        },
+                        "required": ["action"]
                     }),
                 },
             },
@@ -256,6 +281,65 @@ impl ToolHandler for SchedulingTools {
                 {
                     Ok(_) => Ok(format!("Re-run scheduled for task {task_id}")),
                     Err(e) => Ok(format!("Failed to re-run task: {}", e)),
+                }
+            }
+            "task_reruns" => {
+                let action = args["action"].as_str().context("Missing 'action'")?;
+                match action {
+                    "list" => {
+                        let rows = self.rerun_queue.list_active().await?;
+                        if rows.is_empty() {
+                            return Ok("No scheduled tasks are waiting on you.".to_string());
+                        }
+                        let lines: Vec<String> = rows
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "- `{}` · task {} · {} · attempt(s) {} · next {} · {}",
+                                    r.id,
+                                    r.task_id,
+                                    r.state.as_str(),
+                                    r.attempts,
+                                    r.next_eligible_at,
+                                    r.fail_reason.chars().take(120).collect::<String>()
+                                )
+                            })
+                            .collect();
+                        Ok(format!(
+                            "{} task(s) in the dead-letter queue:\n{}",
+                            rows.len(),
+                            lines.join("\n")
+                        ))
+                    }
+                    "retry" => {
+                        let id = args["queue_id"]
+                            .as_str()
+                            .context("Missing 'queue_id' for retry")?;
+                        if self.rerun_queue.retry(id).await? {
+                            Ok(format!(
+                                "Queued `{id}` for another attempt — the watchdog will pick it up within the hour."
+                            ))
+                        } else {
+                            Ok(format!(
+                                "No actionable queue row `{id}` (already done, or never existed)."
+                            ))
+                        }
+                    }
+                    "cancel" => {
+                        let id = args["queue_id"]
+                            .as_str()
+                            .context("Missing 'queue_id' for cancel")?;
+                        if self.rerun_queue.cancel(id).await? {
+                            Ok(format!("Cancelled `{id}` — it will not run again."))
+                        } else {
+                            Ok(format!(
+                                "No cancellable queue row `{id}` (already done, or never existed)."
+                            ))
+                        }
+                    }
+                    other => Ok(format!(
+                        "Unknown action '{other}'. Use list, retry, or cancel."
+                    )),
                 }
             }
             _ => anyhow::bail!("SchedulingTools: unknown tool {name}"),

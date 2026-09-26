@@ -361,6 +361,11 @@ pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
 pub struct LlmClient {
     pub client: reqwest::Client,
     pub registry: Arc<crate::provider::ProviderRegistry>,
+    /// Ordered fallback chain of fully-qualified `provider/model` names tried
+    /// (after the primary) when a call dies with a *transient* HTTP error
+    /// (429/5xx — see [`crate::provider::LlmHttpError`]). Empty (default) =
+    /// ADR-0009 behaviour exactly: primary only. ADR-0012.
+    pub fallback_chain: Vec<String>,
 }
 
 impl LlmClient {
@@ -368,7 +373,24 @@ impl LlmClient {
         Self {
             client: reqwest::Client::new(),
             registry,
+            fallback_chain: Vec::new(),
         }
+    }
+
+    /// Attach a fallback chain (from `[fallback] chain` in config). Entries
+    /// whose provider prefix is not in the registry are dropped with a
+    /// warning at call time, never attempted against the wrong provider.
+    pub fn with_fallback_chain(mut self, chain: Vec<String>) -> Self {
+        // Bound worst-case latency (primary budget + N fallback budgets).
+        const MAX_FALLBACK_CHAIN: usize = 5;
+        if chain.len() > MAX_FALLBACK_CHAIN {
+            tracing::warn!(
+                "[fallback] chain: {} entries exceeds cap {MAX_FALLBACK_CHAIN}, truncating",
+                chain.len()
+            );
+        }
+        self.fallback_chain = chain.into_iter().take(MAX_FALLBACK_CHAIN).collect();
+        self
     }
 
     /// Core chat method returning full completion metadata (message, finish_reason, model).
@@ -376,6 +398,65 @@ impl LlmClient {
     /// Resolves the model string through the registry to pick the right provider,
     /// then delegates the actual HTTP call to that provider.
     pub async fn chat_completion_with_model(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+    ) -> Result<ChatCompletion> {
+        let primary_err = match self.try_model(messages, tools, model).await {
+            Ok(completion) => return Ok(completion),
+            Err(e) => e,
+        };
+        // Only transient (429/5xx) failures justify switching model — a 400
+        // would fail identically on every candidate (ADR-0012 trigger rule).
+        let transient = primary_err
+            .downcast_ref::<crate::provider::LlmHttpError>()
+            .is_some_and(|e| e.is_transient());
+        if !transient || self.fallback_chain.is_empty() {
+            return Err(primary_err);
+        }
+        let mut last_err = primary_err;
+        for cand in &self.fallback_chain {
+            let known = match cand.split_once('/') {
+                Some((prefix, _)) => self.registry.get_provider(prefix).is_some(),
+                None => true, // bare model → default provider, resolvable
+            };
+            if !known {
+                tracing::warn!(
+                    "Fallback entry '{cand}' names an unknown provider — skipping (typo in [fallback] chain?)"
+                );
+                continue;
+            }
+            tracing::warn!(
+                "Fallback: {} failed ({:#}) → trying {}",
+                model,
+                last_err,
+                cand
+            );
+            match self.try_model(messages, tools, cand).await {
+                Ok(mut completion) => {
+                    completion.model = cand.clone();
+                    tracing::info!("Fallback: {} answered after {} failed", cand, model);
+                    return Ok(completion);
+                }
+                Err(e) => {
+                    let still_transient = e
+                        .downcast_ref::<crate::provider::LlmHttpError>()
+                        .is_some_and(|x| x.is_transient());
+                    if !still_transient {
+                        // Non-transient on a fallback: resending elsewhere is
+                        // pointless; surface it (usually config/compat error).
+                        return Err(e);
+                    }
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
+    }
+
+    /// Single attempt against one qualified model, no chain logic.
+    async fn try_model(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
@@ -900,6 +981,262 @@ mod tests {
         assert_eq!(
             tool_calls[0].function.name, "read_skill_file",
             "parsed tool name must match the Kimi content"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0012: request-layer fallback chain (wiremock matrix)
+    // ---------------------------------------------------------------
+
+    use crate::config::ProviderType;
+    use crate::provider::{OpenRouterProvider, ProviderConfig, ProviderRegistry};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::RwLock;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fb_provider_config(name: &str, base_url: String, model: &str) -> ProviderConfig {
+        ProviderConfig {
+            name: name.to_string(),
+            provider_type: ProviderType::OpenRouter,
+            base_url,
+            api_key: Some("k".to_string()),
+            default_model: model.to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 100,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0, // fail fast → deterministic request counts
+        }
+    }
+
+    /// Registry with providers p1/p2/p3 all pointing at the same mock server.
+    fn fb_registry(uri: String) -> Arc<ProviderRegistry> {
+        let mut providers = HashMap::new();
+        for (name, model) in [("p1", "m1"), ("p2", "m2"), ("p3", "m3")] {
+            let provider: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+                fb_provider_config(name, uri.clone(), model),
+            ));
+            providers.insert(name.to_string(), provider);
+        }
+        Arc::new(ProviderRegistry::new(providers, "p1".to_string()))
+    }
+
+    fn fb_msgs() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::from_text("hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        }]
+    }
+
+    fn ok_body() -> String {
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#
+            .to_string()
+    }
+
+    async fn mount_model(server: &MockServer, model: &'static str, template: ResponseTemplate) {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": model })))
+            .respond_with(template)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_primary_success_never_touches_chain() {
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        // m1 ok; any m2 request would hit no mock → 404 counted via catch-all
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(500)
+            })
+            .mount(&server)
+            .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p1/m1");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "chain must not be consulted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_429_primary_200_backup_rewrites_model() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p2/m2", "model must record who actually answered");
+        assert_eq!(
+            c.message.content.as_ref().map(|m| m.as_text()).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_5xx_first_backup_tries_second_in_order() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        mount_model(&server, "m2", ResponseTemplate::new(503)).await;
+        mount_model(
+            &server,
+            "m3",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string(), "p3/m3".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p3/m3");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_400_never_switches_models() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(400).set_body_string("bad"),
+        )
+        .await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::provider::LlmHttpError>()
+                .is_some_and(|e| e.status == 400),
+            "typed error must carry status"
+        );
+        // m2 mock exists but must never have been consulted.
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "400 must not switch models");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_empty_chain_is_pure_adr0009() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()));
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("429"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_unknown_provider_entry_skipped_primary_error_kept() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["nonexistent/some-model".to_string()]);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("p1 API error"),
+            "primary's error must survive a skipped entry: {err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_nontransient_on_backup_stops_walk_and_surfaces() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(401).set_body_string("no key"),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m3",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string(), "p3/m3".to_string()]);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("401"),
+            "misconfigured backup (401) must be surfaced, not masked by later models: {err}"
         );
     }
 }
