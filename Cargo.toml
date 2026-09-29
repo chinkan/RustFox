@@ -70,7 +70,7 @@ include_dir = "0.7"
 
 # OCR (pure Rust, neural-network based)
 ocrs = "0.12"
-rten = { version = "0.24", features = ["rten_format"] }
+rten = { version = "0.26", features = ["rten_format"] }
 
 # Image loading/processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
