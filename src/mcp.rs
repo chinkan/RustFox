@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rmcp::{
-    model::{CallToolRequestParams, Tool as McpTool},
+    model::{CallToolRequestParams, ContentBlock, Tool as McpTool},
     service::RunningService,
     transport::{
         streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
@@ -484,14 +484,13 @@ impl McpManager {
 
                     let tool_name_owned: std::borrow::Cow<'static, str> =
                         std::borrow::Cow::Owned(tool_name.to_string());
+                    let mut call_params = CallToolRequestParams::new(tool_name_owned);
+                    if let Some(args) = arguments.as_object().cloned() {
+                        call_params = call_params.with_arguments(args);
+                    }
                     let result = connection
                         .client
-                        .call_tool(CallToolRequestParams {
-                            meta: None,
-                            name: tool_name_owned,
-                            arguments: arguments.as_object().cloned(),
-                            task: None,
-                        })
+                        .call_tool(call_params)
                         .await
                         .with_context(|| {
                             format!(
@@ -504,7 +503,10 @@ impl McpManager {
                     let text_parts: Vec<String> = result
                         .content
                         .iter()
-                        .filter_map(|c| c.raw.as_text().map(|t| t.text.clone()))
+                        .filter_map(|c| match c {
+                            ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
                         .collect();
 
                     if text_parts.is_empty() {

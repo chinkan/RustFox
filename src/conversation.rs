@@ -645,7 +645,7 @@ mod tests {
             .any(|m| m.tool_call_id.as_deref() == Some("call_split"));
         assert_eq!(
             call_in_tail, result_in_tail,
-            "tool pair must not be split at the boundary (start={start})"
+            "tool pair must not be split at the boundary (start index in message vec)"
         );
     }
 

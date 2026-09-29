@@ -4,6 +4,11 @@ on:
     branches:
       - main
 
+# Least privilege: compile check only needs to read the repo.
+# Fixes CodeQL actions/missing-workflow-permissions (alert 1).
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:

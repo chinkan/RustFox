@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: all jobs only read the repo (check/fmt/clippy/test/web/build).
+# Fixes CodeQL actions/missing-workflow-permissions (alerts 3-8).
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check

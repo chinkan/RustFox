@@ -12,6 +12,10 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Least privilege: build only reads the repo/artifacts it produces.
+    # Fixes CodeQL actions/missing-workflow-permissions (alert 2).
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
