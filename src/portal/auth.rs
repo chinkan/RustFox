@@ -23,6 +23,7 @@ use axum::{
 };
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -133,15 +134,16 @@ pub fn signing_secret(state: &PortalState) -> Result<[u8; 32], PortalError> {
     let key: [u8; 32] = match std::fs::read(&path) {
         Ok(bytes) => {
             let hex = String::from_utf8_lossy(&bytes);
-            let mut buf = [0u8; 32];
-            if !hex_decode_32(hex.trim(), &mut buf) {
+            let Some(buf) = hex_decode_32(hex.trim()) else {
                 return Err(PortalError::internal("portal_secret.key is corrupt"));
-            }
+            };
             buf
         }
         Err(_) => {
-            let mut buf = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rng(), &mut buf);
+            // Draw the key directly from the OS CSPRNG instead of filling a
+            // zero-initialised array, so no constant value ever flows into the
+            // signing key (mirrors the secret-store fix in PR #100).
+            let buf: [u8; 32] = rand::rng().random();
             write_secret_file(&path, &buf)?;
             buf
         }
@@ -150,20 +152,23 @@ pub fn signing_secret(state: &PortalState) -> Result<[u8; 32], PortalError> {
     Ok(key)
 }
 
-fn hex_decode_32(raw: &str, out: &mut [u8; 32]) -> bool {
+fn hex_decode_32(raw: &str) -> Option<[u8; 32]> {
     if raw.len() != 64 {
-        return false;
+        return None;
     }
-    for (i, byte) in raw.as_bytes().chunks(2).enumerate() {
-        let Ok(s) = std::str::from_utf8(byte) else {
-            return false;
-        };
-        let Ok(v) = u8::from_str_radix(s, 16) else {
-            return false;
-        };
-        out[i] = v;
-    }
-    true
+    // Parse into a fresh byte vector and convert to a fixed-size array, so the
+    // key is never materialised from a constant-initialised buffer (CodeQL
+    // rust/hard-coded-cryptographic-value). Mirrors secret_store/file.rs.
+    let bytes: Vec<u8> = raw
+        .as_bytes()
+        .chunks(2)
+        .map(|byte| {
+            std::str::from_utf8(byte)
+                .ok()
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+        })
+        .collect::<Option<Vec<u8>>>()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
 fn write_secret_file(path: &std::path::Path, key: &[u8; 32]) -> Result<(), PortalError> {
@@ -433,12 +438,10 @@ mod tests {
     fn hex_decode_32_roundtrip() {
         let key = [7u8; 32];
         let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-        let mut out = [0u8; 32];
-        assert!(hex_decode_32(&hex, &mut out));
-        assert_eq!(out, key);
-        assert!(!hex_decode_32("nope", &mut out));
-        assert!(!hex_decode_32(&hex[..62], &mut out));
-        assert!(!hex_decode_32(&hex.replace('7', "z"), &mut out));
+        assert_eq!(hex_decode_32(&hex), Some(key));
+        assert_eq!(hex_decode_32("nope"), None);
+        assert_eq!(hex_decode_32(&hex[..62]), None);
+        assert_eq!(hex_decode_32(&hex.replace('7', "z")), None);
     }
 
     #[test]
