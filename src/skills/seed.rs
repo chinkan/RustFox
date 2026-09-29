@@ -25,7 +25,12 @@ pub fn hash_skill_dir(dir: &Path) -> Option<String> {
         h.update([0]);
         h.update(std::fs::read(&file).ok()?);
     }
-    Some(format!("{:x}", h.finalize()))
+    Some(
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    )
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

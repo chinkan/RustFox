@@ -57,7 +57,11 @@ impl ArtifactManager {
 
         let mut h = Sha256::new();
         h.update(safe_content.as_bytes());
-        let sha = format!("{:x}", h.finalize());
+        let sha = h
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         let bytes = safe_content.len() as i64;
         let id = Uuid::new_v4().to_string();
         let rel = path

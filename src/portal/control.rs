@@ -333,7 +333,10 @@ fn file_sha_hex(path: &Path) -> Option<String> {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(b);
-        format!("{:x}", h.finalize())
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     })
 }
 
