@@ -41,7 +41,7 @@ mod tests {
         assert!(!body.contains(secret_value));
         assert!(
             !body.contains(claim_token),
-            "body must not echo raw claim id: {body}"
+            "body must not echo the raw claim id"
         );
         assert!(!body.to_lowercase().contains("token="));
         assert!(!body.to_lowercase().contains("token:"));

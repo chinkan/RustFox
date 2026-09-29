@@ -422,11 +422,15 @@ fn seal_credentials_for_wizard_write(config_path: &Path, content: &str) -> anyho
     let (sealed, n) =
         crate::secret_store::seal_plaintext_bot_tokens_in_config(content, store.as_ref())?;
     if n > 0 {
-        println!(
-            "✓ Sealed {n} bot credential(s) into SecretStore (config holds secret: refs only)"
-        );
+        report_sealed_credentials();
     }
     Ok(sealed)
+}
+
+/// Report (without echoing any secret material) that plaintext credentials were
+/// sealed. Kept argument-free so no sealing-call output flows into a log sink.
+fn report_sealed_credentials() {
+    println!("\u{2713} Bot credentials sealed into SecretStore (config now holds refs only)");
 }
 
 async fn save_config(
@@ -847,8 +851,10 @@ fn run_cli(config_dir: &Path) -> Result<()> {
             continue;
         }
         let token = read_line("  BotFather token: ")?;
-        let default_hint = &format!("  Allowed user id [{user_ids}]: ");
-        let allow_raw = or_default(read_line(default_hint)?, &user_ids);
+        let allow_raw = or_default(
+            read_line("  Allowed user id (blank = use default): ")?,
+            &user_ids,
+        );
         let caller = allow_raw
             .split([',', ' '])
             .map(str::trim)
