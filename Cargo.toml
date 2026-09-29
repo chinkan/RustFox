@@ -88,7 +88,7 @@ hmac = "0.12"
 
 # OAuth 2.0 / PKCE helpers (used by setup wizard)
 rand = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Secret-redaction filter
 regex = "1"
