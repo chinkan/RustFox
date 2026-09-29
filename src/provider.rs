@@ -238,7 +238,7 @@ fn rate_limit_backoff(retry_after: Option<&str>, attempt: u32) -> std::time::Dur
     let capped = base.min(MAX_RATE_LIMIT_BACKOFF_SECS);
     let jitter = {
         use rand::Rng as _;
-        rand::thread_rng().gen_range(0..1000u64)
+        rand::rng().random_range(0..1000u64)
     };
     std::time::Duration::from_secs(capped) + std::time::Duration::from_millis(jitter)
 }

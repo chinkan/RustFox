@@ -141,7 +141,7 @@ pub fn signing_secret(state: &PortalState) -> Result<[u8; 32], PortalError> {
         }
         Err(_) => {
             let mut buf = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+            rand::RngCore::fill_bytes(&mut rand::rng(), &mut buf);
             write_secret_file(&path, &buf)?;
             buf
         }
