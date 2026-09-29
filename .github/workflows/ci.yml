@@ -50,7 +50,7 @@ jobs:
       # Build the SPA so the embedded-assets regression tests in
       # src/portal/static_serve.rs assert against a real dist instead of
       # the tracked stub (they skip when no /assets/ refs are embedded).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
