@@ -69,7 +69,7 @@ axum = "0.8"
 include_dir = "0.7"
 
 # OCR (pure Rust, neural-network based)
-ocrs = "0.12"
+ocrs = "0.13"
 rten = { version = "0.26", features = ["rten_format"] }
 
 # Image loading/processing
