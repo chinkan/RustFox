@@ -4,7 +4,7 @@ use super::{validate_name, SecretStore, SecretValue};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{anyhow, bail, Context, Result};
-use rand::TryRngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -115,10 +115,7 @@ fn load_or_create_key(key_path: &Path) -> Result<[u8; KEY_LEN]> {
     }
     // Draw the key directly from the OS CSPRNG instead of filling a
     // zero-initialised array, so no constant value is ever used as key material.
-    let mut key = [0u8; KEY_LEN];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut key)
-        .map_err(|e| anyhow!("OS CSPRNG failure: {e}"))?;
+    let key: [u8; KEY_LEN] = rand::rng().random();
     write_private_file(key_path, &key)?;
     Ok(key)
 }
@@ -167,10 +164,7 @@ fn encrypt_and_write(
 ) -> Result<()> {
     let plain = serde_json::to_vec(map).context("serialize secret map")?;
     // Fresh random nonce per encryption, drawn directly from the OS CSPRNG.
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce_bytes)
-        .map_err(|e| anyhow!("OS CSPRNG failure: {e}"))?;
+    let nonce_bytes: [u8; NONCE_LEN] = rand::rng().random();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ct = cipher
