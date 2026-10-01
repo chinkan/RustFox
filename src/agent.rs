@@ -1336,6 +1336,13 @@ impl Agent {
             let prompt = prompt.clone();
             let recurring = is_recurring;
             Box::pin(async move {
+                // Issue #111 (Part A): advance the stored next fire time as the
+                // job fires, so `next_run_at` tracks the *actual* next run
+                // (arm refreshes it at runtime; this keeps it rolling without a
+                // restart). Best-effort bookkeeping — never block the dispatch.
+                if let Err(e) = store.refresh_next_run_at(&tid).await {
+                    tracing::warn!("Failed to advance next_run_at for {}: {e:#}", tid);
+                }
                 let incoming = crate::platform::IncomingMessage {
                     platform: "scheduled_task".to_string(),
                     bot_id: crate::platform::DEFAULT_BOT_ID.to_string(),
@@ -1426,6 +1433,13 @@ impl Agent {
         self.task_store
             .update_scheduler_job_id(&task.id, &job_id.to_string())
             .await?;
+        // Issue #111 (Part A): also refresh `next_run_at` to the *authoritative*
+        // next fire time here, so every arm path (restore / portal / tool) agrees
+        // on one semantic instead of the per-path mix (raw cron string /
+        // NULL / timestamp). Best-effort: bookkeeping must never fail an arm.
+        if let Err(e) = self.task_store.refresh_next_run_at(&task.id).await {
+            tracing::warn!("Failed to refresh next_run_at for task {}: {e:#}", task.id);
+        }
         Ok(job_id)
     }
 
@@ -2138,12 +2152,16 @@ Simply answer the question with the information you have.
     result
 }
 
-/// Parse an ISO 8601 datetime string and return the Duration until it fires.
-/// Returns Err if the string is invalid or the time is in the past.
-pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
+/// Parse a one-shot trigger into its absolute UTC instant. Accepts a naive
+/// local datetime (`%Y-%m-%dT%H:%M:%S`, interpreted in the process local zone)
+/// or an RFC 3339 string. Does **not** check whether the time has passed —
+/// callers decide (arming rejects past times; next-run bookkeeping does not).
+pub(crate) fn parse_one_shot_target(
+    trigger_value: &str,
+) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     use chrono::{Local, NaiveDateTime, TimeZone};
 
-    let dt = NaiveDateTime::parse_from_str(trigger_value, "%Y-%m-%dT%H:%M:%S")
+    NaiveDateTime::parse_from_str(trigger_value, "%Y-%m-%dT%H:%M:%S")
         .map(|naive| Local.from_local_datetime(&naive).single())
         .ok()
         .flatten()
@@ -2158,7 +2176,11 @@ pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::t
                 "Invalid datetime '{}'. Use ISO 8601 format e.g. '2026-03-05T12:00:00'",
                 trigger_value
             )
-        })?;
+        })
+}
+
+pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
+    let dt = parse_one_shot_target(trigger_value)?;
 
     let now = chrono::Utc::now();
     if dt <= now {

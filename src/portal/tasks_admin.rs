@@ -121,13 +121,23 @@ pub async fn task_create(
                 .task_store
                 .update_scheduler_job_id(&id, &job_id.to_string())
                 .await;
+            // Issue #111 (Part A): `arm_task` refreshed `next_run_at` to the
+            // true next fire instant — read it back so the response doesn't
+            // repeat the stale (NULL-for-recurring) in-memory value.
+            let next_run = state
+                .task_store
+                .get_by_id(&id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.next_run_at);
             Ok((
                 axum::http::StatusCode::CREATED,
                 Json(json!({
                     "id": id,
                     "name": name,
                     "schedulerJobId": job_id.to_string(),
-                    "nextRun": task.next_run_at,
+                    "nextRun": next_run,
                 })),
             ))
         }
@@ -204,21 +214,11 @@ pub async fn task_update(
             .map_err(|e| PortalError::bad_request("invalid_trigger", e.to_string()))?;
     }
 
-    // next_run_at bookkeeping: one-shots mirror their (new) trigger time;
-    // recurring edits clear the discrete value (NULL).
-    let next_run = if task.trigger_type == "one_shot" {
-        if body.trigger_value.is_some() {
-            Some(Some(eff_value.as_str()))
-        } else {
-            None
-        }
-    } else if body.trigger_value.is_some() {
-        // recurring: no discrete next-run value
-        Some(None)
-    } else {
-        None
-    };
-
+    // `next_run_at` is left untouched here (issue #111, Part A): the handler
+    // used to NULL it for recurring edits and mirror the raw trigger for
+    // one-shots. We now recompute it from the trigger below (via arm on the
+    // active path, or an explicit refresh otherwise) so the stored value is
+    // always the real next fire instant.
     let touched = state
         .task_store
         .update_task_fields(
@@ -226,7 +226,7 @@ pub async fn task_update(
             new_prompt.as_deref(),
             new_value.as_deref(),
             new_name.as_deref(),
-            next_run,
+            None,
         )
         .await
         .map_err(PortalError::internal)?;
@@ -267,6 +267,19 @@ pub async fn task_update(
         None
     };
 
+    // Recompute the authoritative next fire instant. On the active path
+    // `arm_task` already refreshed it; this covers the paused path (edit saved
+    // but not armed) and is idempotent otherwise. Then read the row back so the
+    // response reflects one consistent source of truth.
+    let _ = state.task_store.refresh_next_run_at(&task.id).await;
+    let next_run = state
+        .task_store
+        .get_by_id(&task.id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|t| t.next_run_at);
+
     Ok(Json(json!({
         "id": task.id,
         "updated": {
@@ -276,7 +289,7 @@ pub async fn task_update(
         },
         "rearmed": rearmed.is_some(),
         "schedulerJobId": rearmed,
-        "nextRun": if task.trigger_type == "one_shot" { Some(eff_value) } else { None },
+        "nextRun": next_run,
     })))
 }
 
@@ -347,12 +360,20 @@ pub async fn task_enable(
                 .task_store
                 .update_scheduler_job_id(&armed.id, &job.to_string())
                 .await;
+            // Issue #111 (Part A): reflect the arm-refreshed next fire instant.
+            let next_run = state
+                .task_store
+                .get_by_id(&p.id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.next_run_at);
             Ok(Json(json!({
             "ok": true,
             "id": p.id,
             "enabled": true,
             "schedulerJobId": job.to_string(),
-            "nextRun": if task.trigger_type == "one_shot" { Some(task.trigger_value.clone()) } else { None },
+            "nextRun": next_run,
             })))
         }
         Err(e) => {

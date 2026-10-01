@@ -114,13 +114,30 @@ pub fn resolve_config_path(
     cwd_candidate
 }
 
+/// Where a resolved data path came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathOrigin {
+    /// Field was empty → materialized under the home root.
     Default,
+    /// Absolute override → used verbatim.
     Absolute,
-    RelativeLegacy,
+    /// Relative override → **rebased onto the home root** so it can never
+    /// silently depend on the process CWD (issue #111, Part B). A
+    /// `LegacyPathWarning` is emitted so the user can pin it explicitly.
+    RebasedRelative,
 }
 
+/// Resolve a single configured data path.
+///
+/// - empty → `<home>/<default_subpath>` ([`PathOrigin::Default`])
+/// - absolute → used verbatim ([`PathOrigin::Absolute`])
+/// - relative → **rebased onto `home`** ([`PathOrigin::RebasedRelative`]).
+///
+/// The relative case used to return the value unchanged, which made it
+/// relative to the process CWD — so running the binary from a different
+/// directory silently opened a *different* database / workspace. Rebasing
+/// onto `home` makes the location stable regardless of where the process was
+/// launched from (issue #111, Part B).
 pub fn resolve_data_path(
     configured: &Path,
     home: &Path,
@@ -131,7 +148,7 @@ pub fn resolve_data_path(
     } else if configured.is_absolute() {
         (configured.to_path_buf(), PathOrigin::Absolute)
     } else {
-        (configured.to_path_buf(), PathOrigin::RelativeLegacy)
+        (home.join(configured), PathOrigin::RebasedRelative)
     }
 }
 
@@ -195,33 +212,44 @@ pub fn ensure_dirs(paths: &ResolvedPaths) -> Result<()> {
     Ok(())
 }
 
-/// An actionable warning emitted when a path is relative (CWD-resolved) or when
-/// legacy data is detected in the launch directory while the path is unset.
+/// Emitted when a config path is **relative**. Since issue #111 such paths are
+/// rebased onto the home root (they used to bind to the process CWD), so this
+/// is a migration notice: where the path now lives, and how to pin it.
 #[derive(Debug, Clone)]
 pub struct LegacyPathWarning {
     /// Config field label, e.g. "memory.database_path".
     pub label: String,
-    /// The path currently in effect (CWD-resolved legacy location).
-    pub current: PathBuf,
-    /// Where this path would live under the home root.
-    pub home_default: PathBuf,
+    /// The relative value exactly as written in config.toml.
+    pub configured: PathBuf,
+    /// The absolute path it now resolves to (home-rebased).
+    pub resolved: PathBuf,
+    /// Where the *old* (CWD-relative) behavior would have resolved it, when a
+    /// CWD is available. This is where pre-#111 data may still live, so the
+    /// operator can move it. `None` if the CWD can't be read.
+    pub legacy_cwd: Option<PathBuf>,
 }
 
 impl LegacyPathWarning {
     /// Multi-line, copy-pasteable migration hint.
     pub fn render(&self) -> String {
-        // `cp -rT` merges the source into the already-created destination
-        // directory instead of nesting it (e.g. avoids <home>/skills/skills).
+        let legacy_line = match &self.legacy_cwd {
+            Some(p) if p != &self.resolved => format!(
+                "\n  Previously (CWD-relative) it resolved to: {}\n                   If real data lives there, move it:  mv {} {}",
+                p.display(),
+                p.display(),
+                self.resolved.display(),
+            ),
+            _ => String::new(),
+        };
         format!(
-            "Legacy path in use for `{label}`:\n  \
-             current : {current}\n  \
-             new home default : {home_default}\n  \
-             To migrate this path into the home directory:\n    \
-             cp -rT {current} {home_default}\n  \
-             To keep the current location, pin it in config.toml under its section.",
+            "Relative path in config for `{label}`: '{configured}'.\n  \
+             It now resolves to: {resolved}{legacy_line}\n  \
+             (Relative paths are home-relative, not CWD-relative — issue #111.)\n  \
+             To make it explicit, pin the absolute path in config.toml under its section:\n    \
+             {label} = \"{resolved}\"",
             label = self.label,
-            current = self.current.display(),
-            home_default = self.home_default.display(),
+            configured = self.configured.display(),
+            resolved = self.resolved.display(),
         )
     }
 }
@@ -311,15 +339,32 @@ mod tests {
         assert_eq!(origin, PathOrigin::Absolute);
     }
 
+    /// Regression (issue #111, Part B): a relative override must be rebased
+    /// onto the home root, *not* left relative to the process CWD.
     #[test]
-    fn relative_path_is_legacy() {
+    fn relative_path_is_rebased_onto_home() {
         let (path, origin) = resolve_data_path(
             Path::new("rustfox.db"),
             Path::new("/h/.rustfox"),
             "rustfox.db",
         );
-        assert_eq!(path, PathBuf::from("rustfox.db"));
-        assert_eq!(origin, PathOrigin::RelativeLegacy);
+        assert_eq!(path, PathBuf::from("/h/.rustfox/rustfox.db"));
+        assert_eq!(origin, PathOrigin::RebasedRelative);
+        assert!(
+            path.is_absolute(),
+            "resolved path must never be CWD-relative"
+        );
+    }
+
+    #[test]
+    fn nested_relative_path_is_rebased_onto_home() {
+        let (path, origin) = resolve_data_path(
+            Path::new("sub/data/skills"),
+            Path::new("/h/.rustfox"),
+            "skills",
+        );
+        assert_eq!(path, PathBuf::from("/h/.rustfox/sub/data/skills"));
+        assert_eq!(origin, PathOrigin::RebasedRelative);
     }
 
     #[test]
@@ -355,14 +400,17 @@ mod tests {
     fn warning_render_includes_paths_and_commands() {
         let w = LegacyPathWarning {
             label: "memory.database_path".to_string(),
-            current: PathBuf::from("/work/rustfox.db"),
-            home_default: PathBuf::from("/h/.rustfox/rustfox.db"),
+            configured: PathBuf::from("rustfox.db"),
+            resolved: PathBuf::from("/h/.rustfox/rustfox.db"),
+            legacy_cwd: Some(PathBuf::from("/work/rustfox.db")),
         };
         let s = w.render();
         assert!(s.contains("memory.database_path"));
-        assert!(s.contains("/work/rustfox.db"));
+        assert!(s.contains("rustfox.db"));
         assert!(s.contains("/h/.rustfox/rustfox.db"));
-        assert!(s.contains("cp -rT"));
+        assert!(s.contains("/work/rustfox.db"), "legacy CWD path surfaced");
+        assert!(s.contains("mv "), "migration command surfaced");
+        assert!(s.contains("#111"));
     }
     // ── resolve_config_path tests ───────────────────────────────────
 

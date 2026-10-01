@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,6 +8,36 @@ use tokio::sync::Mutex;
 /// from owner-scoped listings. Kept as a constant so future callers can
 /// extend the convention without re-deriving it.
 pub const SYSTEM_USER_PREFIX: &str = "__system";
+
+/// Next cron fire strictly after `after` for a 6-field expression
+/// (sec min hour day month weekday) — the same parser configuration
+/// `tokio-cron-scheduler` uses internally, so the value we persist as
+/// `next_run_at` matches what the live job will actually do.
+///
+/// Returns `None` for an unparseable expression (callers treat that as
+/// "no known next run" rather than failing).
+pub fn next_cron_occurrence(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let cron = croner::Cron::new(expr)
+        .with_seconds_required()
+        .with_dom_and_dow()
+        .parse()
+        .ok()?;
+    cron.find_next_occurrence(&after, false).ok()
+}
+
+/// Compute the authoritative next fire instant for a task as of `after`
+/// (issue #111, Part A):
+/// - one-shot → its parsed trigger instant (in the past once it has fired,
+///   which is honest — a fired one-shot is retired separately);
+/// - recurring → the next cron occurrence strictly after `after`;
+/// - anything else → `None`.
+pub fn compute_next_run_at(task: &ScheduledTask, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    match task.trigger_type.as_str() {
+        "one_shot" => crate::agent::parse_one_shot_target(&task.trigger_value).ok(),
+        "recurring" => next_cron_occurrence(&task.trigger_value, after),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -286,6 +317,22 @@ impl ScheduledTaskStore {
         Ok(())
     }
 
+    /// Recompute and persist `next_run_at` for `id` from its own trigger and
+    /// the current time (issue #111, Part A). Called on every arm so the stored
+    /// value is the true next fire instant, not the raw cron string / NULL that
+    /// one of the create paths used to write. Idempotent; no-op when the trigger
+    /// is unparseable (leaves the previous value in place rather than lying).
+    pub async fn refresh_next_run_at(&self, id: &str) -> Result<()> {
+        let Some(task) = self.get_by_id(id).await? else {
+            return Ok(());
+        };
+        let Some(next) = compute_next_run_at(&task, Utc::now()) else {
+            return Ok(());
+        };
+        self.update_next_run_at(id, &next.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .await
+    }
+
     pub async fn insert_run(
         &self,
         id: &str,
@@ -487,6 +534,113 @@ mod tests {
 
         let tasks = store.list_all_active().await.unwrap();
         assert_eq!(tasks[0].scheduler_job_id.as_deref(), Some("sched-uuid-123"));
+    }
+
+    // ---- Regression: issue #111, Part A (next_run_at reflects true fire) ----
+
+    /// A recurring cron trigger yields a concrete, *future* instant — never the
+    /// raw expression string the Telegram tool used to store.
+    #[tokio::test]
+    async fn refresh_next_run_at_computes_real_cron_instant() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let mut task = make_task("rec", "80180742", "recurring");
+        task.trigger_value = "0 0 4 * * *".to_string(); // 04:00:00 daily
+        task.next_run_at = Some("0 0 4 * * *".to_string()); // legacy: raw expr
+        store.create(&task).await.unwrap();
+
+        store.refresh_next_run_at("rec").await.unwrap();
+
+        let stored = store.get_by_id("rec").await.unwrap().unwrap();
+        let val = stored.next_run_at.expect("next_run_at must be set");
+        assert_ne!(val, "0 0 4 * * *", "raw cron string must not survive");
+        let parsed = chrono::NaiveDateTime::parse_from_str(&val, "%Y-%m-%dT%H:%M:%S")
+            .expect("next_run_at must be a timestamp");
+        assert!(
+            parsed.and_utc() > chrono::Utc::now(),
+            "recurring next_run_at must be in the future, got {parsed}"
+        );
+    }
+
+    /// An armed one-shot records its exact trigger instant.
+    #[tokio::test]
+    async fn refresh_next_run_at_for_one_shot_is_trigger_instant() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let mut task = make_task("os", "u", "one_shot");
+        task.trigger_value = "2099-01-01T09:00:00".to_string();
+        task.next_run_at = None;
+        store.create(&task).await.unwrap();
+
+        store.refresh_next_run_at("os").await.unwrap();
+
+        let stored = store.get_by_id("os").await.unwrap().unwrap();
+        // Naive local parsed then converted to UTC; just assert it round-trips
+        // to the same wall-clock instant the trigger names.
+        let val = stored.next_run_at.expect("one-shot next_run_at set");
+        // Naive local 2099-01-01T09:00:00 (HKT) converts to 2099-01-01T01:00:00Z;
+        // the date component is stable across the tz conversion.
+        assert!(val.starts_with("2099-01-01"), "unexpected: {val}");
+        chrono::NaiveDateTime::parse_from_str(&val, "%Y-%m-%dT%H:%M:%S")
+            .expect("one-shot next_run_at must be a timestamp");
+    }
+
+    #[test]
+    fn next_cron_occurrence_is_strictly_after_reference() {
+        let after = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let next = next_cron_occurrence("0 0 4 * * *", after).expect("daily cron has a next");
+        assert!(next > after, "next occurrence must be after the reference");
+        assert_eq!(next.date_naive(), after.date_naive()); // 04:00 same day
+    }
+
+    #[test]
+    fn next_cron_occurrence_none_for_garbage() {
+        let after = chrono::Utc::now();
+        assert!(next_cron_occurrence("not a cron", after).is_none());
+    }
+
+    /// The core #111-Part-A property: each fire advances `next_run_at` to the
+    /// following occurrence. Deterministic (no wall clock): feeding the previous
+    /// next-run back in must yield a strictly later instant.
+    #[test]
+    fn compute_next_run_at_advances_on_each_fire() {
+        let mut task = make_task("rec", "u", "recurring");
+        task.trigger_value = "0 0 4 * * *".to_string();
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let first = compute_next_run_at(&task, t0).expect("first next");
+        let second = compute_next_run_at(&task, first).expect("second next");
+        assert!(first > t0);
+        assert!(second > first, "next_run_at must advance after each fire");
+        assert_eq!(
+            (second - first).num_days(),
+            1,
+            "daily cron advances by a day"
+        );
+    }
+
+    /// A fired one-shot's next-run is its (now past) trigger — honest, and it is
+    /// retired separately, so no infinite-future lie.
+    #[test]
+    fn compute_next_run_at_one_shot_is_its_target_not_future() {
+        let mut task = make_task("os", "u", "one_shot");
+        task.trigger_value = "2020-01-01T00:00:00".to_string();
+        let after = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let next = compute_next_run_at(&task, after).expect("one-shot has a target");
+        assert!(next < after, "a past one-shot trigger stays in the past");
+        // Same instant the trigger names (local 2020-01-01T00:00:00 → UTC),
+        // not a recomputed/advanced value.
+        assert_eq!(
+            next,
+            crate::agent::parse_one_shot_target("2020-01-01T00:00:00").unwrap()
+        );
     }
 
     // ---- Regression: issue #109, Bug 1 (owner-scoped listing) ----

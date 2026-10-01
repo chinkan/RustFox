@@ -188,7 +188,11 @@ impl ToolHandler for SchedulingTools {
                     description: description.clone(),
                     status: "active".to_string(),
                     created_at: now.clone(),
-                    next_run_at: Some(trigger_value.clone()),
+                    // Issue #111 (Part A): the true next fire instant is not
+                    // known until the task is armed — `arm_task` computes and
+                    // persists it. Writing the raw cron expression here (as the
+                    // tool used to) made `next_run_at` lie for recurring tasks.
+                    next_run_at: None,
                     deleted_at: None,
                 };
                 if let Err(e) = self.task_store.create(&task).await {
@@ -199,10 +203,18 @@ impl ToolHandler for SchedulingTools {
                 // persisted onto the row (issue #109, Bug 2). Without this a
                 // recurring task could neither be disarmed nor safely re-armed.
                 match self.ops.arm_task(&task).await {
-                    Ok(_job_id) => Ok(format!(
-                        "Task scheduled! ID: {} — {} ({})",
-                        task_id, description, trigger_value
-                    )),
+                    Ok(_job_id) => {
+                        // Bookkeeping (issue #111, Part A): recompute the real
+                        // next fire instant now the task is armed. Idempotent
+                        // with `Agent::arm_task`'s own refresh; here it also
+                        // makes the value observable in tests that drive the
+                        // tool with a fake `SchedulingOps`.
+                        let _ = self.task_store.refresh_next_run_at(&task_id).await;
+                        Ok(format!(
+                            "Task scheduled! ID: {} — {} ({})",
+                            task_id, description, trigger_value
+                        ))
+                    }
                     Err(e) => Ok(format!("Failed to register task with scheduler: {}", e)),
                 }
             }
@@ -521,6 +533,44 @@ mod tests {
         assert!(
             tasks[0].scheduler_job_id.is_some(),
             "the arm path must persist the live job id (was NULL before the fix)"
+        );
+    }
+
+    /// Regression (issue #111, Part A): creating a recurring task through the
+    /// tool must store a concrete *timestamp* as `next_run_at`, never the raw
+    /// cron expression (which is what the tool used to write).
+    #[tokio::test]
+    async fn schedule_task_stores_real_next_run_timestamp() {
+        let (tools, store, _fake) = build_tools().await;
+
+        tools
+            .execute(
+                "schedule_task",
+                json!({
+                    "trigger_type": "recurring",
+                    "trigger_value": "0 0 4 * * *",
+                    "prompt": "say hi",
+                    "description": "daily hi"
+                }),
+                make_ctx("80180742"),
+            )
+            .await
+            .unwrap();
+
+        let task = store
+            .list_all_active()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let val = task
+            .next_run_at
+            .expect("next_run_at must be populated after arm");
+        assert_ne!(val, "0 0 4 * * *", "raw cron string must not be stored");
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(&val, "%Y-%m-%dT%H:%M:%S").is_ok(),
+            "next_run_at must be an ISO timestamp, got: {val}"
         );
     }
 

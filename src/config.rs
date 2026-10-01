@@ -827,9 +827,11 @@ impl Config {
     /// Resolve the home root and every data path, create directories, and write
     /// the resolved paths back into the config fields. Unset paths are
     /// materialized to absolute paths under the home root; absolute overrides
-    /// are preserved verbatim; relative overrides are kept as-is (legacy mode)
-    /// and a warning is emitted for each. Returns any legacy-path warnings for
-    /// the caller to log.
+    /// are preserved verbatim; relative overrides are **rebased onto the home
+    /// root** (issue #111, Part B — they used to bind to the process CWD, which
+    /// silently opened a different database/workspace depending on where the
+    /// binary was launched) and a migration warning is emitted for each.
+    /// Returns those warnings for the caller to log.
     pub fn resolve(&mut self) -> Result<Vec<crate::home::LegacyPathWarning>> {
         use crate::home::{
             ensure_dirs, resolve_data_path, resolve_home, PathOrigin, ResolvedPaths,
@@ -840,14 +842,18 @@ impl Config {
         let os_home = dirs::home_dir();
         let home = resolve_home(env_home.as_deref(), config_home, os_home.as_deref())?;
 
+        let cwd = std::env::current_dir().ok();
         let mut warnings = Vec::new();
         let mut resolve_one = |label: &str, field: &Path, subpath: &str| -> PathBuf {
             let (path, origin) = resolve_data_path(field, &home, subpath);
-            if origin == PathOrigin::RelativeLegacy {
+            if origin == PathOrigin::RebasedRelative {
                 warnings.push(crate::home::LegacyPathWarning {
                     label: label.to_string(),
-                    current: path.clone(),
-                    home_default: home.join(subpath),
+                    configured: field.to_path_buf(),
+                    resolved: path.clone(),
+                    // Where the old CWD-relative behavior would have pointed —
+                    // so the operator can move any real data (issue #111).
+                    legacy_cwd: cwd.as_ref().map(|c| c.join(field)),
                 });
             }
             path
@@ -1177,6 +1183,36 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// Regression (issue #111, Part B): a relative override must be **rebased
+    /// onto home**, not left relative to the process CWD. Before the fix the
+    /// field was written back verbatim (CWD-relative), so launching the binary
+    /// from another directory silently changed which DB/workspace was used.
+    #[test]
+    fn resolve_rebases_relative_override_and_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+        });
+        cfg.memory.database_path = std::path::PathBuf::from("rustfox.db");
+        let warnings = cfg.resolve().unwrap();
+        assert_eq!(
+            cfg.memory.database_path,
+            home.join("rustfox.db"),
+            "relative db path must be home-relative, never CWD-relative"
+        );
+        assert!(cfg.memory.database_path.is_absolute());
+        let w = warnings
+            .iter()
+            .find(|w| w.label == "memory.database_path")
+            .expect("a migration warning must be emitted for the relative path");
+        assert_eq!(w.configured, std::path::PathBuf::from("rustfox.db"));
+        assert_eq!(w.resolved, home.join("rustfox.db"));
+        assert!(w.render().contains("#111"));
+    }
+
     #[test]
     fn resolve_warns_on_relative_override() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1184,11 +1220,11 @@ mod tests {
         let mut cfg: Config = toml::from_str(base_toml()).unwrap();
         cfg.general = Some(GeneralConfig {
             location: None,
-            home: Some(home),
+            home: Some(home.clone()),
         });
         cfg.skills.directory = std::path::PathBuf::from("my-skills");
         let warnings = cfg.resolve().unwrap();
-        assert_eq!(cfg.skills.directory, std::path::PathBuf::from("my-skills"));
+        assert_eq!(cfg.skills.directory, home.join("my-skills"));
         assert!(warnings.iter().any(|w| w.label == "skills.directory"));
     }
 
