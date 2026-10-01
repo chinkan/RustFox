@@ -1,5 +1,6 @@
 pub mod reminders;
 pub mod reruns;
+pub mod schedule;
 pub mod tasks;
 
 use anyhow::{Context, Result};
@@ -91,6 +92,20 @@ impl Scheduler {
             .await
             .with_context(|| format!("Failed to remove job: {}", id))?;
         Ok(())
+    }
+
+    /// Whether a job UUID currently has a registered live job in the
+    /// scheduler's metadata store. Used by callers/tests that must prove a
+    /// task was genuinely disarmed (issue #109, Bug 2) without firing it.
+    ///
+    /// `next_tick_for_job` returns `None` for both an unknown id *and* a job
+    /// that has already fired (its metadata is dropped once the tick passes),
+    /// so this is a conservative "still scheduled" probe, not a "was armed"
+    /// history check.
+    #[allow(dead_code)]
+    pub async fn is_job_registered(&self, id: Uuid) -> bool {
+        let mut inner = self.inner.clone();
+        matches!(inner.next_tick_for_job(id).await, Ok(Some(_)))
     }
 
     /// Start the scheduler

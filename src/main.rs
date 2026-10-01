@@ -356,9 +356,14 @@ async fn main() -> Result<()> {
     tool_registry.register(Box::new(rustfox::memory_tools::MemoryTools::new(
         memory.clone(),
     )));
+    // Late-bound seam so the scheduling tools can arm/disarm through the
+    // Agent's `arm_task`/`disarm_task` (persisting the live job id — issue
+    // #109). The Agent is constructed below, so the holder is filled then.
+    let scheduling_ops = Arc::new(rustfox::scheduler::schedule::OnceScheduling::new());
     tool_registry.register(Box::new(rustfox::scheduling_tools::SchedulingTools::new(
         task_store.clone(),
         Arc::clone(&scheduler),
+        scheduling_ops.clone() as Arc<dyn rustfox::scheduler::schedule::SchedulingOps>,
         job_tx.clone(),
         Arc::clone(&bot),
         rerun_queue.clone(),
@@ -404,6 +409,11 @@ async fn main() -> Result<()> {
             soul_updated.clone(),
         )
     });
+
+    // The agent now exists: give the scheduling tools the real arm/disarm ops.
+    scheduling_ops.set(Arc::new(
+        rustfox::scheduler::schedule::AgentOpsScheduling::new(Arc::clone(&agent)),
+    ));
 
     // Spawn background runner: receives ScheduledJobRequest, calls process_message, persists result, sends reply
     let agent_for_runner = Arc::clone(&agent);
@@ -533,6 +543,24 @@ async fn main() -> Result<()> {
                         .await
                     {
                         tracing::warn!("Failed to update scheduled task run record: {}", e);
+                    }
+                    // Issue #109 (related): a one-shot that fired cleanly must
+                    // not stay `active` forever — retire it (idempotent, no-op
+                    // for recurring).
+                    let trig = if req.is_recurring {
+                        "recurring"
+                    } else {
+                        "one_shot"
+                    };
+                    if let Err(e) = req
+                        .task_store
+                        .retire_completed_one_shot(&req.task_id, trig)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to retire completed one-shot {}: {e:#}",
+                            req.task_id
+                        );
                     }
                     // ADR-0013 / P0 #2: any successful scheduled run (cron or
                     // re-fire) must clear leftover live queue rows for this

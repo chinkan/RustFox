@@ -3,6 +3,11 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Marker used to exclude non-user rows (e.g. system/builtin identities)
+/// from owner-scoped listings. Kept as a constant so future callers can
+/// extend the convention without re-deriving it.
+pub const SYSTEM_USER_PREFIX: &str = "__system";
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ScheduledTask {
@@ -82,6 +87,49 @@ impl ScheduledTaskStore {
             &conn,
             "WHERE user_id = ?1 AND status = 'active' AND deleted_at IS NULL",
             rusqlite::params![user_id],
+        )
+    }
+
+    /// Owner-scoped listing that survives the *composite* run-scoped id used
+    /// when a scheduled task executes itself (`user_id = "{owner}:{task_id}"`,
+    /// see `Agent::build_fire_closure`).
+    ///
+    /// The naive `list_active_for_user` scopes on a literal `user_id`, so a
+    /// scheduled run's self-listing matches nothing (it searches for
+    /// `"owner:task_id"`) while a portal-created task is keyed on a different
+    /// id entirely (`"web"` vs the Telegram owner). This predicate matches:
+    ///
+    /// 1. the row whose `id` equals the queried composite task id (the task
+    ///    listing itself — `sankey` is `` when the caller passed a base id);
+    /// 2. every row whose owner is the base id (covers a scheduled run asking
+    ///    for its siblings, and the plain Telegram caller);
+    /// 3. every row whose owner is the portal identity (`"web"…`) or an
+    ///    owner-less/system identity (`"system"`, `__system…`) — the "bot-wide
+    ///    view" that management tools need.
+    ///
+    /// A telegram owner that merely *starts with* `"web"` (e.g. `"webmaster"`)
+    /// does not match (3) because the predicate anchors at the prefix.
+    pub async fn list_active_for_owner_scope(
+        &self,
+        queried_user_id: &str,
+    ) -> Result<Vec<ScheduledTask>> {
+        // A scheduled run carries "{owner}:{task_id}", so enumerating it from
+        // inside its own task must still resolve back to the owner's rows and
+        // to the task itself.
+        let (base_owner, composite_task_id) = match queried_user_id.split_once(':') {
+            Some((owner, task_id)) => (owner, task_id),
+            None => (queried_user_id, ""),
+        };
+        let conn = self.conn.lock().await;
+        self.query_tasks(
+            &conn,
+            "WHERE status = 'active' AND deleted_at IS NULL
+               AND ( id = ?1
+                     OR user_id = ?2
+                     OR substr(user_id, 1, 6) = 'web'
+                     OR substr(user_id, 1, 6) = 'system'
+                     OR substr(user_id, 1, 8) = ?3 )",
+            rusqlite::params![composite_task_id, base_owner, SYSTEM_USER_PREFIX],
         )
     }
 
@@ -206,6 +254,26 @@ impl ScheduledTaskStore {
             )
             .context("Failed to soft-delete task")?;
         Ok(n)
+    }
+
+    /// Retire a successfully-fired one-shot task (issue #109, related
+    /// observation). Without this, a one-shot that ran stays `active` forever,
+    /// inflating listings and risking mis-restore. Idempotent and a no-op for
+    /// recurring rows: returns `true` only when an active one-shot row was
+    /// actually transitioned to `completed`.
+    pub async fn retire_completed_one_shot(&self, id: &str, trigger_type: &str) -> Result<bool> {
+        if trigger_type != "one_shot" {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_tasks SET status = 'completed'
+                 WHERE id = ?1 AND status = 'active' AND trigger_type = 'one_shot'",
+                rusqlite::params![id],
+            )
+            .context("Failed to retire one-shot task")?;
+        Ok(n > 0)
     }
 
     pub async fn update_next_run_at(&self, id: &str, next_run_at: &str) -> Result<()> {
@@ -419,6 +487,150 @@ mod tests {
 
         let tasks = store.list_all_active().await.unwrap();
         assert_eq!(tasks[0].scheduler_job_id.as_deref(), Some("sched-uuid-123"));
+    }
+
+    // ---- Regression: issue #109, Bug 1 (owner-scoped listing) ----
+
+    /// A portal-created task (`user_id = "web"`, `platform = "portal"`) must be
+    /// visible to the Telegram owner's listing. Before the fix, the tool
+    /// scoped on a literal `user_id` and omitted it (20 vs 21).
+    #[tokio::test]
+    async fn test_owner_scope_includes_portal_tasks() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let tg = make_task("tg-1", "80180742", "one_shot");
+        store.create(&tg).await.unwrap();
+        let mut portal = make_task("portal-1", "web", "recurring");
+        portal.platform = "portal".to_string();
+        store.create(&portal).await.unwrap();
+
+        // Ordinary Telegram caller: base id == queried id.
+        let tasks = store.list_active_for_owner_scope("80180742").await.unwrap();
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"tg-1"), "own task must be listed: {ids:?}");
+        assert!(
+            ids.contains(&"portal-1"),
+            "portal-created task must not be invisible: {ids:?}"
+        );
+        assert_eq!(tasks.len(), 2);
+    }
+
+    /// A scheduled run's own execution context carries a composite
+    /// `user_id = "{owner}:{task_id}"`. Its self-listing must be non-empty
+    /// (previously the literal-`user_id` predicate matched nothing and the
+    /// tool answered "No active scheduled tasks.").
+    #[tokio::test]
+    async fn test_owner_scope_scheduled_run_self_listing_is_non_empty() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let task = make_task("debe2062-aaaa", "80180742", "recurring");
+        store.create(&task).await.unwrap();
+
+        let self_ctx = "80180742:debe2062-aaaa".to_string();
+        let tasks = store.list_active_for_owner_scope(&self_ctx).await.unwrap();
+        assert!(
+            !tasks.is_empty(),
+            "a scheduled run must be able to see its own task"
+        );
+        assert!(tasks.iter().any(|t| t.id == "debe2062-aaaa"));
+    }
+
+    /// The bot-wide listing must not leak a task belonging to an *unrelated*
+    /// Telegram user (isolation between base owners is preserved), while still
+    /// surfacing portal + system rows.
+    #[tokio::test]
+    async fn test_owner_scope_excludes_other_telegram_users() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        store
+            .create(&make_task("mine", "80180742", "one_shot"))
+            .await
+            .unwrap();
+        store
+            .create(&make_task("someone-else", "99999999", "one_shot"))
+            .await
+            .unwrap();
+        store
+            .create(&make_task("portal", "web", "one_shot"))
+            .await
+            .unwrap();
+        store
+            .create(&make_task("sys", "system:watchdog", "one_shot"))
+            .await
+            .unwrap();
+
+        let tasks = store.list_active_for_owner_scope("80180742").await.unwrap();
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"mine"));
+        assert!(ids.contains(&"portal"));
+        assert!(ids.contains(&"sys"));
+        assert!(
+            !ids.contains(&"someone-else"),
+            "another Telegram user's tasks must stay hidden: {ids:?}"
+        );
+    }
+
+    /// A Telegram owner whose id merely starts with `"web"` must not be treated
+    /// as the portal identity (the predicate is anchored, not a bare LIKE).
+    #[tokio::test]
+    async fn test_owner_scope_web_prefix_is_anchored_not_greedy() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        store
+            .create(&make_task("webmaster-task", "webmaster", "one_shot"))
+            .await
+            .unwrap();
+        store
+            .create(&make_task("portal-task", "web", "one_shot"))
+            .await
+            .unwrap();
+
+        let tasks = store.list_active_for_owner_scope("80180742").await.unwrap();
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"portal-task"), "portal identity matches");
+        assert!(
+            !ids.contains(&"webmaster-task"),
+            "an unrelated 'webmaster' owner must not be swept in: {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retire_completed_one_shot_is_idempotent_and_recurring_safe() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        store
+            .create(&make_task("os", "u", "one_shot"))
+            .await
+            .unwrap();
+        store
+            .create(&make_task("rec", "u", "recurring"))
+            .await
+            .unwrap();
+
+        // Recurring rows are never retired.
+        assert!(!store
+            .retire_completed_one_shot("rec", "recurring")
+            .await
+            .unwrap());
+        // One-shot: first call retires, second is a no-op.
+        assert!(store
+            .retire_completed_one_shot("os", "one_shot")
+            .await
+            .unwrap());
+        assert!(!store
+            .retire_completed_one_shot("os", "one_shot")
+            .await
+            .unwrap());
+
+        let os = store.get_by_id("os").await.unwrap().unwrap();
+        assert_eq!(os.status, "completed");
+        let rec = store.get_by_id("rec").await.unwrap().unwrap();
+        assert_eq!(rec.status, "active");
     }
 
     #[tokio::test]

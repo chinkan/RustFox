@@ -1398,6 +1398,12 @@ impl Agent {
     /// id back onto the DB row. One-shot triggers that already passed return
     /// Err (caller decides: restore marks them `completed`, portal 400s).
     pub async fn arm_task(&self, task: &ScheduledTask) -> Result<uuid::Uuid> {
+        // NOTE (issue #109, Bug 2): rows created through the Telegram
+        // `schedule_task` tool historically never persisted their live job id,
+        // so a pre-existing job registered by such a row cannot be looked up
+        // here (there is no id to remove by). Disarming such orphans must be
+        // done by the *creator* persisting the id up-front — see
+        // `schedule_task` routing through this method.
         let fire = Self::build_fire_closure(
             self.job_tx.clone(),
             Arc::clone(&self.bot),
@@ -1414,7 +1420,9 @@ impl Agent {
                 .add_cron_job(&task.trigger_value, &task.description, fire)
                 .await?
         };
-        // Persist the new job id so disable/delete can find it again.
+        // Persist the new job id so disable/delete can find it again. This is
+        // the single write-back every arm path (restore / portal / tool) must
+        // go through — see issue #109, Bug 2.
         self.task_store
             .update_scheduler_job_id(&task.id, &job_id.to_string())
             .await?;
