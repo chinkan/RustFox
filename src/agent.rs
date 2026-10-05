@@ -253,9 +253,9 @@ fn format_bots_available_lines(
         }
         let desc = agents
             .get(persona)
-            .map(|s| s.description.as_str())
+            .map(|s| crate::skills::catalog_description(&s.description))
             .filter(|d| !d.is_empty())
-            .unwrap_or("Telegram bot persona");
+            .unwrap_or_else(|| "Telegram bot persona".to_string());
         if id == persona {
             lines.push(format!(
                 "- **{id}**: {desc}\n  Invoke via: `invoke_agent(agent=\"{id}\", prompt=\"<task>\")`"
@@ -281,7 +281,9 @@ fn format_agent_lines_excluding(
         }
         lines.push(format!(
             "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
-            agent.name, agent.description, agent.name
+            agent.name,
+            crate::skills::catalog_description(&agent.description),
+            agent.name
         ));
     }
     lines.join("\n")
