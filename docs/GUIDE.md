@@ -243,7 +243,7 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 |------|-------------|
 | `read_skill_file` | Read a file from a skill's directory |
 | `write_skill_file` | Write new or update existing skill files |
-| `patch_skill` | Patch an existing skill's SKILL.md (append/replace content) |
+| `patch_skill` | Patch an existing skill's SKILL.md (`mode`: `append` default, or `replace`; append strips patch frontmatter) |
 | `reload_skills` | Hot-reload the skill registry without restarting |
 
 ### Agent Tools
