@@ -67,6 +67,28 @@ pub fn resolve_home(
     Ok(home.join(".rustfox"))
 }
 
+/// The home root the bot will resolve for a config with this text: same
+/// precedence as `Config::resolve` (`RUSTFOX_HOME`, `[general].home`, then
+/// `~/.rustfox`). The wizard seals secrets here so they land in the vault the
+/// bot opens, wherever `config.toml` lives (issue #156).
+pub fn home_for_config_text(content: &str) -> Result<PathBuf> {
+    let cfg_home = config_text_home(content);
+    resolve_home(
+        std::env::var("RUSTFOX_HOME").ok().as_deref(),
+        cfg_home.as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+fn config_text_home(content: &str) -> Option<PathBuf> {
+    let table: toml::Table = toml::from_str(content).ok()?;
+    table
+        .get("general")?
+        .get("home")?
+        .as_str()
+        .map(PathBuf::from)
+}
+
 /// The home root used purely for *config-file discovery*, before the config is
 /// loaded. Uses only `RUSTFOX_HOME` (if absolute) or `<os_home>/.rustfox`.
 pub fn default_home(env_home: Option<&str>, os_home: Option<&Path>) -> Option<PathBuf> {
@@ -412,6 +434,14 @@ mod tests {
         assert!(s.contains("mv "), "migration command surfaced");
         assert!(s.contains("#111"));
     }
+    #[test]
+    fn config_text_home_reads_general_home() {
+        let text = "[general]\nhome = \"/srv/rustfox\"\n\n[openrouter]\napi_key = \"x\"\n";
+        assert_eq!(config_text_home(text), Some(PathBuf::from("/srv/rustfox")));
+        assert_eq!(config_text_home("[openrouter]\napi_key = \"x\"\n"), None);
+        assert_eq!(config_text_home("not toml ["), None);
+    }
+
     // ── resolve_config_path tests ───────────────────────────────────
 
     #[test]
