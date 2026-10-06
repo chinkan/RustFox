@@ -92,8 +92,17 @@ async fn main() -> Result<()> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
         match rustfox::secret_store::import_config_dir_vault(config_dir, &home) {
-            Ok(0) => {}
-            Ok(n) => info!("  Copied {n} secret(s) from the vault beside config.toml"),
+            Ok((n, conflicts)) => {
+                if n > 0 {
+                    info!("  Copied {n} secret(s) from the vault beside config.toml");
+                }
+                for name in conflicts {
+                    warn!(
+                        "  Secret `{name}` differs between vaults: using the home vault value, \
+                         ignoring the vault beside config.toml"
+                    );
+                }
+            }
             Err(e) => warn!("  Old vault beside config.toml not imported: {e:#}"),
         }
         match rustfox::secret_store::open(&home) {
