@@ -430,28 +430,31 @@ async fn send_entities_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> Re
 }
 
 /// Send a markdown string with the user's preferred format mode.
-/// Hint for the run history when Telegram refuses a DM because the user
-/// never sent `/start` to this bot (or blocked it). `None` for any other error.
+/// Hint for the run history when Telegram refuses the owner DM: never sent
+/// `/start`, blocked the bot, or a wrong/unknown chat id. `None` otherwise.
 pub async fn not_started_hint(bot: Option<&Bot>, bot_id: &str, err: &str) -> Option<String> {
     let e = err.to_ascii_lowercase();
-    if ![
-        "can't initiate conversation",
-        "chat not found",
-        "bot was blocked",
-    ]
-    .iter()
-    .any(|m| e.contains(m))
-    {
+    let kind = if e.contains("can't initiate conversation") {
+        0
+    } else if e.contains("bot was blocked") {
+        1
+    } else if e.contains("chat not found") {
+        2
+    } else {
         return None;
-    }
+    };
     let username = match bot {
         Some(b) => b.get_me().await.ok().and_then(|me| me.user.username),
         None => None,
     };
     let who = username.map_or_else(|| format!("the '{bot_id}' bot"), |u| format!("@{u}"));
-    Some(format!(
-        "Not delivered: open Telegram and send /start to {who}"
-    ))
+    Some(match kind {
+        0 => format!("Not delivered: open Telegram and send /start to {who}"),
+        1 => format!("Not delivered: you blocked {who} in Telegram; unblock it to get reminders"),
+        _ => format!(
+            "Not delivered: Telegram can't find this chat; check the user id in allowed_user_ids, then send /start to {who}"
+        ),
+    })
 }
 
 pub async fn send_markdown_message(
@@ -2681,17 +2684,22 @@ mod tests {
 
     #[tokio::test]
     async fn not_started_hint_only_for_unstarted_chats() {
-        for err in [
-            "Forbidden: bot can't initiate conversation with a user",
-            "Bad Request: chat not found",
-            "Forbidden: bot was blocked by the user",
-        ] {
-            assert_eq!(
-                not_started_hint(None, "main", err).await.as_deref(),
-                Some("Not delivered: open Telegram and send /start to the 'main' bot")
-            );
-        }
-        assert_eq!(not_started_hint(None, "main", "timed out").await, None);
+        let hint = |e: &'static str| not_started_hint(None, "main", e);
+        assert_eq!(
+            hint("Forbidden: bot can't initiate conversation with a user")
+                .await
+                .as_deref(),
+            Some("Not delivered: open Telegram and send /start to the 'main' bot")
+        );
+        assert!(hint("Forbidden: bot was blocked by the user")
+            .await
+            .unwrap()
+            .contains("unblock"));
+        assert!(hint("Bad Request: chat not found")
+            .await
+            .unwrap()
+            .contains("check the user id"));
+        assert_eq!(hint("timed out").await, None);
     }
 
     #[test]
