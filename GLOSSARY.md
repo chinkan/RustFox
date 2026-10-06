@@ -31,3 +31,15 @@ _Avoid_: interrupt, preempt
 **Schedule timezone**:
 The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR recurring rows keep `UTC` and pre-ADR one-shot rows get the system local zone, so no fire time changes; the user can change them later. Shown in the portal Tasks page (ADR-0022).
 _Avoid_: server time, UTC offset (`+08:00`)
+
+**Built-in MCP**:
+An MCP connection that ships with RustFox: endpoint fixed in code, turned on after setup by one tap (portal, or Telegram for Exa), one connection for the whole instance, credential (if any) in SecretStore. Never asked in the setup wizard. Today: Google (#119) and Exa web search (ADR-0023).
+_Avoid_: preset MCP, default MCP server
+
+**Keyless Exa**:
+Exa web search used with no API key: free, rate-limited by Exa (HTTP 429 when exceeded). The default when Exa is enabled. A user's own key, stored in SecretStore and sent only as the `x-api-key` header, adds quota (ADR-0023).
+_Avoid_: free tier key, shared key
+
+**Web search stub**:
+Placeholder tool named `web_search`, registered only while Exa is off. A call returns "web search is not enabled"; in Telegram it may offer an "Enable web search" button at most once per conversation. Removed when Exa is on (ADR-0023).
+_Avoid_: fake search, dummy tool
