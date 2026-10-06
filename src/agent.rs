@@ -1567,7 +1567,16 @@ impl Agent {
         };
 
         let count = tasks.len();
-        for task in tasks {
+        for mut task in tasks {
+            // ADR-0021: heal legacy 5-field cron rows; never arm an invalid one.
+            if let Err(e) = self.task_store.normalize_stored_cron(&mut task).await {
+                tracing::error!(
+                    "Not restoring scheduled task {} ({}): {e}",
+                    task.id,
+                    task.description
+                );
+                continue;
+            }
             match self.arm_task(&task).await {
                 Ok(sched_id) => {
                     tracing::info!(
@@ -2374,25 +2383,28 @@ pub(crate) fn parse_scheduler_cron(expr: &str) -> Result<croner::Cron, croner::e
         .parse(expr)
 }
 
-/// Validate a 6-field cron expression (sec min hour day month weekday).
-///
-/// Uses [`parse_scheduler_cron`], so anything that passes here is guaranteed
-/// to be accepted by `Job::new_async`. The previous implementation only
-/// counted whitespace-separated fields — a gate that let "not a cron at all
-/// here" through (six words, zero meaning) and surfaced the real failure
-/// later as an opaque scheduler error.
-pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
-    let fields: Vec<&str> = expr.split_whitespace().collect();
-    if fields.len() != 6 {
+/// Normalise a recurring cron (ADR-0021): 5 fields get seconds `0`
+/// prepended, 6 fields pass through trimmed. The result is checked with
+/// [`parse_scheduler_cron`], so it is safe to store and arm.
+pub(crate) fn normalize_cron_expr(expr: &str) -> anyhow::Result<String> {
+    let trimmed = expr.trim();
+    if trimmed.starts_with('@') {
         anyhow::bail!(
-            "Cron expression must have 6 fields (sec min hour day month weekday), got {}: '{}'",
-            fields.len(),
-            expr
+            "Cron macros like '@daily' are not supported; use 5 or 6 fields, e.g. '0 9 * * *'"
         );
     }
-    parse_scheduler_cron(expr)
-        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", expr, e))?;
-    Ok(())
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    let normalised = match fields.len() {
+        5 => format!("0 {}", fields.join(" ")),
+        6 => trimmed.to_string(),
+        n => anyhow::bail!(
+            "Cron expression must have 5 fields (min hour day month weekday) or 6 fields (sec min hour day month weekday), got {n}: '{expr}'"
+        ),
+    };
+    parse_scheduler_cron(&normalised).map_err(|e| {
+        anyhow::anyhow!("Invalid cron expression '{expr}' (normalised to '{normalised}'): {e}")
+    })?;
+    Ok(normalised)
 }
 
 /// Split a long response string into chunks of at most `max_len` characters.
@@ -2565,36 +2577,44 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cron_expr_valid() {
-        assert!(validate_cron_expr("0 0 9 * * MON").is_ok());
-        assert!(validate_cron_expr("0 30 8 * * *").is_ok());
+    fn test_normalize_cron_expr_pads_five_fields() {
+        for (inp, out) in [
+            ("0 9 * * *", "0 0 9 * * *"),
+            ("*/15 * * * 1-5", "0 */15 * * * 1-5"),
+            ("  0 9 * * *  ", "0 0 9 * * *"),
+        ] {
+            assert_eq!(normalize_cron_expr(inp).unwrap(), out);
+        }
     }
 
     #[test]
-    fn test_validate_cron_expr_wrong_field_count() {
-        assert!(validate_cron_expr("0 9 * * *").is_err()); // 5 fields
-        assert!(validate_cron_expr("0 0 9 1 * * MON").is_err()); // 7 fields
-    }
-
-    #[test]
-    fn test_validate_cron_expr_rejects_garbage_with_six_words() {
-        // Regression: the old gate only counted fields, so six random words
-        // sailed through and the failure surfaced later as an opaque
-        // arm_failed from the scheduler.
-        assert!(validate_cron_expr("not a cron at all here").is_err());
-        assert!(validate_cron_expr("0 30 9 * * BADDAY").is_err());
-        assert!(validate_cron_expr("99 99 99 99 99 99").is_err());
-    }
-
-    #[test]
-    fn test_validate_cron_expr_accepts_what_scheduler_accepts() {
+    fn test_normalize_cron_expr_six_fields_pass_through() {
         for ok in [
             "0 30 7 * * *",      // every day 07:30:00 (weather-report shape)
             "0 0 9 * * MON-FRI", // weekday mornings
+            "0 0 9 * * MON",
             "15 30 12 1,15 * *", // 12:30:15 on the 1st and 15th
             "0 1/10 * * * *",    // sloppy step (croner 4 needs sloppy_ranges)
         ] {
-            assert!(validate_cron_expr(ok).is_ok(), "{ok} must validate");
+            assert_eq!(normalize_cron_expr(ok).unwrap(), ok);
+        }
+    }
+
+    #[test]
+    fn test_normalize_cron_expr_rejects() {
+        for (bad, says) in [
+            ("9 * * *", "got 4"),
+            ("0 0 9 * * * 2027", "got 7"),
+            ("", "got 0"),
+            ("@daily", "macros"),
+            ("x 9 * * *", "normalised to"),
+            // Regression: six words that only *count* as a cron.
+            ("not a cron at all here", "Invalid cron"),
+            ("0 30 9 * * BADDAY", "Invalid cron"),
+            ("99 99 99 99 99 99", "Invalid cron"),
+        ] {
+            let e = normalize_cron_expr(bad).unwrap_err().to_string();
+            assert!(e.contains(says), "{bad:?} -> {e}");
         }
     }
 

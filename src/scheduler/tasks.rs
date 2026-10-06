@@ -13,6 +13,12 @@ pub async fn register_builtin_tasks(
     user_model_cron: String,
     home: std::path::PathBuf,
 ) -> anyhow::Result<()> {
+    // ADR-0021: accept 5-field config crons; fail fast naming the key.
+    let summarize_cron = crate::agent::normalize_cron_expr(&summarize_cron)
+        .map_err(|e| anyhow::anyhow!("[memory] summarize_cron: {e}"))?;
+    let user_model_cron = crate::agent::normalize_cron_expr(&user_model_cron)
+        .map_err(|e| anyhow::anyhow!("[learning] user_model_cron: {e}"))?;
+
     // Heartbeat — log that the bot is alive every hour
     scheduler
         .add_cron_job("0 0 * * * *", "heartbeat", || {

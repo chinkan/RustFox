@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import type { ScheduledTask, TaskCreateBody, TaskUpdateBody } from '../../api/types'
-import { CRON_6_FIELD } from '../../api/types'
+import { CRON_5_OR_6_FIELD } from '../../api/types'
 import { ApiError } from '../../api/client'
 
 export const Route = createFileRoute('/_auth/tasks')({
@@ -17,14 +17,14 @@ type EditState =
   | { mode: 'create'; draft: Draft }
   | { mode: 'edit'; id: string; draft: Draft }
 
-/** 6-field cron heuristic; the server's parser is the real gate. */
+/** 5- or 6-field cron heuristic; the server's parser is the real gate. */
 function triggerLooksValid(draft: Draft): boolean {
   const v = draft.triggerValue.trim()
   if (v === '') return false
   if (draft.triggerType === 'one_shot') {
     return !Number.isNaN(Date.parse(v)) && Date.parse(v) > Date.now()
   }
-  return CRON_6_FIELD.test(v) && v.split(/\s+/).length === 6
+  return CRON_5_OR_6_FIELD.test(v)
 }
 
 function TasksPage() {

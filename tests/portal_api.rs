@@ -934,14 +934,14 @@ fn post_empty(path: &str) -> Request<Body> {
 #[tokio::test]
 async fn task_create_validates_and_arms() {
     let f = fixture(with_token_token()).await;
-    // 5-field cron is rejected (validate_cron_expr wants 6)
+    // 4-field cron is rejected (ADR-0021 accepts 5 or 6)
     let res = f
         .app
         .clone()
         .oneshot(bearer(
             post_json(
                 "/api/tasks",
-                json!({"name":"x","prompt":"p","triggerType":"recurring","triggerValue":"30 7 * * *"}),
+                json!({"name":"x","prompt":"p","triggerType":"recurring","triggerValue":"7 * * *"}),
             ),
             TEST_TOKEN,
         ))
@@ -975,6 +975,67 @@ async fn task_create_validates_and_arms() {
         row.scheduler_job_id.is_some(),
         "job id must persist for disable"
     );
+}
+
+/// ADR-0021: a 5-field cron is padded with seconds `0`, stored and echoed.
+#[tokio::test]
+async fn task_create_pads_five_field_cron() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({"name":"Daily","prompt":"p","triggerType":"recurring","triggerValue":"0 9 * * *"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = body_json(res).await;
+    assert_eq!(body["triggerValue"], "0 0 9 * * *");
+    let id = body["id"].as_str().unwrap();
+    let row = f.state.task_store.get_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.trigger_value, "0 0 9 * * *");
+}
+
+/// ADR-0021: PUT normalises a 5-field cron and still rejects 4 fields.
+#[tokio::test]
+async fn task_update_pads_five_field_and_rejects_four() {
+    let f = fixture(with_token_token()).await;
+    f.state.task_store.create(&make_task("u5")).await.unwrap();
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/u5", json!({"triggerValue":"15 8 * * 1-5"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(res).await["updated"]["triggerValue"],
+        "0 15 8 * * 1-5"
+    );
+    let row = f.state.task_store.get_by_id("u5").await.unwrap().unwrap();
+    assert_eq!(row.trigger_value, "0 15 8 * * 1-5");
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/u5", json!({"triggerValue":"8 * * 1-5"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(res).await["error"]["code"], "invalid_cron");
+    let row = f.state.task_store.get_by_id("u5").await.unwrap().unwrap();
+    assert_eq!(row.trigger_value, "0 15 8 * * 1-5");
 }
 
 #[tokio::test]
