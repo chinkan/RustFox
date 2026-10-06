@@ -62,6 +62,28 @@ pub fn adopt_default_schedules(
     .context("move default scheduled tasks to shim bot")
 }
 
+/// Rows written by a portal web-chat turn (#163) carry a non-numeric
+/// chat_id that Telegram can never deliver to. Hand them to the shim
+/// bot's owner DM. Returns how many rows moved.
+pub fn adopt_web_schedules(conn: &Connection, bots: &[crate::config::BotConfig]) -> Result<usize> {
+    if bots.is_empty() {
+        return Ok(0);
+    }
+    let shim = crate::config::Config::shim_bot(bots);
+    let Some(owner) = shim.allowed_user_ids.first() else {
+        return Ok(0);
+    };
+    conn.execute(
+        "UPDATE scheduled_tasks SET bot_id = ?1, user_id = ?2, chat_id = ?2
+         WHERE chat_id = '' OR chat_id GLOB '*[^0-9-]*'",
+        rusqlite::params![
+            crate::platform::normalize_bot_id(&shim.id),
+            owner.to_string()
+        ],
+    )
+    .context("move web-chat scheduled tasks to shim bot owner")
+}
+
 /// Telegram (or any) handle for the bot that owns the run.
 /// Never falls back to a different bot.
 pub fn owning_bot<'a, T>(
@@ -151,6 +173,11 @@ impl ScheduledTaskStore {
         bots: &[crate::config::BotConfig],
     ) -> Result<usize> {
         adopt_default_schedules(&*self.conn.lock().await, bots)
+    }
+
+    /// See [`adopt_web_schedules`].
+    pub async fn adopt_web_schedules(&self, bots: &[crate::config::BotConfig]) -> Result<usize> {
+        adopt_web_schedules(&*self.conn.lock().await, bots)
     }
 
     pub async fn create(&self, task: &ScheduledTask) -> Result<()> {
@@ -1018,6 +1045,53 @@ mod tests {
         assert_eq!(owner(&conn, "old"), "main");
         assert_eq!(owner(&conn, "r"), "researcher");
         assert_eq!(adopt_default_schedules(&conn, &bots).unwrap(), 0);
+    }
+
+    #[test]
+    fn adopt_web_schedules_moves_non_numeric_chats_to_owner() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scheduled_tasks (id TEXT PRIMARY KEY, bot_id TEXT, user_id TEXT, chat_id TEXT);
+             INSERT INTO scheduled_tasks VALUES
+               ('web', 'default', 'web', 'web'),
+               ('dm', 'researcher', '7', '7'),
+               ('grp', 'researcher', '7', '-1001');",
+        )
+        .unwrap();
+        let mut main = crate::config::BotConfig {
+            id: "main".into(),
+            bot_token: "tok".into(),
+            allowed_user_ids: vec![42, 7],
+            persona: "main".into(),
+            system_prompt_file: None,
+            model: None,
+            tools: None,
+            fully_silent: false,
+        };
+        let row = |id: &str| -> (String, String, String) {
+            conn.query_row(
+                "SELECT bot_id, user_id, chat_id FROM scheduled_tasks WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            adopt_web_schedules(&conn, std::slice::from_ref(&main)).unwrap(),
+            1
+        );
+        assert_eq!(row("web"), ("main".into(), "42".into(), "42".into()));
+        assert_eq!(row("dm"), ("researcher".into(), "7".into(), "7".into()));
+        assert_eq!(
+            row("grp"),
+            ("researcher".into(), "7".into(), "-1001".into())
+        );
+        assert_eq!(
+            adopt_web_schedules(&conn, std::slice::from_ref(&main)).unwrap(),
+            0
+        );
+        main.allowed_user_ids.clear();
+        assert_eq!(adopt_web_schedules(&conn, &[main]).unwrap(), 0);
     }
 
     #[test]

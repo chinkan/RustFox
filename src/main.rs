@@ -304,6 +304,14 @@ async fn main() -> Result<()> {
         Ok(_) => {}
         Err(e) => warn!("  Default schedule move failed: {e:#}"),
     }
+    match task_store.adopt_web_schedules(&config.bots).await {
+        Ok(n) if n > 0 => warn!(
+            "  Moved {n} portal-chat scheduled task(s) to the owner DM on bot '{}' (#163)",
+            Config::shim_bot(&config.bots).id.trim()
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("  Portal-chat schedule move failed: {e:#}"),
+    }
 
     // Dead-letter re-run queue (ADR-0013) shares the same connection.
     let rerun_queue = rustfox::scheduler::reruns::RerunQueue::new(memory.connection());
@@ -408,15 +416,24 @@ async fn main() -> Result<()> {
     // Agent's `arm_task`/`disarm_task` (persisting the live job id — issue
     // #109). The Agent is constructed below, so the holder is filled then.
     let scheduling_ops = Arc::new(rustfox::scheduler::schedule::OnceScheduling::new());
-    tool_registry.register(Box::new(rustfox::scheduling_tools::SchedulingTools::new(
-        task_store.clone(),
-        Arc::clone(&scheduler),
-        scheduling_ops.clone() as Arc<dyn rustfox::scheduler::schedule::SchedulingOps>,
-        job_tx.clone(),
-        Arc::clone(&bot),
-        Arc::clone(&telegram_bots),
-        rerun_queue.clone(),
-    )));
+    tool_registry.register(Box::new(
+        rustfox::scheduling_tools::SchedulingTools::new(
+            task_store.clone(),
+            Arc::clone(&scheduler),
+            scheduling_ops.clone() as Arc<dyn rustfox::scheduler::schedule::SchedulingOps>,
+            job_tx.clone(),
+            Arc::clone(&bot),
+            Arc::clone(&telegram_bots),
+            rerun_queue.clone(),
+        )
+        .with_telegram_owner(
+            rustfox::platform::normalize_bot_id(&shim.id).to_string(),
+            shim.allowed_user_ids
+                .first()
+                .map(u64::to_string)
+                .unwrap_or_default(),
+        ),
+    ));
     tool_registry.register(Box::new(rustfox::skill_tools::SkillTools::new(
         config.skills.directory.clone(),
         config.agents.directory.clone(),
@@ -778,6 +795,22 @@ async fn main() -> Result<()> {
             .await
             {
                 tracing::error!("Failed to send scheduled response: {}", e);
+                if let Some(hint) = rustfox::platform::telegram::not_started_hint(
+                    req.owning_telegram_bot.as_deref(),
+                    &req.incoming.bot_id,
+                    &e.to_string(),
+                )
+                .await
+                {
+                    tracing::warn!("Task {}: {hint}", req.task_id);
+                    if let Err(e) = req
+                        .task_store
+                        .update_run(&run_id, Some(&response), Some(&hint), "failed")
+                        .await
+                    {
+                        tracing::warn!("Failed to mark run {run_id} undelivered: {e:#}");
+                    }
+                }
             }
         }
     });

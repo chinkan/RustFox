@@ -24,6 +24,9 @@ pub struct SchedulingTools {
     bot: Arc<Bot>,
     telegram_bots: Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<Bot>>>>,
     rerun_queue: RerunQueue,
+    /// `(shim bot id, owner Telegram id)` for turns with no Telegram chat
+    /// (portal web chat, #163): their schedules live on the owner's DM.
+    telegram_owner: Option<(String, String)>,
 }
 
 impl SchedulingTools {
@@ -44,7 +47,26 @@ impl SchedulingTools {
             bot,
             telegram_bots,
             rerun_queue,
+            telegram_owner: None,
         }
+    }
+
+    pub fn with_telegram_owner(mut self, bot_id: String, chat_id: String) -> Self {
+        self.telegram_owner = Some((bot_id, chat_id));
+        self
+    }
+
+    /// A non-Telegram turn (chat_id not numeric) acts as the owner on the
+    /// shim bot, so create, list and cancel all see the same rows.
+    fn telegram_scope(&self, mut ctx: ToolContext) -> ToolContext {
+        if let Some((bot_id, owner)) = &self.telegram_owner {
+            if ctx.chat_id.trim().parse::<i64>().is_err() {
+                ctx.bot_id = bot_id.clone();
+                ctx.user_id = owner.clone();
+                ctx.chat_id = owner.clone();
+            }
+        }
+        ctx
     }
 
     async fn rerun_owned_by(&self, queue_id: &str, bot_id: &str) -> anyhow::Result<bool> {
@@ -153,6 +175,7 @@ impl ToolHandler for SchedulingTools {
     }
 
     async fn execute(&self, name: &str, args: Value, ctx: ToolContext) -> ToolResult {
+        let ctx = self.telegram_scope(ctx);
         match name {
             "schedule_task" => {
                 let trigger_type = args["trigger_type"]
@@ -550,6 +573,64 @@ mod tests {
             rerun_queue.clone(),
         );
         (tools, store, fake, rerun_queue)
+    }
+
+    /// Regression (#163): a portal web-chat turn (chat_id "web") must store
+    /// the reminder on the shim bot's owner DM, and its list/cancel must see
+    /// it. Telegram turns keep their own bot/chat.
+    #[tokio::test]
+    async fn web_turn_schedules_on_owner_dm_and_can_list_and_cancel() {
+        let (tools, store, _fake, _queue) = build_tools().await;
+        let tools = tools.with_telegram_owner("main".into(), "42".into());
+        let web = || {
+            let mut c = make_ctx("web");
+            c.chat_id = "web".into();
+            c
+        };
+        let args = json!({
+            "trigger_type": "one_shot",
+            "trigger_value": "2099-01-01T00:00:00Z",
+            "prompt": "ping",
+            "description": "web ping"
+        });
+
+        tools
+            .execute("schedule_task", args.clone(), web())
+            .await
+            .unwrap();
+        let task = store.list_all_active().await.unwrap().pop().unwrap();
+        assert_eq!(
+            (
+                task.bot_id.as_str(),
+                task.user_id.as_str(),
+                task.chat_id.as_str()
+            ),
+            ("main", "42", "42")
+        );
+
+        let listed = tools
+            .execute("list_scheduled_tasks", json!({}), web())
+            .await
+            .unwrap();
+        assert!(listed.contains(&task.id), "web list must see it: {listed}");
+        let out = tools
+            .execute("cancel_scheduled_task", json!({"task_id": task.id}), web())
+            .await
+            .unwrap();
+        assert!(
+            out.starts_with("Cancelled"),
+            "web cancel must find it: {out}"
+        );
+
+        tools
+            .execute("schedule_task", args, make_ctx("7"))
+            .await
+            .unwrap();
+        let tg = store.list_all_active().await.unwrap().pop().unwrap();
+        assert_eq!(
+            (tg.bot_id.as_str(), tg.user_id.as_str(), tg.chat_id.as_str()),
+            (crate::platform::DEFAULT_BOT_ID, "7", "555")
+        );
     }
 
     /// Regression (issue #109, Bug 2): `schedule_task` must persist the live

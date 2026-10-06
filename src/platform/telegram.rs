@@ -430,6 +430,30 @@ async fn send_entities_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> Re
 }
 
 /// Send a markdown string with the user's preferred format mode.
+/// Hint for the run history when Telegram refuses a DM because the user
+/// never sent `/start` to this bot (or blocked it). `None` for any other error.
+pub async fn not_started_hint(bot: Option<&Bot>, bot_id: &str, err: &str) -> Option<String> {
+    let e = err.to_ascii_lowercase();
+    if ![
+        "can't initiate conversation",
+        "chat not found",
+        "bot was blocked",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
+    {
+        return None;
+    }
+    let username = match bot {
+        Some(b) => b.get_me().await.ok().and_then(|me| me.user.username),
+        None => None,
+    };
+    let who = username.map_or_else(|| format!("the '{bot_id}' bot"), |u| format!("@{u}"));
+    Some(format!(
+        "Not delivered: open Telegram and send /start to {who}"
+    ))
+}
+
 pub async fn send_markdown_message(
     bot: &Bot,
     chat_id: ChatId,
@@ -2654,6 +2678,21 @@ impl PlatformSender for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn not_started_hint_only_for_unstarted_chats() {
+        for err in [
+            "Forbidden: bot can't initiate conversation with a user",
+            "Bad Request: chat not found",
+            "Forbidden: bot was blocked by the user",
+        ] {
+            assert_eq!(
+                not_started_hint(None, "main", err).await.as_deref(),
+                Some("Not delivered: open Telegram and send /start to the 'main' bot")
+            );
+        }
+        assert_eq!(not_started_hint(None, "main", "timed out").await, None);
+    }
 
     #[test]
     fn startup_notify_includes_version_and_datetime_not_secrets() {
