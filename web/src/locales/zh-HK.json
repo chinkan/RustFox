@@ -130,7 +130,7 @@
     "triggerTypeLocked": "建立後不可更改觸發方式。",
     "cronExpr": "Cron（5 或 6 欄）",
     "runAt": "執行時間 (ISO-8601)",
-    "cronHint": "分 時 日 月 星期 — 例 30 7 * * *（前面可加秒欄）",
+    "cronHint": "分 時 日 月 星期 — 例 30 7 * * *（前面可加秒欄）。時間而家係 UTC。",
     "triggerInvalid": "觸發值無效（需要 5 或 6 欄 cron／將來嘅 ISO 時間）。",
     "prompt": "Prompt",
     "rearmed": "已即時重新排程 — 下次執行 {{next}}",
