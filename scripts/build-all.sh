@@ -32,9 +32,24 @@ CARGO_FLAGS=(--profile "$PROFILE")
 # ---- 1. Web ----------------------------------------------------------------
 if [ "$SKIP_WEB" -eq 0 ]; then
   cd "$ROOT/web"
-  if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  for tool in node npm; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "ERROR: '$tool' not found. The web portal needs Node.js ^20.19 or >=22.12 with npm."
+      echo "Install it from https://nodejs.org/ (or: nvm install 22), then rerun this script."
+      echo "If web/dist is already built, --skip-web reuses it without Node."
+      exit 1
+    fi
+  done
+  # npm writes node_modules/.package-lock.json after every install; reinstall
+  # when it is missing, older than package-lock.json (deps changed), or vite
+  # is absent (a partial or --omit=dev install). Otherwise skip: no slowdown.
+  if [ ! -f node_modules/.package-lock.json ] \
+    || [ package-lock.json -nt node_modules/.package-lock.json ] \
+    || [ ! -e node_modules/.bin/vite ]; then
     echo "npm ci ..."
-    npm ci
+    # --include=dev: vite is a devDependency; NODE_ENV=production or an
+    # omit=dev npm config would otherwise skip it (`vite: not found`).
+    npm ci --include=dev
   fi
   echo "vite build ..."
   npm run build
