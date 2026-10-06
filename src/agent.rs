@@ -2360,14 +2360,27 @@ pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::t
     Ok(duration)
 }
 
+/// Parse a cron expression with the SAME configuration tokio-cron-scheduler
+/// uses internally (`Seconds::Required` + `dom_and_dow(true)`).
+///
+/// `sloppy_ranges(true)` restores croner 2.x/3.x (and tcs) acceptance of
+/// shortcut step forms like `1/10`, which croner 4 rejects by default.
+pub(crate) fn parse_scheduler_cron(expr: &str) -> Result<croner::Cron, croner::errors::CronError> {
+    croner::parser::CronParser::builder()
+        .seconds(croner::parser::Seconds::Required)
+        .dom_and_dow(true)
+        .sloppy_ranges(true)
+        .build()
+        .parse(expr)
+}
+
 /// Validate a 6-field cron expression (sec min hour day month weekday).
 ///
-/// Uses the SAME parser configuration tokio-cron-scheduler uses internally
-/// (`croner` with `with_seconds_required()` + `with_dom_and_dow()`), so
-/// anything that passes here is guaranteed to be accepted by `Job::new_async`.
-/// The previous implementation only counted whitespace-separated fields — a
-/// gate that let "not a cron at all here" through (six words, zero meaning)
-/// and surfaced the real failure later as an opaque scheduler error.
+/// Uses [`parse_scheduler_cron`], so anything that passes here is guaranteed
+/// to be accepted by `Job::new_async`. The previous implementation only
+/// counted whitespace-separated fields — a gate that let "not a cron at all
+/// here" through (six words, zero meaning) and surfaced the real failure
+/// later as an opaque scheduler error.
 pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 6 {
@@ -2377,10 +2390,7 @@ pub(crate) fn validate_cron_expr(expr: &str) -> anyhow::Result<()> {
             expr
         );
     }
-    croner::Cron::new(expr)
-        .with_seconds_required()
-        .with_dom_and_dow()
-        .parse()
+    parse_scheduler_cron(expr)
         .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", expr, e))?;
     Ok(())
 }
@@ -2582,6 +2592,7 @@ mod tests {
             "0 30 7 * * *",      // every day 07:30:00 (weather-report shape)
             "0 0 9 * * MON-FRI", // weekday mornings
             "15 30 12 1,15 * *", // 12:30:15 on the 1st and 15th
+            "0 1/10 * * * *",    // sloppy step (croner 4 needs sloppy_ranges)
         ] {
             assert!(validate_cron_expr(ok).is_ok(), "{ok} must validate");
         }
