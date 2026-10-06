@@ -296,6 +296,14 @@ async fn main() -> Result<()> {
 
     // Create ScheduledTaskStore sharing the existing SQLite connection
     let task_store = rustfox::scheduler::reminders::ScheduledTaskStore::new(memory.connection());
+    match task_store.adopt_default_schedules(&config.bots).await {
+        Ok(n) if n > 0 => warn!(
+            "  Moved {n} scheduled task(s) from bot 'default' to '{}' (no [[bots]] id 'default')",
+            Config::shim_bot(&config.bots).id.trim()
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("  Default schedule move failed: {e:#}"),
+    }
 
     // Dead-letter re-run queue (ADR-0013) shares the same connection.
     let rerun_queue = rustfox::scheduler::reruns::RerunQueue::new(memory.connection());

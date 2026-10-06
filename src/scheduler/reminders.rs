@@ -40,6 +40,28 @@ pub fn migrate_unscoped_schedules(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
+/// #154: with no `default` bot configured, `bot_id = 'default'` rows have no
+/// owner and never send. Move them to the shim bot. Returns rows moved.
+pub fn adopt_default_schedules(
+    conn: &Connection,
+    bots: &[crate::config::BotConfig],
+) -> Result<usize> {
+    let default = crate::platform::DEFAULT_BOT_ID;
+    if bots.is_empty()
+        || bots
+            .iter()
+            .any(|b| crate::platform::normalize_bot_id(&b.id) == default)
+    {
+        return Ok(0);
+    }
+    let shim = crate::platform::normalize_bot_id(&crate::config::Config::shim_bot(bots).id);
+    conn.execute(
+        "UPDATE scheduled_tasks SET bot_id = ?1 WHERE bot_id = ?2",
+        rusqlite::params![shim, default],
+    )
+    .context("move default scheduled tasks to shim bot")
+}
+
 /// Telegram (or any) handle for the bot that owns the run.
 /// Never falls back to a different bot.
 pub fn owning_bot<'a, T>(
@@ -121,6 +143,14 @@ pub struct ScheduledTaskStore {
 impl ScheduledTaskStore {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
+    }
+
+    /// See [`adopt_default_schedules`].
+    pub async fn adopt_default_schedules(
+        &self,
+        bots: &[crate::config::BotConfig],
+    ) -> Result<usize> {
+        adopt_default_schedules(&*self.conn.lock().await, bots)
     }
 
     pub async fn create(&self, task: &ScheduledTask) -> Result<()> {
@@ -940,6 +970,54 @@ mod tests {
             .unwrap();
         assert_eq!(bot_id, crate::platform::DEFAULT_BOT_ID);
         assert_eq!(migrate_unscoped_schedules(&conn).unwrap(), 0);
+    }
+
+    /// #154: three configs — single default, multi with default, multi without.
+    #[test]
+    fn adopt_default_schedules_only_without_a_default_bot() {
+        fn bot(id: &str) -> crate::config::BotConfig {
+            crate::config::BotConfig {
+                id: id.into(),
+                bot_token: format!("tok-{id}"),
+                allowed_user_ids: vec![1],
+                persona: "main".into(),
+                system_prompt_file: None,
+                model: None,
+                tools: None,
+                fully_silent: false,
+            }
+        }
+        fn db() -> Connection {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scheduled_tasks (id TEXT PRIMARY KEY, bot_id TEXT);
+                 INSERT INTO scheduled_tasks VALUES ('old', 'default'), ('r', 'researcher');",
+            )
+            .unwrap();
+            conn
+        }
+        fn owner(conn: &Connection, id: &str) -> String {
+            conn.query_row(
+                "SELECT bot_id FROM scheduled_tasks WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        for ids in [vec!["default"], vec!["main", "default", "researcher"]] {
+            let conn = db();
+            let bots: Vec<_> = ids.iter().map(|id| bot(id)).collect();
+            assert_eq!(adopt_default_schedules(&conn, &bots).unwrap(), 0);
+            assert_eq!(owner(&conn, "old"), "default");
+        }
+
+        let conn = db();
+        let bots = [bot("researcher"), bot("main")];
+        assert_eq!(adopt_default_schedules(&conn, &bots).unwrap(), 1);
+        assert_eq!(owner(&conn, "old"), "main");
+        assert_eq!(owner(&conn, "r"), "researcher");
+        assert_eq!(adopt_default_schedules(&conn, &bots).unwrap(), 0);
     }
 
     #[test]

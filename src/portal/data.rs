@@ -256,7 +256,7 @@ pub async fn tasks(
     // rows must remain visible so the UI's Enable button can bring them back.
     let active = state
         .task_store
-        .list_browsable_for_bot(crate::platform::DEFAULT_BOT_ID)
+        .list_browsable_for_bot(&state.bot_id())
         .await
         .map_err(PortalError::from)?;
     let out: Vec<serde_json::Value> = active.iter().map(task_json).collect();
@@ -278,7 +278,7 @@ pub async fn task_runs(
         .get_by_id(&p.id)
         .await
         .map_err(PortalError::from)?
-        .filter(|t| t.deleted_at.is_none() && t.bot_id == crate::platform::DEFAULT_BOT_ID)
+        .filter(|t| t.deleted_at.is_none() && t.bot_id == state.bot_id())
         .ok_or_else(|| PortalError::not_found("task"))?;
     let runs = state
         .task_store
@@ -386,7 +386,7 @@ pub async fn stats(
     drop(conn);
     let tasks = state
         .task_store
-        .list_active_for_bot(crate::platform::DEFAULT_BOT_ID)
+        .list_active_for_bot(&state.bot_id())
         .await
         .map_err(PortalError::from)?;
     let skills = state.agent.skill_entries().await.len();

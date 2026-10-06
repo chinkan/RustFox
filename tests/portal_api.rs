@@ -2449,3 +2449,73 @@ async fn secret_notify_helpers_safe_for_telegram() {
     assert!(!msg.contains(value));
     assert!(msg.contains(&url));
 }
+
+/// #154: portal tasks belong to the shim bot, so the scheduler finds a
+/// Telegram owner in single-bot and multi-bot configs alike.
+#[tokio::test]
+async fn task_create_uses_shim_bot_id() {
+    fn bot(id: &str) -> rustfox::config::BotConfig {
+        rustfox::config::BotConfig {
+            id: id.into(),
+            bot_token: format!("tok-{id}"),
+            allowed_user_ids: vec![1],
+            persona: "main".into(),
+            system_prompt_file: None,
+            model: None,
+            tools: None,
+            fully_silent: false,
+        }
+    }
+    for (ids, want) in [
+        (vec!["default"], "default"),
+        (vec!["researcher", "default", "main"], "main"),
+        (vec!["fox", "researcher"], "fox"),
+    ] {
+        let f = fixture_with(with_token_token(), |c| {
+            c.bots = ids.iter().map(|id| bot(id)).collect();
+        })
+        .await;
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(
+                post_json(
+                    "/api/tasks",
+                    json!({"name":"n","prompt":"p","triggerType":"recurring","triggerValue":"0 30 9 * * *"}),
+                ),
+                TEST_TOKEN,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "{ids:?}");
+        let id = body_json(res).await["id"].as_str().unwrap().to_string();
+        let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(row.bot_id, want, "{ids:?}");
+
+        // Listed, and the portal can still manage it.
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+            .await
+            .unwrap();
+        let list = body_json(res).await;
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["id"] == id.as_str()),
+            "{ids:?}"
+        );
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(
+                post_empty(&format!("/api/tasks/{id}/disable")),
+                TEST_TOKEN,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{ids:?}");
+    }
+}

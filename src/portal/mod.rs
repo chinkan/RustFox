@@ -239,6 +239,16 @@ pub struct PortalState {
 }
 
 impl PortalState {
+    /// Bot whose schedules the portal manages: the shim bot (#154; no
+    /// switcher yet). Telegram delivery looks the owner up by this id.
+    pub fn bot_id(&self) -> String {
+        let bots = &self.agent.config().bots;
+        if bots.is_empty() {
+            return crate::platform::DEFAULT_BOT_ID.to_string();
+        }
+        crate::platform::normalize_bot_id(&Config::shim_bot(bots).id).to_string()
+    }
+
     pub fn new(
         agent: Arc<dyn AgentOps>,
         memory: MemoryStore,
