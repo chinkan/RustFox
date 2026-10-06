@@ -1147,6 +1147,7 @@ mod tests {
     #[test]
     fn hidden_entries_cover_backups_and_quarantine() {
         assert!(is_hidden_entry("my-skill.bak"));
+        assert!(is_hidden_entry("SKILL.md.bak-20261006-120000"));
         assert!(is_hidden_entry("my-skill.deleted-20260925010101"));
         assert!(is_hidden_entry(".DS_Store"));
         assert!(!is_hidden_entry("my-skill"));

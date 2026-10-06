@@ -285,8 +285,9 @@ mod tests {
             };
             std::fs::write(f, "---\nname: doomed\n---\nrevive?").unwrap();
         }
-        // standalone backup file too
+        // standalone backup file too (legacy .bak and timestamped .bak-*)
         std::fs::write(dir.join("solo.md.bak"), "# old").unwrap();
+        std::fs::write(dir.join("solo.md.bak-20261006-120000"), "# old-ts").unwrap();
 
         let reg = load_skills_from_dir(&dir, dir.clone()).await.unwrap();
         assert!(reg.get("live").is_some(), "real skill loads");
@@ -297,7 +298,7 @@ mod tests {
         assert!(reg.get("old").is_none(), ".bak dir must not load");
         assert!(
             reg.get("solo.md").is_none() && reg.get("solo").is_none(),
-            ".bak file must not load"
+            ".bak / .bak-* file must not load"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

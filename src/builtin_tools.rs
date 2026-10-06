@@ -180,12 +180,13 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "patch_skill".to_string(),
-                    description: "Patch an existing skill's SKILL.md by appending content or replacing it entirely.".to_string(),
+                    description: "Patch an existing skill's SKILL.md. Default mode is append (safe). Pass mode=replace only when intentionally overwriting the whole file.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
                             "skill_name": { "type": "string", "description": "Name of the skill to patch" },
-                            "patch_content": { "type": "string", "description": "Content to append (or full replacement if it starts with ---)" }
+                            "patch_content": { "type": "string", "description": "Content to append (body only preferred), or full SKILL.md when mode=replace. In append mode a leading YAML frontmatter block is stripped so the original frontmatter is kept." },
+                            "mode": { "type": "string", "enum": ["append", "replace"], "description": "append (default) adds content after the existing body; replace overwrites the whole SKILL.md (backs up first)" }
                         },
                         "required": ["skill_name", "patch_content"]
                     }),
@@ -487,11 +488,13 @@ impl ToolHandler for BuiltinTools {
                     .as_str()
                     .context("Missing 'patch_content'")?
                     .to_string();
+                let mode = args["mode"].as_str();
                 match learning::self_patch_skill(
                     &self.skills_dir,
                     &skill_name,
                     &patch_content,
                     &self.skills,
+                    mode,
                 )
                 .await
                 {

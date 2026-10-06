@@ -324,13 +324,21 @@ async fn extract_skill_from_conversation(
 
 // ─── Feature 2: Skill Self-Patch ────────────────────────────────────────────
 
-/// Safely patch an existing skill's SKILL.md by appending or replacing a section.
-/// Creates a `.bak` backup before modifying. Returns a status message.
+/// Safely patch an existing skill's SKILL.md by appending or replacing content.
+///
+/// `mode` is `"append"` (default) or `"replace"`. Append never infers replace
+/// from a leading `---` — if the patch carries its own YAML frontmatter that
+/// block is stripped and only the body is appended, leaving the original
+/// frontmatter untouched. Replace requires an explicit `mode = "replace"`.
+///
+/// Creates a timestamped `SKILL.md.bak-YYYYMMDD-HHMMSS` backup before writing
+/// and keeps the newest 5 backups. Returns a status message.
 pub async fn self_patch_skill(
     skills_dir: &Path,
     skill_name: &str,
     patch_content: &str,
     skills: &tokio::sync::RwLock<SkillRegistry>,
+    mode: Option<&str>,
 ) -> Result<String> {
     // Validate skill_name to prevent path traversal (e.g. "../secret").
     // Only allow safe directory-name characters.
@@ -342,6 +350,16 @@ pub async fn self_patch_skill(
     {
         anyhow::bail!("Invalid skill name: '{}'", skill_name);
     }
+
+    let mode = mode.unwrap_or("append");
+    let replace = match mode {
+        "append" => false,
+        "replace" => true,
+        other => anyhow::bail!(
+            "Invalid patch_skill mode '{}': expected 'append' or 'replace'",
+            other
+        ),
+    };
 
     let skill_dir = skills_dir.join(skill_name);
 
@@ -368,18 +386,29 @@ pub async fn self_patch_skill(
         .await
         .with_context(|| format!("Failed to read {}", skill_path.display()))?;
 
-    // Create backup.
-    let backup_path = skill_path.with_extension("md.bak");
+    // Create timestamped backup before any write that changes the file.
+    let backup_path = skill_backup_path(&skill_path);
     tokio::fs::write(&backup_path, &current)
         .await
         .with_context(|| format!("Failed to create backup: {}", backup_path.display()))?;
+    rotate_skill_backups(&skill_dir, "SKILL.md").await?;
 
-    // Apply patch: if the patch contains frontmatter (starts with ---), replace
-    // the entire file. Otherwise append to the existing content.
-    let new_content = if patch_content.starts_with("---") {
+    let new_content = if replace {
         patch_content.to_string()
     } else {
-        format!("{}\n\n{}", current.trim_end(), patch_content)
+        // Append: strip a leading frontmatter block from the patch so a model
+        // that habitually includes YAML does not overwrite the original file
+        // and does not duplicate frontmatter in the body.
+        let body = crate::persona_prompt::strip_md_frontmatter(patch_content);
+        let body = body.trim();
+        if body.is_empty() {
+            anyhow::bail!(
+                "Append patch is empty after stripping frontmatter — aborting. \
+                 Backup preserved at {}",
+                backup_path.display()
+            );
+        }
+        format!("{}\n\n{}", current.trim_end(), body)
     };
 
     // Validate that the result still contains frontmatter.
@@ -396,8 +425,9 @@ pub async fn self_patch_skill(
         .with_context(|| format!("Failed to write patched skill: {}", skill_path.display()))?;
 
     info!(
-        "Skill '{}' patched ({} → {} bytes)",
+        "Skill '{}' patched mode={} ({} → {} bytes)",
         skill_name,
+        if replace { "replace" } else { "append" },
         current.len(),
         new_content.len()
     );
@@ -413,11 +443,58 @@ pub async fn self_patch_skill(
         Err(e) => warn!("Failed to reload skills after patch: {:#}", e),
     }
 
-    Ok(format!(
-        "Skill '{}' patched successfully. Backup at {}",
-        skill_name,
-        backup_path.display()
-    ))
+    if replace {
+        Ok(format!(
+            "Replaced SKILL.md; previous version backed up to {}",
+            backup_path.display()
+        ))
+    } else {
+        Ok(format!(
+            "Skill '{}' patched successfully (append). Backup at {}",
+            skill_name,
+            backup_path.display()
+        ))
+    }
+}
+
+/// Build `SKILL.md.bak-YYYYMMDD-HHMMSS` next to `skill_path` (UTC).
+/// Same-second collisions overwrite the existing backup of that name.
+fn skill_backup_path(skill_path: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let name = skill_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("SKILL.md");
+    skill_path.with_file_name(format!("{name}.bak-{stamp}"))
+}
+
+/// Keep only the newest 5 `SKILL.md.bak-*` backups in `skill_dir`.
+async fn rotate_skill_backups(skill_dir: &Path, skill_file_name: &str) -> Result<()> {
+    let prefix = format!("{skill_file_name}.bak-");
+    let mut entries = tokio::fs::read_dir(skill_dir)
+        .await
+        .with_context(|| format!("Failed to list backups in {}", skill_dir.display()))?;
+    let mut backups: Vec<PathBuf> = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix))
+        {
+            backups.push(path);
+        }
+    }
+    // Timestamp in the name sorts lexicographically newest-last; reverse for
+    // newest-first, then drop everything after the 5 newest.
+    backups.sort();
+    backups.reverse();
+    for stale in backups.into_iter().skip(5) {
+        if let Err(e) = tokio::fs::remove_file(&stale).await {
+            warn!("Failed to remove old skill backup {}: {e}", stale.display());
+        }
+    }
+    Ok(())
 }
 
 // ─── Feature 3: User Model ─────────────────────────────────────────────────
@@ -1097,20 +1174,40 @@ mod tests {
         assert!(content.contains("Alice"));
     }
 
+    fn sample_skill_md(body: &str) -> String {
+        format!("---\nname: test-skill\ndescription: Test\ntags: []\n---\n\n{body}")
+    }
+
+    async fn write_sample_skill(dir: &Path, body: &str) -> PathBuf {
+        let skill_dir = dir.join("test-skill");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_path, sample_skill_md(body))
+            .await
+            .unwrap();
+        skill_path
+    }
+
+    fn list_skill_backups(skill_dir: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(skill_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("SKILL.md.bak-"))
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
     #[tokio::test]
     async fn test_self_patch_skill_creates_backup() {
         let dir = tempdir().unwrap();
-        let skill_dir = dir.path().join("test-skill");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-
-        let skill_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(
-            &skill_path,
-            "---\nname: test-skill\ndescription: Test\ntags: []\n---\n\n# Original",
-        )
-        .await
-        .unwrap();
-
+        let skill_path = write_sample_skill(dir.path(), "# Original").await;
+        let skill_dir = skill_path.parent().unwrap().to_path_buf();
         let registry = tokio::sync::RwLock::new(SkillRegistry::new());
 
         let result = self_patch_skill(
@@ -1118,31 +1215,211 @@ mod tests {
             "test-skill",
             "\n## New Section\nAdded.",
             &registry,
+            None,
         )
         .await
         .unwrap();
 
         assert!(result.contains("patched successfully"));
+        assert!(result.contains("Backup at"));
 
-        // Verify backup exists.
-        let backup = skill_dir.join("SKILL.md.bak");
-        assert!(backup.exists());
-        let backup_content = tokio::fs::read_to_string(&backup).await.unwrap();
+        let backups = list_skill_backups(&skill_dir);
+        assert_eq!(backups.len(), 1, "expected one timestamped backup");
+        let backup_content = tokio::fs::read_to_string(&backups[0]).await.unwrap();
         assert!(backup_content.contains("# Original"));
 
-        // Verify patch was applied.
         let patched = tokio::fs::read_to_string(&skill_path).await.unwrap();
         assert!(patched.contains("# Original"));
         assert!(patched.contains("## New Section"));
     }
 
     #[tokio::test]
+    async fn test_self_patch_append_strips_patch_frontmatter() {
+        let dir = tempdir().unwrap();
+        // ~16KB-ish original body so we can assert it survives.
+        let original_body = format!(
+            "# Pipeline\n\n{}\n\n## Step 0\ndo thing\n## Step 7\ndone\n",
+            "x".repeat(16_000)
+        );
+        let skill_path = write_sample_skill(dir.path(), &original_body).await;
+        let registry = tokio::sync::RwLock::new(SkillRegistry::new());
+
+        // Patch looks like a full SKILL.md (leading ---) but mode defaults to append.
+        let patch =
+            "---\nname: test-skill\ndescription: oops\ntags: []\n---\n\n## New note\npolicy only\n";
+        let result = self_patch_skill(
+            dir.path(),
+            "test-skill",
+            patch,
+            &registry,
+            None, // default append
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains("append") || result.contains("patched successfully"),
+            "unexpected result: {result}"
+        );
+        assert!(
+            !result.contains("Replaced SKILL.md"),
+            "must not replace: {result}"
+        );
+
+        let patched = tokio::fs::read_to_string(&skill_path).await.unwrap();
+        // Original frontmatter + body preserved.
+        assert!(patched.starts_with("---\nname: test-skill\n"));
+        assert!(
+            patched.contains(
+                &original_body
+                    .trim_end()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()
+            ) || patched.contains("# Pipeline")
+        );
+        assert!(patched.contains("## Step 0"));
+        assert!(patched.contains("## Step 7"));
+        assert!(
+            patched.len() > 16_000,
+            "original body must remain, got {}",
+            patched.len()
+        );
+        // New body appended; frontmatter not duplicated.
+        assert!(patched.contains("## New note"));
+        assert!(patched.contains("policy only"));
+        assert_eq!(
+            patched.matches("---\nname: test-skill\n").count(),
+            1,
+            "frontmatter must not be duplicated"
+        );
+        assert!(!patched.contains("description: oops"));
+    }
+
+    #[tokio::test]
+    async fn test_self_patch_leading_dashes_without_mode_appends() {
+        let dir = tempdir().unwrap();
+        let skill_path = write_sample_skill(dir.path(), "# Keep me").await;
+        let registry = tokio::sync::RwLock::new(SkillRegistry::new());
+
+        let result = self_patch_skill(
+            dir.path(),
+            "test-skill",
+            "---\nname: test-skill\n---\n\n## Section\nextra",
+            &registry,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!result.starts_with("Replaced"));
+
+        let patched = tokio::fs::read_to_string(&skill_path).await.unwrap();
+        assert!(patched.contains("# Keep me"));
+        assert!(patched.contains("## Section"));
+    }
+
+    #[tokio::test]
+    async fn test_self_patch_replace_requires_explicit_mode() {
+        let dir = tempdir().unwrap();
+        let skill_path = write_sample_skill(dir.path(), "# Original body that must go").await;
+        let skill_dir = skill_path.parent().unwrap().to_path_buf();
+        let registry = tokio::sync::RwLock::new(SkillRegistry::new());
+
+        let replacement =
+            "---\nname: test-skill\ndescription: Replaced\ntags: []\n---\n\n# Only new\n";
+        let result = self_patch_skill(
+            dir.path(),
+            "test-skill",
+            replacement,
+            &registry,
+            Some("replace"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.starts_with("Replaced SKILL.md; previous version backed up to "),
+            "unexpected replace message: {result}"
+        );
+        let bak_in_msg = result
+            .strip_prefix("Replaced SKILL.md; previous version backed up to ")
+            .unwrap();
+        assert!(
+            Path::new(bak_in_msg).exists(),
+            "backup path from result must exist: {bak_in_msg}"
+        );
+
+        let patched = tokio::fs::read_to_string(&skill_path).await.unwrap();
+        assert_eq!(patched, replacement);
+        assert!(!patched.contains("Original body"));
+
+        let backups = list_skill_backups(&skill_dir);
+        assert_eq!(backups.len(), 1);
+        let bak = tokio::fs::read_to_string(&backups[0]).await.unwrap();
+        assert!(bak.contains("Original body that must go"));
+    }
+
+    #[tokio::test]
+    async fn test_self_patch_backup_rotation_keeps_five() {
+        let dir = tempdir().unwrap();
+        let skill_path = write_sample_skill(dir.path(), "# v0").await;
+        let skill_dir = skill_path.parent().unwrap().to_path_buf();
+        let registry = tokio::sync::RwLock::new(SkillRegistry::new());
+
+        // Seed six distinctly-named older backups; rotation should drop extras
+        // after the next patch (keep newest 5 including the new one).
+        for i in 1..=6 {
+            let p = skill_dir.join(format!("SKILL.md.bak-2020010{i}-120000"));
+            tokio::fs::write(&p, format!("old-{i}")).await.unwrap();
+        }
+
+        self_patch_skill(
+            dir.path(),
+            "test-skill",
+            "## note\npatch",
+            &registry,
+            Some("append"),
+        )
+        .await
+        .unwrap();
+
+        let backups = list_skill_backups(&skill_dir);
+        assert_eq!(
+            backups.len(),
+            5,
+            "expected 5 backups after rotation, got {}: {:?}",
+            backups.len(),
+            backups
+        );
+        // Oldest seeded backup (20200101) must be gone; newest seeded + new stamp remain.
+        assert!(
+            !backups.iter().any(|p| p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains("20200101"))),
+            "oldest backup should have been rotated out: {backups:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_self_patch_nonexistent_skill_fails() {
         let dir = tempdir().unwrap();
         let registry = tokio::sync::RwLock::new(SkillRegistry::new());
-        let result = self_patch_skill(dir.path(), "no-such-skill", "patch", &registry).await;
+        let result = self_patch_skill(dir.path(), "no-such-skill", "patch", &registry, None).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_self_patch_invalid_mode_fails() {
+        let dir = tempdir().unwrap();
+        let _ = write_sample_skill(dir.path(), "# hi").await;
+        let registry = tokio::sync::RwLock::new(SkillRegistry::new());
+        let result =
+            self_patch_skill(dir.path(), "test-skill", "x", &registry, Some("merge")).await;
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err()).contains("Invalid patch_skill mode"));
+    }
+
     #[test]
     fn github_release_auth_token_prefers_github_token() {
         let _lock = GITHUB_ENV_LOCK.lock().unwrap();
