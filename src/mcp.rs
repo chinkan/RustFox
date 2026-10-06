@@ -138,8 +138,9 @@ pub fn update_config_tokens(
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
 
-    let mut doc: toml::Value = content
-        .parse()
+    // toml 1.x: Value::from_str parses a *single value*, not a document.
+    // Use toml::from_str (same as 0.8 Value::from_str) for full documents.
+    let mut doc: toml::Value = toml::from_str(&content)
         .with_context(|| format!("Failed to parse TOML from {}", config_path.display()))?;
 
     let servers = doc
