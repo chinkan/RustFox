@@ -1,6 +1,7 @@
 # ADR-0022: Evaluate schedules in a per-task timezone (default: system local, config override)
 
-- **Status:** Accepted (TL lock 2026-10-06; PO locks 2026-10-06, including legacy rows = option C)
+- **Status:** Accepted (TL lock 2026-10-06; PO locks 2026-10-06, including legacy rows = option C;
+  PO Product GO 2026-10-06 with a condition on legacy one-shot rows, see Decision 3)
 - **Date:** 2026-10-06
 - **Issue:** #166
 - **Branch:** `docs/adr-schedule-timezone` (decision); implementation in a follow-up PR
@@ -96,11 +97,23 @@ Entry points that create or change schedules: portal `POST /api/tasks`, portal
   missing, then backfill only `NULL`s, so it is idempotent):
   - existing **recurring** rows → `timezone = 'UTC'`. Their fire times stay exactly what
     they are today. Nothing fires early or late without the user's action.
-  - existing **one-shot** rows → the **system-detected** zone (1.2 / 1.3, ignoring the
-    config override). Today a naive one-shot value is read in process local time, so this
-    keeps its fire instant unchanged too, which is the goal of the lock. RFC 3339 values
-    are unaffected either way.
+  - existing **one-shot** rows (PO Product GO condition, 2026-10-06), by the form of the
+    stored `trigger_value`:
+    - **Absolute time** (RFC 3339 with `Z` or an explicit offset, i.e. a UTC instant) →
+      the **system-detected** zone (1.2 / 1.3, ignoring the config override). The instant
+      does not depend on the zone, so here `timezone` is **display-only**.
+    - **Timezone-naive** local/wall time (`%Y-%m-%dT%H:%M:%S`, no offset) → **`UTC`**,
+      the same as recurring rows, so the wall time is not silently read in a different zone.
+  - **Bottom line (PO): after migration, no task's fire time may change.** This covers
+    recurring and one-shot rows alike. If any rule above would move a fire instant on a
+    given host, this bottom line wins.
+  - Implementation note: today a naive one-shot is read in `chrono::Local` (Context fact 3).
+    On a host whose system zone is UTC, stamping `UTC` keeps the instant. On a host whose
+    system zone is not UTC, reading the same naive value in `UTC` would move it. The
+    implementer must check this case and raise it with TL / PO before coding, not resolve
+    it silently.
   - Log at `info`: `Assigned timezone UTC to {n} existing recurring task(s); edit a task in the portal to change it.`
+    and, for one-shots, `Assigned timezone to {n} existing one-shot task(s) ({a} absolute, {w} naive → UTC).`
 - **No automatic rewrite of cron fields.** Old UTC rows are fixed by the user, by changing
   the task's timezone in the portal (4) or by recreating it.
 - A row whose stored timezone `chrono-tz` cannot parse is handled like an invalid cron
@@ -129,6 +142,7 @@ Entry points that create or change schedules: portal `POST /api/tasks`, portal
   intended and is noted in the changelog.
 - **One-shot naive datetimes** are read in the row's timezone (for new rows, the effective
   default) instead of `chrono::Local`. Without a config override this is the same as today.
+  One-shot RFC 3339 values keep their own offset; for them the row's timezone is only shown.
 
 ### 5. Evaluation: one function, croner 4, the row's `Tz`
 
@@ -222,8 +236,9 @@ users should set `[general] timezone` and/or the `TZ` environment variable (e.g.
 
 - ✅ New schedules fire at the local time the user meant. `0 9 * * *` from Hong Kong fires
   at 09:00 HKT.
-- ✅ Existing recurring schedules keep their exact fire times (stored as `UTC`), and the
-  portal shows which ones are UTC so the user can fix them deliberately.
+- ✅ No existing task's fire time changes on migration (PO bottom line). Recurring and naive
+  one-shot rows are stored as `UTC`; absolute one-shot rows get the system zone for display
+  only. The portal shows which rows are UTC so the user can fix them deliberately.
 - ✅ Users can see the timezone in use (default and per task) without reading logs.
 - ✅ One evaluation function for the live job and `next_run_at`, on croner 4.
 - ⚠️ Arming changes from tokio-cron-scheduler cron jobs to chained one-shots. The stable
@@ -257,10 +272,21 @@ Unit (`next_fire`, `src/scheduler/reminders.rs` or a new `scheduler/timezone.rs`
 
 Migration (in-memory SQLite):
 
-- Old schema with recurring + one-shot rows → column added; recurring rows `UTC`, one-shot
-  rows the system-detected zone; second run changes nothing. Rows written after migration
-  keep their explicit value.
-- Recurring row `0 0 9 * * *` stamped `UTC` → `next_run_at` unchanged from pre-migration.
+- Old schema with recurring + one-shot rows → column added; recurring rows `UTC`; one-shot
+  rows with an absolute (RFC 3339) value → the system-detected zone; one-shot rows with a
+  naive value → `UTC`; second run changes nothing. Rows written after migration keep their
+  explicit value.
+- **Fire time unchanged (PO bottom line):** for every migrated row, the fire instant after
+  migration equals the one before. Recurring row `0 0 9 * * *` stamped `UTC` → `next_run_at`
+  unchanged. One-shot `2099-01-01T09:00:00Z` (absolute) and one-shot `2099-01-01T09:00:00`
+  (naive) → same UTC fire instant as `parse_one_shot_target` gives before migration.
+
+QA (manual, required before merge of the implementation PR):
+
+- Create **one legacy one-shot** task on the pre-migration build, note its fire time,
+  upgrade, restart, and confirm the fire time (portal next run, and the actual fire) is
+  **unchanged**. Record the stored `trigger_value` form (naive or absolute) and the
+  assigned `timezone` in the QA note.
 - Row with an invalid stored timezone → not armed, error logged, still listed.
 
 Integration (fake scheduler where they exist today):
