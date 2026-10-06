@@ -3,7 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-10-06
 - **Branch:** `docs/adr-midrun-and-cron` (decision); implementation in a follow-up PR
-- **Decision source:** PO lock 2026-10-06, questions Q4–Q9 (recorded below)
+- **Decision source:** PO lock 2026-10-06, questions Q4–Q9, plus PO Product GO answers
+  2026-10-06 that close all open questions (recorded below)
 - **Related:** ADR-0005 (portal one generation per identity), ADR-0013 (typed `RunStop`,
   scheduled runner), design `docs/superpowers/specs/2026-07-08-stop-btw-steer-design.md`
 
@@ -58,7 +59,33 @@ while a turn for the same key is active.
 | Q6 Max-iterations | Queued messages not yet injected when a turn stops at max-iterations **start a new user turn automatically**. Never drop. Amendment: auto-start **at most once** (see Decision 7). |
 | Q7 Ack | Acknowledging a queued message must **not** open a new bubble. React (👀) in all modes. The final reply answers queued content together. |
 | Q8 Schedule | A scheduled run that fires while a user turn is active **waits behind it** (no parallel). Messages sent during a scheduled run are **not** injected into it. After it finishes they start the user's own turn. |
-| Q9 Media | Photos, voice and files steer like text. Preprocess (download, voice→text) before inject. Never drop. |
+| Q9 Media | Photos, voice and files steer like text. Preprocess (download, voice→text) before inject. Never drop. Amendment: in v1 voice is a placeholder plus an explicit "not supported" reply (see Product GO 3). |
+
+### PO Product GO answers 2026-10-06
+
+These answers close every open question from the first draft of this ADR. None is left
+blocking.
+
+1. **Queue-full refusal in `fully_silent` (Q4).** The refusal is a **text reply** in every
+   mode, including `fully_silent`. This is required. Silent mode only hides tool bubbles; it
+   does not hide "this message was not accepted". A reaction-only refusal (for example 🙅) is
+   **rejected**: a refused message must never look accepted.
+2. **`/stop` and waiting scheduled runs.** Kept as drafted. `/stop` cancels user-initiated
+   work and clears the user queue only. It does **not** skip a scheduled run waiting behind
+   the cancelled user turn (Decision 6).
+3. **Voice (Q9).** v1 keeps the placeholder item, **and** the bot must send an explicit
+   user-facing reply that voice is not supported yet and the user should type. Voice is never
+   silently treated as accepted or understood. Local speech-to-text (for example
+   whisper.cpp, for privacy) is a **follow-up requirement**, not a v1 choice. There is no
+   open question about the speech-to-text backend for v1.
+4. **Copy language.** User-facing strings in code are **English** (repo English rule). The
+   ADR does not carry non-English product copy. Per-bot language / i18n is backlog. Locked
+   English copy:
+   - Q6 second max-iterations stop: `This turn stopped at the step limit; you still have
+     {N} messages waiting. Send another message and I'll continue.`
+   - Voice not supported: `Voice is not supported yet — please type instead.`
+5. **Q6 copy superseded.** The Cantonese step-limit copy offered earlier on 2026-10-06 is
+   superseded by the English-in-code lock above. The developer uses the English string.
 
 ## Decision
 
@@ -111,8 +138,11 @@ while a turn for the same key is active.
      do not fall back to a text bubble.
    - Full (`pending.len() == 10`) → the message is **not** stored, and the bot replies to it:
      `⚠️ Too many messages are waiting (10). Please wait until this turn finishes, then send
-     again.` This refusal is the only text reply on the ingress path. It is needed because a
-     refused message must not look accepted.
+     again.` The refusal is a text reply in **every** tool-UI mode, including `fully_silent`
+     (Product GO 1). Silent mode hides tool bubbles, not refusals. Do not replace it with a
+     reaction. A refused message must not look accepted.
+   - The only text replies on the ingress path are this refusal and the voice-not-supported
+     notice (Decision 9). Accepted messages get the reaction only.
    - The cap counts items, not bytes. Each photo in a Telegram album is its own update and its
      own item.
 
@@ -147,7 +177,8 @@ while a turn for the same key is active.
    - Nothing running but `n > 0` (race at turn end) → `Cleared {n} queued message(s).`
    - Nothing at all → existing `Nothing is currently processing.`
    - `/stop` does **not** discard waiting scheduled tickets. A scheduled run is not a user
-     message. It runs next, as it would have (see open question 2).
+     message. It runs next, as it would have. `/stop` only cancels user-initiated work and
+     clears the user queue (Product GO 2).
 
 7. **Max-iterations auto-continue, at most once (Q6 + PO amendment 2026-10-06).**
    - A user turn ends with `RunStop::MaxIterations`. The existing max-iterations reply is sent
@@ -157,11 +188,10 @@ while a turn for the same key is active.
        (after any waiting scheduled run, Decision 5.1).
      - `pending` non-empty **and** `auto_continue_used == true` (the auto-started turn also
        hit max-iterations) → **do not** chain. Keep the queue and reply with the PO-locked
-       step-limit message (distinct from the Q4 refusal). English reference wording: *"This
-       turn stopped at the step limit. You still have {N} unprocessed message(s). Send one
-       more message and I'll continue."* `N` = `pending.len()`. PO supplied the exact
-       Traditional Chinese (zh-HK) product copy on 2026-10-06. The developer uses that string
-       verbatim (see open question 4). Then the gate goes **idle with a non-empty queue**.
+       step-limit message (distinct from the Q4 refusal). Locked English copy (Product GO 4):
+       `This turn stopped at the step limit; you still have {N} messages waiting. Send
+       another message and I'll continue.` `N` = `pending.len()`. The string lives in code in
+       English; no locale layer in v1. Then the gate goes **idle with a non-empty queue**.
    - Idle with a non-empty queue: the user's next non-command message starts a turn with all
      pending items **plus** that message, in arrival order. The cap applies only to messages
      waiting behind an *active* turn, so the triggering message is always accepted.
@@ -188,10 +218,20 @@ while a turn for the same key is active.
      same as for a fresh turn.
    - Voice / audio (new): read `msg.voice()` and `msg.audio()`, download, and add
      `AttachmentKind::Audio`. Then call a `transcribe_audio(path) -> Result<String>` hook and
-     put the transcript in `text` (prefixed `[Voice] `, caption kept if present). Until a
-     speech-to-text backend is configured, the hook returns `Err`, and the item text becomes
-     `[Voice message received ({secs}s); transcription is not available]`. The model can
-     still acknowledge it, and it is never dropped.
+     put the transcript in `text` (prefixed `[Voice] `, caption kept if present).
+   - **v1 has no speech-to-text backend (Product GO 3).** The hook returns `Err`, and:
+     - the item is still kept (never dropped), with text
+       `[Voice message received ({secs}s); not transcribed — content unknown]` plus any
+       caption, so the model knows a voice note arrived but must not claim to know what it
+       said;
+     - the bot **replies to the voice message** at ingress, in every tool-UI mode including
+       `fully_silent`: `Voice is not supported yet — please type instead.` This applies
+       whether the gate is idle or active. When the voice item is queued it also gets the 👀
+       reaction; the reply is what tells the user it was not understood.
+     - This also fixes today's idle case, where a voice note with no caption hits "nothing to
+       process" and is silently ignored.
+   - Local speech-to-text (for example whisper.cpp, run locally for privacy) is a follow-up
+     requirement. When it lands, the hook returns `Ok`, and the notice is no longer sent.
    - Download failure → the item is kept with `[Attachment could not be downloaded: {err}]`,
      never silently skipped.
 
@@ -218,6 +258,12 @@ while a turn for the same key is active.
   frequent.
 - **Unlimited auto-continue after max-iterations.** A task that keeps exhausting its budget
   would loop with no human in it, burning tokens. One auto turn, then ask (PO amendment).
+- **Reaction-only refusal in `fully_silent` (for example 🙅).** A reaction is too easy to
+  miss, and a refused message must not look accepted (Product GO 1).
+- **Silently injecting voice as if it were understood.** The user would think the bot heard
+  them (Product GO 3).
+- **Non-English product copy in code for v1.** The repo rule is English. Per-bot language is
+  backlog (Product GO 4, 5).
 - **Ack with a text bubble in non-silent modes.** Q7 says reaction in all modes. Bubbles clog
   the chat exactly when the user is sending several messages.
 - **Parallel scheduled and user turns on the same key.** Two loops writing to one conversation
@@ -234,8 +280,8 @@ while a turn for the same key is active.
   is now kept by the gate's FIFO instead of dispatcher blocking. Tests must cover ordering.
 - ⚠️ Scheduled head-of-line blocking (Decision 8) can delay unrelated scheduled tasks while a
   long user turn runs.
-- ⚠️ Without a speech-to-text backend, voice steers only as a placeholder. Real transcription
-  needs a PO choice (open question 3).
+- ⚠️ Without a speech-to-text backend, voice steers only as a placeholder, and the user is
+  told to type instead. Local speech-to-text is a follow-up requirement (see Follow-ups).
 - ⚠️ Drain point B adds one LLM round when messages arrive during final-answer generation. It
   counts toward `max_iterations`.
 - ⚠️ Group chats: the key is per bot+user, so the same user in two groups with the same bot
@@ -248,6 +294,8 @@ Pure `TurnGate` unit tests (no Telegram), plus `AgenticLoop` tests with a fake L
 
 - **Cap + reject:** 10 enqueues accepted; the 11th returns `Full`, is not stored, and the
   handler produces the refusal text; a reaction is requested only for accepted items.
+- **Refusal in `fully_silent`:** with tool UI mode `fully_silent`, the 11th message still
+  gets the refusal **text** reply (not a reaction only).
 - **Reaction failure:** `setMessageReaction` error → logged, enqueue still `Accepted`, no
   text message sent.
 - **Steer injection:** an item enqueued during iteration k is in the messages of LLM call k+1
@@ -270,20 +318,23 @@ Pure `TurnGate` unit tests (no Telegram), plus `AgenticLoop` tests with a fake L
   `process_attachments` at injection; a voice item carries the transcript (fake hook `Ok`) or
   the placeholder (hook `Err`); a download failure yields a placeholder item, never a dropped
   one.
+- **Voice not supported (v1):** with the hook returning `Err`, a voice message (idle and
+  while a turn is active, and in `fully_silent`) produces the reply `Voice is not supported
+  yet — please type instead.`; the item is kept with the "not transcribed" placeholder; an
+  idle caption-less voice note is no longer ignored.
+- **Step-limit copy:** the second max-iterations stop produces the locked English string
+  with the correct `N`.
 - **No-slip finish:** concurrent `enqueue` racing `finish` → the item either starts the next
   turn or was drained, never lost (loop the race in a test with `tokio::task::yield_now`).
 - **Portal (slice 2):** busy `POST /api/chat` → 202 + position; 11th → `409 queue_full`;
   cancel returns `cleared`.
 
-## Open questions for PO
+## Follow-ups (not blocking)
 
-1. **Refusal bubble in `fully_silent`.** The Q4 refusal is a text reply even on fully silent
-   bots (a refused message must not look accepted). Alternative: a distinct reaction only
-   (for example 🙅), with no text.
-2. **`/stop` and waiting scheduled runs.** Decision 6 keeps waiting scheduled runs. Should
-   `/stop` also skip a scheduled run that is waiting behind the cancelled turn?
-3. **Speech-to-text backend for Q9.** Which provider (OpenRouter audio-capable model, local
-   Whisper, other)? Until then, voice is injected as a placeholder.
-4. **Step-limit message localisation.** Telegram replies are English today, with no locale
-   layer. Should the zh-HK copy be the only string, or should we add a per-bot locale and keep
-   the English reference for others?
+All open questions are resolved by the PO Product GO answers (2026-10-06). Remaining
+follow-ups, each its own issue:
+
+1. **Local speech-to-text** (for example whisper.cpp) behind `transcribe_audio`, for
+   privacy. Required, after v1.
+2. **Per-bot language / i18n** for Telegram replies. Backlog. Until then, user-facing strings
+   in code stay English.

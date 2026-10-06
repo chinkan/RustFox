@@ -1,6 +1,6 @@
 # ADR-0021: Accept 5-field cron by padding seconds (store 6-field only)
 
-- **Status:** Accepted (TL lock 2026-10-06; PO may amend)
+- **Status:** Accepted (TL lock 2026-10-06; PO Product GO 2026-10-06)
 - **Date:** 2026-10-06
 - **Issue:** #155
 - **Related:** #132 (croner 4 migration, `parse_scheduler_cron`), #109 / #111 (arm path,
@@ -37,7 +37,8 @@ Plus the portal UI's client-side gate: `CRON_6_FIELD` in `web/src/api/types.ts`,
 **Timezone (restated, not changed):** every cron is evaluated in **UTC**. `Scheduler::add_cron_job`
 calls `Job::new_async`, which in tokio-cron-scheduler 0.15 is `new_async_tz(schedule, Utc, ..)`.
 `next_cron_occurrence` also computes in `DateTime<Utc>`. So `0 0 9 * * *` fires at 09:00 UTC
-(17:00 HKT). This ADR does not touch timezone behaviour.
+(17:00 HKT). This ADR does not touch timezone behaviour. The PO has flagged UTC evaluation
+as a bug; see "Timezone follow-up (P1)" below.
 
 ## Decision
 
@@ -119,8 +120,9 @@ calls `Job::new_async`, which in tokio-cron-scheduler 0.15 is `new_async_tz(sche
   scheduler, `next_run_at` and restore logic do not change.
 - ✅ Existing 5-field rows heal on the next boot.
 - ⚠️ A 5-field cron always fires at second 0. That is crontab semantics, so it is expected.
-- ⚠️ Times are UTC. A user who means 09:00 Hong Kong time must write `0 1 * * *`. This is
-  existing behaviour, now stated in the tool description (see open question).
+- ⚠️ Times are UTC until the timezone follow-up lands. A user who means 09:00 Hong Kong time
+  must write `0 1 * * *` for now. This is existing behaviour, stated in the tool description,
+  and is tracked as a P1 bug (see below).
 
 ## Tests
 
@@ -149,7 +151,14 @@ Integration (in-memory SQLite, fake scheduler where they exist today):
   logged and not armed.
 - Web: `triggerLooksValid` accepts 5 and 6 fields and rejects 4 and 7 (vitest).
 
-## Open question for PO
+## Timezone follow-up (P1, separate ADR)
 
-- **"Fires at 09:00" in the #155 acceptance criteria means 09:00 UTC** under current
-  behaviour. If the intent is local time (HKT), that is a separate timezone ADR, not this one.
+Resolved by PO Product GO 2026-10-06; no open question remains for this ADR.
+
+- Users mean **local time** when they write `09:00`. Today's UTC evaluation, which turns
+  09:00 into 17:00 HKT, is a **bug**. It is tracked as a **separate P1 follow-up** with its
+  own ADR.
+- Target behaviour for that follow-up: default = the **system local timezone**, with a
+  config override.
+- **#155 (this ADR, seconds pad) proceeds without waiting** for the timezone ADR. The
+  "fires at 09:00" acceptance check for #155 is verified against current (UTC) evaluation.
