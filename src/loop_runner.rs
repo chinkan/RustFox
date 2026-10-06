@@ -169,15 +169,15 @@ impl<'a> AgenticLoop<'a> {
 
             let prepared = messages.prepare(context_window);
 
+            // Assemble builtin → MCP, then exact keep-first dedupe (ADR-0019 slice ②).
+            let mut all = self.tools.all_definitions();
+            all.extend(self.mcp.tool_definitions());
+            let all = crate::llm::dedupe_tool_definitions_keep_first(all);
             let tool_defs = if let Some(ref whitelist) = self.config.allowed_tools {
-                let mut all = self.tools.all_definitions();
-                all.extend(self.mcp.tool_definitions());
                 all.into_iter()
                     .filter(|d| whitelist.contains(&d.function.name))
                     .collect()
             } else {
-                let mut all = self.tools.all_definitions();
-                all.extend(self.mcp.tool_definitions());
                 all
             };
 

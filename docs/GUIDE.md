@@ -23,8 +23,8 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 | `[telegram]` | `bot_token` | Telegram Bot API token | — |
 | | `api_base_url` | Bot API root override (teloxide + rich_sender) | `https://api.telegram.org` |
 | | `allowed_user_ids` | Comma-separated whitelist of user IDs | — |
-| `[openrouter]` | `api_key` | OpenRouter API key | — |
-| | `model` | LLM model ID | `moonshotai/kimi-k2.6` |
+| `[openrouter]` | `api_key` | OpenRouter API key; sealed to `secret:openrouter.api_key` (see below) | — |
+| | `model` | LLM model ID (`provider/model`; wizard list is a shortcut, see [openrouter.ai/models](https://openrouter.ai/models)) | `moonshotai/kimi-k2.6` |
 | | `base_url` | API base URL override | `https://openrouter.ai/api/v1` |
 | `[sandbox]` | `allowed_directory` | Directory for sandboxed file/command ops | `<home>/workspace` |
 | `[memory]` | `database_path` | SQLite database path | `<home>/rustfox.db` |
@@ -49,9 +49,11 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 > Persistent home: All paths resolve relative to `~/.rustfox` by default.
 > Override with `RUSTFOX_HOME` env or `[general].home`.
 > See [docs/persistent-home-directory.md](persistent-home-directory.md).
-> **Secrets:** Prefer the OS keyring (macOS Keychain / Windows Credential Manager / Linux keyutils). If unavailable, RustFox uses an AES-GCM vault at `~/.rustfox/secrets/vault` whose master key is a **plaintext file** `~/.rustfox/secrets/vault.key` (mode `0600`). Anyone who can read `vault.key` can decrypt the vault — treat home-directory permissions as the trust boundary and prefer the OS keyring when available. Pending secret entry uses the portal masked form + Telegram notify/link (never paste values in chat). Required secrets for MCP env use the `secret:NAME` value form; `[sandbox].secret_env` injects named secrets into `execute_command` child processes via env only (never chat/LLM/tool args/logs).
+> **Secrets:** macOS and Windows use the OS keyring (Keychain / Credential Manager). Linux always uses the encrypted vault, because Linux keyutils is in-memory and per-session (a `systemctl --user` service cannot see it and a reboot clears it); secrets left in keyutils by older builds are copied into the vault on first read. If the keyring is unavailable, RustFox uses an AES-GCM vault at `~/.rustfox/secrets/vault` whose master key is a **plaintext file** `~/.rustfox/secrets/vault.key` (mode `0600`). Anyone who can read `vault.key` can decrypt the vault — treat home-directory permissions as the trust boundary. Pending secret entry uses the portal masked form + Telegram notify/link (never paste values in chat). Required secrets for MCP env use the `secret:NAME` value form; `[sandbox].secret_env` injects named secrets into `execute_command` child processes via env only (never chat/LLM/tool args/logs).
 >
 > **Bot tokens:** `[[bots]].bot_token` / legacy `[telegram].bot_token` must be a `secret:NAME` reference (canonical name `bot.<id>.token`). Wizard initial save, `/agents` bind, and wizard add-bot write the BotFather token into SecretStore **before** disk write — `config.toml` never receives plaintext. Startup migrate+scrub remains a safety net for any leftover BotFather-shaped values (`.bak` via the shared config write path). `/config`, `/agents`, and restart replies never echo token values (`bot_token=***`). Manual path: store set `bot.<id>.token` then set `bot_token = "secret:bot.<id>.token"` in config.
+>
+> **OpenRouter key (ADR 0016):** `[openrouter].api_key` is stored in SecretStore as `openrouter.api_key`; config keeps only `api_key = "secret:openrouter.api_key"`. The wizard seals it before writing `config.toml`, and startup migrate+scrub moves any leftover plaintext key into the store (`.bak` via the shared config write path). The ref is resolved at startup, including the legacy `[openrouter]` provider. `[embedding].api_key` and other `[[provider]].api_key` values are deliberately not sealed yet and may stay plaintext. The `config.toml.bak` left by migrate still holds the old plaintext and is written owner-only (`chmod 600`). Once `config.toml` shows `secret:` refs, delete `config.toml.bak` by hand; RustFox never deletes it for you, so you can still roll back.
 
 ---
 
@@ -241,7 +243,7 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 |------|-------------|
 | `read_skill_file` | Read a file from a skill's directory |
 | `write_skill_file` | Write new or update existing skill files |
-| `patch_skill` | Patch an existing skill's SKILL.md (append/replace content) |
+| `patch_skill` | Patch an existing skill's SKILL.md (`mode`: `append` default, or `replace`; append strips patch frontmatter) |
 | `reload_skills` | Hot-reload the skill registry without restarting |
 
 ### Agent Tools
@@ -269,6 +271,8 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 |------|-------------|
 | `try_new_tech` | Run a sandboxed experiment with a new technology (Rust/JS) |
 | `self_upgrade` | Upgrade the bot — auto-detects source code (git + cargo build) or release binary (downloads from GitHub). Re-registers systemd/launchd service if installed. Restarts after success. |
+
+Release-binary `/selfupgrade` asks GitHub for the latest release. Anonymous calls share a low rate limit; if Telegram shows HTTP 403 / rate limit, wait for the quota to reset or export `GITHUB_TOKEN` / `GH_TOKEN` (classic PAT with `public_repo`, or fine-grained Releases read) and retry. See ADR 0018.
 
 ---
 

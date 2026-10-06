@@ -1,11 +1,12 @@
-//! Bot Telegram tokens in [`SecretStore`].
+//! Bot Telegram tokens and the `[openrouter].api_key` (ADR 0016) in [`SecretStore`].
 //!
-//! Config holds `secret:NAME` (typically `secret:bot.<id>.token`) — never the
-//! plaintext BotFather token after bind/migrate. Runtime resolves via the store.
+//! Config holds `secret:NAME` (typically `secret:bot.<id>.token`, or
+//! `secret:openrouter.api_key`) — never the plaintext after bind/migrate.
+//! Runtime resolves via the store.
 //! One-time startup migration moves legacy plaintext into the store and scrubs
 //! `config.toml` (bak via [`crate::config_edit::write_config_validated`]).
 
-use super::{validate_name, SecretStore, SECRET_REF_PREFIX};
+use super::{set_verified, validate_name, SecretStore, SECRET_REF_PREFIX};
 use crate::agents_edit::looks_like_bot_token;
 use crate::config::Config;
 use crate::config_edit::write_config_validated;
@@ -21,6 +22,9 @@ pub fn bot_token_secret_name(bot_id: &str) -> String {
 pub fn bot_token_secret_ref(bot_id: &str) -> String {
     format!("{}{}", SECRET_REF_PREFIX, bot_token_secret_name(bot_id))
 }
+
+/// Vault name for `[openrouter].api_key` (ADR 0016).
+pub const OPENROUTER_API_KEY_SECRET: &str = "openrouter.api_key";
 
 /// Whether `value` is a `secret:NAME` reference.
 pub fn is_secret_ref(value: &str) -> bool {
@@ -59,16 +63,35 @@ pub fn resolve_bot_token(store: &dyn SecretStore, configured: &str) -> Result<St
     }
 }
 
+/// Resolve `secret:openrouter.api_key` in place (ADR 0016). Call before
+/// [`Config::build_providers`] so the legacy `[openrouter]` provider copy gets
+/// the real key. Goes through the bridge so the value is seeded for redaction.
+/// Plaintext / empty keys are left as-is (pre-migrate, Ollama-only).
+pub fn resolve_openrouter_api_key(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
+    if let Some(name) = parse_secret_ref(&cfg.openrouter.api_key) {
+        validate_name(name)?;
+        let value = bridge.get(name)?.with_context(|| {
+            format!("secret `{name}` not found in SecretStore ([openrouter].api_key)")
+        })?;
+        cfg.openrouter.api_key = value.expose().to_string();
+    }
+    Ok(())
+}
+
+/// Persist `plaintext` under `name` (read back via `set_verified`) and return `secret:<name>`.
+pub fn store_secret(store: &dyn SecretStore, name: &str, plaintext: &str) -> Result<String> {
+    validate_name(name)?;
+    let value = plaintext.trim();
+    if value.is_empty() {
+        bail!("secret `{name}` cannot be empty");
+    }
+    set_verified(store, name, value)?;
+    Ok(format!("{SECRET_REF_PREFIX}{name}"))
+}
+
 /// Persist plaintext token under `bot.<id>.token` and return the `secret:…` config value.
 pub fn store_bot_token(store: &dyn SecretStore, bot_id: &str, plaintext: &str) -> Result<String> {
-    let name = bot_token_secret_name(bot_id);
-    validate_name(&name)?;
-    let token = plaintext.trim();
-    if token.is_empty() {
-        bail!("bot_token cannot be empty");
-    }
-    store.set(&name, token)?;
-    Ok(bot_token_secret_ref(bot_id))
+    store_secret(store, &bot_token_secret_name(bot_id), plaintext)
 }
 
 /// Seal BotFather-shaped plaintext `bot_token` values in a config TOML string.
@@ -79,7 +102,11 @@ pub fn store_bot_token(store: &dyn SecretStore, bot_id: &str, plaintext: &str) -
 /// legacy `[telegram]` — only scrubs in place (wizard first-save stays
 /// `[telegram]`-shaped).
 ///
-/// Returns `(sealed_toml, tokens_stored_or_scrubbed)`.
+/// Also seals a non-empty plaintext `[openrouter].api_key` as
+/// `secret:openrouter.api_key` (ADR 0016). `[embedding]` and `[[provider]]`
+/// keys are deliberately left alone.
+///
+/// Returns `(sealed_toml, credentials_stored_or_scrubbed)`.
 pub fn seal_plaintext_bot_tokens_in_config(
     content: &str,
     store: &dyn SecretStore,
@@ -138,6 +165,20 @@ pub fn seal_plaintext_bot_tokens_in_config(
                 tg.insert("bot_token".into(), toml::Value::String(secret_ref));
                 changed += 1;
             }
+        }
+    }
+
+    if let Some(or) = table.get_mut("openrouter").and_then(|v| v.as_table_mut()) {
+        let key = or
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !key.is_empty() && !is_secret_ref(&key) {
+            let secret_ref = store_secret(store, OPENROUTER_API_KEY_SECRET, &key)?;
+            or.insert("api_key".into(), toml::Value::String(secret_ref));
+            changed += 1;
         }
     }
 
@@ -269,10 +310,27 @@ allowed_directory = "/tmp"
         std::fs::write(&path, minimal_bots_toml()).unwrap();
         let store = FakeSecretStore::new();
         let n = migrate_plaintext_bot_tokens(&path, &store).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2, "bot token + [openrouter].api_key");
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(!after.contains("AAMainTokenSecretValueXXXX"));
         assert!(after.contains("secret:bot.main.token"));
+        assert!(!after.contains("sk-test"));
+        assert!(after.contains(r#"api_key = "secret:openrouter.api_key""#));
+        assert_eq!(
+            store.get("openrouter.api_key").unwrap().unwrap().expose(),
+            "sk-test"
+        );
+        let bak = std::fs::read_to_string(dir.path().join("config.toml.bak")).unwrap();
+        assert!(bak.contains("sk-test"), ".bak keeps the pre-scrub file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("config.toml.bak"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, ".bak is owner-only");
+        }
         assert_eq!(
             store.get("bot.main.token").unwrap().unwrap().expose(),
             "111111111:AAMainTokenSecretValueXXXX"
@@ -302,8 +360,9 @@ api_key = "sk-test"
 model = "test-model"
 "#;
         let (sealed, n) = seal_plaintext_bot_tokens_in_config(raw, &store).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
         assert!(!sealed.contains("AAWizardFirstSaveTokenXXXX"));
+        assert!(!sealed.contains("sk-test"));
         assert!(sealed.contains("secret:bot.default.token"));
         assert!(!sealed.contains("[[bots]]"));
         assert_eq!(
@@ -326,5 +385,64 @@ allowed_user_ids = [1]
         let (sealed, n) = seal_plaintext_bot_tokens_in_config(raw, &store).unwrap();
         assert_eq!(n, 0);
         assert!(sealed.contains("YOUR_TELEGRAM_BOT_TOKEN"));
+    }
+
+    #[test]
+    fn seal_openrouter_key_leaves_refs_empty_and_other_keys_alone() {
+        let store = FakeSecretStore::new();
+        let raw = r#"
+[openrouter]
+api_key = "secret:openrouter.api_key"
+model = "m"
+
+[embedding]
+api_key = "sk-embed"
+base_url = "https://openrouter.ai/api/v1"
+model = "e"
+dimensions = 8
+
+[[provider]]
+name = "other"
+type = "openai"
+api_key = "sk-provider"
+model = "m"
+"#;
+        let (_, n) = seal_plaintext_bot_tokens_in_config(raw, &store).unwrap();
+        assert_eq!(
+            n, 0,
+            "ref stays; [embedding]/[[provider]] out of scope (ADR 0016)"
+        );
+
+        let ollama_only = "[openrouter]\napi_key = \"\"\nmodel = \"m\"\n";
+        let (_, n) = seal_plaintext_bot_tokens_in_config(ollama_only, &store).unwrap();
+        assert_eq!(n, 0, "empty key is not sealed");
+        assert!(!store.exists(OPENROUTER_API_KEY_SECRET).unwrap());
+    }
+
+    #[test]
+    fn resolved_openrouter_key_reaches_the_legacy_provider() {
+        use crate::secret_store::{PendingSecretRegistry, SecretBridge};
+        use std::sync::Arc;
+        let store = Arc::new(FakeSecretStore::new());
+        store_secret(store.as_ref(), OPENROUTER_API_KEY_SECRET, "sk-or-x").unwrap();
+        let bridge = SecretBridge::new(store, Arc::new(PendingSecretRegistry::default()));
+
+        let toml = minimal_bots_toml().replace("sk-test", "secret:openrouter.api_key");
+        let mut cfg: Config = toml::from_str(&toml).unwrap();
+        resolve_openrouter_api_key(&mut cfg, &bridge).unwrap();
+        let (providers, _, _) = cfg.build_providers();
+        let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
+        assert_eq!(or.api_key.as_deref(), Some("sk-or-x"));
+
+        let toml = minimal_bots_toml().replace("sk-test", "secret:openrouter.missing");
+        let mut cfg: Config = toml::from_str(&toml).unwrap();
+        assert!(resolve_openrouter_api_key(&mut cfg, &bridge).is_err());
+
+        let mut cfg: Config = toml::from_str(&minimal_bots_toml()).unwrap();
+        resolve_openrouter_api_key(&mut cfg, &bridge).unwrap();
+        assert_eq!(
+            cfg.openrouter.api_key, "sk-test",
+            "plaintext passes through"
+        );
     }
 }

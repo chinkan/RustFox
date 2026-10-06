@@ -85,18 +85,187 @@ impl std::fmt::Display for LlmHttpError {
 impl std::error::Error for LlmHttpError {}
 
 impl LlmHttpError {
-    /// Transient = worth another model or another hour: 429 or any 5xx.
-    /// Everything else (400/401/403/404) can never succeed on resend.
+    /// Transient for *same-model* ADR-0009 retry / job dead-letter: top-level
+    /// 429 or any 5xx. Envelope inner codes do **not** expand this (ADR-0019:
+    /// parse is observability + helpers; walk is gated separately).
     pub fn is_transient(&self) -> bool {
         self.status == reqwest::StatusCode::TOO_MANY_REQUESTS || self.status.is_server_error()
     }
+
+    /// Hard auth/permission exclusions — never walk `[fallback] chain`
+    /// (ADR-0019). 402 credits is intentionally *not* here.
+    pub fn is_auth_hard_exclusion(&self) -> bool {
+        self.status == reqwest::StatusCode::UNAUTHORIZED
+            || self.status == reqwest::StatusCode::FORBIDDEN
+    }
+
+    /// OpenRouter-shaped body insight (numeric codes / documented `error_type`).
+    pub fn envelope_insight(&self) -> Option<OpenRouterEnvelopeInsight> {
+        parse_openrouter_envelope(&self.body)
+    }
 }
+
+/// Pre-HTTP failure (missing provider key, invalid client config that aborts
+/// before a request is sent). Hard-excludes fallback walk (ADR-0019).
+#[derive(Debug, Clone)]
+pub struct LlmPreHttpError {
+    pub message: String,
+}
+
+impl std::fmt::Display for LlmPreHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for LlmPreHttpError {}
 
 /// Classify a bubbled error: does its cause chain contain a transient LLM HTTP
 /// failure? Used by the job runner to decide dead-letter queueing (ADR-0013).
 pub fn is_transient_llm_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<LlmHttpError>()
         .is_some_and(|e| e.is_transient())
+}
+
+/// Whether `[fallback] chain` should try the next model after this error
+/// (ADR-0019). Walks on almost everything; hard-excludes only HTTP 401/403
+/// and [`LlmPreHttpError`] (never-sent HTTP).
+pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
+    if err.downcast_ref::<LlmPreHttpError>().is_some() {
+        return false;
+    }
+    if let Some(http) = err.downcast_ref::<LlmHttpError>() {
+        return !http.is_auth_hard_exclusion();
+    }
+    // Network / timeout / DNS / JSON-or-body parse / missing-choices exhaustion.
+    true
+}
+
+/// Documented OpenRouter `error_type` values that mean upstream transient
+/// (rate limit / overload / unavailable / timeout / server). No free-text
+/// "rate limit" guessing — exact token match only (ADR-0019).
+const TRANSIENT_ERROR_TYPES: &[&str] = &[
+    "rate_limit_exceeded",
+    "provider_overloaded",
+    "provider_unavailable",
+    "timeout",
+    "server",
+];
+
+/// Parsed OpenRouter error envelope for logs + typed inner classification.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OpenRouterEnvelopeInsight {
+    pub inner_codes: Vec<u16>,
+    pub error_types: Vec<String>,
+}
+
+impl OpenRouterEnvelopeInsight {
+    /// True when any collected numeric code is 429/5xx **or** any collected
+    /// `error_type` is in the documented transient set.
+    pub fn has_transient_inner(&self) -> bool {
+        self.inner_codes
+            .iter()
+            .any(|&c| c == 429 || (500..600).contains(&c))
+            || self
+                .error_types
+                .iter()
+                .any(|t| TRANSIENT_ERROR_TYPES.contains(&t.as_str()))
+    }
+}
+
+fn push_code(out: &mut Vec<u16>, v: &serde_json::Value) {
+    if let Some(n) = v.as_u64() {
+        if n <= u16::MAX as u64 {
+            out.push(n as u16);
+        }
+    } else if let Some(s) = v.as_str() {
+        if let Ok(n) = s.parse::<u16>() {
+            out.push(n);
+        }
+    }
+}
+
+fn push_error_type(out: &mut Vec<String>, v: &serde_json::Value) {
+    if let Some(s) = v.as_str() {
+        if !s.is_empty() && !out.iter().any(|e| e == s) {
+            out.push(s.to_string());
+        }
+    }
+}
+
+fn collect_from_error_obj(insight: &mut OpenRouterEnvelopeInsight, err: &serde_json::Value) {
+    if let Some(code) = err.get("code") {
+        push_code(&mut insight.inner_codes, code);
+    }
+    if let Some(et) = err.get("error_type") {
+        push_error_type(&mut insight.error_types, et);
+    }
+    if let Some(meta) = err.get("metadata") {
+        if let Some(et) = meta.get("error_type") {
+            push_error_type(&mut insight.error_types, et);
+        }
+        // Some providers nest a numeric code under metadata.
+        if let Some(code) = meta.get("code") {
+            push_code(&mut insight.inner_codes, code);
+        }
+    }
+}
+
+/// Parse an OpenRouter-shaped error body: top-level `error`, `previous_errors[*]`,
+/// and `metadata` / `error_type`. Returns `None` when the body is not JSON object
+/// shaped enough to inspect (callers keep the raw HTTP status).
+pub fn parse_openrouter_envelope(body: &str) -> Option<OpenRouterEnvelopeInsight> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = value.as_object()?;
+    let mut insight = OpenRouterEnvelopeInsight::default();
+
+    if let Some(err) = obj.get("error") {
+        collect_from_error_obj(&mut insight, err);
+    }
+    if let Some(et) = obj.get("error_type") {
+        push_error_type(&mut insight.error_types, et);
+    }
+    if let Some(meta) = obj.get("metadata") {
+        if let Some(et) = meta.get("error_type") {
+            push_error_type(&mut insight.error_types, et);
+        }
+        if let Some(code) = meta.get("code") {
+            push_code(&mut insight.inner_codes, code);
+        }
+    }
+    if let Some(prev) = obj.get("previous_errors").and_then(|p| p.as_array()) {
+        for entry in prev {
+            // Entries may be bare error objects or wrap `{ "error": {...} }`.
+            if let Some(nested) = entry.get("error") {
+                collect_from_error_obj(&mut insight, nested);
+            }
+            collect_from_error_obj(&mut insight, entry);
+            if let Some(code) = entry.get("status") {
+                push_code(&mut insight.inner_codes, code);
+            }
+        }
+    }
+
+    if insight.inner_codes.is_empty() && insight.error_types.is_empty() {
+        return None;
+    }
+    Some(insight)
+}
+
+/// Log envelope inner transient signals (observability only — does not gate
+/// retry or fallback). Safe to call on every non-success body.
+pub fn log_envelope_if_interesting(provider: &str, status: reqwest::StatusCode, body: &str) {
+    if let Some(insight) = parse_openrouter_envelope(body) {
+        if insight.has_transient_inner() {
+            tracing::warn!(
+                provider = %provider,
+                status = %status,
+                inner_codes = ?insight.inner_codes,
+                error_types = ?insight.error_types,
+                "OpenRouter envelope carries inner transient (429/5xx or documented error_type)"
+            );
+        }
+    }
 }
 
 /// Internal helper: send a chat completion request with retry logic for
@@ -144,6 +313,7 @@ async fn chat_completion_with_retry(
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string());
             let body = response.text().await.unwrap_or_default();
+            log_envelope_if_interesting(provider_name, status, &body);
             let err = anyhow::Error::from(LlmHttpError {
                 provider: provider_name.to_string(),
                 status,
@@ -1261,5 +1431,120 @@ mod tests {
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0019: envelope parse + fallback walk classifier
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn envelope_parses_previous_errors_429_and_error_type() {
+        let body = r#"{
+            "error": {"code": 400, "message": "Provider returned error"},
+            "previous_errors": [
+                {
+                    "code": 429,
+                    "message": "upstream rl",
+                    "metadata": {"error_type": "rate_limit_exceeded"}
+                }
+            ]
+        }"#;
+        let insight = parse_openrouter_envelope(body).unwrap();
+        assert!(insight.inner_codes.contains(&400));
+        assert!(insight.inner_codes.contains(&429));
+        assert!(insight
+            .error_types
+            .iter()
+            .any(|t| t == "rate_limit_exceeded"));
+        assert!(insight.has_transient_inner());
+    }
+
+    #[test]
+    fn envelope_documented_error_type_alone_is_transient() {
+        let body = r#"{
+            "error": {
+                "code": 400,
+                "message": "x",
+                "metadata": {"error_type": "provider_overloaded"}
+            }
+        }"#;
+        let insight = parse_openrouter_envelope(body).unwrap();
+        assert!(insight.has_transient_inner());
+        // Free-text "rate limit" in message must NOT be required / used.
+        assert!(!insight.error_types.iter().any(|t| t.contains(' ')));
+    }
+
+    #[test]
+    fn envelope_ignores_non_json_and_empty_objects() {
+        assert!(parse_openrouter_envelope("not-json").is_none());
+        assert!(parse_openrouter_envelope("{}").is_none());
+        assert!(parse_openrouter_envelope(r#"{"error":{"message":"x"}}"#).is_none());
+    }
+
+    #[test]
+    fn envelope_does_not_string_guess_rate_limit_in_message() {
+        let body = r#"{
+            "error": {"code": 400, "message": "rate limit exceeded somewhere"}
+        }"#;
+        let insight = parse_openrouter_envelope(body).unwrap();
+        assert!(
+            !insight.has_transient_inner(),
+            "message text must not classify"
+        );
+        assert_eq!(insight.inner_codes, vec![400]);
+        assert!(insight.error_types.is_empty());
+    }
+
+    #[test]
+    fn should_walk_fallback_matrix() {
+        let http = |status: u16| {
+            anyhow::Error::from(LlmHttpError {
+                provider: "p".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                body: "x".into(),
+            })
+        };
+        assert!(should_walk_fallback(&http(400)));
+        assert!(should_walk_fallback(&http(402)));
+        assert!(should_walk_fallback(&http(429)));
+        assert!(should_walk_fallback(&http(503)));
+        assert!(!should_walk_fallback(&http(401)));
+        assert!(!should_walk_fallback(&http(403)));
+        assert!(!should_walk_fallback(&anyhow::Error::from(
+            LlmPreHttpError {
+                message: "missing OpenRouter API key".into(),
+            }
+        )));
+        assert!(should_walk_fallback(&anyhow::anyhow!(
+            "Failed to send request"
+        )));
+        assert!(should_walk_fallback(&anyhow::anyhow!(
+            "Failed to parse JSON response"
+        )));
+    }
+
+    #[test]
+    fn auth_hard_exclusion_and_transient_unchanged() {
+        let e401 = LlmHttpError {
+            provider: "p".into(),
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: String::new(),
+        };
+        assert!(e401.is_auth_hard_exclusion());
+        assert!(!e401.is_transient());
+        let e429 = LlmHttpError {
+            provider: "p".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: String::new(),
+        };
+        assert!(!e429.is_auth_hard_exclusion());
+        assert!(e429.is_transient());
+        let e402 = LlmHttpError {
+            provider: "p".into(),
+            status: reqwest::StatusCode::PAYMENT_REQUIRED,
+            body: String::new(),
+        };
+        assert!(!e402.is_auth_hard_exclusion());
+        assert!(!e402.is_transient()); // still not same-model retryable
     }
 }

@@ -541,12 +541,12 @@ function nextStep() {
   showStep(currentStep + 1);
 }
 
-function requireField(id) {
+function requireField(id, valid) {
   const el = document.getElementById(id);
   if (!el) return true;
   const errEl = el.parentElement.querySelector('.error-msg');
   const value = (el.value || '').trim();
-  if (!value) {
+  if (!value || (valid && !valid(value))) {
     el.classList.add('error');
     if (errEl) errEl.classList.add('visible');
     return false;
@@ -569,7 +569,7 @@ function validateStep() {
     if (!state.ollama_running) ok = 0;
     ok = requireField('f-ollama-model') & ok;
   } else {
-    ok = requireField('f-openrouter-key') & requireField('f-openrouter-model') & ok;
+    ok = requireField('f-openrouter-key') & requireField('f-openrouter-model', v => v.includes('/')) & ok;
   }
   return !!ok;
 }
@@ -691,21 +691,31 @@ async function loadLibrary(query) {
   ).join('');
 }
 
+function onOpenRouterModelPick() {
+  const pick = document.getElementById('f-openrouter-model-pick');
+  const field = document.getElementById('f-openrouter-model');
+  if (!pick || !field || !pick.value) return;
+  field.value = pick.value;
+  clearFieldError(field);
+}
+
 async function loadOpenRouterModels() {
-  const sel = document.getElementById('f-openrouter-model');
-  if (!sel) return;
+  const pick = document.getElementById('f-openrouter-model-pick');
+  const field = document.getElementById('f-openrouter-model');
+  if (!pick || !field) return;
   const res = await fetch('/api/openrouter/models');
   const data = await res.json();
   const models = data.models || [];
   const fallback = data.default || '';
-  sel.innerHTML = models.map(name =>
+  pick.innerHTML = models.map(name =>
     `<option value="${escHtml(name)}">${escHtml(name)}</option>`
   ).join('');
-  const want = state.openrouter_model && models.indexOf(state.openrouter_model) !== -1
-    ? state.openrouter_model
-    : fallback;
-  if (want) sel.value = want;
-  state.openrouter_model = sel.value || '';
+  const want = state.openrouter_model || fallback;
+  if (want) {
+    field.value = want;
+    if (models.indexOf(want) !== -1) pick.value = want;
+  }
+  state.openrouter_model = (field.value || '').trim();
 }
 
 function showLibraryList() {
@@ -749,7 +759,7 @@ function renderSummary() {
     : escHtml(state.openrouter_key ? maskSecret(state.openrouter_key) : '(missing)');
   const modelRow = state.provider === 'ollama'
     ? ''
-    : row('OpenRouter model', escHtml(state.openrouter_model || '(pick a model)'));
+    : row('OpenRouter model', escHtml(state.openrouter_model || '(enter a model id)'));
   el.innerHTML =
     '<div class="summary-section"><h3>Setup</h3><div class="summary-list">' +
     row('Provider', escHtml(provider)) +
@@ -848,7 +858,7 @@ function buildSteps() {
   const c = document.getElementById('steps-container');
   c.innerHTML = `<div class="step" id="step-1">
   <h2>🤖 Setup</h2>
-  <p class="subtitle">OpenRouter is the default. Pick a model from the list. Everything else stays a safe default.</p>
+  <p class="subtitle">OpenRouter is the default. Pick a shortcut or type any model id. Everything else stays a safe default.</p>
   <div class="field">
     <label>Provider</label>
     <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
@@ -867,9 +877,10 @@ function buildSteps() {
       <div class="error-msg">API key is required.</div>
     </div>
     <div class="field">
-      <label>OpenRouter model <span class="hint">— pick one, no typed id</span></label>
-      <select id="f-openrouter-model"></select>
-      <div class="error-msg">Pick an OpenRouter model.</div>
+      <label>OpenRouter model <span class="hint">— list is a shortcut · <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/models</a></span></label>
+      <select id="f-openrouter-model-pick" onchange="onOpenRouterModelPick()"></select>
+      <input type="text" id="f-openrouter-model" placeholder="provider/model" value="${escHtml(state.openrouter_model)}" oninput="clearFieldError(this)">
+      <div class="error-msg">Model id is required (provider/model).</div>
     </div>
   </div>
   <div id="ollama-fields" style="display:none">

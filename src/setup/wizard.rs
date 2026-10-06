@@ -397,8 +397,9 @@ async fn run_web(config_dir: &Path) -> Result<()> {
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
         let url = format!("http://localhost:{SETUP_PORT}");
-        let _ = std::process::Command::new("xdg-open").arg(&url).status();
-        let _ = std::process::Command::new("open").arg(&url).status();
+        if !open_browser(&url) {
+            println!("Couldn't open a browser. Open the URL above manually.");
+        }
     });
 
     axum::serve(listener, app)
@@ -411,13 +412,48 @@ async fn run_web(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Launchers to try, in order, for the wizard URL (ADR 0015). WSL hands off
+/// to the Windows browser; headless Linux gets none (URL is printed instead).
+fn browser_openers(wsl: bool, has_display: bool) -> &'static [&'static [&'static str]] {
+    if cfg!(target_os = "macos") {
+        &[&["open"]]
+    } else if cfg!(windows) {
+        &[&["cmd", "/c", "start"]]
+    } else if wsl {
+        &[&["wslview"], &["cmd.exe", "/c", "start"]]
+    } else if has_display {
+        &[&["xdg-open"]]
+    } else {
+        &[]
+    }
+}
+
+/// `true` if some launcher exited 0.
+fn open_browser(url: &str) -> bool {
+    let wsl = std::fs::read_to_string("/proc/version")
+        .is_ok_and(|v| v.to_lowercase().contains("microsoft"));
+    let has_display = ["DISPLAY", "WAYLAND_DISPLAY"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    browser_openers(wsl, has_display).iter().any(|cmd| {
+        std::process::Command::new(cmd[0])
+            .args(&cmd[1..])
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
 // ── Web handlers ───────────────────────────────────────────────────────
 
 async fn serve_index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-/// Open SecretStore beside `config_path` and seal BotFather plaintext tokens so
+/// Open SecretStore beside `config_path` and seal plaintext bot tokens and the
+/// `[openrouter].api_key` (ADR 0016) so
 /// the written file never contains them (wizard first-save / re-save).
 fn seal_credentials_for_wizard_write(config_path: &Path, content: &str) -> anyhow::Result<String> {
     let home = config_path
@@ -436,7 +472,7 @@ fn seal_credentials_for_wizard_write(config_path: &Path, content: &str) -> anyho
 /// Report (without echoing any secret material) that plaintext credentials were
 /// sealed. Kept argument-free so no sealing-call output flows into a log sink.
 fn report_sealed_credentials() {
-    println!("\u{2713} Bot credentials sealed into SecretStore (config now holds refs only)");
+    println!("\u{2713} Credentials sealed into SecretStore (config now holds refs only)");
 }
 
 async fn save_config(
@@ -1142,21 +1178,20 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
             };
             println!("  {}) {name}{mark}", i + 1);
         }
+        let other_n = super::thin::OPENROUTER_MODELS.len() + 1;
+        println!("  {}) Other", other_n);
+        println!("Catalog: {}", super::thin::OPENROUTER_MODELS_URL);
         let prompt = format!(
             "Pick a number [{}]: ",
             super::thin::OPENROUTER_DEFAULT_MODEL
         );
         let pick = read_line(&prompt)?;
-        openrouter_model = if pick.is_empty() {
-            super::thin::OPENROUTER_DEFAULT_MODEL.to_string()
+        let typed = if pick.trim().parse::<usize>().ok() == Some(other_n) {
+            Some(read_line("Model id (provider/model): ")?)
         } else {
-            let idx: usize = pick
-                .parse()
-                .ok()
-                .filter(|n| (1..=super::thin::OPENROUTER_MODELS.len()).contains(n))
-                .context("pick an OpenRouter model")?;
-            super::thin::OPENROUTER_MODELS[idx - 1].to_string()
+            None
         };
+        openrouter_model = super::thin::openrouter_model_from_cli_choice(&pick, typed.as_deref())?;
     }
     let tg_token = read_line("Telegram bot token: ")?;
     let sentence = read_line("System prompt (one sentence): ")?;
@@ -1475,6 +1510,21 @@ pub fn parse_existing_config(content: &str) -> ExistingConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_opens_the_windows_browser_not_xdg_open() {
+        let got = browser_openers(true, true);
+        assert_eq!(got, &[&["wslview"][..], &["cmd.exe", "/c", "start"][..]]);
+        assert_eq!(browser_openers(true, false), got, "WSL ignores DISPLAY");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_linux_skips_auto_open_desktop_uses_xdg_open() {
+        assert!(browser_openers(false, false).is_empty());
+        assert_eq!(browser_openers(false, true), &[&["xdg-open"][..]]);
+    }
     use super::*;
 
     #[test]
@@ -1547,9 +1597,14 @@ mod tests {
         );
         assert!(raw.contains("AAWizardCliFirstSaveTokenXX"));
         let (sealed, n) = seal_plaintext_bot_tokens_in_config(&raw, &store).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2, "bot token + [openrouter].api_key");
         assert!(!sealed.contains("AAWizardCliFirstSaveTokenXX"));
         assert!(sealed.contains("secret:bot.default.token"));
+        assert!(sealed.contains(r#"api_key = "secret:openrouter.api_key""#));
+        assert_eq!(
+            store.get("openrouter.api_key").unwrap().unwrap().expose(),
+            "key"
+        );
         assert_eq!(
             store.get("bot.default.token").unwrap().unwrap().expose(),
             "111111111:AAWizardCliFirstSaveTokenXX"

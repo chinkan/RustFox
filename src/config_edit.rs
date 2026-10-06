@@ -405,6 +405,13 @@ pub fn write_config_validated(path: &Path, new_content: &str) -> Result<PathBuf>
     if path.exists() {
         std::fs::copy(path, &bak)
             .with_context(|| format!("Failed to write backup {}", bak.display()))?;
+        // The bak can hold pre-seal plaintext secrets: owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bak, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to chmod 600 {}", bak.display()))?;
+        }
     }
 
     atomic_write(path, new_content)

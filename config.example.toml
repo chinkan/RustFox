@@ -52,6 +52,7 @@ allowed_user_ids = [123456789]
 
 [openrouter]
 # Get your API key from https://openrouter.ai/keys
+# Sealed into SecretStore on first start / wizard save; becomes "secret:openrouter.api_key".
 api_key = "YOUR_OPENROUTER_API_KEY"
 # Model to use (see https://openrouter.ai/models)
 model = "moonshotai/kimi-k2.6"

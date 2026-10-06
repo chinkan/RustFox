@@ -1715,7 +1715,7 @@ pub async fn handle_message(
                             .edit_message_text(
                                 chat_id,
                                 msg_id,
-                                format!("❌ Upgrade failed:\n{}", e),
+                                format!("❌ Upgrade failed:\n{:#}", e),
                             )
                             .await
                             .ok();
@@ -2131,9 +2131,9 @@ pub async fn handle_message(
             msg_id: current_msg_id,
         });
 
-        // If nothing was streamed, skip the final formatting.
+        // If nothing was streamed, the caller sends the returned text.
         if chunks.is_empty() || chunks.iter().all(|c| c.content.is_empty()) {
-            return;
+            return false;
         }
 
         // Build the full text from all chunks.
@@ -2208,6 +2208,7 @@ pub async fn handle_message(
                 }
             }
         }
+        true
     });
 
     // Build platform-agnostic message
@@ -2257,8 +2258,10 @@ pub async fn handle_message(
         handle.await.ok();
     }
 
-    // Wait for stream receiver to complete its final edit
-    stream_handle.await.ok();
+    // Wait for stream receiver to complete its final edit.
+    // false means the channel closed with no tokens (max iterations,
+    // cancel, empty-retry). Those returns are Ok text that was never streamed.
+    let streamed = stream_handle.await.unwrap_or(false);
 
     // Cleanup temp dir used for file downloads (async to avoid blocking the executor)
     if temp_dir.exists() {
@@ -2274,12 +2277,20 @@ pub async fn handle_message(
         }
     }
 
-    if let Err(e) = process_result {
+    if let Err(e) = &process_result {
         warn!(error = %e, "Agent processing failed");
         return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e), msg_format)
             .await;
     }
-    // Success: response already delivered via streaming
+    // Ok text is not always streamed. Max iterations, cancel, and the
+    // empty-retry sentence return without pushing tokens.
+    if !streamed {
+        if let Ok(text) = &process_result {
+            if !text.is_empty() {
+                send_markdown_message(&bot, msg.chat.id, text, msg_format).await?;
+            }
+        }
+    }
 
     // Check if a self-upgrade tool call requested a restart.
     if agent

@@ -79,6 +79,60 @@ async fn main() -> Result<()> {
     let mut config = Config::load(&config_path)
         .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
+    // Slice 3: host secret bridge (store + pending) shared by MCP / tools / portal.
+    let (secret_bridge, secret_backend) = {
+        let home = config.resolved_home().cloned().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".rustfox"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".rustfox"))
+        });
+        match rustfox::secret_store::open(&home) {
+            Ok((store, backend)) => {
+                info!("  Secret store: {:?}", backend);
+                let pending =
+                    std::sync::Arc::new(rustfox::secret_store::PendingSecretRegistry::default());
+                let bridge = std::sync::Arc::new(rustfox::secret_store::SecretBridge::new(
+                    std::sync::Arc::from(store),
+                    pending,
+                ));
+                let portal_base = format!("http://127.0.0.1:{}/", config.portal.port);
+                bridge.set_portal_base(portal_base);
+                (bridge, Some(backend))
+            }
+            Err(e) => {
+                warn!("  Secret store unavailable ({e}); using in-memory FakeSecretStore");
+                let bridge = std::sync::Arc::new(rustfox::secret_store::SecretBridge::new(
+                    std::sync::Arc::new(rustfox::secret_store::FakeSecretStore::new()),
+                    std::sync::Arc::new(rustfox::secret_store::PendingSecretRegistry::default()),
+                ));
+                (bridge, None)
+            }
+        }
+    };
+    // P0: one-time migrate plaintext [[bots]].bot_token → SecretStore + scrub config.
+    // Only when a durable backend is available — never scrub into an in-memory Fake.
+    if secret_backend.is_some() {
+        match rustfox::secret_store::migrate_plaintext_bot_tokens(
+            &config_path,
+            secret_bridge.store().as_ref(),
+        ) {
+            Ok(n) if n > 0 => {
+                info!("  Migrated {n} plaintext credential(s) into SecretStore (config scrubbed)");
+                config =
+                    Config::load(&config_path).context("reload config after bot-token migrate")?;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("  Bot-token SecretStore migrate skipped: {e:#}");
+            }
+        }
+    } else {
+        warn!("  Bot-token migrate skipped (no durable SecretStore backend)");
+    }
+
+    // ADR 0016: resolve `secret:openrouter.api_key` before providers are built.
+    rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
+
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config.build_providers();
     let registry = Arc::new(
@@ -181,57 +235,6 @@ async fn main() -> Result<()> {
     )
     .context("Failed to initialize memory store")?;
     info!("  Database: {}", config.memory.database_path.display());
-
-    // Slice 3: host secret bridge (store + pending) shared by MCP / tools / portal.
-    let (secret_bridge, secret_backend) = {
-        let home = config.resolved_home().cloned().unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join(".rustfox"))
-                .unwrap_or_else(|| std::path::PathBuf::from(".rustfox"))
-        });
-        match rustfox::secret_store::open(&home) {
-            Ok((store, backend)) => {
-                info!("  Secret store: {:?}", backend);
-                let pending =
-                    std::sync::Arc::new(rustfox::secret_store::PendingSecretRegistry::default());
-                let bridge = std::sync::Arc::new(rustfox::secret_store::SecretBridge::new(
-                    std::sync::Arc::from(store),
-                    pending,
-                ));
-                let portal_base = format!("http://127.0.0.1:{}/", config.portal.port);
-                bridge.set_portal_base(portal_base);
-                (bridge, Some(backend))
-            }
-            Err(e) => {
-                warn!("  Secret store unavailable ({e}); using in-memory FakeSecretStore");
-                let bridge = std::sync::Arc::new(rustfox::secret_store::SecretBridge::new(
-                    std::sync::Arc::new(rustfox::secret_store::FakeSecretStore::new()),
-                    std::sync::Arc::new(rustfox::secret_store::PendingSecretRegistry::default()),
-                ));
-                (bridge, None)
-            }
-        }
-    };
-    // P0: one-time migrate plaintext [[bots]].bot_token → SecretStore + scrub config.
-    // Only when a durable backend is available — never scrub into an in-memory Fake.
-    if secret_backend.is_some() {
-        match rustfox::secret_store::migrate_plaintext_bot_tokens(
-            &config_path,
-            secret_bridge.store().as_ref(),
-        ) {
-            Ok(n) if n > 0 => {
-                info!("  Migrated {n} plaintext bot token(s) into SecretStore (config scrubbed)");
-                config =
-                    Config::load(&config_path).context("reload config after bot-token migrate")?;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!("  Bot-token SecretStore migrate skipped: {e:#}");
-            }
-        }
-    } else {
-        warn!("  Bot-token migrate skipped (no durable SecretStore backend)");
-    }
 
     // Refresh any expiring OAuth tokens before connecting to MCP servers
     let http_client = reqwest::Client::new();

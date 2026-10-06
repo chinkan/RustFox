@@ -250,6 +250,7 @@ struct ToolThenReply {
     config: rustfox::provider::ProviderConfig,
     step: AtomicUsize,
     reply: String,
+    only_tools: bool,
 }
 
 impl ToolThenReply {
@@ -271,7 +272,14 @@ impl ToolThenReply {
             },
             step: AtomicUsize::new(0),
             reply: reply.into(),
+            only_tools: false,
         }
+    }
+
+    fn tools_only() -> Self {
+        let mut this = Self::new("");
+        this.only_tools = true;
+        this
     }
 
     fn into_registry(self) -> rustfox::provider::ProviderRegistry {
@@ -308,7 +316,7 @@ impl rustfox::provider::Provider for ToolThenReply {
         _max_tokens: u32,
     ) -> anyhow::Result<rustfox::llm::ChatCompletion> {
         let n = self.step.fetch_add(1, Ordering::SeqCst);
-        let message = if n == 0 {
+        let message = if self.only_tools || n == 0 {
             rustfox::llm::ChatMessage {
                 role: "assistant".into(),
                 content: None,
@@ -469,6 +477,10 @@ impl HandleMessageHarness {
     /// Tool-using turn. Does not set per-chat `tool_ui_mode` (default Minimal).
     /// `main_fully_silent` is only on bot id `main`; `researcher` stays off.
     async fn tool_turn(main_fully_silent: bool) -> Self {
+        Self::tool_turn_cfg(main_fully_silent, 4, false).await
+    }
+
+    async fn tool_turn_cfg(main_fully_silent: bool, max_iterations: u32, only_tools: bool) -> Self {
         std::env::remove_var("RUSTFOX_HOME");
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().join(".rustfox");
@@ -507,7 +519,7 @@ impl HandleMessageHarness {
             home = "{home}"
 
             [agent]
-            max_iterations = 4
+            max_iterations = {max_iterations}
             empty_response_retry_limit = 0
             parse_retry_limit = 0
             rate_limit_retry_limit = 0
@@ -516,6 +528,7 @@ impl HandleMessageHarness {
             ALLOWED = ALLOWED,
             home = home.display(),
             silent_line = silent_line,
+            max_iterations = max_iterations,
         );
         std::fs::write(&cfg_path, &toml).unwrap();
         let config = Config::load(&cfg_path).expect("load fixture config");
@@ -525,7 +538,11 @@ impl HandleMessageHarness {
         let bot = api.bot();
         let bot_arc = Arc::new(bot.clone());
 
-        let registry = Arc::new(ToolThenReply::new(TOOL_TURN_REPLY).into_registry());
+        let registry = Arc::new(if only_tools {
+            ToolThenReply::tools_only().into_registry()
+        } else {
+            ToolThenReply::new(TOOL_TURN_REPLY).into_registry()
+        });
         let memory = MemoryStore::open_in_memory().expect("in-memory sqlite");
         let task_store = ScheduledTaskStore::new(memory.connection());
         let scheduler = Arc::new(Scheduler::new().await.expect("scheduler"));
@@ -974,5 +991,43 @@ async fn second_bot_without_fully_silent_does_not_inherit_it() {
     assert!(
         sent.iter().any(|(_, text)| text.contains(TOOL_TURN_REPLY)),
         "final assistant text must still be sent; sent={sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn fully_silent_max_iterations_still_sends_the_sentence() {
+    let h = HandleMessageHarness::tool_turn_cfg(true, 1, true).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    drive_tool_turn(&h, "main").await;
+
+    let sent = h.api.sent_snapshot();
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("maximum number of tool call iterations")),
+        "max-iterations sentence must be sent even when nothing was streamed; sent={sent:?}"
+    );
+    let progress: Vec<&str> = sent
+        .iter()
+        .filter(|(_, text)| is_tool_progress(text))
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert!(
+        progress.is_empty(),
+        "fully_silent must still hide tool and Thinking bubbles; got {progress:?}"
+    );
+}
+
+#[tokio::test]
+async fn max_iterations_sentence_is_saved_to_history() {
+    let h = HandleMessageHarness::tool_turn_cfg(false, 1, true).await;
+    drive_tool_turn(&h, "main").await;
+
+    let saved = h.agent.memory.recent_messages(20).await.unwrap();
+    assert!(
+        saved.iter().any(|m| m.role == "assistant"
+            && m.content.as_ref().is_some_and(|c| c
+                .as_text()
+                .contains("maximum number of tool call iterations"))),
+        "the max-iterations sentence sent to the chat must be in history; saved={saved:?}"
     );
 }

@@ -1,10 +1,10 @@
 //! Thin setup.
 //!
 //! Provider is OpenRouter (the default) or Ollama. OpenRouter asks for an
-//! API key and a model chosen from a short list (no typed model id).
-//! Ollama never asks for a base URL or a typed model id: a running daemon's
-//! tags are the already-local choices, and a model that is not local is
-//! picked from the Ollama library page (`https://ollama.com/library`,
+//! API key and a model id: a short shortcut list plus a typed `provider/model`
+//! field (ADR 0017). Ollama never asks for a base URL or a typed model id: a
+//! running daemon's tags are the already-local choices, and a model that is
+//! not local is picked from the Ollama library page (`https://ollama.com/library`,
 //! filtered locally — `/search` is paginated) and pulled once after that pick. Bot token and one
 //! system-prompt sentence are the other fields. Tools and MCP are not
 //! questions. Sandbox-safe tools stay on because the written config does
@@ -27,9 +27,9 @@ pub const OLLAMA_NOT_RUNNING: &str = "Ollama is not running.";
 pub const OLLAMA_LIBRARY_URL: &str = "https://ollama.com/library";
 pub const OLLAMA_LIBRARY_UNAVAILABLE: &str = "Could not load the Ollama library.";
 
-/// Short OpenRouter pick list. Each id is either the schema default or was
+/// Short OpenRouter shortcut list. Each id is either the schema default or was
 /// present on `https://openrouter.ai/api/v1/models` when this list was set.
-/// Do not grow it into a typed model id.
+/// Not an allowlist — users may type any `provider/model` id (ADR 0017).
 pub const OPENROUTER_MODELS: &[&str] = &[
     "moonshotai/kimi-k2.6",
     "anthropic/claude-sonnet-4",
@@ -247,8 +247,45 @@ pub fn pull_request_body(name: &str, library_results: &[String]) -> Result<Value
     Ok(serde_json::json!({ "name": name.trim(), "stream": false }))
 }
 
+/// Catalog link shown next to the model field / printed in CLI (ADR 0017).
+pub const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/models";
+
+/// Non-empty after trim and must contain `/` (covers `openrouter/auto` and
+/// `:free` suffixes). The shortcut list is not an allowlist (ADR 0017).
+pub fn validate_openrouter_model(model: &str) -> Result<()> {
+    let model = model.trim();
+    if model.is_empty() {
+        bail!("OpenRouter model id is required");
+    }
+    if !model.contains('/') {
+        bail!("OpenRouter model id must contain '/' (e.g. provider/model)");
+    }
+    Ok(())
+}
+
 pub fn openrouter_model_allowed(model: &str) -> bool {
-    OPENROUTER_MODELS.contains(&model.trim())
+    validate_openrouter_model(model).is_ok()
+}
+
+/// CLI numbered pick: empty → default; `1..=len` → list entry; `len+1` → Other
+/// (then `typed` is validated). Pure so the Other path is unit-testable.
+pub fn openrouter_model_from_cli_choice(pick: &str, typed: Option<&str>) -> Result<String> {
+    let pick = pick.trim();
+    if pick.is_empty() {
+        return Ok(OPENROUTER_DEFAULT_MODEL.to_string());
+    }
+    let other = OPENROUTER_MODELS.len() + 1;
+    let idx: usize = pick
+        .parse()
+        .ok()
+        .filter(|n| (1..=other).contains(n))
+        .context("pick an OpenRouter model number")?;
+    if idx == other {
+        let id = typed.unwrap_or("").trim();
+        validate_openrouter_model(id)?;
+        return Ok(id.to_string());
+    }
+    Ok(OPENROUTER_MODELS[idx - 1].to_string())
 }
 
 /// A detected local name, or a library name after it has been pulled
@@ -297,9 +334,7 @@ pub fn render_config(answers: &ThinAnswers) -> Result<String> {
             }
             openrouter.insert("api_key".into(), toml::Value::String(key.to_string()));
             let model = answers.openrouter_model.trim();
-            if !openrouter_model_allowed(model) {
-                bail!("pick an OpenRouter model");
-            }
+            validate_openrouter_model(model)?;
             openrouter.insert("model".into(), toml::Value::String(model.to_string()));
         }
         ThinProvider::Ollama => {
@@ -485,8 +520,43 @@ mod tests {
         answers.openrouter_model = OPENROUTER_DEFAULT_MODEL.into();
         let cfg = parse(&render_config(&answers).unwrap());
         assert_eq!(cfg.openrouter.model, OPENROUTER_DEFAULT_MODEL);
+        // Typed id with `/` not on the shortcut list is accepted (ADR 0017).
         answers.openrouter_model = "not/a-real-model".into();
-        assert!(render_config(&answers).is_err());
+        let cfg = parse(&render_config(&answers).unwrap());
+        assert_eq!(cfg.openrouter.model, "not/a-real-model");
+        answers.openrouter_model = "".into();
+        let err = render_config(&answers).unwrap_err().to_string();
+        assert!(err.contains("required"), "{err}");
+        answers.openrouter_model = "   ".into();
+        let err = render_config(&answers).unwrap_err().to_string();
+        assert!(err.contains("required"), "{err}");
+        answers.openrouter_model = "no-slash".into();
+        let err = render_config(&answers).unwrap_err().to_string();
+        assert!(err.contains('/'), "{err}");
+        assert!(openrouter_model_allowed("openai/gpt-4o"));
+        assert!(!openrouter_model_allowed(""));
+        assert!(!openrouter_model_allowed("noslash"));
+    }
+
+    #[test]
+    fn openrouter_cli_choice_other_path_accepts_typed_id() {
+        assert_eq!(
+            openrouter_model_from_cli_choice("", None).unwrap(),
+            OPENROUTER_DEFAULT_MODEL
+        );
+        assert_eq!(
+            openrouter_model_from_cli_choice("1", None).unwrap(),
+            OPENROUTER_MODELS[0]
+        );
+        let other = (OPENROUTER_MODELS.len() + 1).to_string();
+        assert_eq!(
+            openrouter_model_from_cli_choice(&other, Some("acme/cool-model:free")).unwrap(),
+            "acme/cool-model:free"
+        );
+        assert!(openrouter_model_from_cli_choice(&other, Some("")).is_err());
+        assert!(openrouter_model_from_cli_choice(&other, Some("noslash")).is_err());
+        assert!(openrouter_model_from_cli_choice("0", None).is_err());
+        assert!(openrouter_model_from_cli_choice("99", None).is_err());
     }
 
     #[test]
@@ -624,7 +694,13 @@ mod tests {
         assert!(html.contains("id=\"f-telegram-token\""));
         assert!(html.contains("id=\"f-system-prompt\""));
         assert!(html.contains("id=\"f-openrouter-key\""));
-        assert!(html.contains("<select id=\"f-openrouter-model\""));
+        assert!(html.contains("id=\"f-openrouter-model\""));
+        assert!(html.contains("id=\"f-openrouter-model-pick\""));
+        assert!(html.contains(OPENROUTER_MODELS_URL));
+        // Client mirrors the server '/' rule (server stays authoritative).
+        assert!(html.contains("requireField('f-openrouter-model', v => v.includes('/'))"));
+        assert!(!html.contains("<select id=\"f-openrouter-model\""));
+        assert!(!html.contains("no typed id"));
         assert!(html.contains("<select id=\"f-ollama-model\""));
         assert!(html.contains("<select id=\"f-ollama-library\""));
         assert!(html.contains("id=\"f-ollama-search\""));

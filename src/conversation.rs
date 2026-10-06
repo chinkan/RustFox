@@ -250,13 +250,44 @@ impl ConversationManager {
         self.messages.push(steer_msg);
     }
 
-    /// Unified compaction pipeline (ADR 0003 Q1): compress the oldest
-    /// messages once total estimated tokens cross 85% of the real provider
-    /// window. The protected tail (last two user turns + active exchange,
-    /// never mid-tool-pair) stays verbatim. Durable facts are flushed to
-    /// USER.md before the running summary is extended. On summarizer
-    /// failure the pass is DEFERRED — nothing is truncated (Q7).
+    /// Unified compaction pipeline (ADR 0003 Q1 / ADR 0019 ③): compress the
+    /// oldest messages when estimated tokens of the full assembled request
+    /// (system + skills/soul already in the system message + history) cross
+    /// 85% of the real provider window. The protected tail (last two user
+    /// turns + active exchange, never mid-tool-pair) stays verbatim; system /
+    /// soul / skill bodies are never trimmed. Durable facts are flushed to
+    /// USER.md before the running summary is extended. On summarizer failure
+    /// the pass is DEFERRED — nothing is truncated (Q7). If still over the
+    /// watermark after a successful pass, runs one more in-turn compact
+    /// through the same pipeline (bounded at two passes).
     pub async fn compact_messages(&mut self, ctx: &CompactionContext<'_>) -> Result<bool> {
+        const MAX_IN_TURN_PASSES: usize = 2;
+        let mut compacted_any = false;
+        for pass in 0..MAX_IN_TURN_PASSES {
+            match self.compact_messages_once(ctx).await? {
+                true => {
+                    compacted_any = true;
+                    let trigger_tokens = (ctx.context_window as f64
+                        * crate::agent_prompt::COMPACT_TRIGGER_PCT)
+                        as usize;
+                    if crate::agent_prompt::estimate_tokens(&self.messages) <= trigger_tokens {
+                        break;
+                    }
+                    if pass + 1 < MAX_IN_TURN_PASSES {
+                        tracing::info!(
+                            pass = pass + 1,
+                            "Still over compaction watermark; running second in-turn compact"
+                        );
+                    }
+                }
+                false => break,
+            }
+        }
+        Ok(compacted_any)
+    }
+
+    /// Single compaction pass. Returns `true` when a summary layer was applied.
+    async fn compact_messages_once(&mut self, ctx: &CompactionContext<'_>) -> Result<bool> {
         if ctx.context_window == 0 {
             return Ok(false);
         }
@@ -271,6 +302,7 @@ impl ConversationManager {
         if tail_start == 0 || tail_start >= self.messages.len() {
             return Ok(false);
         }
+        // Skip index 0 (system / skills / soul) — never summarize or trim it.
         let range: Vec<&ChatMessage> = self.messages.iter().skip(1).take(tail_start - 1).collect();
         if range.is_empty() {
             return Ok(false);
@@ -405,7 +437,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::config::ProviderType;
-    use crate::provider::{OpenRouterProvider, ProviderConfig, ProviderRegistry};
+    use crate::llm::{ChatCompletion, ToolDefinition};
+    use crate::provider::{OpenRouterProvider, Provider, ProviderConfig, ProviderRegistry};
 
     /// A provider that always fails: empty base_url makes the request a
     /// relative URL, so reqwest errors out without touching the network.
@@ -432,6 +465,137 @@ mod tests {
             providers,
             "test".to_string(),
         )))
+    }
+
+    /// Stub provider that returns a fixed summary text (no network).
+    struct StubSummaryProvider {
+        config: ProviderConfig,
+        reply: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StubSummaryProvider {
+        fn new(reply: impl Into<String>) -> Self {
+            Self {
+                config: ProviderConfig {
+                    name: "stub".to_string(),
+                    provider_type: ProviderType::OpenRouter,
+                    base_url: "http://stub.invalid/v1".to_string(),
+                    api_key: None,
+                    default_model: "stub-model".to_string(),
+                    supports_vision: false,
+                    max_tokens: 256,
+                    discover_models: false,
+                    context_window: 4096,
+                    context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
+                    parse_retry_limit: 0,
+                    rate_limit_retry_limit: 0,
+                },
+                reply: reply.into(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn into_llm(self) -> LlmClient {
+            let mut providers = HashMap::new();
+            providers.insert("stub".to_string(), Arc::new(self) as Arc<dyn Provider>);
+            LlmClient::new(Arc::new(ProviderRegistry::new(
+                providers,
+                "stub".to_string(),
+            )))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for StubSummaryProvider {
+        fn name(&self) -> &str {
+            &self.config.name
+        }
+        fn default_model(&self) -> &str {
+            &self.config.default_model
+        }
+        fn supports_vision(&self) -> bool {
+            self.config.supports_vision
+        }
+        fn config(&self) -> &ProviderConfig {
+            &self.config
+        }
+
+        async fn chat_completion(
+            &self,
+            _client: &reqwest::Client,
+            _messages: &[ChatMessage],
+            _tools: &[ToolDefinition],
+            model: &str,
+            _max_tokens: u32,
+        ) -> anyhow::Result<ChatCompletion> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ChatCompletion {
+                message: ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(MessageContent::Text(self.reply.clone())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                finish_reason: Some("stop".to_string()),
+                model: model.to_string(),
+            })
+        }
+
+        async fn list_models(&self, _client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+            Ok(vec![self.config.default_model.clone()])
+        }
+    }
+
+    fn oversized_history(system: &str) -> Vec<ChatMessage> {
+        let mut messages = vec![ChatMessage {
+            role: "system".to_string(),
+            content: Some(MessageContent::Text(system.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "UNIQUE_KEYWORD_A long initial request {}",
+                "x".repeat(900)
+            ))),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        for i in 0..15 {
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::llm::ToolCall {
+                    id: format!("call_{i}"),
+                    call_type: "function".to_string(),
+                    function: crate::llm::FunctionCall {
+                        name: "search".to_string(),
+                        arguments: format!(r#"{{"q":"{}"}}"#, "y".repeat(120)),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text(format!(
+                    "tool result {}",
+                    "z".repeat(200)
+                ))),
+                tool_calls: None,
+                tool_call_id: Some(format!("call_{i}")),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text(
+                "UNIQUE_KEYWORD_B follow-up request".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        messages
     }
 
     fn manager(messages: Vec<ChatMessage>) -> ConversationManager {
@@ -845,6 +1009,100 @@ mod tests {
                 .unwrap()
                 .as_text(),
             "UNIQUE_KEYWORD_B follow-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_messages_over_watermark_applies_summary_layer() {
+        use crate::agent_prompt::estimate_tokens;
+
+        let mut cm = manager(oversized_history("system prompt"));
+        let tokens_before = estimate_tokens(&cm.messages);
+        assert!(tokens_before > 0);
+
+        let llm = StubSummaryProvider::new("LAYER_SUMMARY_OK old search turns").into_llm();
+        // Window == current estimate → already at 100% > 85% trigger.
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens_before,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        let compacted = cm.compact_messages(&ctx).await.unwrap();
+        assert!(compacted, "over watermark must trigger compaction");
+        assert!(
+            estimate_tokens(&cm.messages) < tokens_before,
+            "compaction must shrink estimated tokens"
+        );
+        assert_eq!(cm.messages[1].role, "system");
+        let summary = cm.messages[1].content.as_ref().unwrap().as_text();
+        assert!(
+            summary.contains("Previously compacted context"),
+            "summary injected as system message: {summary}"
+        );
+        assert!(
+            summary.contains("LAYER_SUMMARY_OK"),
+            "stub layer present: {summary}"
+        );
+        assert!(
+            cm.messages
+                .last()
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap()
+                .as_text()
+                .contains("UNIQUE_KEYWORD_B"),
+            "latest user intent stays verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_system_skills_and_soul_bodies() {
+        use crate::agent_prompt::estimate_tokens;
+
+        // Markers stand in for skill catalog + soul file bodies embedded in
+        // the assembled system prompt (ADR 0019 ③: never trim these).
+        let system = concat!(
+            "SYSTEM_PROMPT_MARKER full instructions
+",
+            "SOUL_BODY_MARKER identity and preferences verbatim forever
+",
+            "SKILL_BODY_MARKER complete skill documentation do not cut
+",
+            "more system padding ",
+        );
+        let system = format!("{system}{}", "S".repeat(200));
+        let mut cm = manager(oversized_history(&system));
+        let tokens_before = estimate_tokens(&cm.messages);
+        let llm = StubSummaryProvider::new("compacted older turns").into_llm();
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens_before,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+
+        let sys_text = cm.messages[0].content.as_ref().unwrap().as_text();
+        assert_eq!(cm.messages[0].role, "system");
+        assert!(
+            sys_text.contains("SYSTEM_PROMPT_MARKER"),
+            "system prompt intact"
+        );
+        assert!(
+            sys_text.contains("SOUL_BODY_MARKER identity and preferences verbatim forever"),
+            "soul body fully preserved: {sys_text}"
+        );
+        assert!(
+            sys_text.contains("SKILL_BODY_MARKER complete skill documentation do not cut"),
+            "skill body fully preserved: {sys_text}"
+        );
+        assert!(
+            sys_text.contains(&"S".repeat(200)),
+            "system padding not truncated"
         );
     }
 

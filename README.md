@@ -118,7 +118,7 @@ need the portal, plain `cargo install --path . --locked` still works.
 ./rustfox --setup --cli
 ```
 
-The wizard guides you through: Telegram bot token, allowed user IDs, LLM provider + API key, model, and optional MCP tools.
+The wizard guides you through provider (OpenRouter or Ollama), API key, model (shortcut list or any typed `provider/model` id), bot token, and system prompt.
 
 ### 3. Run
 
@@ -144,7 +144,7 @@ rustfox --service status
 | `[[bots]]` | Array of Telegram bots, each with `id`, `bot_token`, `allowed_user_ids`, `persona`, and optional `model` / `tools` overrides |
 | `telegram.*` | Legacy single-bot section (deprecated alias when `[[bots]]` is present) |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
-| `openrouter.model` | Default LLM model ID (default: `moonshotai/kimi-k2.6`) |
+| `openrouter.model` | Default LLM model ID (`provider/model`; wizard shortcuts or any typed id; default: `moonshotai/kimi-k2.6`) |
 | `[[provider]]` | Additional LLM providers (Ollama, LM Studio, any OpenAI-compatible endpoint); model strings use `provider/model_id` |
 | `[fallback] chain` | Ordered model fallback list, e.g. `["openrouter/…", "ollama/llama3.1"]` |
 | `[portal]` | Web portal settings (`enabled`, `port`, `bind`, `token_sha256`) |

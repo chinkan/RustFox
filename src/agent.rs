@@ -1026,8 +1026,10 @@ impl Agent {
         };
         cmgr.add_user_turn(user_msg);
 
-        // Per-turn compaction (ADR 0003 Q1): routine compaction runs once per
-        // user turn, before the agentic loop, at 85% of the real provider window.
+        // Per-turn compaction (ADR 0003 Q1 / ADR 0019 ③): runs before the
+        // agentic loop at 85% of the real provider window. compact_messages
+        // may apply a second in-turn pass if still over the watermark; it
+        // never trims system/soul/skill bodies (summarize history only).
         let current_model = self.current_model.read().await.clone();
         let context_window = self.registry.effective_context_window(&current_model);
         let compaction_model = self.config.learning.compaction_model.clone();
@@ -1049,10 +1051,6 @@ impl Agent {
                 "Per-turn compaction failed"
             );
         }
-
-        // Gather all tool definitions
-        let mut all_tools: Vec<ToolDefinition> = self.tool_registry.all_definitions();
-        all_tools.extend(self.mcp.tool_definitions());
 
         // --- LangSmith: start root chain run ---
         let chain_run_id = uuid::Uuid::new_v4().to_string();
@@ -1314,28 +1312,11 @@ impl Agent {
         )
         .await;
 
-        match outcome {
+        let (text, stop) = match outcome {
             Ok(crate::loop_runner::LoopOutcome::FinalResponse {
                 text: final_content,
                 iterations,
             }) => {
-                // Save the delivered content to persistent memory.
-                // A scheduled run's prompt and result are written by the job
-                // runner so failure, cancel, and max-iterations get a result
-                // turn too, with the schedule id on the segment.
-                if incoming.schedule_id.is_none() {
-                    let save_msg = ChatMessage {
-                        role: "assistant".to_string(),
-                        content: Some(MessageContent::from_text(final_content.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    };
-                    self.memory
-                        .save_message(&conversation_id, &save_msg)
-                        .await?;
-                }
-
-                // --- LangSmith: end chain run (success) ---
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
                     outputs: Some(serde_json::json!({
@@ -1345,21 +1326,7 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
-
-                self.clear_cancel_token(bot_id, user_id).await;
-
-                // Post-loop soul reflection: if the agent didn't update SOUL.md during the
-                // conversation but the soul_updated flag was set by a tool, fire a reflection
-                // update to capture session-end insights.
-                if self.soul_updated.load(std::sync::atomic::Ordering::Relaxed) {
-                    // The soul was already updated by update_soul_file tool during the conversation.
-                    // No need to fire a second reflection.
-                }
-
-                Ok(RunOutcome {
-                    text: final_content,
-                    stop: RunStop::FinalResponse,
-                })
+                (final_content, RunStop::FinalResponse)
             }
             Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
                 info!(
@@ -1372,11 +1339,7 @@ impl Agent {
                     error: Some("Cancelled by user".to_string()),
                     end_time: Self::now_iso8601_static(),
                 });
-                self.clear_cancel_token(bot_id, user_id).await;
-                Ok(RunOutcome {
-                    text: "Processing was cancelled.".to_string(),
-                    stop: RunStop::Cancelled,
-                })
+                ("Processing was cancelled.".to_string(), RunStop::Cancelled)
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
                 warn!(
@@ -1393,11 +1356,10 @@ impl Agent {
                     )),
                     end_time: Self::now_iso8601_static(),
                 });
-                self.clear_cancel_token(bot_id, user_id).await;
-                Ok(RunOutcome {
-                    text: "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
-                    stop: RunStop::MaxIterations,
-                })
+                (
+                    "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
+                    RunStop::MaxIterations,
+                )
             }
             Err(e) => {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
@@ -1407,9 +1369,28 @@ impl Agent {
                     end_time: Self::now_iso8601_static(),
                 });
                 self.clear_cancel_token(bot_id, user_id).await;
-                Err(e)
+                return Err(e);
             }
+        };
+        self.clear_cancel_token(bot_id, user_id).await;
+
+        // Every Ok reply is sent to the chat, so history keeps it too
+        // (final, cancelled, or max iterations). A scheduled run's prompt and
+        // result are written by the job runner's `write_schedule_segment`, so
+        // skip it here to avoid a double write.
+        if incoming.schedule_id.is_none() {
+            let save_msg = ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::from_text(text.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+            };
+            self.memory
+                .save_message(&conversation_id, &save_msg)
+                .await?;
         }
+
+        Ok(RunOutcome { text, stop })
     }
 
     /// Conversation a schedule run reads: the owning bot's chat with the user
@@ -1636,11 +1617,12 @@ impl Agent {
         Ok(())
     }
 
-    /// Get all tool definitions for display
+    /// Get all tool definitions (builtin → MCP), deduped by exact `function.name`
+    /// keep-first (ADR-0019 slice ②) before any provider/LLM call or display.
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut all = self.tool_registry.all_definitions();
         all.extend(self.mcp.tool_definitions());
-        all
+        crate::llm::dedupe_tool_definitions_keep_first(all)
     }
 
     /// Handle `invoke_agent` tool args with §7.5 peer depth/cycle guards and
@@ -1793,11 +1775,7 @@ impl Agent {
                 allowed_tools.len()
             );
 
-            let all_possible_tools: Vec<ToolDefinition> = {
-                let mut t = self.tool_registry.all_definitions();
-                t.extend(self.mcp.tool_definitions());
-                t
-            };
+            let all_possible_tools: Vec<ToolDefinition> = self.all_tool_definitions();
 
             let subagent_tools: Vec<ToolDefinition> = all_possible_tools
                 .into_iter()
@@ -1898,11 +1876,7 @@ impl Agent {
         );
 
         // Build the subagent tool definitions (filtered to whitelist only)
-        let all_possible_tools: Vec<ToolDefinition> = {
-            let mut t = self.tool_registry.all_definitions();
-            t.extend(self.mcp.tool_definitions());
-            t
-        };
+        let all_possible_tools: Vec<ToolDefinition> = self.all_tool_definitions();
 
         // Warn if any declared tool is not available at runtime (e.g. MCP server not configured).
         let available_names: Vec<String> = all_possible_tools

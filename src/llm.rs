@@ -111,6 +111,29 @@ pub struct FunctionDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Deduplicate tool definitions by exact `function.name`, keeping the **first**
+/// occurrence (ADR-0019 slice ② / Wafer `duplicate_tool_name`). Later duplicates
+/// are dropped; do not rename tools or change MCP prefix rules.
+pub fn dedupe_tool_definitions_keep_first(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let name = tool.function.name.clone();
+        if seen.insert(name.clone()) {
+            out.push(tool);
+        } else {
+            tracing::warn!(
+                tool_name = %name,
+                kept = "first",
+                "Dropping duplicate tool function.name; keeping first occurrence"
+            );
+        }
+    }
+    out
+}
+
 /// Completion wrapper that preserves metadata alongside the assistant message.
 #[derive(Debug, Clone)]
 pub struct ChatCompletion {
@@ -362,9 +385,10 @@ pub struct LlmClient {
     pub client: reqwest::Client,
     pub registry: Arc<crate::provider::ProviderRegistry>,
     /// Ordered fallback chain of fully-qualified `provider/model` names tried
-    /// (after the primary) when a call dies with a *transient* HTTP error
-    /// (429/5xx — see [`crate::provider::LlmHttpError`]). Empty (default) =
-    /// ADR-0009 behaviour exactly: primary only. ADR-0012.
+    /// (after the primary) on almost any failure (ADR-0019; amends ADR-0012).
+    /// Hard-excludes only HTTP 401/403 and pre-HTTP config errors — see
+    /// [`crate::provider::should_walk_fallback`]. Empty (default) = ADR-0009
+    /// behaviour exactly: primary only.
     pub fallback_chain: Vec<String>,
 }
 
@@ -407,12 +431,9 @@ impl LlmClient {
             Ok(completion) => return Ok(completion),
             Err(e) => e,
         };
-        // Only transient (429/5xx) failures justify switching model — a 400
-        // would fail identically on every candidate (ADR-0012 trigger rule).
-        let transient = primary_err
-            .downcast_ref::<crate::provider::LlmHttpError>()
-            .is_some_and(|e| e.is_transient());
-        if !transient || self.fallback_chain.is_empty() {
+        // ADR-0019: walk on any failure except hard exclusions (401/403,
+        // pre-HTTP missing-key/config). 400/402/timeout/network/parse all walk.
+        if !crate::provider::should_walk_fallback(&primary_err) || self.fallback_chain.is_empty() {
             return Err(primary_err);
         }
         let mut last_err = primary_err;
@@ -440,12 +461,9 @@ impl LlmClient {
                     return Ok(completion);
                 }
                 Err(e) => {
-                    let still_transient = e
-                        .downcast_ref::<crate::provider::LlmHttpError>()
-                        .is_some_and(|x| x.is_transient());
-                    if !still_transient {
-                        // Non-transient on a fallback: resending elsewhere is
-                        // pointless; surface it (usually config/compat error).
+                    if !crate::provider::should_walk_fallback(&e) {
+                        // Auth hard-exclusion on a backup: surface it — do not
+                        // keep hammering later chain entries with a bad key story.
                         return Err(e);
                     }
                     last_err = e;
@@ -678,6 +696,68 @@ mod tests {
         assert!(
             result.is_ok(),
             "stream_text must return Ok even when receiver is dropped"
+        );
+    }
+
+    fn make_tool(name: &str, description: &str) -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.to_string(),
+                description: description.to_string(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            },
+        }
+    }
+
+    #[test]
+    fn test_dedupe_tool_definitions_keep_first_drops_later_duplicates() {
+        let tools = vec![
+            make_tool("alpha", "first-alpha"),
+            make_tool("beta", "only-beta"),
+            make_tool("alpha", "second-alpha"),
+            make_tool("gamma", "only-gamma"),
+            make_tool("beta", "second-beta"),
+        ];
+        let deduped = dedupe_tool_definitions_keep_first(tools);
+        let names: Vec<&str> = deduped.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+        assert_eq!(deduped[0].function.description, "first-alpha");
+        assert_eq!(deduped[1].function.description, "only-beta");
+    }
+
+    #[test]
+    fn test_dedupe_tool_definitions_wafer_style_high_index_duplicate() {
+        // Regression for Wafer `duplicate_tool_name` at tools[155]-style payloads:
+        // a long tool list with a late duplicate must not retain two identical names.
+        let mut tools: Vec<ToolDefinition> = (0..160)
+            .map(|i| make_tool(&format!("tool_{i}"), &format!("desc_{i}")))
+            .collect();
+        // Insert a duplicate of tools[10] at index 155.
+        tools[155] = make_tool("tool_10", "late-duplicate-of-tool-10");
+        let deduped = dedupe_tool_definitions_keep_first(tools);
+        let names: Vec<&str> = deduped.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(names.len(), 159, "exactly one duplicate should be dropped");
+        assert_eq!(
+            names.iter().filter(|n| **n == "tool_10").count(),
+            1,
+            "tool_10 must appear exactly once"
+        );
+        let tool_10 = deduped
+            .iter()
+            .find(|t| t.function.name == "tool_10")
+            .expect("tool_10 kept");
+        assert_eq!(
+            tool_10.function.description, "desc_10",
+            "first occurrence must be kept"
+        );
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "no duplicate function.name remains"
         );
     }
 
@@ -985,7 +1065,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // ADR-0012: request-layer fallback chain (wiremock matrix)
+    // ADR-0012 / ADR-0019: request-layer fallback chain (wiremock matrix)
     // ---------------------------------------------------------------
 
     use crate::config::ProviderType;
@@ -1136,12 +1216,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn fallback_400_never_switches_models() {
+    async fn fallback_400_walks_to_backup_and_rewrites_model() {
+        // ADR-0019: top-level 400 (incl. OpenRouter envelopes) MUST walk.
         let server = MockServer::start().await;
         mount_model(
             &server,
             "m1",
             ResponseTemplate::new(400).set_body_string("bad"),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p2/m2");
+        assert_eq!(
+            c.message.content.as_ref().map(|m| m.as_text()).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_401_never_walks() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(401).set_body_string("bad key"),
         )
         .await;
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1162,11 +1271,151 @@ mod tests {
             .unwrap_err();
         assert!(
             err.downcast_ref::<crate::provider::LlmHttpError>()
-                .is_some_and(|e| e.status == 400),
-            "typed error must carry status"
+                .is_some_and(|e| e.status == 401),
+            "typed 401 must surface: {err}"
         );
-        // m2 mock exists but must never have been consulted.
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "400 must not switch models");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "401 must not walk fallback");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_403_never_walks() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(403).set_body_string("forbidden"),
+        )
+        .await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::provider::LlmHttpError>()
+                .is_some_and(|e| e.status == 403),
+            "typed 403 must surface: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "403 must not walk fallback");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_402_walks_to_backup() {
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": { "code": 402, "message": "Payment Required" }
+            })),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(
+            c.model, "p2/m2",
+            "402 credits must still reach local/backup"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_envelope_400_with_inner_429_walks() {
+        // Observed Kan failure shape: outer HTTP 400 + previous_errors 429.
+        let envelope = serde_json::json!({
+            "error": {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": { "provider_name": "InferenceNet" }
+            },
+            "previous_errors": [
+                {
+                    "code": 429,
+                    "message": "Rate limit",
+                    "metadata": { "error_type": "rate_limit_exceeded" }
+                }
+            ]
+        });
+        let insight = crate::provider::parse_openrouter_envelope(&envelope.to_string())
+            .expect("envelope must parse");
+        assert!(
+            insight.has_transient_inner(),
+            "inner 429 / rate_limit_exceeded must classify as transient: {insight:?}"
+        );
+        assert!(insight.inner_codes.contains(&429));
+        assert!(insight
+            .error_types
+            .iter()
+            .any(|t| t == "rate_limit_exceeded"));
+
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(400).set_body_json(envelope),
+        )
+        .await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p2/m2");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_connect_fail_walks_to_backup() {
+        // Primary points at a closed local port (never HTTP); backup is healthy.
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "m2",
+            ResponseTemplate::new(200).set_body_string(ok_body()),
+        )
+        .await;
+        let mut providers = std::collections::HashMap::new();
+        let dead: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", "http://127.0.0.1:1".to_string(), "m1"),
+        ));
+        let live: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p2", server.uri(), "m2"),
+        ));
+        providers.insert("p1".to_string(), dead);
+        providers.insert("p2".to_string(), live);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p2/m2", "connect/network fail must walk");
     }
 
     #[tokio::test(start_paused = true)]
