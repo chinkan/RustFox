@@ -86,6 +86,16 @@ async fn main() -> Result<()> {
                 .map(|h| h.join(".rustfox"))
                 .unwrap_or_else(|| std::path::PathBuf::from(".rustfox"))
         });
+        // Issue #156: older wizards sealed beside config.toml, not in home.
+        let config_dir = config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        match rustfox::secret_store::import_config_dir_vault(config_dir, &home) {
+            Ok(0) => {}
+            Ok(n) => info!("  Copied {n} secret(s) from the vault beside config.toml"),
+            Err(e) => warn!("  Old vault beside config.toml not imported: {e:#}"),
+        }
         match rustfox::secret_store::open(&home) {
             Ok((store, backend)) => {
                 info!("  Secret store: {:?}", backend);

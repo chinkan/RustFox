@@ -452,14 +452,12 @@ async fn serve_index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-/// Open SecretStore beside `config_path` and seal plaintext bot tokens and the
+/// Open the SecretStore the bot will open for this config (not the folder
+/// beside `config.toml`, issue #156) and seal plaintext bot tokens and the
 /// `[openrouter].api_key` (ADR 0016) so
 /// the written file never contains them (wizard first-save / re-save).
-fn seal_credentials_for_wizard_write(config_path: &Path, content: &str) -> anyhow::Result<String> {
-    let home = config_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+fn seal_credentials_for_wizard_write(content: &str) -> anyhow::Result<String> {
+    let home = crate::home::home_for_config_text(content)?;
     let (store, _) = crate::secret_store::open(&home)?;
     let (sealed, n) =
         crate::secret_store::seal_plaintext_bot_tokens_in_config(content, store.as_ref())?;
@@ -725,16 +723,13 @@ async fn persist_wizard_toml(
         wizard_toml
     };
 
-    let path_for_seal = config_path.to_path_buf();
-    let sealed = tokio::task::spawn_blocking(move || {
-        seal_credentials_for_wizard_write(&path_for_seal, &content)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| {
-        eprintln!("save-config SecretStore seal failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let sealed = tokio::task::spawn_blocking(move || seal_credentials_for_wizard_write(&content))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            eprintln!("save-config SecretStore seal failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     tokio::fs::write(config_path, &sealed)
         .await
@@ -757,10 +752,8 @@ async fn add_bot(
     let token = body.bot_token.clone();
     let uid = body.allowed_user_id;
     let result = tokio::task::spawn_blocking(move || {
-        let home = path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let home = crate::home::home_for_config_text(&text)?;
         let (store, _) = crate::secret_store::open(&home)?;
         crate::agents_edit::append_bot_binding(&path, &id, &token, uid, store.as_ref())
     })
@@ -1215,7 +1208,7 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
     } else {
         config
     };
-    let sealed = seal_credentials_for_wizard_write(&config_path, &to_write)
+    let sealed = seal_credentials_for_wizard_write(&to_write)
         .context("Failed to seal bot tokens into SecretStore before wizard write")?;
     std::fs::write(&config_path, &sealed)
         .with_context(|| format!("Could not write {}", config_path.display()))?;
@@ -1608,6 +1601,49 @@ mod tests {
         assert_eq!(
             store.get("bot.default.token").unwrap().unwrap().expose(),
             "111111111:AAWizardCliFirstSaveTokenXX"
+        );
+    }
+
+    // Issue #156: the wizard must seal into the vault the bot opens (the
+    // resolved home), not `<config_dir>/secrets/vault`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wizard_seal_writes_the_vault_the_bot_opens() {
+        use crate::secret_store::{default_vault_path, EncryptedFileSecretStore, SecretStore};
+        if std::env::var_os("RUSTFOX_HOME").is_some() {
+            return; // env home would win over [general].home
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let raw = cfg(
+            "111111111:AAVaultPathTokenXX",
+            "1",
+            "sk-156",
+            "m",
+            "",
+            "",
+            "",
+        );
+        let mut t: toml::Table = toml::from_str(&raw).unwrap();
+        t.entry("general")
+            .or_insert(toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .unwrap()
+            .insert("home".into(), home.display().to_string().into());
+        let content = toml::to_string(&t).unwrap();
+
+        let sealed = seal_credentials_for_wizard_write(&content).unwrap();
+
+        assert!(!sealed.contains("sk-156"));
+        let vault = EncryptedFileSecretStore::open(&default_vault_path(&home)).unwrap();
+        assert_eq!(
+            vault.get("openrouter.api_key").unwrap().unwrap().expose(),
+            "sk-156"
+        );
+        assert_eq!(
+            crate::home::home_for_config_text(&sealed).unwrap(),
+            home,
+            "the bot resolves the same home from the written config"
         );
     }
 

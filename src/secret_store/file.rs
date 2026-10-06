@@ -53,6 +53,12 @@ impl EncryptedFileSecretStore {
         })
     }
 
+    /// Every stored `(name, value)` pair, for a one-time copy into another store.
+    pub(crate) fn entries(&self) -> Vec<(String, String)> {
+        let map = self.cache.lock().expect("file secret store lock");
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
     fn persist_locked(&self, map: &HashMap<String, String>) -> Result<()> {
         encrypt_and_write(&self.vault_path, &self.key, map)
     }

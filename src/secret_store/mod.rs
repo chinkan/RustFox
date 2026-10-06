@@ -178,6 +178,34 @@ fn set_verified(store: &dyn SecretStore, name: &str, value: &str) -> Result<()> 
     }
 }
 
+/// Copy secrets an older wizard sealed beside `config.toml`
+/// (`<config_dir>/secrets/vault`) into the home vault when that folder is not
+/// the home (issue #156). Call before [`open`]. File-to-file on purpose: a
+/// stale keyutils copy must not shadow the newer wizard value. Names already in
+/// the home vault win; the old vault is left in place. Returns how many were copied.
+pub fn import_config_dir_vault(config_dir: &Path, home: &Path) -> Result<usize> {
+    let old_vault = default_vault_path(config_dir);
+    let same_dir = match (config_dir.canonicalize(), home.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => config_dir == home,
+    };
+    if same_dir || !old_vault.exists() || !default_vault_key_path(config_dir).exists() {
+        return Ok(0);
+    }
+    let old = EncryptedFileSecretStore::open(&old_vault)
+        .with_context(|| format!("open old secret vault at {}", old_vault.display()))?;
+    let store = open_vault(home)?;
+    let mut copied = 0;
+    for (name, value) in old.entries() {
+        if !store.exists(&name)? {
+            set_verified(&store, &name, &value)
+                .with_context(|| format!("copy secret `{name}` from {}", old_vault.display()))?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
 /// Default encrypted vault path under the RustFox home.
 pub fn default_vault_path(home: &Path) -> PathBuf {
     home.join("secrets").join("vault")
@@ -192,6 +220,51 @@ pub fn default_vault_key_path(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn config_dir_vault_secrets_are_copied_without_overwriting() {
+        let tmp = tempdir().unwrap();
+        let config_dir = tmp.path().join("downloads");
+        let home = tmp.path().join(".rustfox");
+        let old = EncryptedFileSecretStore::open(&default_vault_path(&config_dir)).unwrap();
+        old.set("openrouter.api_key", "sk-old").unwrap();
+        old.set("bot.default.token", "123:abc").unwrap();
+        EncryptedFileSecretStore::open(&default_vault_path(&home))
+            .unwrap()
+            .set("bot.default.token", "999:new")
+            .unwrap();
+
+        let n = import_config_dir_vault(&config_dir, &home).unwrap();
+
+        assert_eq!(n, 1);
+        let store = EncryptedFileSecretStore::open(&default_vault_path(&home)).unwrap();
+        let get = |k| store.get(k).unwrap().unwrap().expose().to_string();
+        assert_eq!(get("openrouter.api_key"), "sk-old");
+        assert_eq!(get("bot.default.token"), "999:new", "home vault must win");
+        assert!(
+            default_vault_path(&config_dir).exists(),
+            "old vault is kept"
+        );
+        // Second run copies nothing.
+        assert_eq!(import_config_dir_vault(&config_dir, &home).unwrap(), 0);
+    }
+
+    #[test]
+    fn config_dir_vault_import_is_a_no_op_for_home_or_missing_vault() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        EncryptedFileSecretStore::open(&default_vault_path(&home))
+            .unwrap()
+            .set("a", "1")
+            .unwrap();
+        assert_eq!(import_config_dir_vault(&home, &home).unwrap(), 0);
+        let empty = tmp.path().join("empty");
+        assert_eq!(import_config_dir_vault(&empty, &home).unwrap(), 0);
+        assert!(
+            !default_vault_key_path(&empty).exists(),
+            "no stray key file"
+        );
+    }
 
     #[test]
     fn validate_name_accepts_safe_identifiers() {
