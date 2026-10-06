@@ -76,7 +76,7 @@ rten = { version = "0.26", features = ["rten_format"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 # Document processing
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 docx-rs = "0.4"
 
 # MIME type detection
