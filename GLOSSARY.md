@@ -27,3 +27,7 @@ _Avoid_: injection map, pending injections
 **Steer**:
 Injecting a queued user message into the running turn between loop iterations (never mid-tool), so the final reply covers it. Default `/mode`; scheduled runs are never steered (ADR-0020).
 _Avoid_: interrupt, preempt
+
+**Schedule timezone**:
+The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR rows keep `UTC` until the user changes them. Shown in the portal Tasks page (ADR-0022).
+_Avoid_: server time, UTC offset (`+08:00`)
