@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use super::error::PortalError;
 use super::PortalState;
-use crate::agent::{parse_one_shot_delay, validate_cron_expr};
+use crate::agent::{normalize_cron_expr, parse_one_shot_delay};
 use crate::scheduler::reminders::ScheduledTask;
 
 fn now_iso() -> String {
@@ -67,9 +67,12 @@ pub async fn task_create(
             "name (description) must not be empty",
         ));
     }
+    let mut trigger_value = body.trigger_value.clone();
     match body.trigger_type.as_str() {
-        "recurring" => validate_cron_expr(&body.trigger_value)
-            .map_err(|e| PortalError::bad_request("invalid_cron", e.to_string()))?,
+        "recurring" => {
+            trigger_value = normalize_cron_expr(&body.trigger_value)
+                .map_err(|e| PortalError::bad_request("invalid_cron", e.to_string()))?
+        }
         "one_shot" => {
             parse_one_shot_delay(&body.trigger_value)
                 .map_err(|e| PortalError::bad_request("invalid_trigger", e.to_string()))?;
@@ -101,7 +104,7 @@ pub async fn task_create(
             .unwrap_or_default(),
         platform: "portal".to_string(),
         trigger_type: body.trigger_type.clone(),
-        trigger_value: body.trigger_value.clone(),
+        trigger_value: trigger_value.clone(),
         prompt: body.prompt.clone(),
         description: name.clone(),
         status: "active".to_string(),
@@ -145,6 +148,7 @@ pub async fn task_create(
                 Json(json!({
                     "id": id,
                     "name": name,
+                    "triggerValue": trigger_value,
                     "schedulerJobId": job_id.to_string(),
                     "nextRun": next_run,
                 })),
@@ -200,7 +204,7 @@ pub async fn task_update(
     }
 
     let new_prompt = body.prompt.clone().filter(|s| !s.trim().is_empty());
-    let new_value = body.trigger_value.clone().filter(|s| !s.trim().is_empty());
+    let mut new_value = body.trigger_value.clone().filter(|s| !s.trim().is_empty());
     let new_name = body.name.clone().filter(|s| !s.trim().is_empty());
     if new_prompt.is_none() && new_value.is_none() && new_name.is_none() {
         return Err(PortalError::bad_request(
@@ -210,14 +214,15 @@ pub async fn task_update(
     }
     // fall back to current values for validation of combined state
     let eff_prompt = new_prompt.clone().unwrap_or_else(|| task.prompt.clone());
-    let eff_value = new_value
+    let mut eff_value = new_value
         .clone()
         .unwrap_or_else(|| task.trigger_value.clone());
     let eff_name = new_name.clone().unwrap_or_else(|| task.description.clone());
 
     if task.trigger_type == "recurring" && body.trigger_value.is_some() {
-        validate_cron_expr(&eff_value)
+        eff_value = normalize_cron_expr(&eff_value)
             .map_err(|e| PortalError::bad_request("invalid_cron", e.to_string()))?;
+        new_value = Some(eff_value.clone());
     }
     if task.trigger_type == "one_shot" && body.trigger_value.is_some() {
         parse_one_shot_delay(&eff_value)

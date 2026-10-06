@@ -93,7 +93,7 @@ impl ToolHandler for SchedulingTools {
                         "type": "object",
                         "properties": {
                             "trigger_type": { "type": "string", "enum": ["one_shot", "recurring"] },
-                            "trigger_value": { "type": "string", "description": "ISO 8601 (one_shot) or 6-field cron (recurring)" },
+                            "trigger_value": { "type": "string", "description": "ISO 8601 (one_shot) or cron (recurring): 5 fields 'min hour day month weekday' or 6 fields 'sec min hour day month weekday'. Evaluated in UTC. Stored as 6 fields (seconds added as 0)." },
                             "prompt": { "type": "string", "description": "The message the agent will process" },
                             "description": { "type": "string", "description": "Human-readable label" }
                         },
@@ -182,7 +182,7 @@ impl ToolHandler for SchedulingTools {
                     .as_str()
                     .context("Missing 'trigger_type'")?
                     .to_string();
-                let trigger_value = args["trigger_value"]
+                let mut trigger_value = args["trigger_value"]
                     .as_str()
                     .context("Missing 'trigger_value'")?
                     .to_string();
@@ -195,14 +195,14 @@ impl ToolHandler for SchedulingTools {
                     .context("Missing 'description'")?
                     .to_string();
 
+                use crate::agent::normalize_cron_expr;
                 use crate::agent::parse_one_shot_delay;
-                use crate::agent::validate_cron_expr;
 
                 if trigger_type == "one_shot" {
                     parse_one_shot_delay(&trigger_value)
                         .map_err(|e| anyhow::anyhow!("Invalid trigger: {e}"))?;
                 } else if trigger_type == "recurring" {
-                    validate_cron_expr(&trigger_value)
+                    trigger_value = normalize_cron_expr(&trigger_value)
                         .map_err(|e| anyhow::anyhow!("Invalid cron expression: {e}"))?;
                 } else {
                     anyhow::bail!(
@@ -631,6 +631,28 @@ mod tests {
             (tg.bot_id.as_str(), tg.user_id.as_str(), tg.chat_id.as_str()),
             (crate::platform::DEFAULT_BOT_ID, "7", "555")
         );
+    }
+
+    /// ADR-0021: a 5-field cron is padded with seconds `0`, stored, and shown.
+    #[tokio::test]
+    async fn schedule_task_pads_five_field_cron() {
+        let (tools, store, _fake, _queue) = build_tools().await;
+        let out = tools
+            .execute(
+                "schedule_task",
+                json!({
+                    "trigger_type": "recurring",
+                    "trigger_value": "0 9 * * *",
+                    "prompt": "say hi",
+                    "description": "daily hi"
+                }),
+                make_ctx("80180742"),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("(0 0 9 * * *)"), "unexpected output: {out}");
+        let tasks = store.list_all_active().await.unwrap();
+        assert_eq!(tasks[0].trigger_value, "0 0 9 * * *");
     }
 
     /// Regression (issue #109, Bug 2): `schedule_task` must persist the live

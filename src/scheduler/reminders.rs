@@ -354,6 +354,33 @@ impl ScheduledTaskStore {
         }
     }
 
+    /// ADR-0021 restore heal: pad a legacy 5-field recurring cron with
+    /// seconds `0`, in place and in the DB. `Err` means the stored cron is
+    /// invalid and the caller must leave the row unarmed. A failed DB write
+    /// only warns — the in-memory value is still normalised so the job arms.
+    pub async fn normalize_stored_cron(&self, task: &mut ScheduledTask) -> Result<()> {
+        if task.trigger_type != "recurring" {
+            return Ok(());
+        }
+        let n = crate::agent::normalize_cron_expr(&task.trigger_value)?;
+        if n != task.trigger_value {
+            tracing::info!(
+                "Normalised 5-field cron for task {}: '{}' → '{}'",
+                task.id,
+                task.trigger_value,
+                n
+            );
+            if let Err(e) = self
+                .update_task_fields(&task.id, None, Some(&n), None, None)
+                .await
+            {
+                tracing::warn!("Could not persist normalised cron for {}: {e}", task.id);
+            }
+            task.trigger_value = n;
+        }
+        Ok(())
+    }
+
     /// Partial update for the portal task editor (T3). `None` arguments are
     /// left untouched (COALESCE); `next_run = Some(x)` writes `x` (which may
     /// be NULL to clear it for recurring edits). Returns rows affected
@@ -583,6 +610,35 @@ mod tests {
         }
     }
 
+    /// ADR-0021: restore rewrites a 5-field row, leaves a 6-field row alone,
+    /// and refuses a 7-field row.
+    #[tokio::test]
+    async fn normalize_stored_cron_heals_five_skips_six_rejects_seven() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+        let mut five = make_task("five", "u", "recurring");
+        five.trigger_value = "0 9 * * *".into();
+        let mut six = make_task("six", "u", "recurring");
+        six.trigger_value = "0 0 4 * * *".into();
+        let mut seven = make_task("seven", "u", "recurring");
+        seven.trigger_value = "0 0 9 * * * 2026".into();
+        for t in [&five, &six, &seven] {
+            store.create(t).await.unwrap();
+        }
+
+        store.normalize_stored_cron(&mut five).await.unwrap();
+        assert_eq!(five.trigger_value, "0 0 9 * * *");
+        let row = store.get_by_id("five").await.unwrap().unwrap();
+        assert_eq!(row.trigger_value, "0 0 9 * * *");
+
+        store.normalize_stored_cron(&mut six).await.unwrap();
+        assert_eq!(six.trigger_value, "0 0 4 * * *");
+
+        assert!(store.normalize_stored_cron(&mut seven).await.is_err());
+        let row = store.get_by_id("seven").await.unwrap().unwrap();
+        assert_eq!(row.trigger_value, "0 0 9 * * * 2026");
+    }
+
     #[tokio::test]
     async fn test_create_and_list() {
         let memory = MemoryStore::open_in_memory().unwrap();
@@ -735,8 +791,13 @@ mod tests {
         // 6-field weekday morning → first Monday 09:00 after Thu 2026-01-01
         let next_mon = next_cron_occurrence("0 0 9 * * MON", after).expect("weekday");
         assert_eq!(next_mon.to_rfc3339(), "2026-01-05T09:00:00+00:00");
-        // 5-field must not parse under Seconds::Required
+        // Raw 5-field must not parse under Seconds::Required ...
         assert!(next_cron_occurrence("0 9 * * *", after).is_none());
+        // ... but ADR-0021 normalisation pads it to the next 09:00:00 UTC.
+        let padded = crate::agent::normalize_cron_expr("0 9 * * *").unwrap();
+        assert_eq!(padded, "0 0 9 * * *");
+        let next_9 = next_cron_occurrence(&padded, after).expect("padded");
+        assert_eq!(next_9.to_rfc3339(), "2026-01-01T09:00:00+00:00");
         // Sloppy step form tokio-cron-scheduler documents (`1/10`) still works
         let next_sloppy = next_cron_occurrence("0 1/10 * * * *", after).expect("sloppy step");
         assert_eq!(next_sloppy.to_rfc3339(), "2026-01-01T00:01:00+00:00");

@@ -359,8 +359,8 @@ export interface TaskEnableResult {
   nextRun: string | null
 }
 
-/** Heuristic 6-field cron check (the server gate is the real parser). */
-export const CRON_6_FIELD = /^(\S+\s+){5}\S+$/
+/** Heuristic 5- or 6-field cron check (the server gate is the real parser). */
+export const CRON_5_OR_6_FIELD = /^(\S+\s+){4,5}\S+$/
 
 // ---------------------------------------------------------------------------
 // Dashboard
