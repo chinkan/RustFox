@@ -29,5 +29,5 @@ Injecting a queued user message into the running turn between loop iterations (n
 _Avoid_: interrupt, preempt
 
 **Schedule timezone**:
-The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR rows keep `UTC` until the user changes them. Shown in the portal Tasks page (ADR-0022).
+The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR recurring rows keep `UTC` and pre-ADR one-shot rows get the system local zone, so no fire time changes; the user can change them later. Shown in the portal Tasks page (ADR-0022).
 _Avoid_: server time, UTC offset (`+08:00`)
