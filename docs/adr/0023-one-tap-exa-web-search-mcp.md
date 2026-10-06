@@ -1,6 +1,6 @@
 # ADR-0023: One-tap built-in Exa MCP for web search
 
-- **Status:** Proposed (PO locks 2026-10-06; Product GO pending PO review of this ADR)
+- **Status:** Accepted (Product GO 2026-10-06)
 - **Date:** 2026-10-06
 - **Issue:** none yet. Tracked in the Notion task "Setup: one-tap built-in MCP"; a GitHub
   issue will be opened for the implementation.
@@ -204,19 +204,18 @@ Facts in the current code that shape the decision:
 ## Open questions
 
 1. **Per-bot `tools` allowlists.** Bots may set `tools = [...]` (the researcher example lists
-   `"web_search"`). Proposed: an allowlist entry `web_search` also admits the Exa tools when
-   Exa is on; bots without an allowlist get them by default. Needs TL confirmation.
+   `"web_search"`). **Decided:** an allowlist entry `web_search` also admits the Exa tools
+   (`mcp_exa_web_search_exa`, `mcp_exa_web_fetch_exa`) when Exa is on; bots without an
+   allowlist get them by default.
 2. **Hand-written `exa` row.** If `config.toml` already has `[[mcp_servers]] name = "exa"`,
-   tool names collide. Proposed: the manual row wins, and the portal shows Exa as "configured
-   in config.toml" with the toggle disabled. Needs TL confirmation.
-3. **Ollama and the proactive offer.** Ollama users chose a local model. Should the stub
-   offer still appear for bots on an Ollama provider, or should the stub be skipped there?
-   Proposed: same behavior, since consent is still required. Needs PO confirmation.
-4. **Portal chat.** The proactive offer is specified for Telegram. Proposed: the portal chat
-   shows the same "not enabled" answer and links to Settings, with the same once-per-
-   conversation rule. Needs PO confirmation.
-5. **Storage for `enabled` / `privacy_accepted_at`.** Config section vs SQLite, decided in the
-   implementation PR.
+   tool names collide. **Decided:** the hand-written `[[mcp_servers]] name = "exa"` row wins;
+   the portal shows Exa as "configured in config.toml" with the toggle disabled.
+3. **Ollama and the proactive offer.** Ollama users chose a local model. **Decided:** Ollama
+   bots also get the stub offer; the user must still consent.
+4. **Portal chat.** The proactive offer is specified for Telegram. **Decided:** portal chat
+   uses the same once-per-conversation rule and links to Settings.
+5. **Storage for `enabled` / `privacy_accepted_at`.** Config section vs SQLite. **Left to
+   implementation.**
 
 ## Follow-ups
 
