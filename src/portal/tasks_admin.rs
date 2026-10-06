@@ -41,8 +41,8 @@ pub struct CreateTaskBody {
     trigger_value: String,
 }
 
-fn portal_owns(task: &ScheduledTask) -> Result<(), PortalError> {
-    if task.bot_id == crate::platform::DEFAULT_BOT_ID {
+fn portal_owns(state: &PortalState, task: &ScheduledTask) -> Result<(), PortalError> {
+    if task.bot_id == state.bot_id() {
         Ok(())
     } else {
         Err(PortalError::not_found("task"))
@@ -105,7 +105,7 @@ pub async fn task_create(
         prompt: body.prompt.clone(),
         description: name.clone(),
         status: "active".to_string(),
-        bot_id: crate::platform::DEFAULT_BOT_ID.to_string(),
+        bot_id: state.bot_id(),
         created_at: now_iso(),
         next_run_at: if body.trigger_type == "one_shot" {
             Some(body.trigger_value.clone())
@@ -188,7 +188,7 @@ pub async fn task_update(
         .map_err(PortalError::internal)?
         .filter(|t| t.deleted_at.is_none())
         .ok_or_else(|| PortalError::not_found("task"))?;
-    portal_owns(&task)?;
+    portal_owns(&state, &task)?;
 
     if let Some(tt) = &body.trigger_type {
         if tt != &task.trigger_type {
@@ -315,7 +315,7 @@ pub async fn task_delete(
         .map_err(PortalError::internal)?
         .filter(|t| t.deleted_at.is_none())
         .ok_or_else(|| PortalError::not_found("task"))?;
-    portal_owns(&task)?;
+    portal_owns(&state, &task)?;
 
     let _ = state.agent.disarm_task(task.clone()).await;
     let n = state
@@ -346,7 +346,7 @@ pub async fn task_enable(
         .map_err(PortalError::internal)?
         .filter(|t| t.deleted_at.is_none())
         .ok_or_else(|| PortalError::not_found("task"))?;
-    portal_owns(&task)?;
+    portal_owns(&state, &task)?;
 
     state
         .task_store
@@ -410,7 +410,7 @@ pub async fn task_disable(
         .map_err(PortalError::internal)?
         .filter(|t| t.deleted_at.is_none())
         .ok_or_else(|| PortalError::not_found("task"))?;
-    portal_owns(&task)?;
+    portal_owns(&state, &task)?;
 
     let removed = state.agent.disarm_task(task.clone()).await;
     state
