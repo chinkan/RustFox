@@ -12,7 +12,7 @@ tokio-util = { version = "0.7" }
 teloxide = { version = "0.17", features = ["macros"] }
 
 # HTTP client for OpenRouter
-reqwest = { version = "0.13", features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy", "json", "stream", "form"] }
 
 # Self-update for release binary upgrades
 self_update = { version = "0.44", features = ["archive-tar", "compression-flate2", "archive-zip"] }
