@@ -116,9 +116,8 @@ async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(PortalError::internal)?;
-    content
-        .parse::<toml::Value>()
-        .map_err(|e| PortalError::internal(format!("Config parse error: {e}")))
+    // toml 1.x Value::from_str is single-value only; from_str parses documents.
+    toml::from_str(&content).map_err(|e| PortalError::internal(format!("Config parse error: {e}")))
 }
 
 fn doc_table<'a>(doc: &'a mut toml::Value, section: &str) -> &'a mut toml::value::Table {

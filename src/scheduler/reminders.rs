@@ -50,18 +50,14 @@ pub fn owning_bot<'a, T>(
 }
 
 /// Next cron fire strictly after `after` for a 6-field expression
-/// (sec min hour day month weekday) — the same parser configuration
-/// `tokio-cron-scheduler` uses internally, so the value we persist as
-/// `next_run_at` matches what the live job will actually do.
+/// (sec min hour day month weekday) — uses [`crate::agent::parse_scheduler_cron`]
+/// so the value we persist as `next_run_at` matches what the live job will
+/// actually do.
 ///
 /// Returns `None` for an unparseable expression (callers treat that as
 /// "no known next run" rather than failing).
 pub fn next_cron_occurrence(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let cron = croner::Cron::new(expr)
-        .with_seconds_required()
-        .with_dom_and_dow()
-        .parse()
-        .ok()?;
+    let cron = crate::agent::parse_scheduler_cron(expr).ok()?;
     cron.find_next_occurrence(&after, false).ok()
 }
 
@@ -666,6 +662,27 @@ mod tests {
     fn next_cron_occurrence_none_for_garbage() {
         let after = chrono::Utc::now();
         assert!(next_cron_occurrence("not a cron", after).is_none());
+    }
+
+    /// Pin croner 4 migration behaviour: 6-field next occurrence stays the
+    /// same as croner 2.x, and 5-field expressions still fail to parse
+    /// (Seconds::Required), matching the old with_seconds_required() gate.
+    #[test]
+    fn next_cron_occurrence_pins_6_field_and_rejects_5_field() {
+        let after = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // 6-field daily 04:00 → same day 04:00:00Z
+        let next = next_cron_occurrence("0 0 4 * * *", after).expect("6-field");
+        assert_eq!(next.to_rfc3339(), "2026-01-01T04:00:00+00:00");
+        // 6-field weekday morning → first Monday 09:00 after Thu 2026-01-01
+        let next_mon = next_cron_occurrence("0 0 9 * * MON", after).expect("weekday");
+        assert_eq!(next_mon.to_rfc3339(), "2026-01-05T09:00:00+00:00");
+        // 5-field must not parse under Seconds::Required
+        assert!(next_cron_occurrence("0 9 * * *", after).is_none());
+        // Sloppy step form tokio-cron-scheduler documents (`1/10`) still works
+        let next_sloppy = next_cron_occurrence("0 1/10 * * * *", after).expect("sloppy step");
+        assert_eq!(next_sloppy.to_rfc3339(), "2026-01-01T00:01:00+00:00");
     }
 
     /// The core #111-Part-A property: each fire advances `next_run_at` to the

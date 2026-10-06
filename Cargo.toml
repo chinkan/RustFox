@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Configuration
-toml = "0.8"
+toml = "1.1"
 
 # MCP client
 rmcp = { version = "2.1", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
@@ -51,7 +51,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Cron expression parsing (same crate tokio-cron-scheduler uses internally —
 # validating here means the portal/scheduler-tool gate matches what Job::new_async accepts)
-croner = "2"
+croner = "4"
 
 # Background task scheduler
 tokio-cron-scheduler = "0.15"
