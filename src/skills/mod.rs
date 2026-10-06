@@ -33,6 +33,24 @@ pub fn format_listed_section(noun_singular: &str, followup: &str) -> String {
     )
 }
 
+/// Max chars of a skill/agent description shown in a system-prompt catalog line.
+const CATALOG_DESCRIPTION_MAX_CHARS: usize = 200;
+
+/// Render a description for a catalog line: first non-empty line only, capped
+/// at ~200 chars on a char boundary (`…` appended when cut). The stored
+/// `Skill.description` is never modified; only the catalog rendering is.
+pub fn catalog_description(s: &str) -> String {
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    match line.char_indices().nth(CATALOG_DESCRIPTION_MAX_CHARS) {
+        Some((idx, _)) => format!("{}…", line[..idx].trim_end()),
+        None => line.to_string(),
+    }
+}
+
 /// A loaded skill from a markdown file
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -123,7 +141,9 @@ impl SkillRegistry {
             if skill.model.is_none() && skill.tools.is_empty() {
                 instruction_lines.push(format!(
                     "- **{}** (instruction): {}. Load with: read_skill_file(skill_name=\"{}\", relative_path=\"SKILL.md\") when relevant.",
-                    skill.name, skill.description, skill.name
+                    skill.name,
+                    catalog_description(&skill.description),
+                    skill.name
                 ));
             }
         }
@@ -153,7 +173,9 @@ impl SkillRegistry {
             if skill.model.is_some() || !skill.tools.is_empty() {
                 lines.push(format!(
                     "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
-                    skill.name, skill.description, skill.name
+                    skill.name,
+                    catalog_description(&skill.description),
+                    skill.name
                 ));
             }
         }
@@ -169,7 +191,9 @@ impl SkillRegistry {
         for agent in &unique_agents {
             lines.push(format!(
                 "- **{}**: {}\n  Invoke via: `invoke_agent(agent=\"{}\", prompt=\"<task>\")`",
-                agent.name, agent.description, agent.name
+                agent.name,
+                catalog_description(&agent.description),
+                agent.name
             ));
         }
 
@@ -336,5 +360,53 @@ mod tests {
         assert!(subagent_ctx.contains("subagent-skill"));
         assert!(subagent_ctx.contains("invoke_agent"));
         assert!(!subagent_ctx.contains("instruction-skill"));
+    }
+
+    #[test]
+    fn test_catalog_description_caps_long_multiline() {
+        let long = format!("{}\nSecond line must not appear.", "a".repeat(500));
+        let out = catalog_description(&long);
+        assert!(!out.contains("Second line"));
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= CATALOG_DESCRIPTION_MAX_CHARS + 1);
+        // Multi-byte chars: truncation stays on a char boundary.
+        let cjk = "技".repeat(300);
+        let out = catalog_description(&cjk);
+        assert_eq!(out.chars().count(), CATALOG_DESCRIPTION_MAX_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn test_catalog_description_short_unchanged_and_never_empty() {
+        assert_eq!(catalog_description("Does things"), "Does things");
+        assert_eq!(catalog_description(&"b".repeat(200)), "b".repeat(200));
+        assert_eq!(catalog_description("\n  \nReal desc\nmore"), "Real desc");
+        assert_eq!(catalog_description(""), "");
+    }
+
+    #[test]
+    fn test_catalog_lines_use_capped_description_and_omit_body() {
+        let long = format!("First line {}\nSECOND_LINE_MARKER", "x".repeat(400));
+        let body = "DISTINCTIVE_BODY_STRING_42";
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            make_skill("inst", &long, body, None),
+            PathBuf::from("/tmp/test"),
+        );
+        registry.register(
+            make_skill("sub", &long, body, Some("some/model")),
+            PathBuf::from("/tmp/test"),
+        );
+        for ctx in [
+            registry.build_context(),
+            registry.build_subagent_lines(),
+            registry.build_agents_context(),
+        ] {
+            assert!(ctx.contains("First line"));
+            assert!(ctx.contains('…'));
+            assert!(!ctx.contains("SECOND_LINE_MARKER"));
+            assert!(!ctx.contains(body));
+            assert!(!ctx.contains(&"x".repeat(400)));
+        }
     }
 }
