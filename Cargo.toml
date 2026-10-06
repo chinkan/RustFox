@@ -54,7 +54,7 @@ chrono = { version = "0.4", features = ["serde"] }
 croner = "2"
 
 # Background task scheduler
-tokio-cron-scheduler = "0.13"
+tokio-cron-scheduler = "0.15"
 
 # Markdown parser for entity-based Telegram message formatting
 pulldown-cmark = "0.12"
