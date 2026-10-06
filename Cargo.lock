@@ -505,15 +505,6 @@ dependencies = [
 
 [[package]]
 name = "croner"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c344b0690c1ad1c7176fe18eb173e0c927008fdaaa256e40dfd43ddd149c0843"
-dependencies = [
- "chrono",
-]
-
-[[package]]
-name = "croner"
 version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aa42bcd3d846ebf66e15bd528d1087f75d1c6c1c66ebff626178a106353c576"
@@ -2989,7 +2980,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
- "croner 2.2.0",
+ "croner",
  "dirs",
  "docx-rs",
  "futures",
@@ -3846,7 +3837,7 @@ checksum = "1f50e41f200fd8ed426489bd356910ede4f053e30cebfbd59ef0f856f0d7432a"
 dependencies = [
  "chrono",
  "chrono-tz",
- "croner 3.0.1",
+ "croner",
  "num-derive",
  "num-traits",
  "tokio",
