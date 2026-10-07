@@ -34,4 +34,5 @@ pub mod skills;
 pub mod supervisor;
 pub mod tool_registry;
 pub mod tools;
+pub mod turn_gate;
 pub mod utils;
