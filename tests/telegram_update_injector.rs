@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use rustfox::agent::Agent;
+use rustfox::agent::{session_key, Agent};
 use rustfox::cancel_registry::CancelRegistry;
 use rustfox::config::Config;
 use rustfox::langsmith::LangSmithClient;
@@ -41,6 +41,18 @@ fn fixture(name: &str) -> PathBuf {
 
 fn injector() -> UpdateInjector {
     UpdateInjector::new([ALLOWED]).with_bot_id("main")
+}
+
+/// ADR-0020: chat turns spawn under TurnGate; wait until the key is idle.
+async fn wait_turn_idle(agent: &Agent, bot_id: &str, user_id: u64) {
+    let key = session_key(bot_id, &user_id.to_string());
+    for _ in 0..500 {
+        if !agent.turn_gate.is_active(&key).await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("turn gate still active for {key} after 5s");
 }
 
 /// Minimal Message JSON accepted as `sendMessage` / `editMessageText` result.
@@ -811,6 +823,7 @@ async fn drive_handle_message_chat_with_fixture_llm() {
         .await
         .expect("drive chat_hello");
     assert_eq!(route, HandlerRoute::Message);
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
 
     let texts = h.api.outbound_texts().await;
     assert!(
@@ -848,6 +861,7 @@ async fn drive_handle_message_chat_auto_hits_wiremock_rich() {
         .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
         .await
         .expect("drive chat_hello auto");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
 
     let paths = h.api.received_requests_paths().await;
     assert!(
@@ -902,6 +916,7 @@ async fn drive_tool_turn(h: &HandleMessageHarness, bot_id: &str) {
         .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
         .await
         .unwrap_or_else(|e| panic!("drive {bot_id}: {e:#}"));
+    wait_turn_idle(&h.agent, bot_id, ALLOWED).await;
 }
 
 #[tokio::test]

@@ -153,9 +153,8 @@ pub struct Agent {
     /// Per-user CancellationTokens for /stop — created at process_message entry,
     /// removed on exit. Checked at each iteration boundary.
     pub cancel_token_registry: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
-    /// Per-user pending injection messages (Steer/Inject), max 10 per user.
-    /// When a non-command message arrives while processing is active, it's queued here.
-    pub pending_injections: Arc<tokio::sync::Mutex<HashMap<String, Vec<String>>>>,
+    /// ADR-0020 mid-run queue (replaces pending_injections).
+    pub turn_gate: Arc<crate::turn_gate::TurnGate>,
     /// One-shot senders for loop detection callbacks, keyed by user_id.
     /// The agent loop creates a oneshot channel, stores the sender here,
     /// then awaits the receiver. The Telegram callback handler resolves
@@ -338,7 +337,7 @@ impl Agent {
             bot,
             telegram_bots,
             cancel_token_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            pending_injections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            turn_gate: Arc::new(crate::turn_gate::TurnGate::new()),
             pending_loop_callbacks: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -708,67 +707,66 @@ impl Agent {
     /// Check if a bot+user session has active processing.
     pub async fn is_processing(&self, bot_id: &str, user_id: &str) -> bool {
         let key = session_key(bot_id, user_id);
+        if self.turn_gate.is_active(&key).await {
+            return true;
+        }
         self.cancel_token_registry.lock().await.contains_key(&key)
     }
 
-    /// Queue an injection message for a bot+user session. Returns false if queue is full (max 10).
-    pub async fn queue_injection(&self, bot_id: &str, user_id: &str, text: &str) -> bool {
-        const MAX_INJECTIONS: usize = 10;
-        let key = session_key(bot_id, user_id);
-        let mut map = self.pending_injections.lock().await;
-        let queue = map.entry(key).or_default();
-        if queue.len() >= MAX_INJECTIONS {
-            false
-        } else {
-            queue.push(text.to_string());
-            true
-        }
-    }
-
-    /// Drain all pending injection messages for a bot+user session.
-    pub async fn drain_injections(&self, bot_id: &str, user_id: &str) -> Vec<String> {
-        let key = session_key(bot_id, user_id);
-        let mut map = self.pending_injections.lock().await;
-        map.remove(&key).unwrap_or_default()
-    }
-
-    /// Drain pending steer/queue injections for the given user and push them
-    /// into `messages`. Returns `true` when at least one injection was applied.
-    ///
-    /// Used both at the start of each outer iteration (before the LLM call)
-    /// and right after a tool batch commits (so steer traffic that arrives
-    /// during a long tool batch is still visible on the next turn).
-    ///
-    /// `Queue` mode additionally persists the message into conversation memory
-    /// so it survives a process_message boundary.
-    pub async fn drain_and_inject_steer(
+    /// ADR-0020: drain the gate into `[Steer]` user messages (attachments,
+    /// persist, temp cleanup). Called from the AgenticLoop steer closure.
+    pub async fn drain_steer_messages(
         &self,
-        bot_id: &str,
-        user_id: &str,
+        key: &str,
         conversation_id: &str,
-        messages: &mut Vec<ChatMessage>,
-    ) {
-        let inject_mode = self.get_mid_run_mode(bot_id, user_id).await;
-        let injections = self.drain_injections(bot_id, user_id).await;
-        for text in &injections {
-            let label = if inject_mode == MidRunMode::Steer {
-                "**[Steer]:** "
+        supports_vision: bool,
+    ) -> Vec<ChatMessage> {
+        let items = self.turn_gate.drain(key).await;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let prefixed = if item.text.is_empty() {
+                "[Steer]".to_string()
             } else {
-                "**[User injected mid-processing]:** "
+                format!("[Steer] {}", item.text)
+            };
+            let (attachment_text, image_parts) = crate::file_processor::process_attachments(
+                &item.attachments,
+                &prefixed,
+                &self.config,
+                &self.memory,
+                supports_vision,
+            )
+            .await;
+            let combined =
+                crate::conversation::ConversationManager::combine_user_and_attachment_text(
+                    &prefixed,
+                    &attachment_text,
+                );
+            let content = if image_parts.is_empty() {
+                MessageContent::from_text(combined.clone())
+            } else {
+                let mut parts: Vec<ContentPart> = Vec::new();
+                if !combined.is_empty() {
+                    parts.push(ContentPart::Text {
+                        text: combined.clone(),
+                    });
+                }
+                parts.extend(image_parts);
+                MessageContent::Parts(parts)
             };
             let msg = ChatMessage {
                 role: "user".to_string(),
-                content: Some(MessageContent::from_text(format!("{}{}", label, text))),
+                content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
             };
-            if inject_mode == MidRunMode::Queue {
-                if let Err(e) = self.memory.save_message(conversation_id, &msg).await {
-                    warn!("Failed to persist queued injection: {}", e);
-                }
+            if let Err(e) = self.memory.save_message(conversation_id, &msg).await {
+                warn!("Failed to persist steer message: {}", e);
             }
-            messages.push(msg);
+            out.push(msg);
+            item.cleanup().await;
         }
+        out
     }
 
     /// Register a oneshot sender for a user's loop detection callback.
@@ -1295,7 +1293,9 @@ impl Agent {
             }
         };
 
-        let outcome = crate::loop_runner::AgenticLoop::new(
+        // ADR-0020: attach steer drain only for live chat turns in Steer mode.
+        // Scheduled runs and /mode queue leave pending for finish() instead.
+        let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,
             &self.mcp,
@@ -1306,13 +1306,33 @@ impl Agent {
             turn_sender.as_ref() as &dyn PlatformSender,
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
-        )
-        .run(
-            &mut crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr)),
-            user_id,
-            &incoming.chat_id,
-        )
-        .await;
+        );
+        if incoming.schedule_id.is_none()
+            && self.get_mid_run_mode(bot_id, user_id).await == MidRunMode::Steer
+        {
+            let weak = self.self_weak.clone();
+            let key = session_key(bot_id, user_id);
+            let conv_id = conversation_id.clone();
+            let vision = supports_vision;
+            agentic = agentic.with_steer(Box::new(move || {
+                let weak = weak.clone();
+                let key = key.clone();
+                let conv_id = conv_id.clone();
+                Box::pin(async move {
+                    let Some(agent) = weak.upgrade() else {
+                        return Vec::new();
+                    };
+                    agent.drain_steer_messages(&key, &conv_id, vision).await
+                })
+            }));
+        }
+        let outcome = agentic
+            .run(
+                &mut crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr)),
+                user_id,
+                &incoming.chat_id,
+            )
+            .await;
 
         let (text, stop) = match outcome {
             Ok(crate::loop_runner::LoopOutcome::FinalResponse {

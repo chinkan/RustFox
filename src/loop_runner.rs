@@ -24,6 +24,11 @@ pub type ToolHandlerFn = Box<
         + Sync,
 >;
 
+/// ADR-0020 steer source: returns user messages that arrived mid-run, already
+/// processed (attachments, `[Steer] ` prefix) and persisted. Empty = none.
+pub type SteerFn<'a> =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<ChatMessage>> + Send + 'a>> + Send + Sync + 'a>;
+
 pub struct LoopConfig {
     pub max_iterations: u32,
     pub empty_response_retry_limit: u32,
@@ -71,6 +76,7 @@ pub struct AgenticLoop<'a> {
     platform_sender: &'a dyn PlatformSender,
     make_tool_ctx: Box<dyn Fn(&str, &str) -> ToolContext + Send + Sync + 'a>,
     special_tool_handler: Option<ToolHandlerFn>,
+    steer: Option<SteerFn<'a>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -99,6 +105,21 @@ impl<'a> AgenticLoop<'a> {
             platform_sender,
             make_tool_ctx,
             special_tool_handler,
+            steer: None,
+        }
+    }
+
+    /// Drain mid-run user messages at each step (ADR-0020 drain points A/B).
+    pub fn with_steer(mut self, steer: SteerFn<'a>) -> Self {
+        self.steer = Some(steer);
+        self
+    }
+
+    /// Drained steer messages (empty when steering is off).
+    async fn drain_steer(&self) -> Vec<ChatMessage> {
+        match &self.steer {
+            Some(steer) => steer().await,
+            None => Vec::new(),
         }
     }
 
@@ -166,6 +187,10 @@ impl<'a> AgenticLoop<'a> {
                     return Ok(LoopOutcome::Cancelled);
                 }
             }
+            // Drain point A: messages that arrived during the last step.
+            for msg in self.drain_steer().await {
+                messages.push_user(msg);
+            }
 
             let prepared = messages.prepare(context_window);
 
@@ -226,10 +251,7 @@ impl<'a> AgenticLoop<'a> {
                         tool_calls: None,
                         tool_call_id: None,
                     };
-                    match messages {
-                        MessageContainer::Conversation(cm) => cm.add_user_turn(nudge_msg),
-                        MessageContainer::Plain(msgs) => msgs.push(nudge_msg),
-                    }
+                    messages.push_user(nudge_msg);
                 }
                 if empty_count >= self.config.empty_response_retry_limit {
                     return Ok(LoopOutcome::FinalResponse {
@@ -316,6 +338,22 @@ impl<'a> AgenticLoop<'a> {
             }
 
             if !text.is_empty() {
+                // Drain point B: a message arrived while the model drafted this
+                // reply. Keep the draft as context and answer again (counts
+                // toward max_iterations).
+                let drained = self.drain_steer().await;
+                if !drained.is_empty() {
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(MessageContent::Text(text)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    for msg in drained {
+                        messages.push_user(msg);
+                    }
+                    continue;
+                }
                 if let Some(ref tx) = self.config.stream_token_tx {
                     let _ = LlmClient::stream_text(text.clone(), tx.clone()).await;
                 }
@@ -347,6 +385,13 @@ impl MessageContainer {
     pub fn push(&mut self, msg: ChatMessage) {
         match self {
             MessageContainer::Conversation(cm) => cm.add_assistant_turn(msg),
+            MessageContainer::Plain(msgs) => msgs.push(msg),
+        }
+    }
+
+    pub fn push_user(&mut self, msg: ChatMessage) {
+        match self {
+            MessageContainer::Conversation(cm) => cm.add_user_turn(msg),
             MessageContainer::Plain(msgs) => msgs.push(msg),
         }
     }

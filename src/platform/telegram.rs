@@ -9,15 +9,16 @@ use teloxide::types::{ParseMode, UpdateKind};
 use tracing::{error, info, warn};
 
 use async_trait::async_trait;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ReactionType};
 
-use crate::agent::{Agent, LoopCallbackChoice, MidRunMode};
+use crate::agent::{session_key, Agent, LoopCallbackChoice, MidRunMode, RunStop};
 use crate::platform::sender::{
     MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender,
 };
 use crate::platform::{Attachment, AttachmentKind, IncomingMessage};
 use crate::provider::Provider;
 use crate::tool_registry::ToolUiMode;
+use crate::turn_gate::{step_limit_text, Next, QueuedInput, Submit, QUEUE_FULL_TEXT};
 use crate::utils::markdown_entities::{markdown_to_entities, split_entities};
 use crate::utils::rich_sender;
 use crate::utils::telegram_markdown::escape_text;
@@ -1940,59 +1941,126 @@ pub async fn handle_message(
         }
     }
 
-    // Handle /stop command
+    // Handle /stop command (ADR-0020 Q5: cancel + clear queue)
     if text == "/stop" {
-        if agent.cancel_processing(&bot_id, &user_id.to_string()).await {
-            return send_markdown_message(
-                &bot,
-                msg.chat.id,
-                "⏹ **Processing cancelled.** Accumulated state has been saved.",
-                msg_format,
-            )
-            .await;
+        let key = session_key(&bot_id, &user_id.to_string());
+        let cancelled = agent.cancel_processing(&bot_id, &user_id.to_string()).await;
+        let n = agent.turn_gate.clear(&key).await;
+        let reply = if cancelled {
+            format!("⏹ Processing cancelled. Cleared {n} queued message(s).")
+        } else if n > 0 {
+            format!("Cleared {n} queued message(s).")
         } else {
-            return send_markdown_message(
-                &bot,
-                msg.chat.id,
-                "Nothing is currently processing.",
-                msg_format,
-            )
-            .await;
-        }
+            "Nothing is currently processing.".to_string()
+        };
+        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format).await;
     }
 
-    // CHECK: if user is currently being processed, queue non-command messages as injection
-    if !text.starts_with('/') && agent.is_processing(&bot_id, &user_id.to_string()).await {
-        let current_mode = agent.get_mid_run_mode(&bot_id, &user_id.to_string()).await;
-        let maxed = !agent
-            .queue_injection(&bot_id, &user_id.to_string(), &text)
-            .await;
-        if maxed {
-            return send_markdown_message(
-                &bot,
-                msg.chat.id,
-                "⚠️ **Injection queue full** (max 10). Please wait for current processing to finish.",
-                msg_format,
-            )
-            .await;
+    // ADR-0020: submit to TurnGate, then spawn the turn so the dispatcher is free.
+    let key = session_key(&bot_id, &user_id.to_string());
+    let input = QueuedInput {
+        text: text.clone(),
+        attachments: attachments.clone(),
+        chat_id: msg.chat.id.0.to_string(),
+        user_name: user_name.clone(),
+        platform_msg_id: Some(msg.id.0),
+        temp_dir: if temp_dir.exists() {
+            Some(temp_dir.clone())
+        } else {
+            None
+        },
+    };
+
+    match agent.turn_gate.submit(&key, input).await {
+        Submit::Full(rejected) => {
+            rejected.cleanup().await;
+            send_markdown_message(&bot, msg.chat.id, QUEUE_FULL_TEXT, msg_format).await
         }
-        info!(
-            "Queued '{}' as injection for user {} (mode: {:?})",
-            text, user_id, current_mode
-        );
-        let confirm = match current_mode {
-            MidRunMode::Steer => {
-                "📨 **Steer queued** — will inject into current processing at next step."
+        Submit::Accepted => {
+            if let Err(e) = bot
+                .set_message_reaction(msg.chat.id, msg.id)
+                .reaction([ReactionType::Emoji {
+                    emoji: "👀".to_owned(),
+                }])
+                .await
+            {
+                warn!(error = %e, "setMessageReaction(👀) failed; enqueue still accepted");
             }
-            MidRunMode::Queue => {
-                "📨 **Message queued** — will process after current task completes."
-            }
-        };
-        return send_markdown_message(&bot, msg.chat.id, confirm, msg_format).await;
+            Ok(())
+        }
+        Submit::Start(inputs) => {
+            let bot_s = bot.clone();
+            let agent_s = Arc::clone(&agent);
+            let bot_id_s = bot_id.clone();
+            let chat_id = msg.chat.id;
+            let format_s = msg_format;
+            let uid = user_id;
+            tokio::spawn(async move {
+                let mut batch = inputs;
+                loop {
+                    let mut iter = batch.into_iter();
+                    let Some(first) = iter.next() else {
+                        break;
+                    };
+                    let rest: Vec<_> = iter.collect();
+                    let key = session_key(&bot_id_s, &uid.to_string());
+                    agent_s.turn_gate.restore_pending(&key, rest).await;
+
+                    let stop = run_telegram_user_turn(
+                        bot_s.clone(),
+                        Arc::clone(&agent_s),
+                        bot_id_s.clone(),
+                        uid,
+                        chat_id,
+                        format_s,
+                        first,
+                    )
+                    .await;
+
+                    match agent_s.turn_gate.finish(&key, stop).await {
+                        Next::User { inputs, .. } => {
+                            batch = inputs;
+                        }
+                        Next::StepLimit { n } => {
+                            let _ = send_markdown_message(
+                                &bot_s,
+                                chat_id,
+                                &step_limit_text(n),
+                                format_s,
+                            )
+                            .await;
+                            break;
+                        }
+                        Next::Idle | Next::Scheduled => break,
+                    }
+                }
+            });
+            Ok(())
+        }
     }
+}
+
+/// One Telegram user turn: typing, notifier, stream, `process_message_outcome`.
+/// Returns the stop reason, or `None` when the agent call errored.
+async fn run_telegram_user_turn(
+    bot: Bot,
+    agent: Arc<Agent>,
+    bot_id: String,
+    user_id: u64,
+    chat_id: teloxide::types::ChatId,
+    msg_format: MessageFormat,
+    input: QueuedInput,
+) -> Option<RunStop> {
+    let text = input.text.clone();
+    let attachments = input.attachments.clone();
+    let user_name = input.user_name.clone();
+    let temp_dir = input
+        .temp_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("rustfox_{}", uuid::Uuid::new_v4())));
 
     // Send "typing" indicator
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+    bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await
         .ok();
 
@@ -2020,7 +2088,6 @@ pub async fn handle_message(
     // Spawn notifier task if not silent
     let notifier_handle = if turn_ui_mode != ToolUiMode::Silent {
         let bot_clone = bot.clone();
-        let chat_id = msg.chat.id;
         let mut rx = tool_event_rx.expect("rx exists when not silent");
         let mode = turn_ui_mode;
         Some(tokio::spawn(async move {
@@ -2059,7 +2126,7 @@ pub async fn handle_message(
     // Per-chat silent (fully_silent off) still sends it.
     let placeholder_msg_id: Option<teloxide::types::MessageId> =
         if !fully_silent && tool_ui_mode == ToolUiMode::Silent {
-            match bot.send_message(msg.chat.id, "⏳ Thinking...").await {
+            match bot.send_message(chat_id, "⏳ Thinking...").await {
                 Ok(sent) => Some(sent.id),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to send thinking placeholder");
@@ -2080,7 +2147,7 @@ pub async fn handle_message(
 
     // Spawn receiver task: edits Telegram message as tokens arrive
     let stream_bot = bot.clone();
-    let stream_chat_id = msg.chat.id;
+    let stream_chat_id = chat_id;
     let stream_format = msg_format;
     let stream_handle = tokio::spawn(async move {
         use std::time::{Duration, Instant};
@@ -2243,7 +2310,7 @@ pub async fn handle_message(
         platform: "telegram".to_string(),
         bot_id: bot_id.clone(),
         user_id: user_id.to_string(),
-        chat_id: msg.chat.id.0.to_string(),
+        chat_id: chat_id.0.to_string(),
         user_name,
         text,
         attachments,
@@ -2255,7 +2322,7 @@ pub async fn handle_message(
     // Finished event after processing completes.
     let agent_tool_event_tx = tool_event_tx.clone();
     let process_result = match agent
-        .process_message(
+        .process_message_outcome(
             &incoming,
             tool_event_tx,
             Some(stream_token_tx),
@@ -2263,12 +2330,13 @@ pub async fn handle_message(
         )
         .await
     {
-        Ok(text) => Ok(text),
+        Ok(outcome) => Ok(outcome),
         Err(e) => {
             stream_handle.abort();
             Err(e)
         }
     };
+    let run_stop = process_result.as_ref().ok().map(|o| o.stop);
 
     let process_success = process_result.is_ok();
     if let Some(tx) = agent_tool_event_tx {
@@ -2299,22 +2367,23 @@ pub async fn handle_message(
     // reply below) has been delivered. Best-effort: ignore failures so a
     // stale placeholder never blocks reporting the actual outcome.
     if let Some(placeholder_id) = placeholder_msg_id {
-        if let Err(e) = bot.delete_message(msg.chat.id, placeholder_id).await {
+        if let Err(e) = bot.delete_message(chat_id, placeholder_id).await {
             tracing::warn!(error = %e, "Failed to delete thinking placeholder");
         }
     }
 
     if let Err(e) = &process_result {
         warn!(error = %e, "Agent processing failed");
-        return send_markdown_message(&bot, msg.chat.id, &format!("**Error:** {}", e), msg_format)
-            .await;
+        let _ =
+            send_markdown_message(&bot, chat_id, &format!("**Error:** {}", e), msg_format).await;
+        return None;
     }
     // Ok text is not always streamed. Max iterations, cancel, and the
     // empty-retry sentence return without pushing tokens.
     if !streamed {
-        if let Ok(text) = &process_result {
-            if !text.is_empty() {
-                send_markdown_message(&bot, msg.chat.id, text, msg_format).await?;
+        if let Ok(outcome) = &process_result {
+            if !outcome.text.is_empty() {
+                let _ = send_markdown_message(&bot, chat_id, &outcome.text, msg_format).await;
             }
         }
     }
@@ -2328,7 +2397,7 @@ pub async fn handle_message(
             .restart_pending
             .store(false, std::sync::atomic::Ordering::Release);
         let _ = bot
-            .send_message(msg.chat.id, "🔄 Self-upgrade complete. Restarting...")
+            .send_message(chat_id, "🔄 Self-upgrade complete. Restarting...")
             .await;
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -2336,7 +2405,7 @@ pub async fn handle_message(
         });
     }
 
-    Ok(())
+    run_stop
 }
 
 /// Handle callback query from loop detection inline keyboard.

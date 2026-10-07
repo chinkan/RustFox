@@ -240,16 +240,6 @@ impl ConversationManager {
         }
     }
 
-    pub fn apply_steer(&mut self, text: &str) {
-        let steer_msg = ChatMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text(text.to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-        };
-        self.messages.push(steer_msg);
-    }
-
     /// Unified compaction pipeline (ADR 0003 Q1 / ADR 0019 ③): compress the
     /// oldest messages when estimated tokens of the full assembled request
     /// (system + skills/soul already in the system message + history) cross
