@@ -52,7 +52,7 @@ async fn wait_turn_idle(agent: &Agent, bot_id: &str, user_id: u64) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("turn gate still active for {key} after 5s");
+    panic!("turn gate still active after 5s");
 }
 
 /// Minimal Message JSON accepted as `sendMessage` / `editMessageText` result.
