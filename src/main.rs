@@ -33,6 +33,416 @@ async fn send_schedule_reply(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// One scheduled job: persist, `process_message_outcome`, reply / ADR-0013 dead-letter.
+/// Returns the stop reason for [`TurnGate::finish`] (`None` on hard error).
+async fn run_one_scheduled_job(
+    agent: Arc<Agent>,
+    queue_for_runner: rustfox::scheduler::reruns::RerunQueue,
+    req: &rustfox::agent::ScheduledJobRequest,
+) -> Option<rustfox::agent::RunStop> {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    if let Err(e) = req
+        .task_store
+        .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
+        .await
+    {
+        tracing::warn!("Failed to persist scheduled task run record: {}", e);
+    }
+
+    let processed = agent
+        .process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal)
+        .await;
+
+    // Prompt + result, including failure / cancel / max-iterations,
+    // with the schedule id. Portal rows also land in the owning bot's
+    // Telegram conversation. No approval gate: the run already finished.
+    if let Ok(Some(task)) = req.task_store.get_by_id(&req.task_id).await {
+        let result_body = match &processed {
+            Ok(outcome) => outcome.text.clone(),
+            Err(err) => format!("Scheduled task failed: {err:#}"),
+        };
+        if let Err(e) = rustfox::scheduler::history::write_schedule_segment(
+            &agent.memory,
+            &task,
+            &agent.config.bots,
+            &result_body,
+        )
+        .await
+        {
+            tracing::warn!(
+                "Failed to write schedule {} conversation segment: {e:#}",
+                req.task_id
+            );
+        }
+    }
+
+    let (response, stop) = match processed {
+        Ok(outcome) => {
+            let stop = outcome.stop;
+            let hit_iteration_cap = outcome.is_max_iterations();
+            let r = outcome.text;
+            if hit_iteration_cap {
+                let reason = format!(
+                    "Reached max iterations ({}) without a final response",
+                    agent.config.max_iterations()
+                );
+                tracing::warn!(
+                    "Scheduled task {} exhausted its iteration budget: {}",
+                    req.task_id,
+                    reason
+                );
+                if let Err(e) = req
+                    .task_store
+                    .update_run(&run_id, Some(&r), Some(&reason), "failed")
+                    .await
+                {
+                    tracing::warn!("Failed to update run record: {}", e);
+                }
+                match &req.rerun_id {
+                    Some(rid) => {
+                        if let Err(e) = queue_for_runner.mark_awaiting_user(rid, &reason).await {
+                            tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+                        }
+                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                            let ask = format!(
+                                "**Scheduled task needs your call** — the re-run ran out of iteration budget.\n\n{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
+                                reason, rid
+                            );
+                            let _ = send_schedule_reply(
+                                &req.owning_telegram_bot,
+                                teloxide::types::ChatId(cv),
+                                &ask,
+                                rustfox::platform::telegram::MessageFormat::Auto,
+                            )
+                            .await;
+                        }
+                    }
+                    None => {
+                        match queue_for_runner
+                            .enqueue_manual(&req.task_id, &run_id, &reason)
+                            .await
+                        {
+                            Ok(qid) => {
+                                tracing::info!(
+                                    "Max-iterations on task {} → human-gated queue row {qid}",
+                                    req.task_id
+                                );
+                                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                                    let note = format!(
+                                        "**Scheduled task stalled:** it hit the iteration cap ({}) without finishing, so I did NOT auto-retry (it may have half-done work).\n\n{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
+                                        agent.config.max_iterations(),
+                                        reason,
+                                        qid
+                                    );
+                                    let _ = send_schedule_reply(
+                                        &req.owning_telegram_bot,
+                                        teloxide::types::ChatId(cv),
+                                        &note,
+                                        rustfox::platform::telegram::MessageFormat::Auto,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(qe) => {
+                                tracing::warn!(
+                                    "Failed to record stalled run for {}: {qe:#}",
+                                    req.task_id
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                    let _ = send_schedule_reply(
+                        &req.owning_telegram_bot,
+                        teloxide::types::ChatId(cv),
+                        &r,
+                        rustfox::platform::telegram::MessageFormat::Auto,
+                    )
+                    .await;
+                }
+                return Some(stop);
+            }
+            if let Err(e) = req
+                .task_store
+                .update_run(&run_id, Some(&r), None, "completed")
+                .await
+            {
+                tracing::warn!("Failed to update scheduled task run record: {}", e);
+            }
+            let trig = if req.is_recurring {
+                "recurring"
+            } else {
+                "one_shot"
+            };
+            if let Err(e) = req
+                .task_store
+                .retire_completed_one_shot(&req.task_id, trig)
+                .await
+            {
+                tracing::warn!("Failed to retire completed one-shot {}: {e:#}", req.task_id);
+            }
+            if let Some(rid) = &req.rerun_id {
+                if let Err(e) = queue_for_runner.mark_done(rid).await {
+                    tracing::warn!("Failed to mark rerun {rid} done: {e:#}");
+                } else {
+                    tracing::info!("Rerun {rid} succeeded — queue row closed");
+                }
+            }
+            if let Err(e) = queue_for_runner.supersede_live_for_task(&req.task_id).await {
+                tracing::warn!("Failed to supersede live reruns for {}: {e:#}", req.task_id);
+            }
+            (r, Some(stop))
+        }
+        Err(e) => {
+            tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
+            let err_str = format!("{:#}", e);
+            if let Err(e) = req
+                .task_store
+                .update_run(&run_id, None, Some(&err_str), "failed")
+                .await
+            {
+                tracing::warn!("Failed to update failed scheduled task run record: {}", e);
+            }
+            if !req.is_recurring {
+                let _ = req.task_store.set_status(&req.task_id, "failed").await;
+            }
+            let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
+            match &req.rerun_id {
+                Some(rid) => {
+                    if let Err(e) = queue_for_runner.mark_awaiting_user(rid, &err_str).await {
+                        tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+                    }
+                    if let Some(cv) = chat_id_opt {
+                        let ask = format!(
+                            "**Scheduled task failed twice** (re-run {}), holding for your decision.\n\nLast error: {}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
+                            &rid[..8.min(rid.len())],
+                            err_str,
+                            rid
+                        );
+                        let _ = send_schedule_reply(
+                            &req.owning_telegram_bot,
+                            teloxide::types::ChatId(cv),
+                            &ask,
+                            rustfox::platform::telegram::MessageFormat::Auto,
+                        )
+                        .await;
+                    }
+                    return None;
+                }
+                None if rustfox::provider::is_transient_llm_error(&e) => {
+                    match queue_for_runner
+                        .enqueue(&req.task_id, &run_id, &err_str)
+                        .await
+                    {
+                        Ok(qid) => {
+                            tracing::info!(
+                                "Transient failure on task {} → re-fire queued ({qid}), checking hourly",
+                                req.task_id
+                            );
+                            if let Some(cv) = chat_id_opt {
+                                let note = format!(
+                                    "**Scheduled task hiccup:** transient provider failure (429/5xx), auto re-fire queued — I'll retry within the hour and only nag you if it fails again.\n\n(queue id: `{qid}`)"
+                                );
+                                let _ = send_schedule_reply(
+                                    &req.owning_telegram_bot,
+                                    teloxide::types::ChatId(cv),
+                                    &note,
+                                    rustfox::platform::telegram::MessageFormat::Auto,
+                                )
+                                .await;
+                            }
+                            return None;
+                        }
+                        Err(qe) => {
+                            tracing::warn!("Failed to enqueue rerun for {}: {qe:#}", req.task_id);
+                        }
+                    }
+                }
+                None => {}
+            }
+            let chat_id_val: i64 = match req.incoming.chat_id.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::error!(
+                        "Unparseable chat_id '{}' for task {}",
+                        req.incoming.chat_id,
+                        req.task_id
+                    );
+                    return None;
+                }
+            };
+            let chat = teloxide::types::ChatId(chat_id_val);
+            let error_msg = format!("**Scheduled task failed:** {}", e);
+            let _ = send_schedule_reply(
+                &req.owning_telegram_bot,
+                chat,
+                &error_msg,
+                rustfox::platform::telegram::MessageFormat::Auto,
+            )
+            .await;
+            return None;
+        }
+    };
+
+    let chat_id_val: i64 = match req.incoming.chat_id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::error!(
+                "Unparseable chat_id '{}' for task {}",
+                req.incoming.chat_id,
+                req.task_id
+            );
+            return stop;
+        }
+    };
+    let chat = teloxide::types::ChatId(chat_id_val);
+    if let Err(e) = send_schedule_reply(
+        &req.owning_telegram_bot,
+        chat,
+        &response,
+        rustfox::platform::telegram::MessageFormat::Auto,
+    )
+    .await
+    {
+        tracing::error!("Failed to send scheduled response: {}", e);
+        if let Some(hint) = rustfox::platform::telegram::not_started_hint(
+            req.owning_telegram_bot.as_deref(),
+            &req.incoming.bot_id,
+            &e.to_string(),
+        )
+        .await
+        {
+            tracing::warn!("Task {}: {hint}", req.task_id);
+            if let Err(e) = req
+                .task_store
+                .update_run(&run_id, Some(&response), Some(&hint), "failed")
+                .await
+            {
+                tracing::warn!("Failed to mark run {run_id} undelivered: {e:#}");
+            }
+        }
+    }
+    stop
+}
+
+/// After a scheduled turn, start pending user inputs so they are not stranded
+/// (ADR-0020 Decision 8 / Decision 5). Reuses the Telegram spawn loop from 1a.
+fn handoff_pending_user_after_schedule(
+    agent: &Arc<Agent>,
+    req: &rustfox::agent::ScheduledJobRequest,
+    inputs: Vec<rustfox::turn_gate::QueuedInput>,
+) {
+    let Some(bot) = req.owning_telegram_bot.clone() else {
+        tracing::warn!(
+            bot_id = %req.incoming.bot_id,
+            user_id = %req.incoming.user_id,
+            n = inputs.len(),
+            "scheduled finish→User with no owning Telegram bot; spawning bare agent turns"
+        );
+        spawn_bare_user_turns(
+            Arc::clone(agent),
+            req.incoming.bot_id.clone(),
+            req.incoming.user_id.clone(),
+            inputs,
+        );
+        return;
+    };
+    let Ok(uid) = req.incoming.user_id.parse::<u64>() else {
+        tracing::warn!(
+            user_id = %req.incoming.user_id,
+            "scheduled finish→User: unparseable user_id; spawning bare agent turns"
+        );
+        spawn_bare_user_turns(
+            Arc::clone(agent),
+            req.incoming.bot_id.clone(),
+            req.incoming.user_id.clone(),
+            inputs,
+        );
+        return;
+    };
+    let chat_id = inputs
+        .first()
+        .and_then(|i| i.chat_id.parse::<i64>().ok())
+        .or_else(|| req.incoming.chat_id.parse::<i64>().ok());
+    let Some(cv) = chat_id else {
+        tracing::warn!(
+            chat_id = %req.incoming.chat_id,
+            "scheduled finish→User: unparseable chat_id; spawning bare agent turns"
+        );
+        spawn_bare_user_turns(
+            Arc::clone(agent),
+            req.incoming.bot_id.clone(),
+            req.incoming.user_id.clone(),
+            inputs,
+        );
+        return;
+    };
+    rustfox::platform::telegram::spawn_telegram_turn_loop(
+        (*bot).clone(),
+        Arc::clone(agent),
+        req.incoming.bot_id.clone(),
+        uid,
+        teloxide::types::ChatId(cv),
+        rustfox::platform::telegram::MessageFormat::Auto,
+        inputs,
+    );
+}
+
+/// Minimal finish→User path when Telegram UI is unavailable: process pending
+/// inputs through the agent and keep calling `finish` until Idle/Scheduled.
+fn spawn_bare_user_turns(
+    agent: Arc<Agent>,
+    bot_id: String,
+    user_id: String,
+    inputs: Vec<rustfox::turn_gate::QueuedInput>,
+) {
+    tokio::spawn(async move {
+        let mut batch = inputs;
+        loop {
+            let mut iter = batch.into_iter();
+            let Some(first) = iter.next() else {
+                break;
+            };
+            let rest: Vec<_> = iter.collect();
+            let key = rustfox::agent::session_key(&bot_id, &user_id);
+            agent.turn_gate.restore_pending(&key, rest).await;
+
+            let incoming = rustfox::platform::IncomingMessage {
+                platform: "telegram".into(),
+                bot_id: bot_id.clone(),
+                user_id: user_id.clone(),
+                chat_id: first.chat_id.clone(),
+                user_name: first.user_name.clone(),
+                text: first.text.clone(),
+                attachments: first.attachments.clone(),
+                schedule_id: None,
+            };
+            let stop = match agent
+                .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal)
+                .await
+            {
+                Ok(outcome) => Some(outcome.stop),
+                Err(e) => {
+                    tracing::error!(error = %e, %key, "bare user turn after schedule failed");
+                    None
+                }
+            };
+            first.cleanup().await;
+
+            match agent.turn_gate.finish(&key, stop).await {
+                rustfox::turn_gate::Next::User { inputs, .. } => batch = inputs,
+                rustfox::turn_gate::Next::StepLimit { n } => {
+                    tracing::warn!(%key, n, "bare user turn hit step-limit; queue kept idle");
+                    break;
+                }
+                rustfox::turn_gate::Next::Idle | rustfox::turn_gate::Next::Scheduled => break,
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -482,335 +892,44 @@ async fn main() -> Result<()> {
     ));
 
     // Spawn background runner: receives ScheduledJobRequest, calls process_message, persists result, sends reply
+    // ADR-0020 slice 1b: each job claims the session TurnGate via begin_scheduled before the
+    // agent run, and finish after — so scheduled never parallels a user turn on the same key.
     let agent_for_runner = Arc::clone(&agent);
     let queue_for_runner = rerun_queue.clone();
     tokio::spawn(async move {
         while let Some(req) = job_rx.recv().await {
             let agent = Arc::clone(&agent_for_runner);
+            let key = rustfox::agent::session_key(&req.incoming.bot_id, &req.incoming.user_id);
+            agent.turn_gate.begin_scheduled(&key).await;
 
-            // Persist run record BEFORE processing (capture fire time)
-            let run_id = uuid::Uuid::new_v4().to_string();
-            let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-            if let Err(e) = req
-                .task_store
-                .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
-                .await
-            {
-                tracing::warn!("Failed to persist scheduled task run record: {}", e);
-            }
+            let stop =
+                run_one_scheduled_job(Arc::clone(&agent), queue_for_runner.clone(), &req).await;
 
-            let processed = agent
-                .process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal)
-                .await;
-
-            // Prompt + result, including failure / cancel / max-iterations,
-            // with the schedule id. Portal rows also land in the owning bot's
-            // Telegram conversation. No approval gate: the run already finished.
-            if let Ok(Some(task)) = req.task_store.get_by_id(&req.task_id).await {
-                let result_body = match &processed {
-                    Ok(outcome) => outcome.text.clone(),
-                    Err(err) => format!("Scheduled task failed: {err:#}"),
-                };
-                if let Err(e) = rustfox::scheduler::history::write_schedule_segment(
-                    &agent.memory,
-                    &task,
-                    &agent.config.bots,
-                    &result_body,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        "Failed to write schedule {} conversation segment: {e:#}",
-                        req.task_id
-                    );
+            match agent.turn_gate.finish(&key, stop).await {
+                rustfox::turn_gate::Next::User { inputs, .. } => {
+                    handoff_pending_user_after_schedule(&agent, &req, inputs);
                 }
-            }
-
-            let response = match processed {
-                Ok(outcome) => {
-                    // Read the stop reason before moving the text out.
-                    let hit_iteration_cap = outcome.is_max_iterations();
-                    let r = outcome.text;
-                    // A budget-exhausted run is NOT a success: the loop stopped
-                    // mid-task, possibly after side effects. Record it failed
-                    // and hand it to the human gate (ADR-0013) instead of
-                    // reporting a clean completion.
-                    if hit_iteration_cap {
-                        let reason = format!(
-                            "Reached max iterations ({}) without a final response",
-                            agent.config.max_iterations()
-                        );
-                        tracing::warn!(
-                            "Scheduled task {} exhausted its iteration budget: {}",
-                            req.task_id,
-                            reason
-                        );
-                        if let Err(e) = req
-                            .task_store
-                            .update_run(&run_id, Some(&r), Some(&reason), "failed")
-                            .await
-                        {
-                            tracing::warn!("Failed to update run record: {}", e);
-                        }
-                        match &req.rerun_id {
-                            // A re-fire that exhausted its budget → ask, never auto again.
-                            Some(rid) => {
-                                if let Err(e) =
-                                    queue_for_runner.mark_awaiting_user(rid, &reason).await
-                                {
-                                    tracing::warn!(
-                                        "Failed to mark rerun {rid} awaiting_user: {e:#}"
-                                    );
-                                }
-                                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                                    let ask = format!(
-                                        "**Scheduled task needs your call** — the re-run ran out of iteration budget.
-
-{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                                        reason,
-                                        rid
-                                    );
-                                    let _ = send_schedule_reply(
-                                        &req.owning_telegram_bot,
-                                        teloxide::types::ChatId(cv),
-                                        &ask,
-                                        rustfox::platform::telegram::MessageFormat::Auto,
-                                    )
-                                    .await;
-                                }
-                            }
-                            // First strike: record a human-gated row (never auto-fired).
-                            None => {
-                                match queue_for_runner
-                                    .enqueue_manual(&req.task_id, &run_id, &reason)
-                                    .await
-                                {
-                                    Ok(qid) => {
-                                        tracing::info!(
-                                            "Max-iterations on task {} → human-gated queue row {qid}",
-                                            req.task_id
-                                        );
-                                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                                            let note = format!(
-                                                "**Scheduled task stalled:** it hit the iteration cap ({}) without finishing, so I did NOT auto-retry (it may have half-done work).\n\n{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                                                agent.config.max_iterations(),
-                                                reason,
-                                                qid
-                                            );
-                                            let _ = send_schedule_reply(
-                                                &req.owning_telegram_bot,
-                                                teloxide::types::ChatId(cv),
-                                                &note,
-                                                rustfox::platform::telegram::MessageFormat::Auto,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                    Err(qe) => {
-                                        tracing::warn!(
-                                            "Failed to record stalled run for {}: {qe:#}",
-                                            req.task_id
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Deliver whatever partial text the loop produced, then stop.
-                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                            let _ = send_schedule_reply(
-                                &req.owning_telegram_bot,
-                                teloxide::types::ChatId(cv),
-                                &r,
-                                rustfox::platform::telegram::MessageFormat::Auto,
-                            )
-                            .await;
-                        }
-                        continue;
-                    }
-                    if let Err(e) = req
-                        .task_store
-                        .update_run(&run_id, Some(&r), None, "completed")
-                        .await
-                    {
-                        tracing::warn!("Failed to update scheduled task run record: {}", e);
-                    }
-                    // Issue #109 (related): a one-shot that fired cleanly must
-                    // not stay `active` forever — retire it (idempotent, no-op
-                    // for recurring).
-                    let trig = if req.is_recurring {
-                        "recurring"
+                rustfox::turn_gate::Next::StepLimit { n } => {
+                    if let (Some(bot), Ok(cv)) = (
+                        req.owning_telegram_bot.as_ref(),
+                        req.incoming.chat_id.parse::<i64>(),
+                    ) {
+                        let _ = rustfox::platform::telegram::send_markdown_message(
+                            bot,
+                            teloxide::types::ChatId(cv),
+                            &rustfox::turn_gate::step_limit_text(n),
+                            rustfox::platform::telegram::MessageFormat::Auto,
+                        )
+                        .await;
                     } else {
-                        "one_shot"
-                    };
-                    if let Err(e) = req
-                        .task_store
-                        .retire_completed_one_shot(&req.task_id, trig)
-                        .await
-                    {
                         tracing::warn!(
-                            "Failed to retire completed one-shot {}: {e:#}",
-                            req.task_id
+                            %key,
+                            n,
+                            "step-limit after schedule with no Telegram bot to notify; queue kept"
                         );
                     }
-                    // ADR-0013 / P0 #2: any successful scheduled run (cron or
-                    // re-fire) must clear leftover live queue rows for this
-                    // task — otherwise the next watchdog tick can stale-replay
-                    // a queued/awaiting_user sibling. Mark the fired row done
-                    // first so it shows as `done` rather than `superseded`.
-                    if let Some(rid) = &req.rerun_id {
-                        if let Err(e) = queue_for_runner.mark_done(rid).await {
-                            tracing::warn!("Failed to mark rerun {rid} done: {e:#}");
-                        } else {
-                            tracing::info!("Rerun {rid} succeeded — queue row closed");
-                        }
-                    }
-                    if let Err(e) = queue_for_runner.supersede_live_for_task(&req.task_id).await {
-                        tracing::warn!(
-                            "Failed to supersede live reruns for {}: {e:#}",
-                            req.task_id
-                        );
-                    }
-                    r
                 }
-                Err(e) => {
-                    tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
-                    let err_str = format!("{:#}", e);
-                    if let Err(e) = req
-                        .task_store
-                        .update_run(&run_id, None, Some(&err_str), "failed")
-                        .await
-                    {
-                        tracing::warn!("Failed to update failed scheduled task run record: {}", e);
-                    }
-                    if !req.is_recurring {
-                        let _ = req.task_store.set_status(&req.task_id, "failed").await;
-                    }
-                    // --- ADR-0013 two-strike dead-letter handling ---
-                    let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
-                    match &req.rerun_id {
-                        // Second strike: the re-fire itself died → ask Kan, never auto again.
-                        Some(rid) => {
-                            if let Err(e) = queue_for_runner.mark_awaiting_user(rid, &err_str).await
-                            {
-                                tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
-                            }
-                            if let Some(cv) = chat_id_opt {
-                                let ask = format!(
-                                    "**Scheduled task failed twice** (re-run {}), holding for your decision.\n\nLast error: {}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                                    &rid[..8.min(rid.len())],
-                                    err_str,
-                                    rid
-                                );
-                                let _ = send_schedule_reply(
-                                    &req.owning_telegram_bot,
-                                    teloxide::types::ChatId(cv),
-                                    &ask,
-                                    rustfox::platform::telegram::MessageFormat::Auto,
-                                )
-                                .await;
-                            }
-                            continue;
-                        }
-                        // First strike: transient LLM death → queue for one auto re-fire.
-                        // (is_transient_llm_error downcasts the typed LlmHttpError —
-                        // 429/5xx only; 400/401 and non-LLM errors fall through to
-                        // the plain failure notice below, unchanged.)
-                        None if rustfox::provider::is_transient_llm_error(&e) => {
-                            match queue_for_runner
-                                .enqueue(&req.task_id, &run_id, &err_str)
-                                .await
-                            {
-                                Ok(qid) => {
-                                    tracing::info!(
-                                        "Transient failure on task {} → re-fire queued ({qid}), checking hourly",
-                                        req.task_id
-                                    );
-                                    if let Some(cv) = chat_id_opt {
-                                        let note = format!(
-                                            "**Scheduled task hiccup:** transient provider failure (429/5xx), auto re-fire queued — I'll retry within the hour and only nag you if it fails again.\n\n(queue id: `{qid}`)"
-                                        );
-                                        let _ = send_schedule_reply(
-                                            &req.owning_telegram_bot,
-                                            teloxide::types::ChatId(cv),
-                                            &note,
-                                            rustfox::platform::telegram::MessageFormat::Auto,
-                                        )
-                                        .await;
-                                    }
-                                    continue;
-                                }
-                                Err(qe) => {
-                                    tracing::warn!(
-                                        "Failed to enqueue rerun for {}: {qe:#}",
-                                        req.task_id
-                                    );
-                                }
-                            }
-                        }
-                        None => {}
-                    }
-                    // Send error to user via rich message
-                    let chat_id_val: i64 = match req.incoming.chat_id.parse() {
-                        Ok(v) => v,
-                        Err(_) => {
-                            tracing::error!(
-                                "Unparseable chat_id '{}' for task {}",
-                                req.incoming.chat_id,
-                                req.task_id
-                            );
-                            continue;
-                        }
-                    };
-                    let chat = teloxide::types::ChatId(chat_id_val);
-                    let error_msg = format!("**Scheduled task failed:** {}", e);
-                    let _ = send_schedule_reply(
-                        &req.owning_telegram_bot,
-                        chat,
-                        &error_msg,
-                        rustfox::platform::telegram::MessageFormat::Auto,
-                    )
-                    .await;
-                    continue;
-                }
-            };
-
-            let chat_id_val: i64 = match req.incoming.chat_id.parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    tracing::error!(
-                        "Unparseable chat_id '{}' for task {}",
-                        req.incoming.chat_id,
-                        req.task_id
-                    );
-                    continue;
-                }
-            };
-            let chat = teloxide::types::ChatId(chat_id_val);
-            if let Err(e) = send_schedule_reply(
-                &req.owning_telegram_bot,
-                chat,
-                &response,
-                rustfox::platform::telegram::MessageFormat::Auto,
-            )
-            .await
-            {
-                tracing::error!("Failed to send scheduled response: {}", e);
-                if let Some(hint) = rustfox::platform::telegram::not_started_hint(
-                    req.owning_telegram_bot.as_deref(),
-                    &req.incoming.bot_id,
-                    &e.to_string(),
-                )
-                .await
-                {
-                    tracing::warn!("Task {}: {hint}", req.task_id);
-                    if let Err(e) = req
-                        .task_store
-                        .update_run(&run_id, Some(&response), Some(&hint), "failed")
-                        .await
-                    {
-                        tracing::warn!("Failed to mark run {run_id} undelivered: {e:#}");
-                    }
-                }
+                rustfox::turn_gate::Next::Idle | rustfox::turn_gate::Next::Scheduled => {}
             }
         }
     });
