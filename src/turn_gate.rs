@@ -124,6 +124,32 @@ impl TurnGate {
         Submit::Accepted
     }
 
+    /// ADR-0020 Decision 8: claim the key for a scheduled run.
+    ///
+    /// Idle → mark `Scheduled` and return at once. Busy → enqueue a oneshot
+    /// ticket in `waiting_scheduled` and await until [`finish`] hands us the
+    /// gate (user turn always finishes first).
+    pub async fn begin_scheduled(&self, key: &str) {
+        loop {
+            let rx = {
+                let mut keys = self.keys.lock().await;
+                let st = keys.entry(key.to_string()).or_default();
+                if st.active.is_none() {
+                    st.active = Some(TurnKind::Scheduled);
+                    return;
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                st.waiting_scheduled.push_back(tx);
+                rx
+            };
+            // finish already set `active = Scheduled` before sending.
+            if rx.await.is_ok() {
+                return;
+            }
+            // Sender dropped without handoff — retry.
+        }
+    }
+
     /// Steer drain: queued inputs for the active **user** turn. A scheduled
     /// turn is never steered (Q8), so this returns nothing during one.
     pub async fn drain(&self, key: &str) -> Vec<QueuedInput> {
@@ -414,5 +440,131 @@ mod tests {
             };
             assert!(seen, "round {round}: lost message ({fin:?}, {sub:?})");
         }
+    }
+
+    #[tokio::test]
+    async fn begin_scheduled_on_idle_marks_active() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        assert!(g.is_active("k").await);
+        assert!(matches!(
+            g.finish("k", Some(RunStop::FinalResponse)).await,
+            Next::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_scheduled_waits_until_user_finish_never_two_active() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let g = Arc::new(TurnGate::new());
+        assert!(matches!(
+            g.submit("k", input("start")).await,
+            Submit::Start(_)
+        ));
+
+        let started = Arc::new(AtomicBool::new(false));
+        let g2 = g.clone();
+        let started2 = started.clone();
+        let waiter = tokio::spawn(async move {
+            g2.begin_scheduled("k").await;
+            started2.store(true, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "scheduled must wait behind active user"
+        );
+        // User message while waiting still queues (gate busy).
+        assert!(matches!(
+            g.submit("k", input("mid")).await,
+            Submit::Accepted
+        ));
+        assert_eq!(g.pending_len("k").await, 1);
+
+        match g.finish("k", Some(RunStop::FinalResponse)).await {
+            Next::Scheduled => {}
+            other => panic!("expected Scheduled handoff, got {other:?}"),
+        }
+        waiter.await.unwrap();
+        assert!(started.load(Ordering::SeqCst));
+        assert!(g.is_active("k").await, "scheduled owns the key");
+        // Leftover pending waits behind the scheduled turn (Decision 5.1).
+        assert_eq!(g.pending_len("k").await, 1);
+        // Scheduled is never steered.
+        assert!(g.drain("k").await.is_empty());
+
+        match g.finish("k", Some(RunStop::FinalResponse)).await {
+            Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["mid"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn user_message_during_scheduled_is_not_drained() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        assert!(matches!(g.submit("k", input("hi")).await, Submit::Accepted));
+        assert!(
+            g.drain("k").await.is_empty(),
+            "scheduled turns have no steer drain"
+        );
+        assert_eq!(g.pending_len("k").await, 1);
+        match g.finish("k", Some(RunStop::FinalResponse)).await {
+            Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["hi"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_scheduled_before_leftover_pending() {
+        let g = TurnGate::new();
+        g.submit("k", input("start")).await;
+        g.submit("k", input("left")).await;
+
+        let g2 = std::sync::Arc::new(g);
+        let g3 = g2.clone();
+        let waiter = tokio::spawn(async move {
+            g3.begin_scheduled("k").await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        match g2.finish("k", Some(RunStop::FinalResponse)).await {
+            Next::Scheduled => {}
+            other => panic!("scheduled ticket beats pending, got {other:?}"),
+        }
+        waiter.await.unwrap();
+        assert_eq!(g2.pending_len("k").await, 1);
+        match g2.finish("k", Some(RunStop::FinalResponse)).await {
+            Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["left"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_keeps_waiting_scheduled_tickets() {
+        let g = std::sync::Arc::new(TurnGate::new());
+        g.submit("k", input("start")).await;
+        g.submit("k", input("1")).await;
+        g.submit("k", input("2")).await;
+
+        let g2 = g.clone();
+        let waiter = tokio::spawn(async move {
+            g2.begin_scheduled("k").await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        assert_eq!(g.clear("k").await, 2, "clears user queue only");
+        assert_eq!(g.pending_len("k").await, 0);
+
+        match g.finish("k", Some(RunStop::Cancelled)).await {
+            Next::Scheduled => {}
+            other => panic!("waiting scheduled must survive /stop clear, got {other:?}"),
+        }
+        waiter.await.unwrap();
+        assert!(g.is_active("k").await);
     }
 }

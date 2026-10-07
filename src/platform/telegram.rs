@@ -1989,55 +1989,69 @@ pub async fn handle_message(
             Ok(())
         }
         Submit::Start(inputs) => {
-            let bot_s = bot.clone();
-            let agent_s = Arc::clone(&agent);
-            let bot_id_s = bot_id.clone();
-            let chat_id = msg.chat.id;
-            let format_s = msg_format;
-            let uid = user_id;
-            tokio::spawn(async move {
-                let mut batch = inputs;
-                loop {
-                    let mut iter = batch.into_iter();
-                    let Some(first) = iter.next() else {
-                        break;
-                    };
-                    let rest: Vec<_> = iter.collect();
-                    let key = session_key(&bot_id_s, &uid.to_string());
-                    agent_s.turn_gate.restore_pending(&key, rest).await;
-
-                    let stop = run_telegram_user_turn(
-                        bot_s.clone(),
-                        Arc::clone(&agent_s),
-                        bot_id_s.clone(),
-                        uid,
-                        chat_id,
-                        format_s,
-                        first,
-                    )
-                    .await;
-
-                    match agent_s.turn_gate.finish(&key, stop).await {
-                        Next::User { inputs, .. } => {
-                            batch = inputs;
-                        }
-                        Next::StepLimit { n } => {
-                            let _ = send_markdown_message(
-                                &bot_s,
-                                chat_id,
-                                &step_limit_text(n),
-                                format_s,
-                            )
-                            .await;
-                            break;
-                        }
-                        Next::Idle | Next::Scheduled => break,
-                    }
-                }
-            });
+            spawn_telegram_turn_loop(
+                bot.clone(),
+                Arc::clone(&agent),
+                bot_id.clone(),
+                user_id,
+                msg.chat.id,
+                msg_format,
+                inputs,
+            );
             Ok(())
         }
     }
+}
+
+/// Spawn the Telegram user-turn loop used after `Submit::Start` and after a
+/// scheduled run's `finish` returns [`Next::User`] (ADR-0020 Decision 8).
+///
+/// Runs `run_telegram_user_turn` then `finish` until Idle / Scheduled /
+/// StepLimit. `Next::Scheduled` breaks so the waiting job runner proceeds.
+pub fn spawn_telegram_turn_loop(
+    bot: Bot,
+    agent: Arc<Agent>,
+    bot_id: String,
+    user_id: u64,
+    chat_id: teloxide::types::ChatId,
+    msg_format: MessageFormat,
+    inputs: Vec<QueuedInput>,
+) {
+    tokio::spawn(async move {
+        let mut batch = inputs;
+        loop {
+            let mut iter = batch.into_iter();
+            let Some(first) = iter.next() else {
+                break;
+            };
+            let rest: Vec<_> = iter.collect();
+            let key = session_key(&bot_id, &user_id.to_string());
+            agent.turn_gate.restore_pending(&key, rest).await;
+
+            let stop = run_telegram_user_turn(
+                bot.clone(),
+                Arc::clone(&agent),
+                bot_id.clone(),
+                user_id,
+                chat_id,
+                msg_format,
+                first,
+            )
+            .await;
+
+            match agent.turn_gate.finish(&key, stop).await {
+                Next::User { inputs, .. } => {
+                    batch = inputs;
+                }
+                Next::StepLimit { n } => {
+                    let _ =
+                        send_markdown_message(&bot, chat_id, &step_limit_text(n), msg_format).await;
+                    break;
+                }
+                Next::Idle | Next::Scheduled => break,
+            }
+        }
+    });
 }
 
 /// One Telegram user turn: typing, notifier, stream, `process_message_outcome`.
