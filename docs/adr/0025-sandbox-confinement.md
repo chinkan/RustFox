@@ -100,6 +100,30 @@ File-tool rules (§2) are identical in both modes.
 - Official Docker image ⇒ **`trusted`** (the container already isolates).
 - Portal shows the current mode and lets the owner switch.
 
+### 3a. Linux: helping the owner get to sandbox mode
+
+- **bwrap missing:** the wizard shows an **Install for me** button. It installs
+  bwrap through `pkexec` (the OS-native password prompt). RustFox **never**
+  collects, sends through the portal, or stores the sudo password.
+- Supported package managers: `apt`, `dnf`, `pacman`. Any other ⇒ treated as
+  "cannot install".
+- No GUI session (headless/SSH) or no `pkexec` ⇒ no button; show one copyable
+  install command (e.g. `sudo apt install bubblewrap`).
+- After install, re-run the probe. Only if the sandbox starts, write `sandbox`.
+  If install fails or the probe still fails, write `trusted` and show the
+  one-line command.
+- **Blocked by system settings:** if bwrap is present but the probe fails due to
+  AppArmor (Ubuntu 23.10+ `kernel.apparmor_restrict_unprivileged_userns`; e.g.
+  user-namespace setup or `--unshare-net` loopback `RTM_NEWADDR: Operation not
+  permitted`, see
+  [convira-sandbox#2](https://github.com/Convira/convira-sandbox/issues/2)),
+  tell the user the computer's system settings block safe mode. Do **not** tell
+  them to install bwrap again.
+- **No re-setup needed:** the portal has a one-click **Switch to safe mode**
+  that re-probes before switching; it only writes `sandbox` on success.
+- macOS needs no install (Seatbelt is built in). Docker defaults to `trusted`
+  and shows no button.
+
 ### 4. Same policy for main loop and subagents (Q5)
 
 Main loop, `invoke_agent`, `spawn_agents`, scheduled runs and bot peers all use
@@ -130,7 +154,7 @@ trusted.
 ### 7. Canonical error copy
 
 These English strings are the **canonical copy**; code and tests match them
-exactly (`{path}` is the user-supplied path).
+exactly (`{path}` is the user-supplied path; `{command}` is the one-line install command for the detected package manager).
 
 | Case | Message |
 |------|---------|
@@ -138,6 +162,11 @@ exactly (`{path}` is the user-supplied path).
 | Sandbox failed to start | `Running commands is not available in safe mode on this computer right now. You can switch to trusted mode in the portal, or allow sandboxing in your Docker settings.` |
 | Empty tool intersection | `No tools are available for this agent with the tools you asked for, so it was not started.` |
 | Path outside sandbox | `The path {path} is outside your workspace folder, so it cannot be used.` |
+| Install button | `Install for me` |
+| Installing / password hint | `Installing the safety tool. Your computer may ask for your password; RustFox never sees it.` |
+| Install failed + command | `We could not install the safety tool. You can install it yourself by running: {command}` |
+| Blocked by system settings | `This computer's system settings block safe mode, so RustFox will run in trusted mode.` |
+| Switched to safe mode | `Safe mode is on. Commands can now only use your workspace folder.` |
 
 ## Rejected alternatives
 
@@ -227,6 +256,23 @@ exactly (`{path}` is the user-supplied path).
 
 24. Cases 1–6 and 15–17 give identical results from the main loop and from a
     subagent.
+
+### Linux install helper and portal switch
+
+25. bwrap missing, GUI + pkexec + apt/dnf/pacman: button shown; install via
+    pkexec; probe re-run; success ⇒ `sandbox` + "Safe mode is on" copy.
+26. pkexec cancelled or install fails ⇒ `trusted` + "could not install" copy
+    with the right command.
+27. Install succeeds but probe still fails ⇒ `trusted`.
+28. Unsupported package manager ⇒ no button; command shown; `trusted`.
+29. Headless/SSH or no pkexec ⇒ no button; one copyable command.
+30. bwrap present, AppArmor blocks userns (CI job (a)) ⇒ "system settings
+    block safe mode" copy; no install button or install hint.
+31. No password ever appears in portal requests, logs, config or SecretStore
+    (inspect network traffic and files during test 25).
+32. Portal "Switch to safe mode": probe fails ⇒ stays `trusted` with the
+    matching copy; probe succeeds ⇒ writes `sandbox`.
+33. macOS: no install button; Docker: no button, `trusted`.
 
 ### Verification
 
