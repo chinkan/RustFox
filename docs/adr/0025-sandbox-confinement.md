@@ -320,7 +320,7 @@ manual real-device gate.
 
 - Debian without bwrap: probe ⇒ `trusted`. Install bwrap, re-run: ⇒ `sandbox`
   mode works.
-- Windows (on Kan's Windows PC, the maintainer's Windows PC): new install defaults to
+- Windows (on the maintainer's Windows PC): new install defaults to
   `trusted`; choosing `sandbox` ⇒ plain error on `execute_command`.
 
 **Install helper (tests 25, 26):** verified in v1.0.5 by unit tests with a fake
