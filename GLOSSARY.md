@@ -52,3 +52,15 @@ _Avoid_: free tier key, shared key
 **Web search stub**:
 Placeholder tool named `web_search`, registered only while Exa is off. A call returns "web search is not enabled"; in Telegram it may offer an "Enable web search" button at most once per conversation. Removed when Exa is on (ADR-0023).
 _Avoid_: fake search, dummy tool
+
+**Sandbox mode**:
+`[sandbox] mode = "sandbox"`. `execute_command` runs under an OS sandbox confined to the workspace (Linux bubblewrap, macOS Seatbelt); unavailable on Windows in Phase 1. Fails closed if the sandbox cannot start (ADR-0025).
+_Avoid_: safe mode (UI copy only), silent fallback
+
+**Trusted mode**:
+`[sandbox] mode = "trusted"`, the default when `mode` is missing. `execute_command` starts in the workspace but is not confined. File tools stay confined in every mode (ADR-0025).
+_Avoid_: unsafe mode, no sandbox
+
+**Tool cap**:
+Rule that a caller-supplied `tools` list on `invoke_agent` / `spawn_agents` is intersected with the parent's tools and the agent's declared tools. Empty result is an error; never escalates (ADR-0025).
+_Avoid_: tool override, tool grant
