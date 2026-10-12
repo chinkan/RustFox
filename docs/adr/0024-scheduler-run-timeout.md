@@ -1,6 +1,6 @@
 # ADR-0024: Scheduled-run wall-clock timeout + zombie reconcile
 
-- **Status:** Proposed (awaiting Product GO)
+- **Status:** Accepted
 - **Date:** 2026-10-12
 - **Issue:** #175 (canonical; #174 closed as duplicate)
 - **Depends on:** ADR-0013 (human-gate / dead-letter), ADR-0020 slice 1b (TurnGate `begin_scheduled` / `finish`)
@@ -25,8 +25,9 @@ watchdog; **no** concurrent runner in this slice. `#166` timezone yields.
    - **Default: `900` (15 minutes).**  
    - Wrap the scheduled agent call (`run_one_scheduled_job` / equivalent) in
      `tokio::time::timeout`.  
-   - `0` is **refused** / treated as default (no unbound path — same spirit as
-     fixing #58's "0 = forever").
+   - **Floor: `60`.** Values `1..=59` are rejected (or clamped to `60` at load —
+     prefer reject with a clear config error). `0` is **refused** / treated as
+     default (no unbound path — same spirit as fixing #58's "0 = forever").
 
 2. **On timeout**  
    - **Cancel** the in-flight agent (same cancel-token path as user `/stop` for
