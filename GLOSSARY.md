@@ -32,6 +32,15 @@ _Avoid_: interrupt, preempt
 The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR recurring rows keep `UTC` and pre-ADR one-shot rows get the system local zone, so no fire time changes; the user can change them later. Shown in the portal Tasks page (ADR-0022).
 _Avoid_: server time, UTC offset (`+08:00`)
 
+
+**Scheduled run timeout**:
+Wall-clock bound on one scheduled agent call (`scheduler.run_timeout_secs`, default 900). On expiry the run is cancelled, marked failed, human-gated once (ADR-0013), and the job runner plus TurnGate are released (ADR-0024).
+_Avoid_: unbounded schedule, forever cron
+
+**Zombie running row**:
+A `scheduled_task_runs` row left `status=running` after the process died or a run was abandoned. Cleared to `failed` on startup and by the stale-run watchdog (ADR-0024).
+_Avoid_: stuck run, orphan status
+
 **Built-in MCP**:
 An MCP connection that ships with RustFox: endpoint fixed in code, turned on after setup by one tap (portal, or Telegram for Exa), one connection for the whole instance, credential (if any) in SecretStore. Never asked in the setup wizard. Today: Google (#119) and Exa web search (ADR-0023).
 _Avoid_: preset MCP, default MCP server
