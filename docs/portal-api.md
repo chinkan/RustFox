@@ -120,16 +120,19 @@ Existing same-name entry → skipped with reason (unless `force:true`, which qua
 
 Write paths go through `AgentOps::arm_task`/`disarm_task` against the **live** scheduler (the old `restartToSchedule` fib is gone). Create/update/enable share ONE arming path with restore + the Telegram tool (`build_fire_closure`). `triggerType` is immutable (delete + recreate); in-flight runs are untouched by edits/disarm (already-spawned jobs naturally survive — the UI doesn't pretend otherwise).
 
+### GET /api/schedule/timezone
+→ `200 {"timezone":"Asia/Hong_Kong","utcOffset":"+08:00","source":"config|env|system|fallback"}` — effective default schedule timezone (ADR-0022).
+
 ### GET /api/tasks
-→ `200 [{"id","name","cron","enabled","nextRun","prompt","triggerType","triggerValue","status","platform"}]` — active + paused (completed/cancelled one-shots hidden; soft-deleted always hidden). `name`=description (or first 40 chars of prompt), `cron`=trigger_value when recurring (`"once"` for one-shot), `enabled`=`status=="active"`. Full editable state included so the edit form needs no second fetch.
+→ `200 [{"id","name","cron","enabled","nextRun","prompt","triggerType","triggerValue","status","platform","timezone"}]` — active + paused (completed/cancelled one-shots hidden; soft-deleted always hidden). `name`=description (or first 40 chars of prompt), `cron`=trigger_value when recurring (`"once"` for one-shot), `enabled`=`status=="active"`, `timezone`=IANA name for the row. Full editable state included so the edit form needs no second fetch.
 
 ### POST /api/tasks — create + arm immediately
-Body `{"name"?,"prompt","triggerType":"recurring|one_shot","triggerValue":"<6-field cron | ISO-8601 local>"}`.
-Validation: non-empty prompt; recurring values run through the **exact** croner config the tokio-cron-scheduler uses internally (`invalid_cron` otherwise — portal gate == scheduler reality, no "accepted here, silently dead there"); one-shot parses to a future datetime (`invalid_trigger`, and `bad_request` if in the past).
-→ `201 {"id","name","schedulerJobId","nextRun"}`. If arming fails the DB row is **rolled back** (`arm_failed`) — a task that exists in the DB but never fires is the worst outcome.
+Body `{"name"?,"prompt","triggerType":"recurring|one_shot","triggerValue":"<6-field cron | ISO-8601 local>","timezone"?}`. Optional `timezone` (IANA); missing → effective default. Invalid → `400 invalid_timezone`.
+Validation: non-empty prompt; recurring values run through the **exact** croner config the live evaluator uses (`invalid_cron` otherwise); one-shot parses to a future datetime in the row timezone (`invalid_trigger`, and `bad_request` if in the past).
+→ `201 {"id","name","triggerValue","timezone","schedulerJobId","nextRun"}`. If arming fails the DB row is **rolled back** (`arm_failed`) — a task that exists in the DB but never fires is the worst outcome.
 
 ### PUT /api/tasks/{id} — edit + re-arm (partial)
-Body any subset of `{"name"?,"prompt"?,"triggerValue"?,"triggerType"?}`; `triggerType` present-but-different → `400 trigger_type_immutable`. Active tasks: disarm → update → re-arm. Paused tasks: DB-only edit (stays disarmed). Re-arm failure surfaces as `arm_failed` (row saved but honestly flagged).
+Body any subset of `{"name"?,"prompt"?,"triggerValue"?,"triggerType"?,"timezone"?}`; `triggerType` present-but-different → `400 trigger_type_immutable`. Invalid timezone → `400 invalid_timezone`. Active tasks: disarm → update → re-arm. Paused tasks: DB-only edit (stays disarmed). Re-arm failure surfaces as `arm_failed` (row saved but honestly flagged).
 → `200 {"id","updated":{...},"rearmed":bool,"schedulerJobId":null|"<id>","nextRun"}`
 
 ### DELETE /api/tasks/{id} — soft delete, history preserved

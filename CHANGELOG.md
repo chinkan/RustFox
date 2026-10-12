@@ -3,6 +3,16 @@
 All notable changes to RustFox are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Schedule timezone (ADR-0022 / #166).** Cron and naive one-shots evaluate in a
+  per-task IANA timezone (default: system local, optional `[general] timezone`).
+  Config crons (`summarize_cron`, `user_model_cron`, heartbeat) now use the
+  effective default timezone (e.g. nightly summarisation at 02:00 local, not UTC).
+  Legacy recurring rows keep `UTC`; legacy one-shots keep the system zone at migration.
+
 ## [1.0.4] — 2026-10-04
 
 Release candidate on main after `v1.0.3`. Bumps the workspace version users see

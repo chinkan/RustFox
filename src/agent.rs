@@ -167,6 +167,8 @@ pub struct Agent {
     /// Optional supervisor for session-scoped cancel of in-flight CLI jobs.
     /// Attached after construction (ReasoningBackend needs the Agent Arc first).
     pub supervisor: Arc<tokio::sync::RwLock<Option<Arc<crate::supervisor::Supervisor>>>>,
+    /// Effective default schedule timezone (ADR-0022).
+    pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -313,6 +315,13 @@ impl Agent {
     ) -> Self {
         let llm = LlmClient::new(registry.clone()).with_fallback_chain(config.fallback_chain());
         let initial_model = registry.default_qualified_model();
+        let schedule_tz = crate::scheduler::timezone::resolve_schedule_timezone(
+            config.schedule_timezone_config(),
+        )
+        .unwrap_or(crate::scheduler::timezone::ScheduleTimezone {
+            tz: chrono_tz::UTC,
+            source: crate::scheduler::timezone::TimezoneSource::Fallback,
+        });
         Self {
             llm,
             registry,
@@ -342,6 +351,7 @@ impl Agent {
                 std::collections::HashMap::new(),
             )),
             supervisor: Arc::new(tokio::sync::RwLock::new(None)),
+            schedule_tz,
         }
     }
 
@@ -543,10 +553,30 @@ impl Agent {
             }
         }
 
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%d %H:%M:%S UTC")
-            .to_string();
-        ctx.push_str(&format!("\n\nCurrent date and time: {}", now));
+        {
+            let tz = self.schedule_tz.tz;
+            let now = chrono::Utc::now().with_timezone(&tz);
+            let offset = self.schedule_tz.utc_offset_label(chrono::Utc::now());
+            // Abbreviation: use zone name when no short form — show "HKT" style via offset label.
+            let abbrev = now.format("%Z").to_string();
+            let abbrev = if abbrev.is_empty() || abbrev.starts_with('+') || abbrev.starts_with('-')
+            {
+                tz.name()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(tz.name())
+                    .replace('_', " ")
+            } else {
+                abbrev
+            };
+            ctx.push_str(&format!(
+                "\n\nCurrent date and time: {} {} ({}, UTC{})",
+                now.format("%Y-%m-%d %H:%M:%S"),
+                abbrev,
+                tz,
+                offset
+            ));
+        }
         if let Some(loc) = self.config.user_location() {
             ctx.push_str(&format!("\nUser location: {}", loc));
         }
@@ -1535,14 +1565,23 @@ impl Agent {
             self.task_store.clone(),
             task,
         );
+        let tz = crate::scheduler::timezone::parse_task_tz(&task.timezone).map_err(|e| {
+            tracing::error!(
+                "Not arming scheduled task {} ({}): invalid timezone '{}': {e}",
+                task.id,
+                task.description,
+                task.timezone
+            );
+            e
+        })?;
         let job_id = if task.trigger_type == "one_shot" {
-            let delay = parse_one_shot_delay(&task.trigger_value)?;
+            let delay = parse_one_shot_delay(&task.trigger_value, tz)?;
             self.scheduler
                 .add_one_shot_job(delay, &task.description, fire)
                 .await?
         } else {
             self.scheduler
-                .add_cron_job(&task.trigger_value, &task.description, fire)
+                .add_cron_job(&task.trigger_value, tz, &task.description, fire)
                 .await?
         };
         // Persist the new job id so disable/delete can find it again. This is
@@ -2346,18 +2385,34 @@ Simply answer the question with the information you have.
 }
 
 /// Parse a one-shot trigger into its absolute UTC instant. Accepts a naive
-/// local datetime (`%Y-%m-%dT%H:%M:%S`, interpreted in the process local zone)
-/// or an RFC 3339 string. Does **not** check whether the time has passed —
-/// callers decide (arming rejects past times; next-run bookkeeping does not).
+/// datetime (`%Y-%m-%dT%H:%M:%S`, interpreted in `tz`) or an RFC 3339 string
+/// (offset respected; `tz` is display-only). Does **not** check whether the
+/// time has passed — callers decide. ADR-0022: no `chrono::Local` here.
 pub(crate) fn parse_one_shot_target(
     trigger_value: &str,
+    tz: chrono_tz::Tz,
 ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
-    use chrono::{Local, NaiveDateTime, TimeZone};
+    use chrono::{NaiveDateTime, TimeZone};
 
     NaiveDateTime::parse_from_str(trigger_value, "%Y-%m-%dT%H:%M:%S")
-        .map(|naive| Local.from_local_datetime(&naive).single())
         .ok()
-        .flatten()
+        .and_then(|naive| match tz.from_local_datetime(&naive) {
+            chrono::LocalResult::Single(dt) => Some(dt),
+            chrono::LocalResult::Ambiguous(earlier, _) => Some(earlier),
+            chrono::LocalResult::None => {
+                // DST gap: fire at the first real instant after the gap.
+                let mut t = naive;
+                for _ in 0..(4 * 3600) {
+                    t += chrono::Duration::seconds(1);
+                    match tz.from_local_datetime(&t) {
+                        chrono::LocalResult::Single(dt) => return Some(dt),
+                        chrono::LocalResult::Ambiguous(earlier, _) => return Some(earlier),
+                        chrono::LocalResult::None => {}
+                    }
+                }
+                None
+            }
+        })
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .or_else(|| {
             chrono::DateTime::parse_from_rfc3339(trigger_value)
@@ -2372,8 +2427,11 @@ pub(crate) fn parse_one_shot_target(
         })
 }
 
-pub(crate) fn parse_one_shot_delay(trigger_value: &str) -> anyhow::Result<std::time::Duration> {
-    let dt = parse_one_shot_target(trigger_value)?;
+pub(crate) fn parse_one_shot_delay(
+    trigger_value: &str,
+    tz: chrono_tz::Tz,
+) -> anyhow::Result<std::time::Duration> {
+    let dt = parse_one_shot_target(trigger_value, tz)?;
 
     let now = chrono::Utc::now();
     if dt <= now {
@@ -2578,21 +2636,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_one_shot_target_naive_uses_row_tz() {
+        use chrono::TimeZone;
+        let hkt = chrono_tz::Asia::Hong_Kong;
+        let dt = parse_one_shot_target("2099-01-01T09:00:00", hkt).unwrap();
+        assert_eq!(
+            dt,
+            chrono::Utc.with_ymd_and_hms(2099, 1, 1, 1, 0, 0).unwrap()
+        );
+        let utc = parse_one_shot_target("2099-01-01T09:00:00", chrono_tz::UTC).unwrap();
+        assert_eq!(
+            utc,
+            chrono::Utc.with_ymd_and_hms(2099, 1, 1, 9, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_one_shot_target_rfc3339_ignores_row_tz() {
+        use chrono::TimeZone;
+        let dt = parse_one_shot_target("2099-01-01T09:00:00Z", chrono_tz::Asia::Hong_Kong).unwrap();
+        assert_eq!(
+            dt,
+            chrono::Utc.with_ymd_and_hms(2099, 1, 1, 9, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
     fn test_parse_one_shot_delay_valid() {
-        let result = parse_one_shot_delay("2099-12-31T23:59:59");
+        let result = parse_one_shot_delay("2099-12-31T23:59:59", chrono_tz::UTC);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_one_shot_delay_past_returns_err() {
-        let result = parse_one_shot_delay("2000-01-01T00:00:00");
+        let result = parse_one_shot_delay("2000-01-01T00:00:00", chrono_tz::UTC);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already passed"));
     }
 
     #[test]
     fn test_parse_one_shot_delay_invalid_format() {
-        let result = parse_one_shot_delay("next tuesday");
+        let result = parse_one_shot_delay("next tuesday", chrono_tz::UTC);
         assert!(result.is_err());
     }
 

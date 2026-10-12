@@ -216,7 +216,8 @@ impl MemoryStore {
                 created_at       TEXT NOT NULL DEFAULT (datetime('now')),
                 next_run_at      TEXT,
                 deleted_at       TEXT,
-                bot_id           TEXT NOT NULL
+                bot_id           TEXT NOT NULL,
+                timezone         TEXT NOT NULL DEFAULT 'UTC'
             );
 
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
@@ -375,6 +376,7 @@ impl MemoryStore {
                 crate::platform::DEFAULT_BOT_ID
             );
         }
+        crate::scheduler::reminders::migrate_schedule_timezones(conn)?;
 
         // Stored embedding dimension (None if legacy DB without schema_meta row)
         let raw: Option<String> = conn

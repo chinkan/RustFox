@@ -57,6 +57,11 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         { id: 'k1', kind: 'fact' as const, text: 'Kan prefers HKT for all match reporting', score: 0.98, createdAt: null },
         { id: 'k2', kind: 'knowledge' as const, text: 'HKO weather API endpoints', score: 0.91, createdAt: null },
       ].filter((m) => m.text.toLowerCase().includes(q.toLowerCase())),
+    getScheduleTimezone: async () => ({
+      timezone: 'Asia/Hong_Kong',
+      utcOffset: '+08:00',
+      source: 'config',
+    }),
     listTasks: async () => [
       { id: 'c1', name: '香港天氣報告', cron: '0 30 7 * * *', enabled: true, nextRun: '2026-09-23T07:30:00+08:00', prompt: 'Run the hko-weather skill.', triggerType: 'recurring', triggerValue: '0 30 7 * * *', status: 'active', platform: 'telegram' },
       { id: 'c2', name: 'arXiv 簡報', cron: '0 0 10 * * *', enabled: false, nextRun: '—', prompt: 'Run cantonese-arxiv-daily-briefing.', triggerType: 'recurring', triggerValue: '0 0 10 * * *', status: 'paused', platform: 'telegram' },

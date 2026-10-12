@@ -236,6 +236,8 @@ pub struct PortalState {
     /// matching state is the only proof the tap started here.
     pub google_oauth_states:
         Arc<std::sync::Mutex<std::collections::HashMap<String, crate::google_mcp::PendingLogin>>>,
+    /// Effective default schedule timezone (ADR-0022).
+    pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
 }
 
 impl PortalState {
@@ -273,7 +275,16 @@ impl PortalState {
             secret_store: Arc::new(crate::secret_store::FakeSecretStore::new()),
             pending_secrets: Arc::new(crate::secret_store::PendingSecretRegistry::default()),
             google_oauth_states: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            schedule_tz: crate::scheduler::timezone::ScheduleTimezone {
+                tz: chrono_tz::UTC,
+                source: crate::scheduler::timezone::TimezoneSource::Fallback,
+            },
         }
+    }
+
+    pub fn with_schedule_tz(mut self, tz: crate::scheduler::timezone::ScheduleTimezone) -> Self {
+        self.schedule_tz = tz;
+        self
     }
 
     /// Replace the default fake secret store (production / integration tests).
@@ -353,6 +364,7 @@ pub fn router(state: PortalState) -> Router {
         )
         .route("/memory/search", get(data::memory_search))
         .route("/tasks", get(data::tasks).post(tasks_admin::task_create))
+        .route("/schedule/timezone", get(data::schedule_timezone))
         .route(
             "/tasks/{id}",
             axum::routing::put(tasks_admin::task_update).delete(tasks_admin::task_delete),

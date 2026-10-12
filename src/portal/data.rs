@@ -245,6 +245,7 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
         "status": t.status,
         "platform": t.platform,
         "botId": t.bot_id,
+        "timezone": t.timezone,
     })
 }
 
@@ -261,6 +262,19 @@ pub async fn tasks(
         .map_err(PortalError::from)?;
     let out: Vec<serde_json::Value> = active.iter().map(task_json).collect();
     Ok(Json(serde_json::Value::Array(out)))
+}
+
+/// GET /api/schedule/timezone — effective default timezone (ADR-0022).
+pub async fn schedule_timezone(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, PortalError> {
+    let tz = state.schedule_tz;
+    let now = chrono::Utc::now();
+    Ok(Json(json!({
+        "timezone": tz.tz.name(),
+        "utcOffset": tz.utc_offset_label(now),
+        "source": tz.source.as_str(),
+    })))
 }
 
 #[derive(Deserialize)]

@@ -39,6 +39,9 @@ pub struct CreateTaskBody {
     /// 6-field cron (recurring) or ISO-8601 local datetime (one_shot).
     #[serde(rename = "triggerValue")]
     trigger_value: String,
+    /// Optional IANA timezone; missing → effective default (ADR-0022).
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 fn portal_owns(state: &PortalState, task: &ScheduledTask) -> Result<(), PortalError> {
@@ -67,6 +70,22 @@ pub async fn task_create(
             "name (description) must not be empty",
         ));
     }
+    let default_tz = state.schedule_tz.tz;
+    let tz_stored = match body
+        .timezone
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => default_tz.name().to_string(),
+        Some(name) => crate::scheduler::timezone::parse_iana(name, "timezone")
+            .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?
+            .name()
+            .to_string(),
+    };
+    let tz = crate::scheduler::timezone::parse_task_tz(&tz_stored)
+        .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?;
+
     let mut trigger_value = body.trigger_value.clone();
     match body.trigger_type.as_str() {
         "recurring" => {
@@ -74,7 +93,7 @@ pub async fn task_create(
                 .map_err(|e| PortalError::bad_request("invalid_cron", e.to_string()))?
         }
         "one_shot" => {
-            parse_one_shot_delay(&body.trigger_value)
+            parse_one_shot_delay(&body.trigger_value, tz)
                 .map_err(|e| PortalError::bad_request("invalid_trigger", e.to_string()))?;
         }
         other => {
@@ -116,6 +135,7 @@ pub async fn task_create(
             None
         },
         deleted_at: None,
+        timezone: tz_stored.clone(),
     };
 
     state
@@ -149,6 +169,7 @@ pub async fn task_create(
                     "id": id,
                     "name": name,
                     "triggerValue": trigger_value,
+                    "timezone": tz_stored,
                     "schedulerJobId": job_id.to_string(),
                     "nextRun": next_run,
                 })),
@@ -177,6 +198,9 @@ pub struct UpdateTaskBody {
     /// Rejected outright if present and different from the stored type.
     #[serde(rename = "triggerType")]
     trigger_type: Option<String>,
+    /// Optional IANA timezone (ADR-0022).
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 /// PUT /api/tasks/{id} — edit + re-arm (if live). Partial update.
@@ -206,10 +230,19 @@ pub async fn task_update(
     let new_prompt = body.prompt.clone().filter(|s| !s.trim().is_empty());
     let mut new_value = body.trigger_value.clone().filter(|s| !s.trim().is_empty());
     let new_name = body.name.clone().filter(|s| !s.trim().is_empty());
-    if new_prompt.is_none() && new_value.is_none() && new_name.is_none() {
+    let new_tz = body
+        .timezone
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(ref name) = new_tz {
+        crate::scheduler::timezone::parse_iana(name, "timezone")
+            .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?;
+    }
+    if new_prompt.is_none() && new_value.is_none() && new_name.is_none() && new_tz.is_none() {
         return Err(PortalError::bad_request(
             "empty_patch",
-            "no editable fields provided (name/prompt/triggerValue)",
+            "no editable fields provided (name/prompt/triggerValue/timezone)",
         ));
     }
     // fall back to current values for validation of combined state
@@ -218,14 +251,17 @@ pub async fn task_update(
         .clone()
         .unwrap_or_else(|| task.trigger_value.clone());
     let eff_name = new_name.clone().unwrap_or_else(|| task.description.clone());
+    let eff_tz_name = new_tz.clone().unwrap_or_else(|| task.timezone.clone());
+    let eff_tz = crate::scheduler::timezone::parse_task_tz(&eff_tz_name)
+        .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?;
 
     if task.trigger_type == "recurring" && body.trigger_value.is_some() {
         eff_value = normalize_cron_expr(&eff_value)
             .map_err(|e| PortalError::bad_request("invalid_cron", e.to_string()))?;
         new_value = Some(eff_value.clone());
     }
-    if task.trigger_type == "one_shot" && body.trigger_value.is_some() {
-        parse_one_shot_delay(&eff_value)
+    if task.trigger_type == "one_shot" && (body.trigger_value.is_some() || new_tz.is_some()) {
+        parse_one_shot_delay(&eff_value, eff_tz)
             .map_err(|e| PortalError::bad_request("invalid_trigger", e.to_string()))?;
     }
 
@@ -242,6 +278,7 @@ pub async fn task_update(
             new_value.as_deref(),
             new_name.as_deref(),
             None,
+            new_tz.as_deref(),
         )
         .await
         .map_err(PortalError::internal)?;
@@ -301,6 +338,7 @@ pub async fn task_update(
             "name": eff_name,
             "prompt": eff_prompt,
             "triggerValue": eff_value,
+            "timezone": eff_tz_name,
         },
         "rearmed": rearmed.is_some(),
         "schedulerJobId": rearmed,
@@ -361,7 +399,11 @@ pub async fn task_enable(
     let mut armed = task.clone();
     armed.status = "active".to_string();
     // A one-shot whose time already passed cannot be re-armed meaningfully.
-    if armed.trigger_type == "one_shot" && parse_one_shot_delay(&armed.trigger_value).is_err() {
+    let armed_tz =
+        crate::scheduler::timezone::parse_task_tz(&armed.timezone).unwrap_or(chrono_tz::UTC);
+    if armed.trigger_type == "one_shot"
+        && parse_one_shot_delay(&armed.trigger_value, armed_tz).is_err()
+    {
         let _ = state.task_store.set_status(&p.id, &task.status).await;
         return Err(PortalError::bad_request(
             "trigger_passed",

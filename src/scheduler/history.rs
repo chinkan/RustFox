@@ -200,6 +200,7 @@ mod tests {
             next_run_at: None,
             deleted_at: None,
             bot_id: "researcher".to_string(),
+            timezone: "UTC".to_string(),
         }
     }
 

@@ -67,11 +67,20 @@ impl ConversationManager {
         }
         let summary = (!folded_summary.is_empty()).then(|| folded_summary.join("\n\n"));
 
-        let now = chrono::Local::now();
+        let schedule_tz = crate::scheduler::timezone::resolve_schedule_timezone(None).unwrap_or(
+            crate::scheduler::timezone::ScheduleTimezone {
+                tz: chrono_tz::UTC,
+                source: crate::scheduler::timezone::TimezoneSource::Fallback,
+            },
+        );
+        let now = chrono::Utc::now().with_timezone(&schedule_tz.tz);
+        let offset = schedule_tz.utc_offset_label(chrono::Utc::now());
         let context_prompt = format!(
-            "\n\nCurrent date and time: {} ({})",
+            "\n\nCurrent date and time: {} {} ({}, UTC{})",
             now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%A")
+            now.format("%A"),
+            schedule_tz.tz,
+            offset
         );
 
         let system_msg = ChatMessage {

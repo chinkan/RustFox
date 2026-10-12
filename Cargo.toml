@@ -49,6 +49,8 @@ uuid = { version = "1", features = ["v4"] }
 
 # Chrono for timestamps
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 # Cron expression parsing (same crate tokio-cron-scheduler uses internally —
 # validating here means the portal/scheduler-tool gate matches what Job::new_async accepts)
 croner = "4"

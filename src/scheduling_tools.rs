@@ -27,6 +27,8 @@ pub struct SchedulingTools {
     /// `(shim bot id, owner Telegram id)` for turns with no Telegram chat
     /// (portal web chat, #163): their schedules live on the owner's DM.
     telegram_owner: Option<(String, String)>,
+    /// Effective default IANA timezone (ADR-0022).
+    default_tz: chrono_tz::Tz,
 }
 
 impl SchedulingTools {
@@ -48,7 +50,13 @@ impl SchedulingTools {
             telegram_bots,
             rerun_queue,
             telegram_owner: None,
+            default_tz: chrono_tz::UTC,
         }
+    }
+
+    pub fn with_default_tz(mut self, tz: chrono_tz::Tz) -> Self {
+        self.default_tz = tz;
+        self
     }
 
     pub fn with_telegram_owner(mut self, bot_id: String, chat_id: String) -> Self {
@@ -89,16 +97,20 @@ impl ToolHandler for SchedulingTools {
                 function: FunctionDefinition {
                     name: "schedule_task".to_string(),
                     description: "Schedule a task for the current bot. Every schedule has that bot's id; there is no global or shared cron.".to_string(),
-                    parameters: json!({
+                    parameters: {
+                        let default_tz = self.default_tz.to_string();
+                        json!({
                         "type": "object",
                         "properties": {
                             "trigger_type": { "type": "string", "enum": ["one_shot", "recurring"] },
-                            "trigger_value": { "type": "string", "description": "ISO 8601 (one_shot) or cron (recurring): 5 fields 'min hour day month weekday' or 6 fields 'sec min hour day month weekday'. Evaluated in UTC. Stored as 6 fields (seconds added as 0)." },
+                            "trigger_value": { "type": "string", "description": format!("ISO 8601 (one_shot) or cron (recurring): 5 fields 'min hour day month weekday' or 6 fields 'sec min hour day month weekday'. Evaluated in the task's timezone (argument 'timezone', IANA name; default {default_tz}). Stored as 6 fields (seconds added as 0).") },
+                            "timezone": { "type": "string", "description": format!("IANA timezone for this task, e.g. 'Asia/Hong_Kong'. Omit to use the default ({default_tz}).") },
                             "prompt": { "type": "string", "description": "The message the agent will process" },
                             "description": { "type": "string", "description": "Human-readable label" }
                         },
                         "required": ["trigger_type", "trigger_value", "prompt", "description"]
-                    }),
+                    })
+                    },
                 },
             },
             ToolDefinition {
@@ -198,8 +210,17 @@ impl ToolHandler for SchedulingTools {
                 use crate::agent::normalize_cron_expr;
                 use crate::agent::parse_one_shot_delay;
 
+                let tz_name = args["timezone"].as_str().unwrap_or("").trim();
+                let (tz, tz_stored) = if tz_name.is_empty() {
+                    (self.default_tz, self.default_tz.name().to_string())
+                } else {
+                    let tz = crate::scheduler::timezone::parse_iana(tz_name, "timezone")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    (tz, tz.name().to_string())
+                };
+
                 if trigger_type == "one_shot" {
-                    parse_one_shot_delay(&trigger_value)
+                    parse_one_shot_delay(&trigger_value, tz)
                         .map_err(|e| anyhow::anyhow!("Invalid trigger: {e}"))?;
                 } else if trigger_type == "recurring" {
                     trigger_value = normalize_cron_expr(&trigger_value)
@@ -235,6 +256,7 @@ impl ToolHandler for SchedulingTools {
                     // tool used to) made `next_run_at` lie for recurring tasks.
                     next_run_at: None,
                     deleted_at: None,
+                    timezone: tz_stored.clone(),
                 };
                 if let Err(e) = self.task_store.create(&task).await {
                     return Ok(format!("Failed to save task: {}", e));
@@ -252,8 +274,8 @@ impl ToolHandler for SchedulingTools {
                         // tool with a fake `SchedulingOps`.
                         let _ = self.task_store.refresh_next_run_at(&task_id).await;
                         Ok(format!(
-                            "Task scheduled! ID: {} — {} ({})",
-                            task_id, description, trigger_value
+                            "Task scheduled! ID: {} — {} ({}, {})",
+                            task_id, description, trigger_value, tz_stored
                         ))
                     }
                     Err(e) => Ok(format!("Failed to register task with scheduler: {}", e)),
@@ -650,7 +672,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.contains("(0 0 9 * * *)"), "unexpected output: {out}");
+        assert!(
+            out.contains("(0 0 9 * * *, UTC)"),
+            "unexpected output: {out}"
+        );
         let tasks = store.list_all_active().await.unwrap();
         assert_eq!(tasks[0].trigger_value, "0 0 9 * * *");
     }

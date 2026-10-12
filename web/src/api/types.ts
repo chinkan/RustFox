@@ -97,6 +97,12 @@ export interface MemoryEntry {
 // Tasks
 // ---------------------------------------------------------------------------
 
+export interface ScheduleTimezoneInfo {
+  timezone: string
+  utcOffset: string
+  source: string
+}
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -110,6 +116,8 @@ export interface ScheduledTask {
   triggerValue: string
   status: string
   platform: string
+  /** IANA timezone for this task (ADR-0022). */
+  timezone: string
 }
 
 export interface TaskRun {
@@ -318,6 +326,8 @@ export interface TaskCreateBody {
   triggerType: 'recurring' | 'one_shot'
   /** 6-field cron (sec min hour dom mon dow) or ISO-8601 for one_shot. */
   triggerValue: string
+  /** Optional IANA timezone; omit → effective default. */
+  timezone?: string
 }
 
 export interface TaskUpdateBody {
@@ -326,6 +336,7 @@ export interface TaskUpdateBody {
   triggerValue?: string
   /** Rejected with 400 trigger_type_immutable if changed. */
   triggerType?: 'recurring' | 'one_shot'
+  timezone?: string
 }
 
 export interface TaskCreateResult {
