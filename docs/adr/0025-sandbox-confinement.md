@@ -328,8 +328,10 @@ manual real-device gate.
 [pkexec(1)](https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html):
 `126` = user dismissed the auth dialog; `127` = not authorized, auth failed or
 pkexec error; after successful auth pkexec returns the package manager's own
-exit code. Four cases:
-- `0` (installed) ⇒ re-probe ⇒ `sandbox` if the probe succeeds.
+exit code. Five cases:
+- `0` (installed) and re-probe succeeds ⇒ `sandbox` + "Safe mode is on" copy.
+- `0` (installed) but re-probe is blocked by AppArmor / user namespaces ⇒
+  `trusted` + the "blocked by system settings" copy, and **no** install command.
 - `126` (cancelled), `127` (not authorized), other non-zero e.g. `100`
   (`apt-get` install failed) ⇒ all write `trusted` and show the one-line
   install command.
