@@ -1417,7 +1417,7 @@ pub async fn handle_message(
              **/format** — Switch message format: rich, markdown, or auto\n\
              **/selfupgrade** — Upgrade the bot (source or release binary)\n\
              **/models** — Browse and change the model\n\
-             **/stop** — Cancel the current processing gracefully\n\
+             **/stop** — Cancel the current turn (user or scheduled) and clear queued messages\n\
              **/btw** — Ask a parallel question while the bot is busy\n\
              **/portal** — Portal URLs (web UI) for this network
              **/config** — Show/set allowlisted config keys (secrets redacted)
@@ -1941,13 +1941,17 @@ pub async fn handle_message(
         }
     }
 
-    // Handle /stop command (ADR-0020 Q5: cancel + clear queue)
+    // Handle /stop (ADR-0020 Q5 + ADR-0024): cancel active User *or* Scheduled
+    // turn via the same cancel token; clear user pending; waiting scheduled
+    // tickets are kept by TurnGate::clear.
     if text == "/stop" {
         let key = session_key(&bot_id, &user_id.to_string());
         let cancelled = agent.cancel_processing(&bot_id, &user_id.to_string()).await;
         let n = agent.turn_gate.clear(&key).await;
         let reply = if cancelled {
-            format!("⏹ Processing cancelled. Cleared {n} queued message(s).")
+            format!(
+                "⏹ Processing cancelled (user or scheduled turn). Cleared {n} queued message(s)."
+            )
         } else if n > 0 {
             format!("Cleared {n} queued message(s).")
         } else {

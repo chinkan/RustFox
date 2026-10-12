@@ -163,6 +163,10 @@ Be concise and helpful."""
 # threshold = 3           # Repetitions of the same tool+args before a loop is flagged (default 3)
 # timeout_seconds = 120   # Idle window for the loop detector; tool calls older than this don't count (default 120)
 
+# Scheduled-run wall-clock timeout (ADR-0024 / #175). Optional; defaults apply if omitted.
+# [scheduler]
+# run_timeout_secs = 900   # Max seconds for one scheduled agent call (default 900). Floor 60; 0 → default.
+
 # LangSmith observability (optional)
 # Traces every LLM call and tool execution for debugging in the LangSmith UI.
 # Get your API key at https://smith.langchain.com → Settings → API Keys

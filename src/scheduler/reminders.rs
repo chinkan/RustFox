@@ -10,6 +10,13 @@ use tracing::info;
 /// extend the convention without re-deriving it.
 pub const SYSTEM_USER_PREFIX: &str = "__system";
 
+/// ADR-0024: wall-clock timeout failure reason on a scheduled run.
+pub const RUN_TIMEOUT_ERROR: &str = "run timeout";
+/// ADR-0024: startup reconcile reason for zombie `running` rows.
+pub const INTERRUPTED_BY_RESTART: &str = "interrupted by restart";
+/// ADR-0024: stale-run watchdog reason (distinct from live timeout).
+pub const STALE_RUNNING_ROW: &str = "stale running row";
+
 /// Assign rows that predate `bot_id` to the default bot. Does not drop them.
 /// Returns how many rows were updated. Safe to call on every open.
 pub fn migrate_unscoped_schedules(conn: &Connection) -> Result<usize> {
@@ -508,6 +515,74 @@ impl ScheduledTaskStore {
         )
         .context("Failed to update scheduled task run")?;
         Ok(())
+    }
+
+    /// ADR-0024 startup reconcile: every `running` row → `failed`.
+    /// Local single-process: no live cross-process run to preserve.
+    pub async fn fail_all_running(&self, reason: &str) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_task_runs SET status = 'failed', error = ?1 WHERE status = 'running'",
+                rusqlite::params![reason],
+            )
+            .context("Failed to reconcile running scheduled_task_runs")?;
+        Ok(n)
+    }
+
+    /// ADR-0024 stale-run watchdog: `running` rows older than `timeout_secs`
+    /// → `failed`. Returns the rows flipped (for owner warnings).
+    pub async fn fail_stale_running(
+        &self,
+        timeout_secs: u64,
+        reason: &str,
+    ) -> Result<Vec<ScheduledTaskRun>> {
+        let conn = self.conn.lock().await;
+        let age = format!("-{timeout_secs} seconds");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, run_at, response, error, status, created_at
+                 FROM scheduled_task_runs
+                 WHERE status = 'running'
+                   AND created_at <= datetime('now', ?1)",
+            )
+            .context("Failed to prepare stale-running query")?;
+        let stale = stmt
+            .query_map(rusqlite::params![age], |row| {
+                Ok(ScheduledTaskRun {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    run_at: row.get(2)?,
+                    response: row.get(3)?,
+                    error: row.get(4)?,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .context("Failed to map stale-running rows")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to collect stale-running rows")?;
+        drop(stmt);
+
+        let mut flipped = Vec::with_capacity(stale.len());
+        for row in stale {
+            let n = conn
+                .execute(
+                    "UPDATE scheduled_task_runs
+                     SET status = 'failed', error = ?1
+                     WHERE id = ?2 AND status = 'running'",
+                    rusqlite::params![reason, row.id],
+                )
+                .context("Failed to fail stale running row")?;
+            if n > 0 {
+                flipped.push(ScheduledTaskRun {
+                    status: "failed".to_string(),
+                    error: Some(reason.to_string()),
+                    ..row
+                });
+            }
+        }
+        Ok(flipped)
     }
 
     pub async fn get_task_runs(
@@ -1284,5 +1359,107 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].response.as_deref(), Some("result"));
         assert_eq!(runs[0].status, "completed");
+    }
+
+    #[tokio::test]
+    async fn fail_all_running_flips_every_running_row() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+        let task = make_task("task-recon", "user-1", "cron");
+        store.create(&task).await.unwrap();
+
+        store
+            .insert_run(
+                "r1",
+                "task-recon",
+                "2026-10-01T00:00:00",
+                None,
+                None,
+                "running",
+            )
+            .await
+            .unwrap();
+        store
+            .insert_run(
+                "r2",
+                "task-recon",
+                "2026-10-02T00:00:00",
+                None,
+                None,
+                "running",
+            )
+            .await
+            .unwrap();
+        store
+            .insert_run(
+                "r3",
+                "task-recon",
+                "2026-10-03T00:00:00",
+                Some("ok"),
+                None,
+                "completed",
+            )
+            .await
+            .unwrap();
+
+        let n = store
+            .fail_all_running(INTERRUPTED_BY_RESTART)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+
+        let runs = store.get_task_runs("task-recon", 10).await.unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            runs.into_iter().map(|r| (r.id.clone(), r)).collect();
+        assert_eq!(by_id["r1"].status, "failed");
+        assert_eq!(by_id["r1"].error.as_deref(), Some(INTERRUPTED_BY_RESTART));
+        assert_eq!(by_id["r2"].status, "failed");
+        assert_eq!(by_id["r3"].status, "completed");
+    }
+
+    #[tokio::test]
+    async fn fail_stale_running_only_ages_past_timeout() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+        let task = make_task("task-stale", "user-1", "cron");
+        store.create(&task).await.unwrap();
+
+        // Insert a fresh running row (created_at = now) — should NOT flip.
+        store
+            .insert_run(
+                "fresh",
+                "task-stale",
+                "2026-10-12T00:00:00",
+                None,
+                None,
+                "running",
+            )
+            .await
+            .unwrap();
+
+        // Backdate one row to be older than timeout.
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "INSERT INTO scheduled_task_runs (id, task_id, run_at, response, error, status, created_at)
+                 VALUES ('old', 'task-stale', '2026-10-01T00:00:00', NULL, NULL, 'running', datetime('now', '-2 hours'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let flipped = store
+            .fail_stale_running(900, STALE_RUNNING_ROW)
+            .await
+            .unwrap();
+        assert_eq!(flipped.len(), 1);
+        assert_eq!(flipped[0].id, "old");
+        assert_eq!(flipped[0].error.as_deref(), Some(STALE_RUNNING_ROW));
+
+        let runs = store.get_task_runs("task-stale", 10).await.unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            runs.into_iter().map(|r| (r.id.clone(), r)).collect();
+        assert_eq!(by_id["old"].status, "failed");
+        assert_eq!(by_id["fresh"].status, "running");
     }
 }
