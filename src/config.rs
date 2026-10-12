@@ -54,6 +54,9 @@ pub struct Config {
     /// Opt-in embedded web portal (ADR 0004). Absent section = disabled.
     #[serde(default)]
     pub portal: PortalConfig,
+    /// Scheduled-run wall-clock timeout (ADR-0024 / #175).
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -85,6 +88,49 @@ pub struct SubagentsConfig {
     /// When None, defaults to sandbox tools only (read_file, write_file, list_files, execute_command).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tools: Option<Vec<String>>,
+}
+
+/// Scheduled job runner bounds (ADR-0024). Single-consumer runner; no concurrent
+/// runners in this slice.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SchedulerConfig {
+    /// Wall-clock timeout in seconds for one scheduled agent call.
+    /// Default 900 (15 min). `0` is refused and treated as the default (no
+    /// unbound path). Values `1..=59` are rejected at config load.
+    #[serde(default = "default_run_timeout_secs")]
+    pub run_timeout_secs: u64,
+}
+
+fn default_run_timeout_secs() -> u64 {
+    900
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            run_timeout_secs: default_run_timeout_secs(),
+        }
+    }
+}
+
+impl SchedulerConfig {
+    /// Normalize / validate after deserialize.
+    /// - `0` → default 900 (refuse unbound)
+    /// - `1..=59` → hard error (floor is 60)
+    pub fn normalize(&mut self) -> Result<()> {
+        if self.run_timeout_secs == 0 {
+            self.run_timeout_secs = default_run_timeout_secs();
+            return Ok(());
+        }
+        if self.run_timeout_secs < 60 {
+            anyhow::bail!(
+                "scheduler.run_timeout_secs must be 0 (use default {}) or >= 60; got {}",
+                default_run_timeout_secs(),
+                self.run_timeout_secs
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Risk-threshold gates that govern when the supervisor may auto-execute a
@@ -802,6 +848,11 @@ impl Config {
         self.agent.max_iterations
     }
 
+    /// Scheduled-run wall-clock timeout in seconds (ADR-0024; default 900).
+    pub fn scheduler_run_timeout_secs(&self) -> u64 {
+        self.scheduler.run_timeout_secs
+    }
+
     /// Empty response retry limit (from [agent] empty_response_retry_limit, default 3).
     pub fn empty_response_retry_limit(&self) -> u32 {
         self.agent.empty_response_retry_limit
@@ -936,6 +987,11 @@ impl Config {
         config
             .normalize_bots()
             .with_context(|| "Invalid [[bots]] / [telegram] configuration")?;
+
+        config
+            .scheduler
+            .normalize()
+            .with_context(|| "Invalid [scheduler] configuration")?;
 
         let warnings = config
             .resolve()
@@ -2373,5 +2429,75 @@ mod tests {
         );
         // Shim token refreshed from bots, but api_base_url preserved.
         assert_eq!(cfg.telegram.bot_token, "tok-main");
+    }
+
+    // ── ADR-0024 scheduler.run_timeout_secs ───────────────────────────
+
+    #[test]
+    fn scheduler_run_timeout_default_is_900() {
+        let cfg: Config = toml::from_str(base_toml()).unwrap();
+        assert_eq!(cfg.scheduler.run_timeout_secs, 900);
+        assert_eq!(cfg.scheduler_run_timeout_secs(), 900);
+    }
+
+    #[test]
+    fn scheduler_run_timeout_zero_becomes_default() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [scheduler]
+            run_timeout_secs = 0
+            "#,
+        )
+        .unwrap();
+        cfg.scheduler.normalize().unwrap();
+        assert_eq!(cfg.scheduler.run_timeout_secs, 900);
+    }
+
+    #[test]
+    fn scheduler_run_timeout_rejects_below_floor() {
+        for bad in [1u64, 30, 59] {
+            let mut cfg = SchedulerConfig {
+                run_timeout_secs: bad,
+            };
+            let err = cfg.normalize().unwrap_err().to_string();
+            assert!(
+                err.contains("run_timeout_secs") && err.contains("60"),
+                "bad={bad} err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_run_timeout_accepts_floor_and_above() {
+        for ok in [60u64, 120, 900, 3600] {
+            let mut cfg = SchedulerConfig {
+                run_timeout_secs: ok,
+            };
+            cfg.normalize().unwrap();
+            assert_eq!(cfg.run_timeout_secs, ok);
+        }
+    }
+
+    #[test]
+    fn scheduler_run_timeout_loads_from_toml() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [scheduler]
+            run_timeout_secs = 120
+            "#,
+        )
+        .unwrap();
+        cfg.scheduler.normalize().unwrap();
+        assert_eq!(cfg.scheduler_run_timeout_secs(), 120);
     }
 }

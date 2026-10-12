@@ -50,9 +50,124 @@ async fn run_one_scheduled_job(
         tracing::warn!("Failed to persist scheduled task run record: {}", e);
     }
 
-    let processed = agent
-        .process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal)
-        .await;
+    // ADR-0024: wall-clock timeout around the scheduled agent call.
+    let timeout_secs = agent.config.scheduler_run_timeout_secs();
+    let mut run_fut =
+        Box::pin(agent.process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal));
+    let processed = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        &mut run_fut,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            tracing::warn!(
+                "Scheduled task {} timed out after {timeout_secs}s — cancelling",
+                req.task_id
+            );
+            // Cancel the in-flight agent (same path as user /stop), then
+            // best-effort wait for the cancel to land before dropping the fut.
+            let _ = agent
+                .cancel_processing(&req.incoming.bot_id, &req.incoming.user_id)
+                .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut run_fut).await;
+
+            let reason = rustfox::scheduler::reminders::RUN_TIMEOUT_ERROR;
+            if let Err(e) = req
+                .task_store
+                .update_run(&run_id, None, Some(reason), "failed")
+                .await
+            {
+                tracing::warn!("Failed to update run record on timeout: {e}");
+            }
+
+            // History segment so the hang is visible in conversation.
+            if let Ok(Some(task)) = req.task_store.get_by_id(&req.task_id).await {
+                let body = format!("Scheduled task timed out after {timeout_secs}s (cancelled).");
+                if let Err(e) = rustfox::scheduler::history::write_schedule_segment(
+                    &agent.memory,
+                    &task,
+                    &agent.config.bots,
+                    &body,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Failed to write schedule {} timeout segment: {e:#}",
+                        req.task_id
+                    );
+                }
+            }
+
+            // ADR-0013 human-gate once — hang may have side effects; no auto re-fire.
+            let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
+            match &req.rerun_id {
+                Some(rid) => {
+                    if let Err(e) = queue_for_runner.mark_awaiting_user(rid, reason).await {
+                        tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+                    }
+                    if let Some(cv) = chat_id_opt {
+                        let ask = format!(
+                            "**Scheduled task needs your call** — the re-run hit the wall-clock timeout ({timeout_secs}s).
+
+{reason}
+
+Reply with:
+- retry → try once more automatically
+- cancel → give up
+
+(queue id: `{rid}`)"
+                        );
+                        let _ = send_schedule_reply(
+                            &req.owning_telegram_bot,
+                            teloxide::types::ChatId(cv),
+                            &ask,
+                            rustfox::platform::telegram::MessageFormat::Auto,
+                        )
+                        .await;
+                    }
+                }
+                None => match queue_for_runner
+                    .enqueue_manual(&req.task_id, &run_id, reason)
+                    .await
+                {
+                    Ok(qid) => {
+                        tracing::info!(
+                            "Run timeout on task {} → human-gated queue row {qid}",
+                            req.task_id
+                        );
+                        if let Some(cv) = chat_id_opt {
+                            let note = format!(
+                                "**Scheduled task timed out** after {timeout_secs}s without finishing, so I did NOT auto-retry (it may have half-done work).
+
+{reason}
+
+Reply with:
+- retry → try once more automatically
+- cancel → give up
+
+(queue id: `{qid}`)"
+                            );
+                            let _ = send_schedule_reply(
+                                &req.owning_telegram_bot,
+                                teloxide::types::ChatId(cv),
+                                &note,
+                                rustfox::platform::telegram::MessageFormat::Auto,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(qe) => {
+                        tracing::warn!("Failed to record timeout gate for {}: {qe:#}", req.task_id);
+                    }
+                },
+            }
+            // Always finish the TurnGate (caller does); surface Cancelled so
+            // auto-continue / pending handoff behaves like a user /stop.
+            return Some(rustfox::agent::RunStop::Cancelled);
+        }
+    };
 
     // Prompt + result, including failure / cancel / max-iterations,
     // with the schedule id. Portal rows also land in the owning bot's
@@ -731,6 +846,18 @@ async fn main() -> Result<()> {
         Err(e) => warn!("  Rerun queue boot reset failed: {e:#}"),
     }
 
+    // ADR-0024: reconcile zombie `running` rows left by crash/kill.
+    match task_store
+        .fail_all_running(rustfox::scheduler::reminders::INTERRUPTED_BY_RESTART)
+        .await
+    {
+        Ok(n) if n > 0 => info!(
+            "  Scheduled runs: marked {n} leftover running row(s) failed (interrupted by restart)"
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("  Scheduled-run startup reconcile failed: {e:#}"),
+    }
+
     // Create scheduler as Arc so Agent can hold it and closures can reference it
     let scheduler = Arc::new(Scheduler::new().await?);
 
@@ -942,6 +1069,7 @@ async fn main() -> Result<()> {
         let store = task_store.clone();
         let tx = job_tx.clone();
         let bots_for_watch = Arc::clone(&telegram_bots);
+        let stale_timeout_secs = config.scheduler_run_timeout_secs();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
             interval.tick().await; // skip first immediate tick
@@ -1040,6 +1168,48 @@ async fn main() -> Result<()> {
                 // 3. Purge old terminal rows.
                 if let Err(e) = queue.purge_terminal().await {
                     tracing::warn!("Rerun purge failed: {e:#}");
+                }
+                // 4. ADR-0024 stale-run watchdog: running rows older than timeout.
+                let timeout_secs = stale_timeout_secs;
+                match store
+                    .fail_stale_running(
+                        timeout_secs,
+                        rustfox::scheduler::reminders::STALE_RUNNING_ROW,
+                    )
+                    .await
+                {
+                    Ok(flipped) => {
+                        for row in flipped {
+                            tracing::warn!(
+                                "Stale running scheduled_task_runs {} (task {}) → failed",
+                                row.id,
+                                row.task_id
+                            );
+                            if let Ok(Some(task)) = store.get_by_id(&row.task_id).await {
+                                let owner = {
+                                    let guard = bots_for_watch
+                                        .read()
+                                        .unwrap_or_else(|err| err.into_inner());
+                                    rustfox::scheduler::reminders::owning_bot(&task.bot_id, &guard)
+                                        .cloned()
+                                };
+                                if let Ok(cv) = task.chat_id.parse::<i64>() {
+                                    let note = format!(
+                                        "**Scheduled run watchdog:** a `running` row older than {timeout_secs}s was marked failed (stale running row).\n\n(task: `{}`, run: `{}`)",
+                                        task.id, row.id
+                                    );
+                                    let _ = send_schedule_reply(
+                                        &owner,
+                                        teloxide::types::ChatId(cv),
+                                        &note,
+                                        rustfox::platform::telegram::MessageFormat::Auto,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!("Stale-run watchdog failed: {e:#}"),
                 }
             }
         });
