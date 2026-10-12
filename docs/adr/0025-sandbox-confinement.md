@@ -159,7 +159,7 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 | Case | Message |
 |------|---------|
 | Windows + `sandbox` | `Running commands is not available in safe mode on Windows yet. You can switch to trusted mode in the portal.` |
-| Sandbox failed to start | `Running commands is not available in safe mode on this computer right now. You can switch to trusted mode in the portal, or allow sandboxing in your Docker settings.` |
+| Sandbox failed to start | `Running commands is not available in safe mode on this computer right now. You can switch to trusted mode in the portal. If you run RustFox in Docker, allow sandboxing in your Docker settings.` |
 | Empty tool intersection | `No tools are available for this agent with the tools you asked for, so it was not started.` |
 | Path outside sandbox | `The path {path} is outside your workspace folder, so it cannot be used.` |
 | Install button | `Install for me` |
