@@ -83,6 +83,13 @@ New key `[sandbox] mode = "sandbox" | "trusted"`.
 | `trusted` | Current behaviour: starts in `allowed_directory`, not confined. |
 | `sandbox` | Runs under an OS sandbox confined to `allowed_directory`. Linux: bubblewrap (`bwrap`). macOS: Seatbelt (`sandbox-exec`). Windows (Phase 1): no OS sandbox, so `execute_command` is **unavailable** and returns the Windows error below. |
 
+**Sandbox filesystem view (Linux bwrap; macOS Seatbelt profile equivalent):**
+read-only system directories needed to run commands (`/usr`, `/bin`, `/sbin`,
+`/lib*`, `/etc`, `/opt`); `allowed_directory` read-write; private `/tmp`,
+`/dev`, `/proc`; nothing else (in particular not the user's home directory).
+So `/etc/hostname` is **readable** and not writable; `~/` outside the workspace
+is not visible.
+
 File-tool rules (§2) are identical in both modes.
 
 **Defaults:**
@@ -94,9 +101,14 @@ File-tool rules (§2) are identical in both modes.
     for commands is not yet available on Windows.
   - **Linux / macOS** ⇒ wizard **probes once** by actually launching
     `bwrap` / `sandbox-exec` with a trivial command. Success ⇒ writes
-    `sandbox`. Failure (bwrap missing; Ubuntu 23.10+ AppArmor
-    `kernel.apparmor_restrict_unprivileged_userns=1` blocking user namespaces;
-    etc.) ⇒ writes `trusted` and shows how to install or enable bwrap.
+    `sandbox`. Failure ⇒ writes `trusted`, and the message depends on the
+    cause (§3a):
+    - **bwrap not installed** ⇒ install helper (**Install for me**) or the
+      one-line install command.
+    - **bwrap present but blocked** (Ubuntu 23.10+ AppArmor
+      `kernel.apparmor_restrict_unprivileged_userns=1` or other user-namespace
+      restriction) ⇒ the "blocked by system settings" message, with **no**
+      install advice.
 - Official Docker image ⇒ **`trusted`** (the container already isolates).
 - Portal shows the current mode and lets the owner switch.
 
@@ -214,13 +226,19 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 3. Windows junction `ws\j -> C:\Windows`: `list_files j` and `read_file j\win.ini`
    rejected.
 4. TOCTOU (Unix): race a swap of `ws/c` between a regular file and a symlink to
-   outside while calling `read_file` / `write_file` in a loop; no access
-   outside ever succeeds.
+   outside while calling `read_file` / `write_file` in a loop for **10,000
+   swap attempts or 10 s, whichever comes first**; **zero** accesses outside
+   the workspace allowed.
 5. `../` and absolute outside paths (`../../etc/passwd`, `/etc/passwd`,
    `C:\Windows\win.ini`) rejected.
 6. Write a new file via symlinked parent `ws/d -> /tmp`: `write_file d/new.txt`
    rejected.
 7. Regular files and nested directories inside the workspace still work.
+7a. `send_file`: absolute/`../` outside path rejected; `ws/e -> /etc/passwd`
+    symlink rejected; both with the canonical "outside" copy.
+7b. New-file creation uses `create_new`: if the target appears between the
+    check and the create (pre-created file or symlink), the create fails and
+    the existing file is never overwritten or followed.
 
 ### Config and wizard
 
@@ -228,8 +246,9 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 9. Wizard-written config contains an explicit `mode`.
 10. Hand-written config without `mode` ⇒ `trusted`.
 11. Wizard probe success (Linux with working bwrap / macOS) ⇒ writes `sandbox`.
-12. Wizard probe failure (bwrap missing or userns blocked) ⇒ writes `trusted`
-    and shows install/enable hint.
+12. Wizard probe failure because **bwrap is not installed** ⇒ writes `trusted`
+    and shows the install helper or one-line install command. (Blocked-by-
+    system-settings case: test 30.)
 13. Windows wizard ⇒ writes `trusted`, portal note shown.
 14. Portal shows the mode and switching persists to `config.toml`.
 
@@ -238,9 +257,11 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 15. Windows + `sandbox`: `execute_command` returns the canonical Windows copy.
 16. `sandbox` with bwrap removed / namespaces blocked: `execute_command` returns
     the "failed to start" copy; no command runs unconfined.
-17. `sandbox` on Linux/macOS: `cat /etc/hostname > ws/x` works only for reads
-    allowed by policy; `touch ~/outside` fails; writes inside workspace succeed.
-18. Docker image default config ⇒ `trusted`.
+17. `sandbox` on Linux/macOS: `cat /etc/hostname > ws/x` succeeds (system dirs
+    are read-only visible); `touch /etc/x` fails; `ls ~` / `touch ~/outside`
+    fails (home not visible); writes inside the workspace succeed.
+18. Docker image default config ⇒ `trusted`. *Deferred: the repository has no
+    Dockerfile yet.*
 
 ### Tool cap
 
@@ -272,7 +293,8 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
     (inspect network traffic and files during test 25).
 32. Portal "Switch to safe mode": probe fails ⇒ stays `trusted` with the
     matching copy; probe succeeds ⇒ writes `sandbox`.
-33. macOS: no install button; Docker: no button, `trusted`.
+33. macOS: no install button. Docker part (no button, `trusted`) *deferred:
+    the repository has no Dockerfile yet.*
 
 ### Verification
 
@@ -281,8 +303,9 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 - **(a) Default runner.** `kernel.apparmor_restrict_unprivileged_userns=1`
   blocks bwrap
   ([actions/runner-images#10015](https://github.com/actions/runner-images/issues/10015)).
-  Verifies: wizard probe fails ⇒ writes `trusted` + install hint; `sandbox`
-  mode fails closed (test 16).
+  Verifies: wizard probe fails ⇒ writes `trusted` and shows the "blocked by
+  system settings" message (no install hint; test 30); `sandbox` mode fails
+  closed (test 16).
 - **(b) Userns enabled.** Same job after
   `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. First runs a
   bwrap smoke test (e.g. `bwrap --ro-bind / / true`) and **fails the job** if
@@ -297,8 +320,19 @@ manual real-device gate.
 
 - Debian without bwrap: probe ⇒ `trusted`. Install bwrap, re-run: ⇒ `sandbox`
   mode works.
-- Windows: new install defaults to `trusted`; choosing `sandbox` ⇒ plain error
-  on `execute_command`.
+- Windows (on Kan's Windows PC, `kan-ai-pc`): new install defaults to
+  `trusted`; choosing `sandbox` ⇒ plain error on `execute_command`.
+
+**Install helper (tests 25, 26):** verified in v1.0.5 by unit tests with a fake
+`pkexec` covering exit `0` (success), `126` (user cancelled) and `127` (cannot
+install), asserting the resulting mode and the user-facing copy.
+
+**Password handling (test 31):** verified by code review that the sudo password
+never passes through the portal and is never stored in config, database or
+logs (`pkexec` owns the prompt).
+
+**Known untested after v1.0.5:** the real-desktop `pkexec` flow has not been run
+manually. User reports about it are treated as bugs immediately.
 
 CI workflow changes are implementation work and are not part of this docs
 change.
