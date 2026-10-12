@@ -1261,19 +1261,32 @@ impl Agent {
                                     }),
                                 }]
                             };
+                            // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
+                            let child_stacks: Vec<Vec<String>> = match (0..parsed_tasks.len())
+                                .map(|i| {
+                                    crate::peer_invoke::spawn_agents_child_stack(&parent_stack, i)
+                                })
+                                .collect::<Result<_, _>>()
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(stack = ?parent_stack, "spawn_agents rejected: {e}");
+                                    return Some(e);
+                                }
+                            };
                             let agent = match self_weak.upgrade() {
                                 Some(a) => a,
                                 None => return Some("Agent is shutting down".to_string()),
                             };
                             let futures: Vec<_> = parsed_tasks
                                 .into_iter()
-                                .map(|task| {
+                                .zip(child_stacks)
+                                .map(|(task, stack)| {
                                     let sp = task.system_prompt.clone();
                                     let p = task.prompt.clone();
                                     let m = task.model.clone();
                                     let t = task.tools.clone();
                                     let a = agent.clone();
-                                    let stack = parent_stack.clone();
                                     let user_id = user_id.clone();
                                     let chat_id = chat_id.clone();
                                     let turn_trace = turn_trace.clone();
@@ -2164,19 +2177,35 @@ impl Agent {
                                         }),
                                     }]
                                 };
+                                // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
+                                let child_stacks: Vec<Vec<String>> = match (0..parsed_tasks.len())
+                                    .map(|i| {
+                                        crate::peer_invoke::spawn_agents_child_stack(
+                                            &parent_stack,
+                                            i,
+                                        )
+                                    })
+                                    .collect::<Result<_, _>>()
+                                {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        warn!(stack = ?parent_stack, "spawn_agents rejected: {e}");
+                                        return Some(e);
+                                    }
+                                };
                                 let agent = match self_weak.upgrade() {
                                     Some(a) => a,
                                     None => return Some("Agent is shutting down".to_string()),
                                 };
                                 let futures: Vec<_> = parsed_tasks
                                     .into_iter()
-                                    .map(|task| {
+                                    .zip(child_stacks)
+                                    .map(|(task, stack)| {
                                         let sp = task.system_prompt.clone();
                                         let p = task.prompt.clone();
                                         let m = task.model.clone();
                                         let t = task.tools.clone();
                                         let a = agent.clone();
-                                        let stack = parent_stack.clone();
                                         let user_id = user_id.clone();
                                         let chat_id = chat_id.clone();
                                         let turn_trace = turn_trace.clone();
@@ -2503,8 +2532,7 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
 
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
-#[allow(dead_code)]
-fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
+pub(crate) fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
     let mut tools = vec!["read_skill_file".to_string(), "read_agent_file".to_string()];
     for t in declared {
         if t != "read_skill_file" && t != "read_agent_file" {

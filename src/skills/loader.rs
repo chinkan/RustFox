@@ -143,19 +143,41 @@ fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Extract a simple `key: [a, b, c]` list from frontmatter
+/// Extract a list from frontmatter: flow style `key: [a, b, c]` or block style
+/// (`key:` followed by `- a` lines).
 fn extract_list_field(frontmatter: &str, key: &str) -> Vec<String> {
     let prefix = format!("{}:", key);
-    for line in frontmatter.lines() {
+    let unquote = |s: &str| s.trim().trim_matches('"').trim_matches('\'').to_string();
+    let mut lines = frontmatter.lines();
+    while let Some(line) = lines.next() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(&prefix) {
             let rest = rest.trim();
             if rest.starts_with('[') && rest.ends_with(']') {
                 return rest[1..rest.len() - 1]
                     .split(',')
-                    .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                    .map(unquote)
                     .filter(|s| !s.is_empty())
                     .collect();
+            }
+            if rest.is_empty() {
+                let mut items = Vec::new();
+                for item in lines.by_ref() {
+                    let item = item.trim();
+                    if item.is_empty() || item.starts_with('#') {
+                        continue;
+                    }
+                    match item.strip_prefix('-') {
+                        Some(v) => {
+                            let v = unquote(v);
+                            if !v.is_empty() {
+                                items.push(v);
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                return items;
             }
         }
     }
@@ -334,6 +356,20 @@ mod tests {
         let frontmatter = "tools: [read_skill_file, mcp_threads_post]\n";
         let tools = extract_list_field(frontmatter, "tools");
         assert_eq!(tools, vec!["read_skill_file", "mcp_threads_post"]);
+    }
+
+    #[test]
+    fn test_extract_list_field_block_style() {
+        // #173: AGENT.md uses YAML block lists; they were silently dropped.
+        let fm = "name: verifier\ntools:\n  - read_file\n  - \"list_files\"\n\n  - plan_view\nskip_bootstrap: true\n";
+        assert_eq!(
+            extract_list_field(fm, "tools"),
+            vec!["read_file", "list_files", "plan_view"]
+        );
+        assert!(extract_bool_field(fm, "skip_bootstrap"));
+        // Unindented items are valid YAML too.
+        let fm = "tools:\n- read_file\nmodel: x\n";
+        assert_eq!(extract_list_field(fm, "tools"), vec!["read_file"]);
     }
 
     #[test]

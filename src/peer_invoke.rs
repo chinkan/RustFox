@@ -246,6 +246,18 @@ pub fn push_invoke_stack(stack: &[String], target: &str) -> Vec<String> {
     next
 }
 
+/// Child invoke stack for the `index`-th ad-hoc task of a `spawn_agents` call.
+///
+/// Pushes a depth-unique `spawn_agents[<depth>.<index>]` frame so nested
+/// spawns count toward [`MAX_PEER_DEPTH`] through [`guard_peer_invoke`]
+/// without tripping its cycle check. Returns the guard's error string when the
+/// stack is already at the depth limit.
+pub fn spawn_agents_child_stack(stack: &[String], index: usize) -> Result<Vec<String>, String> {
+    let marker = format!("spawn_agents[{}.{index}]", stack.len());
+    guard_peer_invoke(stack, &marker)?;
+    Ok(push_invoke_stack(stack, &marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +520,27 @@ mod tests {
         let key_peer = canonicalize_self_stack_key(&stack_qa, "researcher", &prelim, &bots);
         assert_eq!(key_peer, "researcher");
         assert!(guard_peer_invoke(&stack_qa, &key_peer).is_ok());
+    }
+
+    #[test]
+    fn spawn_agents_nesting_is_bounded_by_max_peer_depth() {
+        let root = vec!["main".to_string()];
+        // First level (main → spawn) is allowed.
+        let l1 = spawn_agents_child_stack(&root, 0).unwrap();
+        assert_eq!(l1.len(), 2);
+        // Sibling tasks get distinct frames.
+        assert_ne!(l1, spawn_agents_child_stack(&root, 1).unwrap());
+        // Second level is allowed (no false cycle on the repeated tool name).
+        let l2 = spawn_agents_child_stack(&l1, 0).unwrap();
+        assert_eq!(l2.len(), MAX_PEER_DEPTH + 1);
+        // Beyond MAX_PEER_DEPTH: rejected with the shared depth message.
+        let err = spawn_agents_child_stack(&l2, 0).unwrap_err();
+        assert!(err.contains("depth limit exceeded"), "{err}");
+        assert!(err.contains(&format!("max_peer_depth={MAX_PEER_DEPTH}")));
+        // Mixed with invoke_agent frames the same budget applies.
+        let via_agent = push_invoke_stack(&root, "researcher");
+        let mixed = spawn_agents_child_stack(&via_agent, 0).unwrap();
+        assert!(spawn_agents_child_stack(&mixed, 0).is_err());
+        assert!(guard_peer_invoke(&mixed, "verifier").is_err());
     }
 }
