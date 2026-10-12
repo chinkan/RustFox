@@ -859,6 +859,75 @@ mod tests {
         }
     }
 
+    /// #173: the shipped verifier agent gets exactly the built-in tools its
+    /// AGENT.md `tools:` lists, and can read a workspace file inside the sandbox.
+    #[tokio::test]
+    async fn verifier_subagent_reads_workspace_file_with_declared_tools_only() {
+        let agents_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let agents = crate::skills::loader::load_skills_from_dir(&agents_dir, agents_dir.clone())
+            .await
+            .unwrap();
+        let verifier = agents.get("verifier").expect("verifier agent ships");
+        assert_eq!(verifier.tools, vec!["read_file", "list_files", "plan_view"]);
+
+        // Same whitelist + filter run_subagent applies to the tool registry.
+        let allowed = crate::agent::effective_subagent_tools(&verifier.tools);
+        let tools = make_tools();
+        let exposed: Vec<String> = tools
+            .define()
+            .into_iter()
+            .map(|d| d.function.name)
+            .filter(|n| allowed.contains(n))
+            .collect();
+        for want in ["read_file", "list_files", "plan_view"] {
+            assert!(exposed.contains(&want.to_string()), "{want} missing");
+        }
+        for unlisted in ["write_file", "send_file", "plan_create", "plan_update"] {
+            assert!(
+                !exposed.contains(&unlisted.to_string()),
+                "{unlisted} leaked"
+            );
+        }
+
+        // Reads go through the shared sandbox tool and stay confined.
+        let root = tempfile::tempdir().unwrap();
+        let sandbox = root.path().join("workspace");
+        std::fs::create_dir_all(sandbox.join("daily")).unwrap();
+        std::fs::write(sandbox.join("daily/note.md"), "2026-10-08 ok").unwrap();
+        std::fs::write(root.path().join("secret.txt"), "nope").unwrap();
+        let ctx = || plan_ctx(&sandbox);
+
+        let body = tools
+            .execute("read_file", json!({"path": "daily/note.md"}), ctx())
+            .await
+            .unwrap();
+        assert_eq!(body, "2026-10-08 ok");
+        let abs = sandbox.join("daily/note.md").display().to_string();
+        let body = tools
+            .execute("read_file", json!({"path": abs}), ctx())
+            .await
+            .unwrap();
+        assert!(body.contains("2026-10-08"));
+        let listing = tools
+            .execute("list_files", json!({"path": "daily"}), ctx())
+            .await
+            .unwrap();
+        assert!(listing.contains("note.md"));
+
+        for escape in [
+            "../secret.txt".to_string(),
+            root.path().join("secret.txt").display().to_string(),
+        ] {
+            assert!(
+                tools
+                    .execute("read_file", json!({"path": escape}), ctx())
+                    .await
+                    .is_err(),
+                "read outside sandbox must fail: {escape}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn plan_pointer_notes_and_rejections() {
         let dir = tempfile::tempdir().unwrap();
