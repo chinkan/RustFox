@@ -324,8 +324,15 @@ manual real-device gate.
   `trusted`; choosing `sandbox` ⇒ plain error on `execute_command`.
 
 **Install helper (tests 25, 26):** verified in v1.0.5 by unit tests with a fake
-`pkexec` covering exit `0` (success), `126` (user cancelled) and `127` (cannot
-install), asserting the resulting mode and the user-facing copy.
+`pkexec`, asserting the resulting mode and the user-facing copy. Exit codes per
+[pkexec(1)](https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html):
+`126` = user dismissed the auth dialog; `127` = not authorized, auth failed or
+pkexec error; after successful auth pkexec returns the package manager's own
+exit code. Four cases:
+- `0` (installed) ⇒ re-probe ⇒ `sandbox` if the probe succeeds.
+- `126` (cancelled), `127` (not authorized), other non-zero e.g. `100`
+  (`apt-get` install failed) ⇒ all write `trusted` and show the one-line
+  install command.
 
 **Password handling (test 31):** verified by code review that the sudo password
 never passes through the portal and is never stored in config, database or
