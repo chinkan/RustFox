@@ -490,6 +490,10 @@ pub struct GeneralConfig {
     /// Optional absolute path overriding the default `~/.rustfox` home root.
     #[serde(default)]
     pub home: Option<PathBuf>,
+    /// Optional IANA timezone override for schedules (ADR-0022 / #166).
+    /// e.g. "Asia/Hong_Kong". Invalid names fail startup.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -833,6 +837,11 @@ impl Config {
     /// Location string from [general], injected into the system prompt.
     pub fn user_location(&self) -> Option<&str> {
         self.general.as_ref().and_then(|g| g.location.as_deref())
+    }
+
+    /// Optional `[general] timezone` IANA override (ADR-0022).
+    pub fn schedule_timezone_config(&self) -> Option<&str> {
+        self.general.as_ref().and_then(|g| g.timezone.as_deref())
     }
 
     /// Resolved home directory (set by `resolve()`). Returns `None` before
@@ -1212,6 +1221,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         cfg.resolve().unwrap();
         let resolved = cfg
@@ -1229,6 +1239,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         let warnings = cfg.resolve().unwrap();
         assert_eq!(cfg.resolved_home.as_ref().unwrap(), &home);
@@ -1248,6 +1259,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         // Use an absolute path under the (writable) tempdir so ensure_dirs can
         // create its parent; the intent is to verify an absolute override is
@@ -1271,6 +1283,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         cfg.memory.database_path = std::path::PathBuf::from("rustfox.db");
         let warnings = cfg.resolve().unwrap();
@@ -1297,6 +1310,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         cfg.skills.directory = std::path::PathBuf::from("my-skills");
         let warnings = cfg.resolve().unwrap();
@@ -1866,6 +1880,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home),
+            timezone: None,
         });
         cfg.resolve().unwrap();
         let (prompt, source) = cfg.resolve_system_prompt();
@@ -1920,6 +1935,7 @@ mod tests {
         cfg.general = Some(GeneralConfig {
             location: None,
             home: Some(home.clone()),
+            timezone: None,
         });
         cfg.openrouter.system_prompt_file = Some(abs.clone());
         cfg.resolve().unwrap();

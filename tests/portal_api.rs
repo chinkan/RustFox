@@ -907,6 +907,7 @@ fn make_task(id: &str) -> ScheduledTask {
         next_run_at: Some("2026-09-23T07:30:00+08:00".into()),
         deleted_at: None,
         bot_id: rustfox::platform::DEFAULT_BOT_ID.into(),
+        timezone: "UTC".into(),
     }
 }
 

@@ -46,3 +46,10 @@ describe('i18n locale parity', () => {
     expect(empty).toEqual([])
   })
 })
+
+describe('schedule timezone copy (ADR-0022 / #166)', () => {
+  it('removes temporary UTC portal hints from #167', () => {
+    expect(JSON.stringify(en)).not.toContain('Times are in UTC for now.')
+    expect(JSON.stringify(zhHK)).not.toContain('時間而家係 UTC。')
+  })
+})

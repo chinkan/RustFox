@@ -130,7 +130,7 @@
     "triggerTypeLocked": "Trigger type cannot be changed after creation.",
     "cronExpr": "Cron (5 or 6 fields)",
     "runAt": "Run at (ISO-8601)",
-    "cronHint": "min hour day month weekday — e.g. 30 7 * * * (optional leading seconds field). Times are in UTC for now.",
+    "cronHint": "min hour day month weekday — e.g. 30 7 * * * (optional leading seconds field). Times are in the task timezone.",
     "triggerInvalid": "Invalid trigger value (need 5- or 6-field cron / future ISO time).",
     "prompt": "Prompt",
     "rearmed": "Re-armed live — next run {{next}}",
@@ -139,7 +139,10 @@
     "updatedRearmed": "Task updated & re-armed — next run {{next}}",
     "deleted": "Task deleted — run history preserved",
     "deleteConfirmTitle": "Delete task?",
-    "deleteConfirm": "Delete “{{name}}”? The schedule is cancelled; run history stays available."
+    "deleteConfirm": "Delete “{{name}}”? The schedule is cancelled; run history stays available.",
+    "defaultTimezone": "Default schedule timezone: {{tz}} (UTC{{offset}})",
+    "timezone": "Timezone (IANA)",
+    "utcLegacy": "UTC (legacy)"
   },
   "settings": {
     "title": "Settings",

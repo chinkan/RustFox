@@ -152,6 +152,11 @@ Be concise and helpful."""
 # Uncomment and set to your city/region (e.g. "Tokyo, Japan")
 # location = "Tokyo, Japan"
 
+# IANA timezone for schedules (optional). Containers often have no /etc/localtime
+# and no TZ, so the system zone is UTC — set this and/or TZ (e.g. Asia/Hong_Kong).
+# An unknown name fails startup. The portal Tasks page and boot log show the zone in use.
+# timezone = "Asia/Hong_Kong"
+
 # Agent loop (optional; defaults apply if section omitted)
 # [agent]
 # max_iterations = 25              # Agent loop cap (default 25)

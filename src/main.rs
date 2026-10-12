@@ -963,6 +963,13 @@ async fn main() -> Result<()> {
             Arc::clone(&telegram_bots),
             rerun_queue.clone(),
         )
+        .with_default_tz(
+            rustfox::scheduler::timezone::resolve_schedule_timezone(
+                config.schedule_timezone_config(),
+            )
+            .expect("schedule timezone")
+            .tz,
+        )
         .with_telegram_owner(
             rustfox::platform::normalize_bot_id(&shim.id).to_string(),
             shim.allowed_user_ids
@@ -1248,6 +1255,9 @@ async fn main() -> Result<()> {
         .resolved_home
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let schedule_tz =
+        rustfox::scheduler::timezone::resolve_schedule_timezone(config.schedule_timezone_config())?;
+    schedule_tz.log_boot();
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
@@ -1256,6 +1266,7 @@ async fn main() -> Result<()> {
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),
         home,
+        schedule_tz.tz,
     )
     .await?;
     scheduler.start().await?;
@@ -1308,6 +1319,12 @@ async fn main() -> Result<()> {
             config.portal.clone(),
             config_path.clone(),
             config.resolved_home().cloned(),
+        )
+        .with_schedule_tz(
+            rustfox::scheduler::timezone::resolve_schedule_timezone(
+                config.schedule_timezone_config(),
+            )
+            .expect("schedule timezone"),
         )
         .with_secret_store(secret_bridge.store())
         .with_pending_secrets(secret_bridge.pending());

@@ -47,6 +47,110 @@ pub fn migrate_unscoped_schedules(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
+/// ADR-0022 option C: add `timezone` column and backfill NULL rows only.
+/// Recurring → UTC; one-shot → system local (ignores config override).
+/// Idempotent. Fire times must not change.
+pub fn migrate_schedule_timezones(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(scheduled_tasks)")
+        .context("scheduled_tasks schema")?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("read scheduled_tasks columns")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect scheduled_tasks columns")?;
+    if !cols.iter().any(|c| c == "timezone") {
+        conn.execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN timezone TEXT;")
+            .context("add scheduled_tasks.timezone")?;
+    }
+
+    let system_tz = crate::scheduler::timezone::detect_system_tz().unwrap_or(chrono_tz::UTC);
+    let system_name = system_tz.name().to_string();
+
+    // Warn if we fell back to UTC while chrono::Local may not be UTC.
+    let local_offset = chrono::Local::now().offset().local_minus_utc();
+    if system_tz == chrono_tz::UTC && local_offset != 0 {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, description FROM scheduled_tasks
+                 WHERE (timezone IS NULL OR timezone = '')
+                   AND trigger_type = 'one_shot'
+                   AND trigger_value NOT LIKE '%Z'
+                   AND trigger_value NOT LIKE '%+%'
+                   AND trigger_value NOT LIKE '%-%-%T%:%:%-%'",
+            )
+            .ok();
+        if let Some(ref mut stmt) = stmt {
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .ok()
+                .and_then(|m| m.collect::<rusqlite::Result<Vec<_>>>().ok())
+                .unwrap_or_default();
+            for (id, desc) in rows {
+                tracing::warn!(
+                    "Could not resolve system IANA timezone while migrating one-shot task {id} ({desc}); stamped UTC — verify fire time in the portal"
+                );
+            }
+        }
+    }
+
+    let recurring_n = conn
+        .execute(
+            "UPDATE scheduled_tasks SET timezone = 'UTC'
+             WHERE (timezone IS NULL OR timezone = '') AND trigger_type = 'recurring'",
+            [],
+        )
+        .context("backfill recurring timezone")?;
+    if recurring_n > 0 {
+        info!(
+            "Assigned timezone UTC to {recurring_n} existing recurring task(s); edit a task in the portal to change it."
+        );
+    }
+
+    // Count naive vs absolute one-shots before update
+    let mut naive_n = 0usize;
+    let mut abs_n = 0usize;
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, trigger_value FROM scheduled_tasks
+                 WHERE (timezone IS NULL OR timezone = '') AND trigger_type = 'one_shot'",
+            )
+            .context("select one-shot for tz migrate")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (_id, tv) in &rows {
+            if chrono::DateTime::parse_from_rfc3339(tv).is_ok() {
+                abs_n += 1;
+            } else {
+                naive_n += 1;
+            }
+        }
+    }
+
+    let one_shot_n = conn
+        .execute(
+            "UPDATE scheduled_tasks SET timezone = ?1
+             WHERE (timezone IS NULL OR timezone = '') AND trigger_type = 'one_shot'",
+            rusqlite::params![system_name],
+        )
+        .context("backfill one-shot timezone")?;
+    if one_shot_n > 0 {
+        info!(
+            "Assigned timezone {system_name} to {one_shot_n} existing one-shot task(s) ({naive_n} naive, {abs_n} absolute)."
+        );
+    }
+
+    // Any remaining NULL (unknown trigger_type) → system local
+    let _ = conn.execute(
+        "UPDATE scheduled_tasks SET timezone = ?1 WHERE timezone IS NULL OR timezone = ''",
+        rusqlite::params![system_name],
+    );
+
+    Ok(())
+}
+
 /// #154: with no `default` bot configured, `bot_id = 'default'` rows have no
 /// owner and never send. Move them to the shim bot. Returns rows moved.
 pub fn adopt_default_schedules(
@@ -108,8 +212,8 @@ pub fn owning_bot<'a, T>(
 /// Returns `None` for an unparseable expression (callers treat that as
 /// "no known next run" rather than failing).
 pub fn next_cron_occurrence(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let cron = crate::agent::parse_scheduler_cron(expr).ok()?;
-    cron.find_next_occurrence(&after, false).ok()
+    // Legacy UTC helper; prefer [`crate::scheduler::timezone::next_fire`].
+    crate::scheduler::timezone::next_fire(expr, chrono_tz::UTC, after)
 }
 
 /// Compute the authoritative next fire instant for a task as of `after`
@@ -119,9 +223,10 @@ pub fn next_cron_occurrence(expr: &str, after: DateTime<Utc>) -> Option<DateTime
 /// - recurring → the next cron occurrence strictly after `after`;
 /// - anything else → `None`.
 pub fn compute_next_run_at(task: &ScheduledTask, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let tz = crate::scheduler::timezone::parse_task_tz(&task.timezone).ok()?;
     match task.trigger_type.as_str() {
-        "one_shot" => crate::agent::parse_one_shot_target(&task.trigger_value).ok(),
-        "recurring" => next_cron_occurrence(&task.trigger_value, after),
+        "one_shot" => crate::agent::parse_one_shot_target(&task.trigger_value, tz).ok(),
+        "recurring" => crate::scheduler::timezone::next_fire(&task.trigger_value, tz, after),
         _ => None,
     }
 }
@@ -148,6 +253,8 @@ pub struct ScheduledTask {
     /// `[[bots]]` id that owns this schedule. Required. Old rows are migrated
     /// to [`crate::platform::DEFAULT_BOT_ID`]; new rows must set it explicitly.
     pub bot_id: String,
+    /// IANA timezone for this task (ADR-0022). Always set on new rows.
+    pub timezone: String,
 }
 
 #[derive(Debug, Clone)]
@@ -196,8 +303,8 @@ impl ScheduledTaskStore {
             "INSERT INTO scheduled_tasks
              (id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
               trigger_value, prompt, description, status, created_at, next_run_at,
-              deleted_at, bot_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+              deleted_at, bot_id, timezone)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
                 task.id,
                 task.scheduler_job_id,
@@ -213,6 +320,7 @@ impl ScheduledTaskStore {
                 task.next_run_at,
                 task.deleted_at,
                 task.bot_id,
+                task.timezone,
             ],
         )
         .context("Failed to insert scheduled task")?;
@@ -330,7 +438,7 @@ impl ScheduledTaskStore {
             .prepare(
                 "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
                         trigger_value, prompt, description, status, created_at, next_run_at, deleted_at,
-                        bot_id
+                        bot_id, timezone
                  FROM scheduled_tasks WHERE id = ?1",
             )
             .context("Failed to prepare get_by_id query")?;
@@ -351,6 +459,9 @@ impl ScheduledTaskStore {
                     next_run_at: row.get(11)?,
                     deleted_at: row.get(12)?,
                     bot_id: row.get(13)?,
+                    timezone: row
+                        .get::<_, Option<String>>(14)?
+                        .unwrap_or_else(|| "UTC".into()),
                 })
             })
             .context("Failed to query task by id")?;
@@ -378,7 +489,7 @@ impl ScheduledTaskStore {
                 n
             );
             if let Err(e) = self
-                .update_task_fields(&task.id, None, Some(&n), None, None)
+                .update_task_fields(&task.id, None, Some(&n), None, None, None)
                 .await
             {
                 tracing::warn!("Could not persist normalised cron for {}: {e}", task.id);
@@ -399,6 +510,7 @@ impl ScheduledTaskStore {
         trigger_value: Option<&str>,
         description: Option<&str>,
         next_run: Option<Option<&str>>,
+        timezone: Option<&str>,
     ) -> Result<usize> {
         let conn = self.conn.lock().await;
         let n = conn
@@ -407,14 +519,16 @@ impl ScheduledTaskStore {
                  SET prompt        = COALESCE(?1, prompt),
                      trigger_value = COALESCE(?2, trigger_value),
                      description   = COALESCE(?3, description),
-                     next_run_at   = CASE WHEN ?4 THEN ?5 ELSE next_run_at END
-                 WHERE id = ?6 AND deleted_at IS NULL",
+                     next_run_at   = CASE WHEN ?4 THEN ?5 ELSE next_run_at END,
+                     timezone      = COALESCE(?6, timezone)
+                 WHERE id = ?7 AND deleted_at IS NULL",
                 rusqlite::params![
                     prompt,
                     trigger_value,
                     description,
                     next_run.is_some(),
                     next_run.flatten(),
+                    timezone,
                     id
                 ],
             )
@@ -629,7 +743,7 @@ impl ScheduledTaskStore {
         let sql = format!(
             "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
                     trigger_value, prompt, description, status, created_at, next_run_at, deleted_at,
-                    bot_id
+                    bot_id, timezone
              FROM scheduled_tasks {}
              ORDER BY created_at ASC",
             where_clause
@@ -652,6 +766,9 @@ impl ScheduledTaskStore {
                     next_run_at: row.get(11)?,
                     deleted_at: row.get(12)?,
                     bot_id: row.get(13)?,
+                    timezone: row
+                        .get::<_, Option<String>>(14)?
+                        .unwrap_or_else(|| "UTC".into()),
                 })
             })
             .context("Failed to map rows")?
@@ -682,6 +799,7 @@ mod tests {
             next_run_at: Some("2099-01-01T09:00:00".to_string()),
             deleted_at: None,
             bot_id: crate::platform::DEFAULT_BOT_ID.to_string(),
+            timezone: "UTC".to_string(),
         }
     }
 
@@ -914,7 +1032,7 @@ mod tests {
         // not a recomputed/advanced value.
         assert_eq!(
             next,
-            crate::agent::parse_one_shot_target("2020-01-01T00:00:00").unwrap()
+            crate::agent::parse_one_shot_target("2020-01-01T00:00:00", chrono_tz::UTC).unwrap()
         );
     }
 
@@ -1461,5 +1579,120 @@ mod tests {
             runs.into_iter().map(|r| (r.id.clone(), r)).collect();
         assert_eq!(by_id["old"].status, "failed");
         assert_eq!(by_id["fresh"].status, "running");
+    }
+
+    /// ADR-0022: old schema → column added; recurring UTC; one-shots system local;
+    /// second run is a no-op; fire instants unchanged for recurring UTC rows.
+    #[test]
+    fn migrate_schedule_timezones_option_c() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scheduled_tasks (
+                id TEXT PRIMARY KEY, scheduler_job_id TEXT, user_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL, platform TEXT NOT NULL, trigger_type TEXT NOT NULL,
+                trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
+                deleted_at TEXT, bot_id TEXT NOT NULL DEFAULT 'default');
+             INSERT INTO scheduled_tasks
+                (id, user_id, chat_id, platform, trigger_type, trigger_value, prompt, description, bot_id)
+             VALUES
+                ('r1', 'u', '1', 'telegram', 'recurring', '0 0 9 * * *', 'p', 'recurring utc', 'default'),
+                ('o1', 'u', '1', 'telegram', 'one_shot', '2099-01-01T09:00:00', 'p', 'naive', 'default'),
+                ('o2', 'u', '1', 'telegram', 'one_shot', '2099-01-01T09:00:00Z', 'p', 'absolute', 'default');",
+        )
+        .unwrap();
+
+        let system_tz = crate::scheduler::timezone::detect_system_tz().unwrap_or(chrono_tz::UTC);
+        let system_name = system_tz.name().to_string();
+
+        // Pre-migration fire for recurring (UTC evaluation, as today).
+        use chrono::TimeZone;
+        let after = chrono::Utc.with_ymd_and_hms(2026, 10, 6, 0, 0, 0).unwrap();
+        let pre_recurring =
+            crate::scheduler::timezone::next_fire("0 0 9 * * *", chrono_tz::UTC, after);
+
+        migrate_schedule_timezones(&conn).unwrap();
+
+        let tz_r: String = conn
+            .query_row(
+                "SELECT timezone FROM scheduled_tasks WHERE id='r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tz_r, "UTC");
+        let tz_o1: String = conn
+            .query_row(
+                "SELECT timezone FROM scheduled_tasks WHERE id='o1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tz_o1, system_name);
+        let tz_o2: String = conn
+            .query_row(
+                "SELECT timezone FROM scheduled_tasks WHERE id='o2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tz_o2, system_name);
+
+        // Fire time unchanged for recurring stamped UTC.
+        let post_recurring =
+            crate::scheduler::timezone::next_fire("0 0 9 * * *", chrono_tz::UTC, after);
+        assert_eq!(pre_recurring, post_recurring);
+
+        // Naive one-shot fire in stamped system zone matches parse with that zone.
+        let naive_fire =
+            crate::agent::parse_one_shot_target("2099-01-01T09:00:00", system_tz).unwrap();
+        let task = ScheduledTask {
+            id: "o1".into(),
+            scheduler_job_id: None,
+            user_id: "u".into(),
+            chat_id: "1".into(),
+            platform: "telegram".into(),
+            trigger_type: "one_shot".into(),
+            trigger_value: "2099-01-01T09:00:00".into(),
+            prompt: "p".into(),
+            description: "naive".into(),
+            status: "active".into(),
+            created_at: "2026-01-01T00:00:00".into(),
+            next_run_at: None,
+            deleted_at: None,
+            bot_id: "default".into(),
+            timezone: system_name.clone(),
+        };
+        assert_eq!(compute_next_run_at(&task, after), Some(naive_fire));
+
+        // Idempotent: second run changes nothing.
+        migrate_schedule_timezones(&conn).unwrap();
+        let tz_r2: String = conn
+            .query_row(
+                "SELECT timezone FROM scheduled_tasks WHERE id='r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tz_r2, "UTC");
+
+        // Explicit post-migration row keeps its value (simulate already set).
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, user_id, chat_id, platform, trigger_type, trigger_value, prompt, description, bot_id, timezone)
+             VALUES ('r2', 'u', '1', 'telegram', 'recurring', '0 0 10 * * *', 'p', 'explicit', 'default', 'Asia/Hong_Kong')",
+            [],
+        )
+        .unwrap();
+        migrate_schedule_timezones(&conn).unwrap();
+        let tz_explicit: String = conn
+            .query_row(
+                "SELECT timezone FROM scheduled_tasks WHERE id='r2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tz_explicit, "Asia/Hong_Kong");
     }
 }

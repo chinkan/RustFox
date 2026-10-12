@@ -4,6 +4,7 @@ use crate::memory::MemoryStore;
 use crate::scheduler::Scheduler;
 
 /// Register built-in background tasks
+#[allow(clippy::too_many_arguments)]
 pub async fn register_builtin_tasks(
     scheduler: &Scheduler,
     _memory: MemoryStore,
@@ -12,6 +13,7 @@ pub async fn register_builtin_tasks(
     summarize_threshold: usize,
     user_model_cron: String,
     home: std::path::PathBuf,
+    default_tz: chrono_tz::Tz,
 ) -> anyhow::Result<()> {
     // ADR-0021: accept 5-field config crons; fail fast naming the key.
     let summarize_cron = crate::agent::normalize_cron_expr(&summarize_cron)
@@ -21,7 +23,7 @@ pub async fn register_builtin_tasks(
 
     // Heartbeat — log that the bot is alive every hour
     scheduler
-        .add_cron_job("0 0 * * * *", "heartbeat", || {
+        .add_cron_job("0 0 * * * *", default_tz, "heartbeat", || {
             Box::pin(async {
                 info!("Heartbeat: bot is alive");
             })
@@ -33,19 +35,24 @@ pub async fn register_builtin_tasks(
         let memory_clone = _memory.clone();
         let llm_clone = llm.clone();
         scheduler
-            .add_cron_job(&summarize_cron, "nightly-summarization", move || {
-                let store = memory_clone.clone();
-                let llm = llm_clone.clone();
-                let threshold = summarize_threshold;
-                Box::pin(async move {
-                    if let Err(e) =
-                        crate::memory::summarizer::summarize_all_active(&store, &llm, threshold)
-                            .await
-                    {
-                        tracing::error!("Nightly summarization failed: {:#}", e);
-                    }
-                })
-            })
+            .add_cron_job(
+                &summarize_cron,
+                default_tz,
+                "nightly-summarization",
+                move || {
+                    let store = memory_clone.clone();
+                    let llm = llm_clone.clone();
+                    let threshold = summarize_threshold;
+                    Box::pin(async move {
+                        if let Err(e) =
+                            crate::memory::summarizer::summarize_all_active(&store, &llm, threshold)
+                                .await
+                        {
+                            tracing::error!("Nightly summarization failed: {:#}", e);
+                        }
+                    })
+                },
+            )
             .await?;
     }
 
@@ -55,34 +62,41 @@ pub async fn register_builtin_tasks(
         let llm_clone = llm.clone();
         let home_path = home.clone();
         scheduler
-            .add_cron_job(&user_model_cron, "weekly-user-model-update", move || {
-                let store = memory_clone.clone();
-                let llm = llm_clone.clone();
-                let path = home_path.join("USER.md");
-                let home = home_path.clone();
-                Box::pin(async move {
-                    // Check if any soul file was updated in the last 24h
-                    let recent_update = ["SOUL.md", "AGENTS.md", "USER.md"].iter().any(|name| {
-                        let p = home.join(name);
-                        if let Ok(meta) = std::fs::metadata(&p) {
-                            if let Ok(modified) = meta.modified() {
-                                if let Ok(duration) = modified.elapsed() {
-                                    return duration < std::time::Duration::from_secs(86400);
+            .add_cron_job(
+                &user_model_cron,
+                default_tz,
+                "weekly-user-model-update",
+                move || {
+                    let store = memory_clone.clone();
+                    let llm = llm_clone.clone();
+                    let path = home_path.join("USER.md");
+                    let home = home_path.clone();
+                    Box::pin(async move {
+                        // Check if any soul file was updated in the last 24h
+                        let recent_update =
+                            ["SOUL.md", "AGENTS.md", "USER.md"].iter().any(|name| {
+                                let p = home.join(name);
+                                if let Ok(meta) = std::fs::metadata(&p) {
+                                    if let Ok(modified) = meta.modified() {
+                                        if let Ok(duration) = modified.elapsed() {
+                                            return duration
+                                                < std::time::Duration::from_secs(86400);
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        false
-                    });
+                                false
+                            });
 
-                    if recent_update {
-                        tracing::info!(
-                            "Soul files recently updated — skipping cron user model update"
-                        );
-                        return;
-                    }
-                    crate::learning::update_user_model(&llm, &store, &path).await;
-                })
-            })
+                        if recent_update {
+                            tracing::info!(
+                                "Soul files recently updated — skipping cron user model update"
+                            );
+                            return;
+                        }
+                        crate::learning::update_user_model(&llm, &store, &path).await;
+                    })
+                },
+            )
             .await?;
     }
 

@@ -32,6 +32,7 @@ function TasksPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const tasks = useQuery({ queryKey: ['tasks'], queryFn: api.listTasks, refetchInterval: 30_000 })
+  const scheduleTz = useQuery({ queryKey: ['schedule-timezone'], queryFn: api.getScheduleTimezone })
   const [runsFor, setRunsFor] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [edit, setEdit] = useState<EditState>({ mode: 'view' })
@@ -115,6 +116,14 @@ function TasksPage() {
       <div className="page-head">
         <h1>{t('tasks.title')}</h1>
         <p>{t('tasks.subtitle')}</p>
+        {scheduleTz.data ? (
+          <p className="hint">
+            {t('tasks.defaultTimezone', {
+              tz: scheduleTz.data.timezone,
+              offset: scheduleTz.data.utcOffset,
+            })}
+          </p>
+        ) : null}
       </div>
 
       {notice ? (
@@ -132,7 +141,13 @@ function TasksPage() {
               setNotice(null)
               setEdit({
                 mode: 'create',
-                draft: { name: '', prompt: '', triggerType: 'recurring', triggerValue: '0 0 12 * * *' },
+                draft: {
+                  name: '',
+                  prompt: '',
+                  triggerType: 'recurring',
+                  triggerValue: '0 0 12 * * *',
+                  timezone: scheduleTz.data?.timezone ?? '',
+                },
               })
             }}
           >
@@ -193,6 +208,16 @@ function TasksPage() {
               )}
             </div>
             <div className="field">
+              <label htmlFor="task-tz">{t('tasks.timezone')}</label>
+              <input
+                id="task-tz"
+                type="text"
+                value={draft.timezone ?? ''}
+                onChange={(e) => patchDraft({ timezone: e.target.value })}
+                placeholder={scheduleTz.data?.timezone ?? 'Asia/Hong_Kong'}
+              />
+            </div>
+            <div className="field">
               <label htmlFor="task-prompt">{t('tasks.prompt')}</label>
               <textarea
                 id="task-prompt"
@@ -213,6 +238,7 @@ function TasksPage() {
                       prompt: draft.prompt,
                       triggerType: draft.triggerType,
                       triggerValue: draft.triggerValue,
+                      timezone: draft.timezone || undefined,
                     })
                   } else if (edit.mode === 'edit') {
                     update.mutate({
@@ -221,6 +247,7 @@ function TasksPage() {
                         name: draft.name,
                         prompt: draft.prompt,
                         triggerValue: draft.triggerValue,
+                        timezone: draft.timezone || undefined,
                       },
                     })
                   }
@@ -243,6 +270,7 @@ function TasksPage() {
             <tr>
               <th>{t('tasks.col.task')}</th>
               <th>{t('tasks.col.cron')}</th>
+              <th>{t('tasks.timezone')}</th>
               <th>{t('tasks.col.nextRun')}</th>
               <th>{t('tasks.col.status')}</th>
               <th />
@@ -255,6 +283,16 @@ function TasksPage() {
                   <strong>{task.name}</strong>
                 </td>
                 <td className="mono">{task.cron}</td>
+                <td className="mono">
+                  {task.timezone}
+                  {task.timezone === 'UTC' &&
+                  scheduleTz.data &&
+                  scheduleTz.data.timezone !== 'UTC' ? (
+                    <span className="badge" style={{ marginLeft: 6 }}>
+                      {t('tasks.utcLegacy')}
+                    </span>
+                  ) : null}
+                </td>
                 <td className="mono">{task.nextRun}</td>
                 <td>
                   <span className={`badge dot ${task.enabled ? 'running' : 'idle'}`}>
@@ -279,6 +317,7 @@ function TasksPage() {
                           prompt: task.prompt,
                           triggerType: task.triggerType as 'recurring' | 'one_shot',
                           triggerValue: task.triggerValue,
+                          timezone: task.timezone,
                         },
                       })
                     }
