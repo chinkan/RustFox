@@ -123,6 +123,9 @@ Be concise and helpful."""
 # The LLM's persistent workspace (file/command tools are confined here).
 # Leave unset to use <home>/workspace. Set an absolute path to override.
 # allowed_directory = "/absolute/path/to/workspace"
+# Command confinement (ADR-0025): "sandbox" (OS sandbox, Linux/macOS) or
+# "trusted" (not confined). Missing = "trusted".
+# mode = "trusted"
 
 [memory]
 # Path to the SQLite database file for persistent memory
