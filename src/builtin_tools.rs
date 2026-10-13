@@ -13,7 +13,8 @@ use crate::platform::sender::PlatformSender;
 use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
 use crate::tools::{
-    sandbox_list_dir, sandbox_read_to_string, sandbox_write, validate_sandbox_path,
+    sandbox_list_dir, sandbox_open_for_send, sandbox_read_to_string, sandbox_write,
+    validate_sandbox_path,
 };
 
 pub struct BuiltinTools {
@@ -277,22 +278,10 @@ impl ToolHandler for BuiltinTools {
                 let path = args["path"].as_str().unwrap_or(".");
                 let sandbox = ctx.sandbox_dir.clone();
                 let path_owned = path.to_string();
-                let resolved =
+                let entries =
                     tokio::task::spawn_blocking(move || sandbox_list_dir(&sandbox, &path_owned))
                         .await
                         .context("list_files task failed")??;
-                let mut entries = Vec::new();
-                let mut dir = tokio::fs::read_dir(&resolved).await?;
-                while let Some(entry) = dir.next_entry().await? {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let kind = if entry.file_type().await?.is_dir() {
-                        "dir"
-                    } else {
-                        "file"
-                    };
-                    entries.push(format!("[{kind}] {name}"));
-                }
-                entries.sort();
                 Ok(entries.join("\n"))
             }
             "send_file" => {
@@ -303,20 +292,17 @@ impl ToolHandler for BuiltinTools {
                     .filter(|c| !c.is_empty());
                 let sandbox = ctx.sandbox_dir.clone();
                 let path_owned = path.to_string();
-                let resolved = tokio::task::spawn_blocking(move || {
-                    // validate + no dangling/outside symlink (ADR-0025 7a)
-                    validate_sandbox_path(&sandbox, &path_owned)
+                // validate + no-follow open (ADR-0025 §2 / 7a)
+                let (resolved, size) = tokio::task::spawn_blocking(move || {
+                    sandbox_open_for_send(&sandbox, &path_owned)
                 })
                 .await
                 .context("send_file task failed")??;
-                let metadata = tokio::fs::metadata(&resolved)
-                    .await
-                    .with_context(|| format!("File not found: {}", resolved.display()))?;
                 const TG_FILE_LIMIT: u64 = 50 * 1024 * 1024;
-                if metadata.len() > TG_FILE_LIMIT {
+                if size > TG_FILE_LIMIT {
                     anyhow::bail!(
                         "File is {} MB — exceeds Telegram's 50 MB limit",
-                        metadata.len() / 1024 / 1024
+                        size / 1024 / 1024
                     );
                 }
                 ctx.sender

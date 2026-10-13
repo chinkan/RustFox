@@ -209,28 +209,53 @@ pub fn sandbox_write(sandbox_dir: &Path, requested: &str, content: &str) -> Resu
     Ok(path)
 }
 
-/// Validate + return path for list_files / send_file (metadata checked by caller).
-pub fn sandbox_list_dir(sandbox_dir: &Path, requested: &str) -> Result<PathBuf> {
+/// List a sandbox directory for `list_files`, opening it with no-follow
+/// semantics (ADR-0025 §2): `O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT`
+/// + reparse-attribute reject on Windows. Returns sorted `[dir]/[file] name` lines.
+pub fn sandbox_list_dir(sandbox_dir: &Path, requested: &str) -> Result<Vec<String>> {
     let path = validate_sandbox_path(sandbox_dir, requested)?;
-    // Refuse to list through a symlink/reparse at the resolved user path when
-    // the original requested path is itself a reparse point.
-    let user_path = if Path::new(requested).is_absolute() {
-        PathBuf::from(requested)
-    } else {
-        sandbox_dir.join(requested)
-    };
-    if let Ok(meta) = fs::symlink_metadata(&user_path) {
-        if meta.file_type().is_symlink() {
-            // Symlink-to-inside was allowed by validate via canonicalize; listing
-            // the canonical dir is fine. Symlink-to-outside already rejected.
-            // Still reject if canonicalize somehow left us with a symlink path.
-        }
-        #[cfg(windows)]
-        if is_reparse_point(&user_path) {
-            anyhow::bail!("{}", path_outside_sandbox_msg(requested));
-        }
+    let dir = open_nofollow_read(&path).map_err(|e| nofollow_err(e, requested, &path))?;
+    if !dir.metadata()?.is_dir() {
+        anyhow::bail!("Not a directory: {}", path.display());
     }
-    Ok(path)
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&path)? {
+        let entry = entry?;
+        let kind = if entry.file_type()?.is_dir() {
+            "dir"
+        } else {
+            "file"
+        };
+        entries.push(format!("[{kind}] {}", entry.file_name().to_string_lossy()));
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+/// Validate a `send_file` path and open it with no-follow semantics; returns
+/// the resolved path and its size (taken from the opened handle).
+pub fn sandbox_open_for_send(sandbox_dir: &Path, requested: &str) -> Result<(PathBuf, u64)> {
+    let path = validate_sandbox_path(sandbox_dir, requested)?;
+    let file = open_nofollow_read(&path).map_err(|e| nofollow_err(e, requested, &path))?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        anyhow::bail!("Not a regular file: {}", path.display());
+    }
+    Ok((path, meta.len()))
+}
+
+/// Map a no-follow open failure: a symlink/reparse point raced in after
+/// validation gets the ADR-0025 outside-workspace copy.
+fn nofollow_err(e: std::io::Error, requested: &str, path: &Path) -> anyhow::Error {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        return anyhow::anyhow!("{}", path_outside_sandbox_msg(requested));
+    }
+    #[cfg(windows)]
+    if e.kind() == std::io::ErrorKind::PermissionDenied && is_reparse_point(path) {
+        return anyhow::anyhow!("{}", path_outside_sandbox_msg(requested));
+    }
+    anyhow::Error::new(e).context(format!("Failed to open: {}", path.display()))
 }
 
 fn open_nofollow_read(path: &Path) -> std::io::Result<File> {
@@ -300,20 +325,25 @@ fn open_windows_nofollow(
     write: bool,
     create_new: bool,
 ) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    // FILE_FLAG_OPEN_REPARSE_POINT: open the reparse point itself, then reject.
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    // Windows has no O_NOFOLLOW. FILE_FLAG_OPEN_REPARSE_POINT opens the reparse
+    // point itself (symlink/junction) instead of its target; we then reject it
+    // based on the opened handle's attributes. FILE_FLAG_BACKUP_SEMANTICS lets
+    // the same helper open directories (list_files).
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     let mut opts = OpenOptions::new();
     opts.read(read)
         .write(write)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
     if create_new {
         opts.create_new(true);
     } else if write {
         opts.truncate(true);
     }
     let file = opts.open(path)?;
-    if is_reparse_point(path) {
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "reparse point (symlink/junction) rejected",
@@ -462,12 +492,47 @@ mod tests {
         }
         let err = validate_sandbox_path(&ws, "j").unwrap_err().to_string();
         assert_eq!(err, outside_msg("j"));
-        let err2 = validate_sandbox_path(&ws, "j/win.ini")
+        // list_files on the junction itself.
+        let err = sandbox_list_dir(&ws, "j").unwrap_err().to_string();
+        assert_eq!(err, outside_msg("j"));
+        // read_file / send_file of a file through the junction.
+        let err = sandbox_read_to_string(&ws, "j\\win.ini")
             .unwrap_err()
             .to_string();
-        assert!(
-            err2 == outside_msg("j/win.ini") || err2.contains("outside"),
-            "{err2}"
+        assert_eq!(err, outside_msg("j\\win.ini"));
+        let err = sandbox_open_for_send(&ws, "j\\win.ini")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, outside_msg("j\\win.ini"));
+        // The reparse point itself is rejected by the nofollow open helper.
+        let err = open_nofollow_read(&junction).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn adr0025_5_windows_absolute_outside_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let path = r"C:\Windows\win.ini";
+        assert_eq!(
+            validate_sandbox_path(&ws, path).unwrap_err().to_string(),
+            outside_msg(path)
+        );
+        assert_eq!(
+            sandbox_read_to_string(&ws, path).unwrap_err().to_string(),
+            outside_msg(path)
+        );
+        assert_eq!(
+            sandbox_open_for_send(&ws, path).unwrap_err().to_string(),
+            outside_msg(path)
+        );
+        assert_eq!(
+            sandbox_list_dir(&ws, r"C:\Windows")
+                .unwrap_err()
+                .to_string(),
+            outside_msg(r"C:\Windows")
         );
     }
 
@@ -588,7 +653,10 @@ mod tests {
             "world"
         );
         let listed = sandbox_list_dir(&ws, "nested/deep").unwrap();
-        assert!(listed.is_dir());
+        assert_eq!(listed, vec!["[file] ok.txt".to_string()]);
+        let (sent, len) = sandbox_open_for_send(&ws, "nested/deep/ok.txt").unwrap();
+        assert!(sent.starts_with(ws.canonicalize().unwrap()));
+        assert_eq!(len, 5);
     }
 
     #[test]
@@ -609,6 +677,44 @@ mod tests {
             let err = validate_sandbox_path(&ws, path).unwrap_err().to_string();
             assert_eq!(err, outside_msg(path), "path={path}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adr0025_list_and_send_symlink_escape_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let outside = dir.path().join("out");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "SECRET").unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("ld")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), ws.join("sf")).unwrap();
+
+        for path in ["ld", "ld/", "../out"] {
+            let err = sandbox_list_dir(&ws, path).unwrap_err().to_string();
+            assert_eq!(err, outside_msg(path), "path={path}");
+        }
+        for path in ["sf", "ld/secret.txt", "../out/secret.txt"] {
+            let err = sandbox_open_for_send(&ws, path).unwrap_err().to_string();
+            assert_eq!(err, outside_msg(path), "path={path}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adr0025_nofollow_open_rejects_symlink_final_component() {
+        // Simulates a symlink swapped in after validation: the helper used by
+        // list_files / send_file must refuse to follow it.
+        let dir = tempdir().unwrap();
+        let outside = dir.path().join("out");
+        fs::create_dir_all(&outside).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = open_nofollow_read(&link).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        let mapped = nofollow_err(err, "link", &link).to_string();
+        assert_eq!(mapped, outside_msg("link"));
     }
 
     #[test]
