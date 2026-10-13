@@ -3003,6 +3003,7 @@ dependencies = [
  "include_dir",
  "infer",
  "keyring",
+ "libc",
  "nix",
  "ocrs",
  "pdf-extract",
