@@ -984,11 +984,13 @@ async fn main() -> Result<()> {
         skills_rw.clone(),
         agents_rw.clone(),
     )));
+    let sandbox_mode_handle = std::sync::Arc::new(std::sync::RwLock::new(config.sandbox.mode));
     tool_registry.register(Box::new(
         rustfox::command_tool::CommandTool::new(
             config.sandbox.allowed_directory.clone(),
             cancel_registry.clone(),
         )
+        .with_mode_handle(std::sync::Arc::clone(&sandbox_mode_handle))
         .with_secrets(
             std::sync::Arc::clone(&secret_bridge),
             config.sandbox.secret_env.clone(),
@@ -1327,7 +1329,8 @@ async fn main() -> Result<()> {
             .expect("schedule timezone"),
         )
         .with_secret_store(secret_bridge.store())
-        .with_pending_secrets(secret_bridge.pending());
+        .with_pending_secrets(secret_bridge.pending())
+        .with_sandbox_mode(std::sync::Arc::clone(&sandbox_mode_handle));
         rustfox::portal::auth::ensure_startup_token(&portal_state);
         if let Err(e) = rustfox::portal::serve(portal_state, portal_shutdown.clone()).await {
             // Portal is best-effort: a bind failure must not kill the bot.

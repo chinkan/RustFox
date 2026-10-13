@@ -238,6 +238,8 @@ pub struct PortalState {
         Arc<std::sync::Mutex<std::collections::HashMap<String, crate::google_mcp::PendingLogin>>>,
     /// Effective default schedule timezone (ADR-0022).
     pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
+    /// Live `[sandbox] mode` shared with CommandTool (ADR-0025).
+    pub sandbox_mode: std::sync::Arc<std::sync::RwLock<crate::sandbox::SandboxMode>>,
 }
 
 impl PortalState {
@@ -279,11 +281,23 @@ impl PortalState {
                 tz: chrono_tz::UTC,
                 source: crate::scheduler::timezone::TimezoneSource::Fallback,
             },
+            sandbox_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::sandbox::SandboxMode::Trusted,
+            )),
         }
     }
 
     pub fn with_schedule_tz(mut self, tz: crate::scheduler::timezone::ScheduleTimezone) -> Self {
         self.schedule_tz = tz;
+        self
+    }
+
+    /// Share the live sandbox mode lock with CommandTool (ADR-0025 portal switch).
+    pub fn with_sandbox_mode(
+        mut self,
+        mode: std::sync::Arc<std::sync::RwLock<crate::sandbox::SandboxMode>>,
+    ) -> Self {
+        self.sandbox_mode = mode;
         self
     }
 
@@ -380,6 +394,18 @@ pub fn router(state: PortalState) -> Router {
         )
         .route("/connectors/google/client-id", post(google::set_client_id))
         .route("/settings", axum::routing::patch(settings::patch_settings))
+        .route(
+            "/settings/sandbox/switch-safe",
+            axum::routing::post(settings::switch_to_safe_mode),
+        )
+        .route(
+            "/settings/sandbox/trusted",
+            axum::routing::post(settings::switch_to_trusted_mode),
+        )
+        .route(
+            "/settings/sandbox/install",
+            axum::routing::post(settings::install_sandbox_tool),
+        )
         .route("/soul", get(settings::get_soul))
         .route("/soul", axum::routing::put(settings::put_soul))
         // Slice 2: authenticated pending-secret admin.

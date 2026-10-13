@@ -377,6 +377,8 @@ async fn run_web(config_dir: &Path) -> Result<()> {
         .route("/api/openrouter/models", get(openrouter_models))
         .route("/api/add-bot", post(add_bot))
         .route("/api/install-service", post(install_service))
+        .route("/api/sandbox/status", get(sandbox_status))
+        .route("/api/sandbox/install", post(sandbox_install))
         .route("/api/shutdown", post(shutdown_server))
         .route("/api/oauth/start", get(oauth_start))
         .route("/oauth/callback", get(oauth_callback))
@@ -508,6 +510,7 @@ struct ThinResponse {
 }
 
 fn thin_answers(body: &ThinRequest) -> Result<super::thin::ThinAnswers> {
+    let (sandbox_mode, _msg, _ux) = crate::sandbox::choose_wizard_sandbox_mode();
     Ok(super::thin::ThinAnswers {
         provider: super::thin::ThinProvider::parse(&body.provider)?,
         openrouter_api_key: body.openrouter_api_key.clone(),
@@ -515,6 +518,7 @@ fn thin_answers(body: &ThinRequest) -> Result<super::thin::ThinAnswers> {
         ollama_model: body.ollama_model.clone(),
         bot_token: body.bot_token.clone(),
         system_prompt: body.system_prompt.clone(),
+        sandbox_mode,
     })
 }
 
@@ -793,6 +797,104 @@ async fn add_bot(
             error: Some(format!("Task join failed: {e}")),
         }),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct SandboxStatusResponse {
+    mode: String,
+    message: Option<String>,
+    install_button: Option<String>,
+    installing_hint: Option<String>,
+    install_command: Option<String>,
+    can_install: bool,
+    blocked_by_system: bool,
+}
+
+async fn sandbox_status() -> Json<SandboxStatusResponse> {
+    let (mode, msg, ux) = crate::sandbox::choose_wizard_sandbox_mode();
+    let mut resp = SandboxStatusResponse {
+        mode: mode.as_str().to_string(),
+        message: msg.map(|s| s.to_string()),
+        install_button: None,
+        installing_hint: None,
+        install_command: None,
+        can_install: false,
+        blocked_by_system: matches!(ux, crate::sandbox::InstallUx::BlockedBySystemSettings),
+    };
+    match ux {
+        crate::sandbox::InstallUx::OfferButton { command } => {
+            resp.can_install = true;
+            resp.install_button = Some(crate::sandbox::MSG_INSTALL_BUTTON.to_string());
+            resp.installing_hint = Some(crate::sandbox::MSG_INSTALLING.to_string());
+            resp.install_command = Some(command.user_command);
+        }
+        crate::sandbox::InstallUx::CommandOnly { command } => {
+            resp.install_command = Some(command);
+        }
+        crate::sandbox::InstallUx::BlockedBySystemSettings => {
+            resp.message = Some(crate::sandbox::MSG_BLOCKED_BY_SYSTEM.to_string());
+        }
+        crate::sandbox::InstallUx::UnsupportedPackageManager => {
+            resp.message = Some(crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER.to_string());
+        }
+        crate::sandbox::InstallUx::AlreadyWorks | crate::sandbox::InstallUx::NotApplicable => {}
+    }
+    Json(resp)
+}
+
+#[derive(Debug, Serialize)]
+struct SandboxInstallResponse {
+    ok: bool,
+    mode: String,
+    message: String,
+}
+
+async fn sandbox_install(State(st): State<WizardState>) -> Json<SandboxInstallResponse> {
+    let Some(command) = crate::sandbox::detect_install_command() else {
+        return Json(SandboxInstallResponse {
+            ok: false,
+            mode: "trusted".into(),
+            message: crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER.to_string(),
+        });
+    };
+    let fallback_cmd = command.user_command.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::sandbox::install_bwrap(&crate::sandbox::install::RealPkexec, &command, None, None)
+    })
+    .await
+    .unwrap_or_else(|_| crate::sandbox::InstallOutcome {
+        mode: crate::sandbox::SandboxMode::Trusted,
+        message: crate::sandbox::format_install_failed(&fallback_cmd),
+        includes_install_command: true,
+    });
+
+    // Patch mode into config.toml if it exists.
+    if st.config_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&st.config_path).await {
+            if let Ok(mut doc) = content.parse::<toml::Value>() {
+                if let Some(table) = doc.as_table_mut() {
+                    let sandbox = table
+                        .entry("sandbox")
+                        .or_insert_with(|| toml::Value::Table(Default::default()));
+                    if let Some(stbl) = sandbox.as_table_mut() {
+                        stbl.insert(
+                            "mode".into(),
+                            toml::Value::String(outcome.mode.as_str().to_string()),
+                        );
+                    }
+                    if let Ok(rendered) = toml::to_string_pretty(&doc) {
+                        let _ = tokio::fs::write(&st.config_path, rendered).await;
+                    }
+                }
+            }
+        }
+    }
+
+    Json(SandboxInstallResponse {
+        ok: outcome.mode == crate::sandbox::SandboxMode::Sandbox,
+        mode: outcome.mode.as_str().to_string(),
+        message: outcome.message,
+    })
 }
 
 /// POST /api/install-service
@@ -1189,6 +1291,27 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
     let tg_token = read_line("Telegram bot token: ")?;
     let sentence = read_line("System prompt (one sentence): ")?;
 
+    let (sandbox_mode, sandbox_msg, sandbox_ux) = crate::sandbox::choose_wizard_sandbox_mode();
+    if let Some(msg) = sandbox_msg {
+        println!("\n{msg}");
+    }
+    match &sandbox_ux {
+        crate::sandbox::InstallUx::OfferButton { command } => {
+            println!(
+                "\nSafe mode needs bubblewrap. Run: {}\nOr use the portal later: {}",
+                command.user_command,
+                crate::sandbox::MSG_INSTALL_BUTTON
+            );
+        }
+        crate::sandbox::InstallUx::CommandOnly { command } => {
+            println!("\nTo enable safe mode later, run: {command}");
+        }
+        crate::sandbox::InstallUx::BlockedBySystemSettings => {}
+        crate::sandbox::InstallUx::UnsupportedPackageManager => {
+            println!("\n{}", crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER);
+        }
+        crate::sandbox::InstallUx::AlreadyWorks | crate::sandbox::InstallUx::NotApplicable => {}
+    }
     let config = super::thin::render_config(&super::thin::ThinAnswers {
         provider,
         openrouter_api_key: or_key,
@@ -1196,6 +1319,7 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
         ollama_model,
         bot_token: tg_token,
         system_prompt: sentence,
+        sandbox_mode,
     })?;
 
     let config_path = config_dir.join("config.toml");
@@ -1309,6 +1433,8 @@ pub struct ConfigParams<'a> {
     pub max_tokens: u32,
     pub db_path: &'a str,
     pub location: &'a str,
+    /// ADR-0025: explicit `[sandbox] mode` written by the wizard.
+    pub sandbox_mode: crate::sandbox::SandboxMode,
 }
 
 pub fn format_config(p: &ConfigParams<'_>) -> String {
@@ -1329,6 +1455,7 @@ pub fn format_config(p: &ConfigParams<'_>) -> String {
     let model = p.model;
     let max_tokens = p.max_tokens;
     let db_path = p.db_path;
+    let sandbox_mode = p.sandbox_mode.as_str();
 
     format!(
         r#"[telegram]
@@ -1347,6 +1474,9 @@ Be concise and helpful."""
 
 [memory]
 database_path = "{db_path}"
+
+[sandbox]
+mode = "{sandbox_mode}"
 
 [general]
 {loc_line}
@@ -1563,6 +1693,7 @@ mod tests {
             max_tokens: 4096,
             db_path: db,
             location: loc,
+            sandbox_mode: crate::sandbox::SandboxMode::Trusted,
         })
     }
 
@@ -2026,5 +2157,28 @@ model = "new"
         let merged = merge_wizard_save(existing, wizard).unwrap();
         assert_eq!(merged, wizard);
         assert!(!merged.contains("[[bots]]") && !merged.contains("bots ="));
+    }
+
+    #[test]
+    fn wizard_format_config_writes_explicit_mode() {
+        let out = format_config(&ConfigParams {
+            tg_token: "t",
+            user_ids: "1",
+            or_key: "k",
+            model: "m",
+            max_tokens: 1,
+            db_path: "db.db",
+            location: "",
+            sandbox_mode: crate::sandbox::SandboxMode::Sandbox,
+        });
+        assert!(out.contains("[sandbox]"), "{out}");
+        assert!(out.contains("mode = \"sandbox\""), "{out}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_wizard_mode_is_trusted() {
+        let (mode, _, _) = crate::sandbox::choose_wizard_sandbox_mode();
+        assert_eq!(mode, crate::sandbox::SandboxMode::Trusted);
     }
 }

@@ -177,6 +177,7 @@ exactly (`{path}` is the user-supplied path; `{command}` is the one-line install
 | Install button | `Install for me` |
 | Installing / password hint | `Installing the safety tool. Your computer may ask for your password; RustFox never sees it.` |
 | Install failed + command | `We could not install the safety tool. You can install it yourself by running: {command}` |
+| No supported package manager | `We couldn't install the safety tool automatically on this computer. You can install "bubblewrap" with your system's software installer, or switch to trusted mode in the portal.` |
 | Blocked by system settings | `This computer's system settings block safe mode, so RustFox will run in trusted mode.` |
 | Switched to safe mode | `Safe mode is on. Commands can now only use your workspace folder.` |
 

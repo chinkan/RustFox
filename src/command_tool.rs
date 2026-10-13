@@ -24,6 +24,8 @@ enum SendMode {
 
 pub struct CommandTool {
     sandbox_dir: PathBuf,
+    /// Live mode (portal can switch without restart via shared lock).
+    mode: Arc<std::sync::RwLock<crate::sandbox::SandboxMode>>,
     cancel_registry: Arc<CancelRegistry>,
     /// Optional Slice 3 bridge: inject `secret_env` names into child env.
     secret_bridge: Option<Arc<crate::secret_store::SecretBridge>>,
@@ -34,10 +36,30 @@ impl CommandTool {
     pub fn new(sandbox_dir: PathBuf, cancel_registry: Arc<CancelRegistry>) -> Self {
         Self {
             sandbox_dir,
+            mode: Arc::new(std::sync::RwLock::new(crate::sandbox::SandboxMode::Trusted)),
             cancel_registry,
             secret_bridge: None,
             secret_env_names: Vec::new(),
         }
+    }
+
+    /// Set the effective `[sandbox] mode` (and share the lock with the portal).
+    pub fn with_mode(mut self, mode: crate::sandbox::SandboxMode) -> Self {
+        self.mode = Arc::new(std::sync::RwLock::new(mode));
+        self
+    }
+
+    /// Share an existing mode lock (portal live-switch).
+    pub fn with_mode_handle(
+        mut self,
+        mode: Arc<std::sync::RwLock<crate::sandbox::SandboxMode>>,
+    ) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn mode_handle(&self) -> Arc<std::sync::RwLock<crate::sandbox::SandboxMode>> {
+        Arc::clone(&self.mode)
     }
 
     /// Attach SecretBridge + names to inject into spawn env (Slice 3).
@@ -109,18 +131,49 @@ impl CommandTool {
             Err(safe_msg) => return Ok(safe_msg),
         };
 
-        let mut cmd = TokioCommand::new(if cfg!(windows) { "cmd" } else { "sh" });
-        cmd.arg(if cfg!(windows) { "/C" } else { "-c" })
-            .arg(command)
-            .current_dir(&self.sandbox_dir)
-            .stdout(std::process::Stdio::piped())
+        let mode = *self.mode.read().unwrap_or_else(|e| e.into_inner());
+
+        let mut cmd = if mode == crate::sandbox::SandboxMode::Sandbox {
+            // Windows: refuse. Linux/macOS: OS sandbox. Fail closed — never
+            // silently fall back to trusted (ADR-0025 §6).
+            #[cfg(windows)]
+            {
+                return Ok(crate::sandbox::MSG_WINDOWS_SANDBOX.to_string());
+            }
+            #[cfg(not(windows))]
+            {
+                match crate::sandbox::prepare_sandboxed_command(&self.sandbox_dir, command) {
+                    Ok(c) => c,
+                    Err(crate::sandbox::SandboxStartError::WindowsUnavailable) => {
+                        return Ok(crate::sandbox::MSG_WINDOWS_SANDBOX.to_string());
+                    }
+                    Err(_) => {
+                        return Ok(crate::sandbox::MSG_SANDBOX_FAILED.to_string());
+                    }
+                }
+            }
+        } else {
+            let mut c = TokioCommand::new(if cfg!(windows) { "cmd" } else { "sh" });
+            c.arg(if cfg!(windows) { "/C" } else { "-c" })
+                .arg(command)
+                .current_dir(&self.sandbox_dir);
+            c
+        };
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         for (k, v) in &secret_env {
             cmd.env(k, v);
         }
         #[cfg(unix)]
         cmd.process_group(0);
-        let mut child = cmd.spawn()?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) if mode == crate::sandbox::SandboxMode::Sandbox => {
+                warn!("sandbox spawn failed (fail-closed): {e}");
+                return Ok(crate::sandbox::MSG_SANDBOX_FAILED.to_string());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let escaped_cmd = crate::utils::telegram_markdown::escape_text(command);
 
@@ -539,5 +592,71 @@ mod tests {
         let tool = CommandTool::new(PathBuf::from("."), Arc::new(CancelRegistry::new()));
         let map = tool.resolve_spawn_secret_env().unwrap();
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn sandbox_mode_windows_message_exact() {
+        assert_eq!(
+            crate::sandbox::MSG_WINDOWS_SANDBOX,
+            "Running commands is not available in safe mode on Windows yet. You can switch to trusted mode in the portal."
+        );
+    }
+
+    #[test]
+    fn sandbox_failed_message_exact() {
+        assert_eq!(
+            crate::sandbox::MSG_SANDBOX_FAILED,
+            "Running commands is not available in safe mode on this computer right now. You can switch to trusted mode in the portal. If you run RustFox in Docker, allow sandboxing in your Docker settings."
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_mode_fail_closed_when_bwrap_missing() {
+        // Force missing bwrap via env override to a nonexistent path.
+        std::env::set_var("RUSTFOX_BWRAP_PATH", "/nonexistent/rustfox-no-bwrap");
+        struct ClearBwrap;
+        impl Drop for ClearBwrap {
+            fn drop(&mut self) {
+                std::env::remove_var("RUSTFOX_BWRAP_PATH");
+            }
+        }
+        let _clear = ClearBwrap;
+        let dir = tempdir().unwrap();
+        let tool = CommandTool::new(dir.path().to_path_buf(), Arc::new(CancelRegistry::new()))
+            .with_mode(crate::sandbox::SandboxMode::Sandbox);
+        let result = tool
+            .execute(
+                "execute_command",
+                json!({ "command": "echo should-not-run" }),
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        #[cfg(windows)]
+        {
+            assert_eq!(result, crate::sandbox::MSG_WINDOWS_SANDBOX);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(result, crate::sandbox::MSG_SANDBOX_FAILED);
+            assert!(!dir.path().join("should-not-run").exists());
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn windows_sandbox_mode_returns_canonical_error() {
+        let dir = tempdir().unwrap();
+        let tool = CommandTool::new(dir.path().to_path_buf(), Arc::new(CancelRegistry::new()))
+            .with_mode(crate::sandbox::SandboxMode::Sandbox);
+        let result = tool
+            .execute(
+                "execute_command",
+                json!({ "command": "echo hi" }),
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, crate::sandbox::MSG_WINDOWS_SANDBOX);
     }
 }

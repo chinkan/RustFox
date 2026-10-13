@@ -90,6 +90,7 @@ function SettingsPage() {
   const [soulFile, setSoulFile] = useState<SoulName | null>(null)
   const [soulText, setSoulText] = useState('')
   const [soulMsg, setSoulMsg] = useState<string | null>(null)
+  const [sandboxMsg, setSandboxMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
   // Seed the form once data arrives (and refresh after invalidation).
   useEffect(() => {
@@ -138,9 +139,35 @@ function SettingsPage() {
     onError: (e: Error) => setSoulMsg(e.message),
   })
 
+  const switchSafe = useMutation({
+    mutationFn: () => api.switchSandboxSafe(),
+    onSuccess: (r) => {
+      setSandboxMsg({ text: r.message, ok: r.ok })
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
+  })
+  const switchTrusted = useMutation({
+    mutationFn: () => api.switchSandboxTrusted(),
+    onSuccess: (r) => {
+      setSandboxMsg({ text: r.message, ok: r.ok })
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
+  })
+  const installSandbox = useMutation({
+    mutationFn: () => api.installSandboxTool(),
+    onSuccess: (r) => {
+      setSandboxMsg({ text: r.message, ok: r.ok })
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
+  })
+
   const editable = settings.data?.editable
   const masked = settings.data?.masked
   const promptInfo = settings.data?.systemPrompt
+  const sandbox = settings.data?.sandbox
   const dirty =
     !!editable &&
     ((form.model ?? '') !== editable.model ||
@@ -288,6 +315,100 @@ function SettingsPage() {
                 </p>
               </div>
             ) : null}
+          </section>
+
+          <section className="section" style={{ gridColumn: '1 / -1' }}>
+            <h2 className="section-title">{t('settings.sandboxTitle')}</h2>
+            <div className="card">
+              {sandbox ? (
+                <>
+                  <p style={{ fontSize: 13 }}>
+                    {t('settings.sandboxCurrentMode', {
+                      mode:
+                        sandbox.mode === 'sandbox'
+                          ? t('settings.sandboxModeSafe')
+                          : t('settings.sandboxModeTrusted'),
+                    })}
+                  </p>
+                  {sandbox.blockedBySystem || sandbox.statusMessage ? (
+                    <div className="error-note" role="status" style={{ marginTop: 8 }}>
+                      {sandbox.statusMessage
+                        ?? "This computer's system settings block safe mode, so RustFox will run in trusted mode."}
+                    </div>
+                  ) : null}
+                  {sandbox.windowsNote ? (
+                    <div className="hint" role="status" style={{ marginTop: 8 }}>
+                      {t('settings.sandboxWindowsNote')}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+                    {sandbox.mode !== 'sandbox' && sandbox.platform !== 'windows' && !sandbox.blockedBySystem ? (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={switchSafe.isPending}
+                        onClick={() => {
+                          setSandboxMsg(null)
+                          switchSafe.mutate()
+                        }}
+                      >
+                        {switchSafe.isPending ? t('settings.saving') : t('settings.sandboxSwitchSafe')}
+                      </button>
+                    ) : null}
+                    {sandbox.mode === 'sandbox' ? (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={switchTrusted.isPending}
+                        onClick={() => {
+                          setSandboxMsg(null)
+                          switchTrusted.mutate()
+                        }}
+                      >
+                        {t('settings.sandboxSwitchTrusted')}
+                      </button>
+                    ) : null}
+                    {sandbox.canInstall && sandbox.mode !== 'sandbox' ? (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={installSandbox.isPending}
+                        onClick={() => {
+                          setSandboxMsg({
+                            text: t('settings.sandboxInstallingHint'),
+                            ok: true,
+                          })
+                          installSandbox.mutate()
+                        }}
+                      >
+                        {installSandbox.isPending
+                          ? t('settings.sandboxInstallingHint')
+                          : t('settings.sandboxInstallButton')}
+                      </button>
+                    ) : null}
+                  </div>
+                  {!sandbox.canInstall
+                    && !sandbox.blockedBySystem
+                    && sandbox.installCommand
+                    && sandbox.platform === 'linux'
+                    && sandbox.mode !== 'sandbox' ? (
+                    <div className="hint" style={{ marginTop: 8 }}>
+                      <code>{sandbox.installCommand}</code>
+                    </div>
+                  ) : null}
+                  {sandboxMsg ? (
+                    <div
+                      className={sandboxMsg.ok ? 'hint' : 'error-note'}
+                      style={{ marginTop: 8 }}
+                    >
+                      {sandboxMsg.text}
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="loading">{t('common.loading')}</div>
+              )}
+            </div>
           </section>
 
           <section className="section" style={{ gridColumn: '1 / -1' }}>

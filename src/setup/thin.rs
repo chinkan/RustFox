@@ -303,6 +303,8 @@ pub struct ThinAnswers {
     pub ollama_model: String,
     pub bot_token: String,
     pub system_prompt: String,
+    /// ADR-0025: wizard-chosen `[sandbox] mode` (`sandbox` | `trusted`).
+    pub sandbox_mode: crate::sandbox::SandboxMode,
 }
 
 pub fn render_config(answers: &ThinAnswers) -> Result<String> {
@@ -372,6 +374,13 @@ pub fn render_config(answers: &ThinAnswers) -> Result<String> {
     );
     root.insert("memory".into(), toml::Value::Table(memory));
 
+    let mut sandbox = toml::map::Map::new();
+    sandbox.insert(
+        "mode".into(),
+        toml::Value::String(answers.sandbox_mode.as_str().to_string()),
+    );
+    root.insert("sandbox".into(), toml::Value::Table(sandbox));
+
     toml::to_string(&toml::Value::Table(root)).context("serialize thin config")
 }
 
@@ -439,6 +448,7 @@ mod tests {
             ollama_model: String::new(),
             bot_token: "123:abc".into(),
             system_prompt: "Be brief and kind.".into(),
+            sandbox_mode: crate::sandbox::SandboxMode::Trusted,
         }
     }
 
@@ -568,6 +578,7 @@ mod tests {
             ollama_model: "llama3.2:latest".into(),
             bot_token: "123:abc".into(),
             system_prompt: "Speak plainly.".into(),
+            sandbox_mode: crate::sandbox::SandboxMode::Trusted,
         };
         let text = render_config(&answers).unwrap();
         assert!(!text.contains("mcp"));
@@ -729,5 +740,26 @@ mod tests {
         let rendered = render_config(&openrouter_answers()).unwrap();
         assert!(!rendered.contains("fully_silent"));
         assert!(!rendered.contains("silent"));
+    }
+
+    #[test]
+    fn wizard_writes_explicit_sandbox_mode() {
+        let mut answers = openrouter_answers();
+        answers.sandbox_mode = crate::sandbox::SandboxMode::Sandbox;
+        let text = render_config(&answers).unwrap();
+        assert!(
+            text.contains("mode = \"sandbox\""),
+            "expected explicit mode in:\n{text}"
+        );
+        let cfg = parse(&text);
+        assert_eq!(cfg.sandbox.mode, crate::sandbox::SandboxMode::Sandbox);
+    }
+
+    #[test]
+    fn wizard_trusted_mode_written_explicitly() {
+        let answers = openrouter_answers();
+        let text = render_config(&answers).unwrap();
+        assert!(text.contains("[sandbox]"), "{text}");
+        assert!(text.contains("mode = \"trusted\""), "{text}");
     }
 }

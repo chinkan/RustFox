@@ -64,6 +64,50 @@ jobs:
         run: cd web && npm ci && npm run build
       - run: cargo test
 
+  # ADR-0025 Linux CI (a): default AppArmor userns restriction — fail-closed /
+  # blocked-by-system-settings (tests 16, 30).
+  sandbox-linux-default:
+    name: Sandbox Linux (default AppArmor)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Sandbox unit/integration (expect blocked or fail-closed)
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
+
+  # ADR-0025 Linux CI (b): userns enabled — smoke bwrap then confinement (11, 17).
+  sandbox-linux-userns:
+    name: Sandbox Linux (userns enabled)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: bwrap smoke (fail job if sandbox cannot start)
+        run: bwrap --ro-bind / / true
+      - name: Confinement tests
+        env:
+          RUSTFOX_EXPECT_SANDBOX_OK: "1"
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
+
+  # ADR-0025 macOS Seatbelt integration.
+  sandbox-macos:
+    name: Sandbox macOS (Seatbelt)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Seatbelt sandbox tests
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
+
   web:
     name: Web portal
     runs-on: ubuntu-latest

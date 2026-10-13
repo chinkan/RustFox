@@ -22,6 +22,7 @@ import type {
   Settings,
   SettingsPatch,
   SettingsPatchResult,
+  SandboxSwitchResult,
   Skill,
   SkillEntry,
   SoulFile,
@@ -170,6 +171,12 @@ export const api = {
     }),
   patchSettings: (patch: SettingsPatch) =>
     request<SettingsPatchResult>('/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  switchSandboxSafe: () =>
+    request<SandboxSwitchResult>('/settings/sandbox/switch-safe', { method: 'POST', body: '{}' }),
+  switchSandboxTrusted: () =>
+    request<SandboxSwitchResult>('/settings/sandbox/trusted', { method: 'POST', body: '{}' }),
+  installSandboxTool: () =>
+    request<SandboxSwitchResult>('/settings/sandbox/install', { method: 'POST', body: '{}' }),
   getSoul: (name: SoulName) => get<SoulFile>(`/soul?name=${encodeURIComponent(name)}`),
   putSoul: (name: SoulName, content: string) =>
     request<{ ok: boolean; name: string; bytes: number }>('/soul', {

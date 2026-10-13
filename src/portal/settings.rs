@@ -64,6 +64,10 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
         }));
     }
 
+    let live_mode = *state.sandbox_mode.read().unwrap_or_else(|e| e.into_inner());
+    let workspace = cfg.sandbox.allowed_directory.clone();
+    let sandbox_info = sandbox_status_json(live_mode, workspace).await;
+
     Ok(Json(json!({
         "editable": {
             "model": model,
@@ -89,6 +93,7 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "embeddingApiKey": cfg.embedding.as_ref().map(|e| mask_secret(&e.api_key)),
             "mcpServers": cfg.mcp_servers.iter().map(|m| json!({ "name": m.name })).collect::<Vec<_>>(),
         },
+        "sandbox": sandbox_info,
         "restartRequired": ["portalPort", "portalEnabled", "portalBind", "portalToken"],
     })))
 }
@@ -338,4 +343,252 @@ pub async fn put_soul(
     Ok(Json(
         json!({ "ok": true, "name": body.name, "bytes": body.content.len() }),
     ))
+}
+
+/// Probe (like the wizard) and project install / blocked-by-system UX for Settings.
+async fn sandbox_status_json(
+    live_mode: crate::sandbox::SandboxMode,
+    workspace: std::path::PathBuf,
+) -> Value {
+    let platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
+
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::sandbox::probe_sandbox(Some(workspace.as_path()))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        crate::sandbox::ProbeOutcome::Failed(crate::sandbox::ProbeFailure::OtherFailure(
+            "probe task failed".into(),
+        ))
+    });
+    let ux = crate::sandbox::install_ux_for_probe(&outcome);
+    let already_sandbox = live_mode == crate::sandbox::SandboxMode::Sandbox;
+
+    let mut can_install = false;
+    let mut install_command: Option<String> = None;
+    let mut blocked_by_system = false;
+    let mut status_message: Option<&'static str> = None;
+
+    match &ux {
+        crate::sandbox::InstallUx::OfferButton { command } if !already_sandbox => {
+            // Linux + bwrap missing + not sandbox mode + can_offer_install_button()
+            can_install = true;
+            install_command = Some(command.user_command.clone());
+        }
+        crate::sandbox::InstallUx::CommandOnly { command } if !already_sandbox => {
+            install_command = Some(command.clone());
+        }
+        crate::sandbox::InstallUx::UnsupportedPackageManager if !already_sandbox => {
+            status_message = Some(crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER);
+        }
+        crate::sandbox::InstallUx::BlockedBySystemSettings => {
+            // ADR test 30: system-settings copy only — no Install / no install hint.
+            blocked_by_system = true;
+            status_message = Some(crate::sandbox::MSG_BLOCKED_BY_SYSTEM);
+        }
+        _ => {}
+    }
+
+    json!({
+        "mode": live_mode.as_str(),
+        "platform": platform,
+        "windowsNote": if cfg!(windows) {
+            Some("Safe mode for commands is not yet available on Windows.")
+        } else {
+            None::<&str>
+        },
+        "canInstall": can_install,
+        "installButton": crate::sandbox::MSG_INSTALL_BUTTON,
+        "installingHint": crate::sandbox::MSG_INSTALLING,
+        "installCommand": install_command,
+        "switchToSafeLabel": "Switch to safe mode",
+        "blockedBySystem": blocked_by_system,
+        "statusMessage": status_message,
+    })
+}
+
+async fn persist_sandbox_mode(
+    path: &Path,
+    mode: crate::sandbox::SandboxMode,
+) -> Result<(), PortalError> {
+    let mut doc = load_doc(path).await?;
+    doc_table(&mut doc, "sandbox").insert(
+        "mode".to_string(),
+        toml::Value::String(mode.as_str().to_string()),
+    );
+    let new_content = toml::to_string_pretty(&doc)
+        .map_err(|e| PortalError::internal(format!("Config serialize error: {e}")))?;
+    write_config_with_backup(path, &new_content).await?;
+    Ok(())
+}
+
+/// POST /api/settings/sandbox/switch-safe — re-probe, then write `sandbox` on success.
+pub async fn switch_to_safe_mode(
+    State(state): State<PortalState>,
+) -> Result<Json<Value>, PortalError> {
+    let workspace = state.agent.config().sandbox.allowed_directory.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::sandbox::probe_sandbox(Some(workspace.as_path()))
+    })
+    .await
+    .map_err(PortalError::internal)?;
+
+    match outcome {
+        crate::sandbox::ProbeOutcome::Success => {
+            persist_sandbox_mode(
+                state.config_path.as_path(),
+                crate::sandbox::SandboxMode::Sandbox,
+            )
+            .await?;
+            *state
+                .sandbox_mode
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = crate::sandbox::SandboxMode::Sandbox;
+            Ok(Json(json!({
+                "ok": true,
+                "mode": "sandbox",
+                "message": crate::sandbox::MSG_SAFE_MODE_ON,
+            })))
+        }
+        crate::sandbox::ProbeOutcome::Failed(
+            crate::sandbox::ProbeFailure::BlockedBySystemSettings,
+        ) => Ok(Json(json!({
+            "ok": false,
+            "mode": "trusted",
+            "message": crate::sandbox::MSG_BLOCKED_BY_SYSTEM,
+        }))),
+        crate::sandbox::ProbeOutcome::Failed(crate::sandbox::ProbeFailure::WindowsUnavailable) => {
+            Ok(Json(json!({
+                "ok": false,
+                "mode": "trusted",
+                "message": crate::sandbox::MSG_WINDOWS_SANDBOX,
+            })))
+        }
+        crate::sandbox::ProbeOutcome::Failed(crate::sandbox::ProbeFailure::BwrapMissing) => {
+            match crate::sandbox::detect_install_command() {
+                Some(cmd) => Ok(Json(json!({
+                    "ok": false,
+                    "mode": "trusted",
+                    "message": crate::sandbox::format_install_failed(&cmd.user_command),
+                    "installCommand": cmd.user_command,
+                    "canInstall": crate::sandbox::can_offer_install_button(),
+                }))),
+                None => Ok(Json(json!({
+                    "ok": false,
+                    "mode": "trusted",
+                    "message": crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER,
+                    "canInstall": false,
+                }))),
+            }
+        }
+        crate::sandbox::ProbeOutcome::Failed(crate::sandbox::ProbeFailure::OtherFailure(msg)) => {
+            Ok(Json(json!({
+                "ok": false,
+                "mode": "trusted",
+                "message": crate::sandbox::MSG_SANDBOX_FAILED,
+                "detail": msg,
+            })))
+        }
+    }
+}
+
+/// POST /api/settings/sandbox/install — Linux pkexec install + re-probe (ADR-0025 §3a).
+pub async fn install_sandbox_tool(
+    State(state): State<PortalState>,
+) -> Result<Json<Value>, PortalError> {
+    if cfg!(not(target_os = "linux")) {
+        return Err(PortalError::bad_request(
+            "install_not_applicable",
+            "Install helper is only available on Linux",
+        ));
+    }
+    let Some(command) = crate::sandbox::detect_install_command() else {
+        return Err(PortalError::bad_request(
+            "unsupported_package_manager",
+            crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER,
+        ));
+    };
+    if !crate::sandbox::can_offer_install_button() {
+        return Err(PortalError::bad_request(
+            "install_unavailable",
+            command.user_command.clone(),
+        ));
+    }
+    let workspace = state.agent.config().sandbox.allowed_directory.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::sandbox::install_bwrap(
+            &crate::sandbox::install::RealPkexec,
+            &command,
+            Some(workspace.as_path()),
+            None,
+        )
+    })
+    .await
+    .map_err(PortalError::internal)?;
+
+    persist_sandbox_mode(state.config_path.as_path(), outcome.mode).await?;
+    *state
+        .sandbox_mode
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = outcome.mode;
+
+    Ok(Json(json!({
+        "ok": outcome.mode == crate::sandbox::SandboxMode::Sandbox,
+        "mode": outcome.mode.as_str(),
+        "message": outcome.message,
+        "includesInstallCommand": outcome.includes_install_command,
+        "installingHint": crate::sandbox::MSG_INSTALLING,
+    })))
+}
+
+/// POST /api/settings/sandbox/trusted — switch back to trusted mode.
+pub async fn switch_to_trusted_mode(
+    State(state): State<PortalState>,
+) -> Result<Json<Value>, PortalError> {
+    persist_sandbox_mode(
+        state.config_path.as_path(),
+        crate::sandbox::SandboxMode::Trusted,
+    )
+    .await?;
+    *state
+        .sandbox_mode
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = crate::sandbox::SandboxMode::Trusted;
+    Ok(Json(json!({
+        "ok": true,
+        "mode": "trusted",
+        "message": "Trusted mode is on. Commands are not OS-confined.",
+    })))
+}
+
+#[cfg(test)]
+mod sandbox_settings_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sandbox_status_json_has_mode() {
+        let ws = std::env::temp_dir().join("rustfox-portal-sandbox-status-test");
+        let _ = std::fs::create_dir_all(&ws);
+        let v = sandbox_status_json(crate::sandbox::SandboxMode::Trusted, ws).await;
+        assert_eq!(v["mode"], "trusted");
+        assert!(v.get("switchToSafeLabel").is_some());
+        assert!(v.get("blockedBySystem").is_some());
+        // When already in sandbox mode, never offer install.
+        let ws2 = std::env::temp_dir().join("rustfox-portal-sandbox-status-test2");
+        let _ = std::fs::create_dir_all(&ws2);
+        let v2 = sandbox_status_json(crate::sandbox::SandboxMode::Sandbox, ws2).await;
+        assert_eq!(v2["canInstall"], false);
+        assert!(
+            v2["installCommand"].is_null(),
+            "sandbox mode must not expose installCommand"
+        );
+    }
 }

@@ -517,6 +517,7 @@ function showStep(n) {
     document.getElementById('progress-label').textContent = 'Setup complete!';
     btnBack.style.display = 'none';
     btnNext.style.display = 'none';
+    if (typeof refreshSandboxStatus === 'function') refreshSandboxStatus();
     return;
   }
   document.getElementById('progress-fill').style.width = ((n / WIZARD_STEPS) * 100) + '%';
@@ -929,6 +930,11 @@ function buildSteps() {
   <h1 style="margin-bottom:0.5rem">🎉 You're all set!</h1>
   <p class="subtitle"><code>config.toml</code> has been saved. Start your bot with:</p>
   <pre style="margin-bottom:2rem;text-align:center;font-size:0.95rem;color:#e2e8f0">rustfox</pre>
+  <div id="sandbox-section" style="margin-top: 1rem; text-align: center;">
+    <p id="sandbox-status" class="hint" style="margin-bottom: 0.75rem;"></p>
+    <button id="btn-install-bwrap" class="btn-secondary" style="display:none" onclick="installSandboxTool()">Install for me</button>
+    <p id="sandbox-install-status" class="hint" style="margin-top: 0.75rem;"></p>
+  </div>
   <div id="service-install-section" style="margin-top: 1.5rem; text-align: center;">
     <button id="btn-install-service" class="btn-primary" onclick="installService()">Install as background service</button>
     <p id="service-install-status" class="success-msg" style="margin-top: 0.75rem;"></p>
@@ -937,6 +943,62 @@ function buildSteps() {
     </div>
   </div>
 </div>`;
+}
+
+async function refreshSandboxStatus() {
+  try {
+    const res = await fetch('/api/sandbox/status');
+    const data = await res.json();
+    const status = document.getElementById('sandbox-status');
+    const btn = document.getElementById('btn-install-bwrap');
+    if (!status) return;
+    status.className = 'hint';
+    if (data.mode === 'sandbox') {
+      status.textContent = 'Safe mode is on. Commands can now only use your workspace folder.';
+      status.className = 'success-msg visible';
+      if (btn) btn.style.display = 'none';
+    } else if (data.blocked_by_system) {
+      status.textContent = data.message || "This computer's system settings block safe mode, so RustFox will run in trusted mode.";
+      status.className = 'error-msg visible';
+      if (btn) btn.style.display = 'none';
+    } else if (data.can_install) {
+      status.textContent = 'Safe mode needs the bubblewrap safety tool.';
+      if (btn) { btn.style.display = 'inline-block'; btn.textContent = data.install_button || 'Install for me'; }
+    } else if (data.install_command) {
+      status.innerHTML = 'To enable safe mode later, run: <code>' + escHtml(data.install_command) + '</code>';
+      if (btn) btn.style.display = 'none';
+    } else {
+      status.textContent = data.message || 'Running in trusted mode.';
+      if (data.message) status.className = 'error-msg visible';
+      if (btn) btn.style.display = 'none';
+    }
+  } catch (_) {}
+}
+
+async function installSandboxTool() {
+  const btn = document.getElementById('btn-install-bwrap');
+  const status = document.getElementById('sandbox-install-status');
+  if (btn) { btn.disabled = true; }
+  if (status) {
+    status.className = 'hint';
+    status.textContent = 'Installing the safety tool. Your computer may ask for your password; RustFox never sees it.';
+  }
+  try {
+    const res = await fetch('/api/sandbox/install', { method: 'POST' });
+    const data = await res.json();
+    if (status) {
+      status.textContent = data.message || '';
+      status.className = data.ok ? 'success-msg visible' : 'error-msg visible';
+    }
+    await refreshSandboxStatus();
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Install failed: ' + e.message;
+      status.className = 'error-msg visible';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function init() {
