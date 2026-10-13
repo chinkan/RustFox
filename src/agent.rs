@@ -1145,6 +1145,7 @@ impl Agent {
             )
         };
 
+        let parent_tools_for_children = loop_tools.clone();
         let loop_config = crate::loop_runner::LoopConfig {
             max_iterations: self.config.max_iterations(),
             empty_response_retry_limit: self.config.empty_response_retry_limit(),
@@ -1172,6 +1173,7 @@ impl Agent {
             let self_weak = self.self_weak.clone();
             let parent_stack = root_stack.clone();
             let turn_trace = turn_trace.clone();
+            let parent_tools = parent_tools_for_children;
             move |name: &str, args: &Value, user_id: &str, chat_id: &str| {
                 let name_owned = name.to_string();
                 let args_owned = args.clone();
@@ -1180,6 +1182,7 @@ impl Agent {
                 let user_id = user_id.to_string();
                 let chat_id = chat_id.to_string();
                 let turn_trace = turn_trace.clone();
+                let parent_tools = parent_tools.clone();
                 Box::pin(async move {
                     match name_owned.as_str() {
                         "invoke_agent" => {
@@ -1195,6 +1198,7 @@ impl Agent {
                                         &user_id,
                                         &chat_id,
                                         Some(turn_trace.clone()),
+                                        parent_tools,
                                     )
                                     .await,
                             )
@@ -1290,6 +1294,7 @@ impl Agent {
                                     let user_id = user_id.clone();
                                     let chat_id = chat_id.clone();
                                     let turn_trace = turn_trace.clone();
+                                    let parent_tools = parent_tools.clone();
                                     Box::pin(async move {
                                         let caller = stack
                                             .first()
@@ -1307,6 +1312,7 @@ impl Agent {
                                             stack,
                                             delivery,
                                             Some(turn_trace),
+                                            parent_tools,
                                         )
                                         .await
                                     })
@@ -1717,6 +1723,7 @@ impl Agent {
         user_id: &str,
         chat_id: &str,
         trace: Option<crate::loop_runner::TurnTrace>,
+        parent_tools: Option<Vec<String>>,
     ) -> String {
         let agent_name = match args["bot"]
             .as_str()
@@ -1807,6 +1814,7 @@ impl Agent {
                 child_stack,
                 delivery,
                 trace,
+                parent_tools,
             )
             .await;
         crate::peer_invoke::format_via_attribution(&via_label, &result)
@@ -1832,6 +1840,7 @@ impl Agent {
         invoke_stack: Vec<String>,
         delivery: crate::peer_invoke::ToolDelivery,
         trace: Option<crate::loop_runner::TurnTrace>,
+        parent_tools: Option<Vec<String>>,
     ) -> String {
         // --- Ad-hoc mode (no predefined skill/agent) ---
         if skill_name.is_none() {
@@ -1839,7 +1848,8 @@ impl Agent {
                 .map(str::to_string)
                 .unwrap_or_else(|| self.config.openrouter.model.clone());
 
-            let declared_tools = tools_override
+            let resolved_today = tools_override
+                .clone()
                 .or_else(|| self.config.subagents.default_tools.clone())
                 .unwrap_or_else(|| {
                     vec![
@@ -1849,7 +1859,17 @@ impl Agent {
                         "execute_command".to_string(),
                     ]
                 });
-            let allowed_tools = declared_tools; // ad-hoc: no auto-injection of read_skill_file
+            // Ad-hoc: no declared list; cap = parent tools. No read_skill_file inject.
+            let allowed_tools = match resolve_capped_subagent_tools(
+                parent_tools.as_deref(),
+                tools_override.as_deref(),
+                &resolved_today,
+                None,
+                false,
+            ) {
+                Ok(t) => t,
+                Err(msg) => return msg,
+            };
             let max_iter = self.config.max_iterations();
 
             info!(
@@ -1904,7 +1924,7 @@ impl Agent {
 
         // Resolve model and tool list from registry metadata (or overrides).
         // Order (§7.5): agents registry → skills registry → [[bots]] persona.
-        let (resolved_model, declared_tools, max_iter, bot_persona_fallback) = {
+        let (resolved_model, allowed_tools, max_iter, bot_persona_fallback) = {
             let default_model = self.config.openrouter.model.clone();
 
             let skill_opt = {
@@ -1936,20 +1956,37 @@ impl Agent {
                     skill_name
                 );
             }
-            let tools = tools_override
-                .or_else(|| skill_opt.as_ref().map(|s| s.tools.clone()))
+            let agent_declared = skill_opt
+                .as_ref()
+                .map(|s| s.tools.clone())
                 .or_else(|| bot_peer.and_then(|b| b.tools.clone()))
                 .unwrap_or_default();
+            let resolved_today = tools_override
+                .clone()
+                .unwrap_or_else(|| agent_declared.clone());
+            let declared_for_cap = if agent_declared.is_empty() {
+                None
+            } else {
+                Some(agent_declared)
+            };
+            let capped = match resolve_capped_subagent_tools(
+                parent_tools.as_deref(),
+                tools_override.as_deref(),
+                &resolved_today,
+                declared_for_cap.as_deref(),
+                true,
+            ) {
+                Ok(t) => t,
+                Err(msg) => return msg,
+            };
             let max_i = skill_opt
                 .as_ref()
                 .and_then(|s| s.max_iterations)
                 .unwrap_or_else(|| self.config.max_iterations())
                 .min(self.config.max_iterations());
             let bot_fallback = bot_peer.map(|b| b.persona.trim().to_string());
-            (model, tools, max_i, bot_fallback)
+            (model, capped, max_i, bot_fallback)
         };
-
-        let allowed_tools = effective_subagent_tools(&declared_tools);
 
         info!(
             "Agent/subagent '{}' using model: {} (allowed_tools: {} tools)",
@@ -2087,6 +2124,7 @@ impl Agent {
                 let self_weak = self.self_weak.clone();
                 let parent_stack = invoke_stack.clone();
                 let turn_trace = trace.clone();
+                let parent_tools = Some(allowed_tools.to_vec());
                 move |name: &str, args: &Value, user_id: &str, chat_id: &str| {
                     let name_owned = name.to_string();
                     let args_owned = args.clone();
@@ -2095,6 +2133,7 @@ impl Agent {
                     let user_id = user_id.to_string();
                     let chat_id = chat_id.to_string();
                     let turn_trace = turn_trace.clone();
+                    let parent_tools = parent_tools.clone();
                     Box::pin(async move {
                         match name_owned.as_str() {
                             "invoke_agent" => {
@@ -2110,6 +2149,7 @@ impl Agent {
                                             &user_id,
                                             &chat_id,
                                             turn_trace.clone(),
+                                            parent_tools,
                                         )
                                         .await,
                                 )
@@ -2209,6 +2249,7 @@ impl Agent {
                                         let user_id = user_id.clone();
                                         let chat_id = chat_id.clone();
                                         let turn_trace = turn_trace.clone();
+                                        let parent_tools = parent_tools.clone();
                                         Box::pin(async move {
                                             let caller = stack
                                                 .first()
@@ -2227,6 +2268,7 @@ impl Agent {
                                                 stack,
                                                 delivery,
                                                 turn_trace,
+                                                parent_tools,
                                             )
                                             .await
                                         })
@@ -2530,6 +2572,10 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// ADR-0025 canonical copy when tools_override ∩ parent ∩ declared is empty.
+pub(crate) const EMPTY_SUBAGENT_TOOLS_MSG: &str =
+    "No tools are available for this agent with the tools you asked for, so it was not started.";
+
 /// Build the effective tool whitelist for a subagent/agent.
 /// Always includes `read_skill_file` and `read_agent_file`; deduplicates.
 pub(crate) fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
@@ -2540,6 +2586,60 @@ pub(crate) fn effective_subagent_tools(declared: &[String]) -> Vec<String> {
         }
     }
     tools
+}
+
+/// Cap subagent tools per ADR-0025 §5:
+/// `effective = requested ∩ parent_tools ∩ declared_tools` (declared only if non-empty).
+///
+/// - `requested`: caller `tools` argument, if any.
+/// - `resolved_today`: today's resolution when `tools` is omitted (ad-hoc defaults /
+///   named agent declared list).
+/// - `declared`: named agent's declared tools when non-empty; `None` for ad-hoc.
+/// - `parent_tools`: parent's whitelist; `None` means unrestricted parent.
+/// - `inject_read_tools`: named agents still get `read_skill_file` / `read_agent_file`.
+///
+/// Empty intersection returns [`EMPTY_SUBAGENT_TOOLS_MSG`] (child must not start).
+/// Partial overlap drops tools the parent lacks and keeps the rest (not an error).
+pub(crate) fn resolve_capped_subagent_tools(
+    parent_tools: Option<&[String]>,
+    requested: Option<&[String]>,
+    resolved_today: &[String],
+    declared: Option<&[String]>,
+    inject_read_tools: bool,
+) -> Result<Vec<String>, String> {
+    let mut base: Vec<String> = match requested {
+        Some(req) => req.to_vec(),
+        None => resolved_today.to_vec(),
+    };
+
+    if let Some(parent) = parent_tools {
+        base.retain(|t| parent.iter().any(|p| p == t));
+    }
+
+    // When the caller supplied `tools` and the agent declares a non-empty list,
+    // also intersect with declared (ADR-0025 formula).
+    if requested.is_some() {
+        if let Some(decl) = declared {
+            if !decl.is_empty() {
+                base.retain(|t| decl.iter().any(|d| d == t));
+            }
+        }
+    }
+
+    if base.is_empty() {
+        // Legacy named agents with an empty tools list and no override still
+        // receive the auto-injected read tools.
+        if requested.is_none() && resolved_today.is_empty() && inject_read_tools {
+            return Ok(effective_subagent_tools(&[]));
+        }
+        return Err(EMPTY_SUBAGENT_TOOLS_MSG.to_string());
+    }
+
+    if inject_read_tools {
+        Ok(effective_subagent_tools(&base))
+    } else {
+        Ok(base)
+    }
 }
 
 /// Return declared tools that are not present in the set of all available tool names.
@@ -2620,6 +2720,87 @@ mod tests {
         assert!(tools.contains(&"read_file".to_string()));
         // Should not have duplicates
         assert_eq!(tools.iter().filter(|t| *t == "read_skill_file").count(), 1);
+    }
+
+    // --- ADR-0025 tool-cap tests 19–23 ---
+
+    fn s(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn adr0025_19_parent_partial_overlap_keeps_shared_tools() {
+        // Parent [read_file], request [read_file, execute_command] ⇒ child gets read_file only.
+        let parent = s(&["read_file"]);
+        let requested = s(&["read_file", "execute_command"]);
+        let got =
+            resolve_capped_subagent_tools(Some(&parent), Some(&requested), &requested, None, false)
+                .unwrap();
+        assert_eq!(got, s(&["read_file"]));
+    }
+
+    #[test]
+    fn adr0025_20_named_agent_intersects_declared() {
+        // Declares [read_file, write_file], request [write_file, execute_command],
+        // parent has all ⇒ write_file (+ injected read tools).
+        let parent = s(&["read_file", "write_file", "execute_command"]);
+        let requested = s(&["write_file", "execute_command"]);
+        let declared = s(&["read_file", "write_file"]);
+        let got = resolve_capped_subagent_tools(
+            Some(&parent),
+            Some(&requested),
+            &requested,
+            Some(&declared),
+            true,
+        )
+        .unwrap();
+        assert!(got.contains(&"write_file".to_string()));
+        // execute_command dropped by declared ∩; read_file not in request.
+        assert!(!got.iter().any(|t| t == "execute_command"));
+        assert!(got.contains(&"read_skill_file".to_string()));
+        assert!(got.contains(&"read_agent_file".to_string()));
+        let non_injected: Vec<_> = got
+            .iter()
+            .filter(|t| *t != "read_skill_file" && *t != "read_agent_file")
+            .cloned()
+            .collect();
+        assert_eq!(non_injected, s(&["write_file"]));
+    }
+
+    #[test]
+    fn adr0025_21_adhoc_capped_to_parent() {
+        let parent = s(&["read_file", "list_files"]);
+        let defaults = s(&["read_file", "write_file", "list_files", "execute_command"]);
+        let got =
+            resolve_capped_subagent_tools(Some(&parent), None, &defaults, None, false).unwrap();
+        assert_eq!(got, s(&["read_file", "list_files"]));
+    }
+
+    #[test]
+    fn adr0025_22_empty_intersection_canonical_error() {
+        let parent = s(&["read_file"]);
+        let requested = s(&["execute_command"]);
+        let err =
+            resolve_capped_subagent_tools(Some(&parent), Some(&requested), &requested, None, false)
+                .unwrap_err();
+        assert_eq!(err, EMPTY_SUBAGENT_TOOLS_MSG);
+    }
+
+    #[test]
+    fn adr0025_23_nested_spawn_cannot_regain_tool() {
+        // Middle agent lacks execute_command; nested request cannot regain it.
+        let middle = s(&["read_file", "write_file"]);
+        let nested_request = s(&["read_file", "execute_command"]);
+        let got = resolve_capped_subagent_tools(
+            Some(&middle),
+            Some(&nested_request),
+            &nested_request,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(got, s(&["read_file"]));
+        assert!(!got.contains(&"execute_command".to_string()));
     }
 
     #[test]

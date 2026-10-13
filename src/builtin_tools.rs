@@ -12,7 +12,9 @@ use crate::llm::{FunctionDefinition, ToolDefinition};
 use crate::platform::sender::PlatformSender;
 use crate::skills::SkillRegistry;
 use crate::tool_registry::{ToolContext, ToolHandler, ToolResult};
-use crate::tools::validate_sandbox_path;
+use crate::tools::{
+    sandbox_list_dir, sandbox_read_to_string, sandbox_write, validate_sandbox_path,
+};
 
 pub struct BuiltinTools {
     skills_dir: PathBuf,
@@ -243,10 +245,13 @@ impl ToolHandler for BuiltinTools {
         match name {
             "read_file" => {
                 let path = args["path"].as_str().context("Missing 'path' argument")?;
-                let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
-                let content = tokio::fs::read_to_string(&resolved)
-                    .await
-                    .with_context(|| format!("Failed to read file: {}", resolved.display()))?;
+                let sandbox = ctx.sandbox_dir.clone();
+                let path_owned = path.to_string();
+                let content = tokio::task::spawn_blocking(move || {
+                    sandbox_read_to_string(&sandbox, &path_owned)
+                })
+                .await
+                .context("read_file task failed")??;
                 Ok(content)
             }
             "write_file" => {
@@ -254,11 +259,14 @@ impl ToolHandler for BuiltinTools {
                 let content = args["content"]
                     .as_str()
                     .context("Missing 'content' argument")?;
-                let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
-                if let Some(parent) = resolved.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                tokio::fs::write(&resolved, content).await?;
+                let sandbox = ctx.sandbox_dir.clone();
+                let path_owned = path.to_string();
+                let content_owned = content.to_string();
+                let resolved = tokio::task::spawn_blocking(move || {
+                    sandbox_write(&sandbox, &path_owned, &content_owned)
+                })
+                .await
+                .context("write_file task failed")??;
                 Ok(format!(
                     "Wrote {} bytes to {}",
                     content.len(),
@@ -267,7 +275,12 @@ impl ToolHandler for BuiltinTools {
             }
             "list_files" => {
                 let path = args["path"].as_str().unwrap_or(".");
-                let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
+                let sandbox = ctx.sandbox_dir.clone();
+                let path_owned = path.to_string();
+                let resolved =
+                    tokio::task::spawn_blocking(move || sandbox_list_dir(&sandbox, &path_owned))
+                        .await
+                        .context("list_files task failed")??;
                 let mut entries = Vec::new();
                 let mut dir = tokio::fs::read_dir(&resolved).await?;
                 while let Some(entry) = dir.next_entry().await? {
@@ -288,7 +301,14 @@ impl ToolHandler for BuiltinTools {
                     .get("caption")
                     .and_then(|v| v.as_str())
                     .filter(|c| !c.is_empty());
-                let resolved = validate_sandbox_path(&ctx.sandbox_dir, path)?;
+                let sandbox = ctx.sandbox_dir.clone();
+                let path_owned = path.to_string();
+                let resolved = tokio::task::spawn_blocking(move || {
+                    // validate + no dangling/outside symlink (ADR-0025 7a)
+                    validate_sandbox_path(&sandbox, &path_owned)
+                })
+                .await
+                .context("send_file task failed")??;
                 let metadata = tokio::fs::metadata(&resolved)
                     .await
                     .with_context(|| format!("File not found: {}", resolved.display()))?;
