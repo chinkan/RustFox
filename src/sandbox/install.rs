@@ -19,7 +19,7 @@ pub const MSG_INSTALL_FAILED_PREFIX: &str =
     "We could not install the safety tool. You can install it yourself by running:";
 /// Unsupported package manager (ADR-0025 test 28) — no install button or apt fallback.
 pub const MSG_UNSUPPORTED_PACKAGE_MANAGER: &str =
-    "No supported package manager (apt/dnf/pacman) was found, so the safety tool cannot be installed automatically.";
+    "We couldn't install the safety tool automatically on this computer. You can install \"bubblewrap\" with your system's software installer, or switch to trusted mode in the portal.";
 
 fn install_failed_message(command: &str) -> String {
     format!("{MSG_INSTALL_FAILED_PREFIX} {command}")

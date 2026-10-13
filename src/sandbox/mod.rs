@@ -145,7 +145,10 @@ mod tests {
         assert!(MSG_INSTALL_FAILED_PREFIX.starts_with(
             "We could not install the safety tool. You can install it yourself by running:"
         ));
-        assert!(MSG_UNSUPPORTED_PACKAGE_MANAGER.contains("apt/dnf/pacman"));
+        assert_eq!(
+            MSG_UNSUPPORTED_PACKAGE_MANAGER,
+            "We couldn't install the safety tool automatically on this computer. You can install \"bubblewrap\" with your system's software installer, or switch to trusted mode in the portal."
+        );
         assert!(!MSG_UNSUPPORTED_PACKAGE_MANAGER.contains("sudo apt install"));
     }
 }
