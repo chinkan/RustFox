@@ -5,13 +5,64 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-10-13
+
+Release candidate on main after `v1.0.4`. Headline: sandbox / trusted mode
+(ADR-0025). No tag in this commit.
+
+### Added
+
+- **Sandbox / trusted mode (ADR-0025, #186, #191).** `execute_command` runs
+  confined to the workspace: bubblewrap on Linux, Seatbelt on macOS. Windows
+  refuses sandbox mode and defaults to trusted. Choose the mode in the setup
+  wizard or switch it in the portal. If the sandbox cannot start, the command
+  fails closed instead of running unconfined.
+- **Mid-run steering (ADR-0020, #170, #171).** Messages sent while a turn is
+  running steer that turn; scheduled runs go through the same turn gate.
+- **Scheduler run timeout (ADR-0024, #175).** Scheduled runs have a wall-clock
+  timeout, so one hung run no longer blocks the scheduler. Stale `running`
+  rows are reconciled.
+- OpenRouter: type any model id in setup; the API key is sealed in the secret
+  store (#140, #141).
+
 ### Changed
 
-- **Schedule timezone (ADR-0022 / #166).** Cron and naive one-shots evaluate in a
+- **Schedule timezone (ADR-0022, #166).** Cron and naive one-shots evaluate in a
   per-task IANA timezone (default: system local, optional `[general] timezone`).
-  Config crons (`summarize_cron`, `user_model_cron`, heartbeat) now use the
-  effective default timezone (e.g. nightly summarisation at 02:00 local, not UTC).
-  Legacy recurring rows keep `UTC`; legacy one-shots keep the system zone at migration.
+  Config crons (`summarize_cron`, `user_model_cron`, heartbeat) use the effective
+  default timezone (e.g. nightly summarisation at 02:00 local, not UTC). Legacy
+  recurring rows keep `UTC`; legacy one-shots keep the system zone at migration.
+- Five-field cron expressions are accepted (seconds default to 0) (#167).
+- LLM fallback applies to any failure; context compaction no longer trims
+  skills (ADR-0019, #148, #150).
+- Workspace version bumped to `1.0.5`.
+
+### Fixed
+
+- **File tools no longer follow symlinks out of the workspace (#188, #193).**
+  `read_file`, `write_file`, `list_files` and `send_file` open with no-follow
+  semantics; on Windows, symlinks and junctions (reparse points) are rejected.
+  Subagent `tools_override` is intersected with the parent's tools (#188).
+  Closes #189.
+- Subagents declared with block-style `tools:` in `AGENT.md` now get their
+  sandbox read tools (#173).
+- Portal tasks and reminders reach the right bot and the owner's Telegram DM
+  (#162, #164).
+- Setup and secrets: Linux always uses the file vault, wizard secrets land in
+  the vault the bot opens, `config.toml.bak` is owner-only, WSL opens the Windows
+  browser (#137, #139, #142, #143, #157, #160).
+- Cancelled and max-iterations replies are saved to history; `self_upgrade`
+  errors are surfaced; duplicate tool names are deduped; skill catalog
+  descriptions are capped; `patch_skill` defaults to append (#144, #146, #149,
+  #151, #153).
+
+### Dependencies
+
+- `reqwest` 0.12 → 0.13.4 (#134), `toml` 0.8 → 1.1.6 (#131), `croner` 2 → 4
+  (#132), `tokio-cron-scheduler` 0.13 → 0.15.1 (#135), `pdf-extract` 0.10 →
+  0.12.1 (#129).
+- Web: `typescript` 5.9.3 → 7.0.2 (#133) and a minor/patch group update (#130).
+- `rustls` and `source-map-js` lockfile bumps to clear Dependabot alerts (#161).
 
 ## [1.0.4] — 2026-10-04
 
