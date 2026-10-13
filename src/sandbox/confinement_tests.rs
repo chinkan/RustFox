@@ -13,6 +13,31 @@ fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 /// Test 16: prepare / probe fail closed — never a silent trusted wrap.
+/// Regression (#191): a workspace under /tmp must stay visible in sandbox mode.
+#[test]
+#[cfg(target_os = "linux")]
+fn confinement_workspace_under_tmp() {
+    let _env = env_lock();
+    if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_none() {
+        eprintln!("skip: set RUSTFOX_EXPECT_SANDBOX_OK=1 in userns-enabled CI job");
+        return;
+    }
+    let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let ws = dir.path();
+    assert_eq!(probe_sandbox(Some(ws)), ProbeOutcome::Success);
+    let mut cmd = wrap::build_bwrap_std(ws, "echo ok > inside.txt").unwrap();
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(ws.join("inside.txt")).unwrap().trim(),
+        "ok"
+    );
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn fail_closed_when_bwrap_path_forced_missing() {

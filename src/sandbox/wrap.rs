@@ -135,15 +135,17 @@ fn build_bwrap_args(
     // Do NOT --unshare-net: Ubuntu AppArmor often blocks RTM_NEWADDR.
     args.push("--unshare-pid".into());
     ro_bind_args(&mut args);
-    args.push("--bind".into());
-    args.push(ws_str.clone());
-    args.push(ws_str.clone());
+    // bwrap mounts in argument order: private /tmp, /dev, /proc must come
+    // before the workspace bind, or a workspace under /tmp is hidden.
     args.push("--tmpfs".into());
     args.push("/tmp".into());
     args.push("--dev".into());
     args.push("/dev".into());
     args.push("--proc".into());
     args.push("/proc".into());
+    args.push("--bind".into());
+    args.push(ws_str.clone());
+    args.push(ws_str.clone());
     args.push("--chdir".into());
     args.push(ws_str);
     for a in inner_argv {
@@ -280,6 +282,18 @@ fn build_seatbelt_tokio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn bwrap_args_mount_private_dirs_before_workspace_bind() {
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let args = build_bwrap_args(dir.path(), &["true"]).unwrap();
+        let pos = |flag: &str| args.iter().position(|a| a == flag).unwrap();
+        let bind = pos("--bind");
+        assert!(pos("--tmpfs") < bind, "{args:?}");
+        assert!(pos("--dev") < bind, "{args:?}");
+        assert!(pos("--proc") < bind, "{args:?}");
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
