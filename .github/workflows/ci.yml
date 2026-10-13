@@ -76,7 +76,7 @@ jobs:
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Sandbox unit/integration (expect blocked or fail-closed)
-        run: cargo test -p rustfox --lib sandbox:: -- --nocapture
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture
 
   # ADR-0025 Linux CI (b): userns enabled — smoke bwrap then confinement (11, 17).
   sandbox-linux-userns:
@@ -95,7 +95,7 @@ jobs:
       - name: Confinement tests
         env:
           RUSTFOX_EXPECT_SANDBOX_OK: "1"
-        run: cargo test -p rustfox --lib sandbox:: -- --nocapture
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture
 
   # ADR-0025 macOS Seatbelt integration.
   sandbox-macos:
@@ -106,7 +106,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Seatbelt sandbox tests
-        run: cargo test -p rustfox --lib sandbox:: -- --nocapture
+        run: cargo test -p rustfox --lib "sandbox::" -- --nocapture
 
   web:
     name: Web portal
