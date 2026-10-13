@@ -355,6 +355,10 @@ pub struct OcrConfig {
 pub struct SandboxConfig {
     #[serde(default)]
     pub allowed_directory: PathBuf,
+    /// Command confinement (ADR-0025). Missing ⇒ trusted (upgrade / hand-written).
+    /// Values: `"sandbox"` | `"trusted"`.
+    #[serde(default)]
+    pub mode: crate::sandbox::SandboxMode,
     /// Named secrets from SecretStore injected into `execute_command` child env
     /// (Slice 3). Missing names create a pending claim + Telegram notify.
     #[serde(default)]
@@ -2515,5 +2519,73 @@ mod tests {
         .unwrap();
         cfg.scheduler.normalize().unwrap();
         assert_eq!(cfg.scheduler_run_timeout_secs(), 120);
+    }
+
+    // ADR-0025 tests 8, 10: missing mode ⇒ trusted
+    #[test]
+    fn sandbox_mode_missing_is_trusted() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.mode, crate::sandbox::SandboxMode::Trusted);
+    }
+
+    #[test]
+    fn sandbox_mode_explicit_sandbox() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            mode = "sandbox"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.mode, crate::sandbox::SandboxMode::Sandbox);
+    }
+
+    #[test]
+    fn sandbox_mode_explicit_trusted() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            mode = "trusted"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.mode, crate::sandbox::SandboxMode::Trusted);
+    }
+
+    #[test]
+    fn sandbox_section_absent_mode_is_trusted() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.mode, crate::sandbox::SandboxMode::Trusted);
     }
 }

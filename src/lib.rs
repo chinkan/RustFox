@@ -25,6 +25,7 @@ pub mod persona_prompt;
 pub mod platform;
 pub mod portal;
 pub mod provider;
+pub mod sandbox;
 pub mod scheduler;
 pub mod scheduling_tools;
 pub mod secret_store;

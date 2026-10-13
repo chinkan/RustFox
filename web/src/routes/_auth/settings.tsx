@@ -90,6 +90,7 @@ function SettingsPage() {
   const [soulFile, setSoulFile] = useState<SoulName | null>(null)
   const [soulText, setSoulText] = useState('')
   const [soulMsg, setSoulMsg] = useState<string | null>(null)
+  const [sandboxMsg, setSandboxMsg] = useState<string | null>(null)
 
   // Seed the form once data arrives (and refresh after invalidation).
   useEffect(() => {
@@ -138,9 +139,35 @@ function SettingsPage() {
     onError: (e: Error) => setSoulMsg(e.message),
   })
 
+  const switchSafe = useMutation({
+    mutationFn: () => api.switchSandboxSafe(),
+    onSuccess: (r) => {
+      setSandboxMsg(r.message)
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg(e.message),
+  })
+  const switchTrusted = useMutation({
+    mutationFn: () => api.switchSandboxTrusted(),
+    onSuccess: (r) => {
+      setSandboxMsg(r.message)
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg(e.message),
+  })
+  const installSandbox = useMutation({
+    mutationFn: () => api.installSandboxTool(),
+    onSuccess: (r) => {
+      setSandboxMsg(r.message)
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => setSandboxMsg(e.message),
+  })
+
   const editable = settings.data?.editable
   const masked = settings.data?.masked
   const promptInfo = settings.data?.systemPrompt
+  const sandbox = settings.data?.sandbox
   const dirty =
     !!editable &&
     ((form.model ?? '') !== editable.model ||
@@ -288,6 +315,73 @@ function SettingsPage() {
                 </p>
               </div>
             ) : null}
+          </section>
+
+          <section className="section" style={{ gridColumn: '1 / -1' }}>
+            <h2 className="section-title">{t('settings.sandboxTitle')}</h2>
+            <div className="card">
+              {sandbox ? (
+                <>
+                  <p style={{ fontSize: 13 }}>
+                    {t('settings.sandboxCurrentMode', { mode: sandbox.mode })}
+                  </p>
+                  {sandbox.windowsNote ? (
+                    <div className="hint" role="status" style={{ marginTop: 8 }}>
+                      {sandbox.windowsNote}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+                    {sandbox.mode !== 'sandbox' && sandbox.platform !== 'windows' ? (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={switchSafe.isPending}
+                        onClick={() => {
+                          setSandboxMsg(null)
+                          switchSafe.mutate()
+                        }}
+                      >
+                        {switchSafe.isPending ? t('settings.saving') : sandbox.switchToSafeLabel}
+                      </button>
+                    ) : null}
+                    {sandbox.mode === 'sandbox' ? (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={switchTrusted.isPending}
+                        onClick={() => {
+                          setSandboxMsg(null)
+                          switchTrusted.mutate()
+                        }}
+                      >
+                        {t('settings.sandboxSwitchTrusted')}
+                      </button>
+                    ) : null}
+                    {sandbox.canInstall ? (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={installSandbox.isPending}
+                        onClick={() => {
+                          setSandboxMsg(sandbox.installingHint)
+                          installSandbox.mutate()
+                        }}
+                      >
+                        {installSandbox.isPending ? sandbox.installingHint : sandbox.installButton}
+                      </button>
+                    ) : null}
+                  </div>
+                  {!sandbox.canInstall && sandbox.installCommand && sandbox.platform === 'linux' && sandbox.mode !== 'sandbox' ? (
+                    <div className="hint" style={{ marginTop: 8 }}>
+                      <code>{sandbox.installCommand}</code>
+                    </div>
+                  ) : null}
+                  {sandboxMsg ? <div className="hint" style={{ marginTop: 8 }}>{sandboxMsg}</div> : null}
+                </>
+              ) : (
+                <div className="loading">{t('common.loading')}</div>
+              )}
+            </div>
           </section>
 
           <section className="section" style={{ gridColumn: '1 / -1' }}>

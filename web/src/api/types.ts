@@ -434,12 +434,38 @@ export interface SystemPromptInfo {
   divergence: boolean
 }
 
+
+export type SandboxMode = 'sandbox' | 'trusted'
+
+export interface SandboxStatus {
+  mode: SandboxMode
+  platform: string
+  windowsNote?: string | null
+  canInstall: boolean
+  installButton: string
+  installingHint: string
+  installCommand?: string | null
+  switchToSafeLabel: string
+}
+
+export interface SandboxSwitchResult {
+  ok: boolean
+  mode: SandboxMode
+  message: string
+  installCommand?: string
+  canInstall?: boolean
+  includesInstallCommand?: boolean
+  installingHint?: string
+  detail?: string
+}
+
 export interface Settings {
   editable: SettingsEditable
   masked: SettingsMasked
   /** Fields whose change needs a restart before they take effect. */
   restartRequired: string[]
   systemPrompt: SystemPromptInfo
+  sandbox: SandboxStatus
 }
 
 export type AutonomyMode = 'default' | 'autopilot' | 'plan'
