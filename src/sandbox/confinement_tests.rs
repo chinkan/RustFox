@@ -3,11 +3,20 @@
 use super::*;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+
+/// Serialises tests that read or set `RUSTFOX_BWRAP_PATH` (process-wide env).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Test 16: prepare / probe fail closed — never a silent trusted wrap.
 #[test]
 #[cfg(target_os = "linux")]
 fn fail_closed_when_bwrap_path_forced_missing() {
+    let _env = env_lock();
     std::env::set_var("RUSTFOX_BWRAP_PATH", "/nonexistent/rustfox-no-bwrap-xyz");
     struct ClearBwrap;
     impl Drop for ClearBwrap {
@@ -33,6 +42,7 @@ fn fail_closed_when_bwrap_path_forced_missing() {
 #[test]
 #[cfg(target_os = "linux")]
 fn default_runner_probe_trusted_ux() {
+    let _env = env_lock();
     if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_some() {
         return;
     }
@@ -61,6 +71,7 @@ fn default_runner_probe_trusted_ux() {
 #[test]
 #[cfg(target_os = "linux")]
 fn confinement_when_userns_enabled() {
+    let _env = env_lock();
     if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_none() {
         eprintln!("skip: set RUSTFOX_EXPECT_SANDBOX_OK=1 in userns-enabled CI job");
         return;
@@ -102,6 +113,7 @@ fn confinement_when_userns_enabled() {
 #[test]
 #[cfg(target_os = "macos")]
 fn macos_seatbelt_confinement() {
+    let _env = env_lock();
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
     let outcome = probe_sandbox(Some(ws));
