@@ -11,7 +11,7 @@ mod wrap;
 pub use install::{
     can_offer_install_button, detect_install_command, format_install_failed, install_bwrap,
     install_ux_for_probe, InstallOutcome, InstallUx, MSG_INSTALLING, MSG_INSTALL_BUTTON,
-    MSG_INSTALL_FAILED_PREFIX,
+    MSG_INSTALL_FAILED_PREFIX, MSG_UNSUPPORTED_PACKAGE_MANAGER,
 };
 pub use probe::{probe_sandbox, ProbeFailure, ProbeOutcome};
 pub use wrap::{prepare_sandboxed_command, SandboxStartError};
@@ -145,5 +145,7 @@ mod tests {
         assert!(MSG_INSTALL_FAILED_PREFIX.starts_with(
             "We could not install the safety tool. You can install it yourself by running:"
         ));
+        assert!(MSG_UNSUPPORTED_PACKAGE_MANAGER.contains("apt/dnf/pacman"));
+        assert!(!MSG_UNSUPPORTED_PACKAGE_MANAGER.contains("sudo apt install"));
     }
 }

@@ -17,6 +17,9 @@ pub const MSG_INSTALLING: &str =
 /// Prefix of the install-failed copy; callers append `{command}`.
 pub const MSG_INSTALL_FAILED_PREFIX: &str =
     "We could not install the safety tool. You can install it yourself by running:";
+/// Unsupported package manager (ADR-0025 test 28) — no install button or apt fallback.
+pub const MSG_UNSUPPORTED_PACKAGE_MANAGER: &str =
+    "No supported package manager (apt/dnf/pacman) was found, so the safety tool cannot be installed automatically.";
 
 fn install_failed_message(command: &str) -> String {
     format!("{MSG_INSTALL_FAILED_PREFIX} {command}")
@@ -38,8 +41,10 @@ pub enum InstallUx {
     AlreadyWorks,
     /// Show the Install for me button + installing hint.
     OfferButton { command: InstallCommand },
-    /// No GUI / no pkexec / unsupported PM — show one-line command only.
+    /// No GUI / no pkexec — show one-line install command only.
     CommandOnly { command: String },
+    /// No apt/dnf/pacman — no button and no fake install command (ADR test 28).
+    UnsupportedPackageManager,
     /// bwrap present but blocked — no install advice.
     BlockedBySystemSettings,
     /// Non-Linux (macOS Seatbelt is built-in; Windows has no Phase-1 sandbox).
@@ -167,9 +172,7 @@ pub fn install_ux_for_probe(outcome: &ProbeOutcome) -> InstallUx {
                 Some(cmd) => InstallUx::CommandOnly {
                     command: cmd.user_command,
                 },
-                None => InstallUx::CommandOnly {
-                    command: "sudo apt install bubblewrap".into(),
-                },
+                None => InstallUx::UnsupportedPackageManager,
             },
             ProbeOutcome::Failed(ProbeFailure::WindowsUnavailable) => InstallUx::NotApplicable,
             ProbeOutcome::Failed(ProbeFailure::OtherFailure(_)) => {
@@ -182,9 +185,7 @@ pub fn install_ux_for_probe(outcome: &ProbeOutcome) -> InstallUx {
                         Some(cmd) => InstallUx::CommandOnly {
                             command: cmd.user_command,
                         },
-                        None => InstallUx::CommandOnly {
-                            command: "sudo apt install bubblewrap".into(),
-                        },
+                        None => InstallUx::UnsupportedPackageManager,
                     }
                 } else {
                     InstallUx::BlockedBySystemSettings

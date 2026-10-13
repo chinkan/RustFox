@@ -1,7 +1,10 @@
 //! Probe whether the OS sandbox can start a trivial command (ADR-0025 §3).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 
+#[cfg(not(windows))]
 use super::wrap::{self, SandboxStartError};
 
 /// Result of launching a trivial sandboxed command.
@@ -93,6 +96,7 @@ fn probe_unix(workspace: Option<&Path>) -> ProbeOutcome {
 }
 
 /// Classify stderr / error text into a [`ProbeFailure`].
+#[cfg(not(windows))]
 pub(crate) fn classify_stderr(text: &str, bwrap_present: bool) -> ProbeFailure {
     let lower = text.to_ascii_lowercase();
     if !bwrap_present
@@ -111,6 +115,7 @@ pub(crate) fn classify_stderr(text: &str, bwrap_present: bool) -> ProbeFailure {
     ProbeFailure::OtherFailure(text.trim().to_string())
 }
 
+#[cfg(not(windows))]
 fn looks_blocked_by_system(lower: &str) -> bool {
     lower.contains("user namespace")
         || lower.contains("uid map")
@@ -129,12 +134,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(windows))]
     fn classify_apparmor_as_blocked() {
         let f = classify_stderr("bwrap: setting up uid map: Permission denied", true);
         assert_eq!(f, ProbeFailure::BlockedBySystemSettings);
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn classify_missing_bwrap() {
         let f = classify_stderr("No such file or directory", false);
         assert_eq!(f, ProbeFailure::BwrapMissing);

@@ -446,6 +446,10 @@ export interface SandboxStatus {
   installingHint: string
   installCommand?: string | null
   switchToSafeLabel: string
+  /** AppArmor / userns blocked the probe — show system-settings copy only. */
+  blockedBySystem?: boolean
+  /** Optional status copy (blocked-by-system / unsupported PM). */
+  statusMessage?: string | null
 }
 
 export interface SandboxSwitchResult {

@@ -98,6 +98,8 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         installingHint: 'Installing the safety tool. Your computer may ask for your password; RustFox never sees it.',
         installCommand: 'sudo apt install bubblewrap',
         switchToSafeLabel: 'Switch to safe mode',
+        blockedBySystem: false,
+        statusMessage: null,
       },
     }),
     patchSettings: async (p) => ({

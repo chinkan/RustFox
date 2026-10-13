@@ -952,11 +952,14 @@ async function refreshSandboxStatus() {
     const status = document.getElementById('sandbox-status');
     const btn = document.getElementById('btn-install-bwrap');
     if (!status) return;
+    status.className = 'hint';
     if (data.mode === 'sandbox') {
       status.textContent = 'Safe mode is on. Commands can now only use your workspace folder.';
+      status.className = 'success-msg visible';
       if (btn) btn.style.display = 'none';
     } else if (data.blocked_by_system) {
       status.textContent = data.message || "This computer's system settings block safe mode, so RustFox will run in trusted mode.";
+      status.className = 'error-msg visible';
       if (btn) btn.style.display = 'none';
     } else if (data.can_install) {
       status.textContent = 'Safe mode needs the bubblewrap safety tool.';
@@ -965,7 +968,8 @@ async function refreshSandboxStatus() {
       status.innerHTML = 'To enable safe mode later, run: <code>' + escHtml(data.install_command) + '</code>';
       if (btn) btn.style.display = 'none';
     } else {
-      status.textContent = 'Running in trusted mode.';
+      status.textContent = data.message || 'Running in trusted mode.';
+      if (data.message) status.className = 'error-msg visible';
       if (btn) btn.style.display = 'none';
     }
   } catch (_) {}
@@ -975,14 +979,23 @@ async function installSandboxTool() {
   const btn = document.getElementById('btn-install-bwrap');
   const status = document.getElementById('sandbox-install-status');
   if (btn) { btn.disabled = true; }
-  if (status) status.textContent = 'Installing the safety tool. Your computer may ask for your password; RustFox never sees it.';
+  if (status) {
+    status.className = 'hint';
+    status.textContent = 'Installing the safety tool. Your computer may ask for your password; RustFox never sees it.';
+  }
   try {
     const res = await fetch('/api/sandbox/install', { method: 'POST' });
     const data = await res.json();
-    if (status) status.textContent = data.message || '';
+    if (status) {
+      status.textContent = data.message || '';
+      status.className = data.ok ? 'success-msg visible' : 'error-msg visible';
+    }
     await refreshSandboxStatus();
   } catch (e) {
-    if (status) status.textContent = 'Install failed: ' + e.message;
+    if (status) {
+      status.textContent = 'Install failed: ' + e.message;
+      status.className = 'error-msg visible';
+    }
   } finally {
     if (btn) btn.disabled = false;
   }

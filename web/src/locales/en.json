@@ -176,7 +176,13 @@
     "promptNotEnabled": "The file pointer is unset — edits go to prompts/system.md but the bot still uses the inline prompt until you add system_prompt_file to [openrouter] in config.toml.",
     "sandboxTitle": "Safe mode (commands)",
     "sandboxCurrentMode": "Current mode: {{mode}}",
-    "sandboxSwitchTrusted": "Switch to trusted mode"
+    "sandboxSwitchTrusted": "Switch to trusted mode",
+    "sandboxModeSafe": "safe mode",
+    "sandboxModeTrusted": "trusted mode",
+    "sandboxSwitchSafe": "Switch to safe mode",
+    "sandboxInstallButton": "Install for me",
+    "sandboxInstallingHint": "Installing the safety tool. Your computer may ask for your password; RustFox never sees it.",
+    "sandboxWindowsNote": "Safe mode for commands is not yet available on Windows."
   },
   "notFound": {
     "title": "404 — Route not found",

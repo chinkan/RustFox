@@ -834,6 +834,9 @@ async fn sandbox_status() -> Json<SandboxStatusResponse> {
         crate::sandbox::InstallUx::BlockedBySystemSettings => {
             resp.message = Some(crate::sandbox::MSG_BLOCKED_BY_SYSTEM.to_string());
         }
+        crate::sandbox::InstallUx::UnsupportedPackageManager => {
+            resp.message = Some(crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER.to_string());
+        }
         crate::sandbox::InstallUx::AlreadyWorks | crate::sandbox::InstallUx::NotApplicable => {}
     }
     Json(resp)
@@ -851,16 +854,17 @@ async fn sandbox_install(State(st): State<WizardState>) -> Json<SandboxInstallRe
         return Json(SandboxInstallResponse {
             ok: false,
             mode: "trusted".into(),
-            message: crate::sandbox::format_install_failed("sudo apt install bubblewrap"),
+            message: crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER.to_string(),
         });
     };
+    let fallback_cmd = command.user_command.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         crate::sandbox::install_bwrap(&crate::sandbox::install::RealPkexec, &command, None, None)
     })
     .await
     .unwrap_or_else(|_| crate::sandbox::InstallOutcome {
         mode: crate::sandbox::SandboxMode::Trusted,
-        message: crate::sandbox::format_install_failed("sudo apt install bubblewrap"),
+        message: crate::sandbox::format_install_failed(&fallback_cmd),
         includes_install_command: true,
     });
 
@@ -1303,6 +1307,9 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
             println!("\nTo enable safe mode later, run: {command}");
         }
         crate::sandbox::InstallUx::BlockedBySystemSettings => {}
+        crate::sandbox::InstallUx::UnsupportedPackageManager => {
+            println!("\n{}", crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER);
+        }
         crate::sandbox::InstallUx::AlreadyWorks | crate::sandbox::InstallUx::NotApplicable => {}
     }
     let config = super::thin::render_config(&super::thin::ThinAnswers {

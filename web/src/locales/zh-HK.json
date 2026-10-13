@@ -176,7 +176,13 @@
     "promptNotEnabled": "未設檔案指標 —— 編輯會寫入 prompts/system.md，但喺 config.toml 嘅 [openrouter] 加返 system_prompt_file 之前，bot 仍然用 inline prompt。",
     "sandboxTitle": "安全模式（指令）",
     "sandboxCurrentMode": "目前模式：{{mode}}",
-    "sandboxSwitchTrusted": "切換至 trusted 模式"
+    "sandboxSwitchTrusted": "切換至信任模式",
+    "sandboxModeSafe": "安全模式",
+    "sandboxModeTrusted": "信任模式",
+    "sandboxSwitchSafe": "切換至安全模式",
+    "sandboxInstallButton": "為我安裝",
+    "sandboxInstallingHint": "正在安裝安全工具。你的電腦可能會要求輸入密碼；RustFox 不會看到密碼。",
+    "sandboxWindowsNote": "安全模式指令暫時未能在 Windows 使用。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",

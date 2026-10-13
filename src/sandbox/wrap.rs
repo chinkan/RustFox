@@ -1,6 +1,9 @@
 //! Build OS-sandboxed process commands (bwrap / Seatbelt).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command as StdCommand;
 
 use tokio::process::Command as TokioCommand;
@@ -14,6 +17,7 @@ pub enum SandboxStartError {
 }
 
 /// Whether `bwrap` is findable on PATH (Linux).
+#[cfg(not(windows))]
 pub fn bwrap_on_path() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -27,11 +31,10 @@ pub fn bwrap_on_path() -> bool {
 
 #[cfg(target_os = "linux")]
 fn which_bwrap() -> Option<PathBuf> {
+    // Test/CI override: when set, only that path counts (missing ⇒ fail closed).
     if let Ok(p) = std::env::var("RUSTFOX_BWRAP_PATH") {
         let pb = PathBuf::from(&p);
-        if pb.is_file() {
-            return Some(pb);
-        }
+        return if pb.is_file() { Some(pb) } else { None };
     }
     // Prefer `which`-style PATH walk without spawning.
     if let Ok(path) = std::env::var("PATH") {
@@ -53,12 +56,8 @@ fn which_bwrap() -> Option<PathBuf> {
 }
 
 /// Sync probe command (used by [`super::probe`]).
+#[cfg(not(windows))]
 pub fn build_probe_command(workspace: &Path) -> Result<StdCommand, SandboxStartError> {
-    #[cfg(windows)]
-    {
-        let _ = workspace;
-        return Err(SandboxStartError::WindowsUnavailable);
-    }
     #[cfg(target_os = "linux")]
     {
         build_bwrap_std(workspace, "true")
@@ -67,7 +66,7 @@ pub fn build_probe_command(workspace: &Path) -> Result<StdCommand, SandboxStartE
     {
         build_seatbelt_std(workspace, "/usr/bin/true")
     }
-    #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
     {
         let _ = workspace;
         Err(SandboxStartError::Other(

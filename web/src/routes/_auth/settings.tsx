@@ -90,7 +90,7 @@ function SettingsPage() {
   const [soulFile, setSoulFile] = useState<SoulName | null>(null)
   const [soulText, setSoulText] = useState('')
   const [soulMsg, setSoulMsg] = useState<string | null>(null)
-  const [sandboxMsg, setSandboxMsg] = useState<string | null>(null)
+  const [sandboxMsg, setSandboxMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
   // Seed the form once data arrives (and refresh after invalidation).
   useEffect(() => {
@@ -142,26 +142,26 @@ function SettingsPage() {
   const switchSafe = useMutation({
     mutationFn: () => api.switchSandboxSafe(),
     onSuccess: (r) => {
-      setSandboxMsg(r.message)
+      setSandboxMsg({ text: r.message, ok: r.ok })
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
-    onError: (e: Error) => setSandboxMsg(e.message),
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
   })
   const switchTrusted = useMutation({
     mutationFn: () => api.switchSandboxTrusted(),
     onSuccess: (r) => {
-      setSandboxMsg(r.message)
+      setSandboxMsg({ text: r.message, ok: r.ok })
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
-    onError: (e: Error) => setSandboxMsg(e.message),
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
   })
   const installSandbox = useMutation({
     mutationFn: () => api.installSandboxTool(),
     onSuccess: (r) => {
-      setSandboxMsg(r.message)
+      setSandboxMsg({ text: r.message, ok: r.ok })
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
-    onError: (e: Error) => setSandboxMsg(e.message),
+    onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
   })
 
   const editable = settings.data?.editable
@@ -323,15 +323,26 @@ function SettingsPage() {
               {sandbox ? (
                 <>
                   <p style={{ fontSize: 13 }}>
-                    {t('settings.sandboxCurrentMode', { mode: sandbox.mode })}
+                    {t('settings.sandboxCurrentMode', {
+                      mode:
+                        sandbox.mode === 'sandbox'
+                          ? t('settings.sandboxModeSafe')
+                          : t('settings.sandboxModeTrusted'),
+                    })}
                   </p>
+                  {sandbox.blockedBySystem || sandbox.statusMessage ? (
+                    <div className="error-note" role="status" style={{ marginTop: 8 }}>
+                      {sandbox.statusMessage
+                        ?? "This computer's system settings block safe mode, so RustFox will run in trusted mode."}
+                    </div>
+                  ) : null}
                   {sandbox.windowsNote ? (
                     <div className="hint" role="status" style={{ marginTop: 8 }}>
-                      {sandbox.windowsNote}
+                      {t('settings.sandboxWindowsNote')}
                     </div>
                   ) : null}
                   <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
-                    {sandbox.mode !== 'sandbox' && sandbox.platform !== 'windows' ? (
+                    {sandbox.mode !== 'sandbox' && sandbox.platform !== 'windows' && !sandbox.blockedBySystem ? (
                       <button
                         type="button"
                         className="primary"
@@ -341,7 +352,7 @@ function SettingsPage() {
                           switchSafe.mutate()
                         }}
                       >
-                        {switchSafe.isPending ? t('settings.saving') : sandbox.switchToSafeLabel}
+                        {switchSafe.isPending ? t('settings.saving') : t('settings.sandboxSwitchSafe')}
                       </button>
                     ) : null}
                     {sandbox.mode === 'sandbox' ? (
@@ -357,26 +368,42 @@ function SettingsPage() {
                         {t('settings.sandboxSwitchTrusted')}
                       </button>
                     ) : null}
-                    {sandbox.canInstall ? (
+                    {sandbox.canInstall && sandbox.mode !== 'sandbox' ? (
                       <button
                         type="button"
                         className="btn-secondary"
                         disabled={installSandbox.isPending}
                         onClick={() => {
-                          setSandboxMsg(sandbox.installingHint)
+                          setSandboxMsg({
+                            text: t('settings.sandboxInstallingHint'),
+                            ok: true,
+                          })
                           installSandbox.mutate()
                         }}
                       >
-                        {installSandbox.isPending ? sandbox.installingHint : sandbox.installButton}
+                        {installSandbox.isPending
+                          ? t('settings.sandboxInstallingHint')
+                          : t('settings.sandboxInstallButton')}
                       </button>
                     ) : null}
                   </div>
-                  {!sandbox.canInstall && sandbox.installCommand && sandbox.platform === 'linux' && sandbox.mode !== 'sandbox' ? (
+                  {!sandbox.canInstall
+                    && !sandbox.blockedBySystem
+                    && sandbox.installCommand
+                    && sandbox.platform === 'linux'
+                    && sandbox.mode !== 'sandbox' ? (
                     <div className="hint" style={{ marginTop: 8 }}>
                       <code>{sandbox.installCommand}</code>
                     </div>
                   ) : null}
-                  {sandboxMsg ? <div className="hint" style={{ marginTop: 8 }}>{sandboxMsg}</div> : null}
+                  {sandboxMsg ? (
+                    <div
+                      className={sandboxMsg.ok ? 'hint' : 'error-note'}
+                      style={{ marginTop: 8 }}
+                    >
+                      {sandboxMsg.text}
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <div className="loading">{t('common.loading')}</div>
