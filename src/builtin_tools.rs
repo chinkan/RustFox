@@ -328,11 +328,14 @@ impl ToolHandler for BuiltinTools {
                     "statuses": vec![json!("todo"); steps.len()],
                     "notes": vec![json!(""); steps.len()],
                 });
-                tokio::fs::write(
-                    plan_file(&plans_dir, title),
-                    serde_json::to_string_pretty(&plan)?,
-                )
-                .await?;
+                migrate_plans_dir(&plans_dir).await;
+                // Overwrite an existing plan with this title in place (old- or
+                // new-format file); otherwise use the encoded filename.
+                let path = match find_plan_path(&plans_dir, title).await? {
+                    Some(path) => path,
+                    None => plan_file(&plans_dir, title),
+                };
+                tokio::fs::write(path, serde_json::to_string_pretty(&plan)?).await?;
                 write_active_plan(&plans_dir, title).await?;
                 Ok(format!(
                     "Created plan '{}' with {} steps",
@@ -348,8 +351,7 @@ impl ToolHandler for BuiltinTools {
                     .as_str()
                     .context("Missing 'status' argument")?;
                 let notes = args.get("notes").and_then(|v| v.as_str());
-                let plan_path = plan_file(&plans_dir, &title);
-                let content = read_plan_file(&plans_dir, &title).await?;
+                let (plan_path, content) = read_plan_file(&plans_dir, &title).await?;
                 let mut plan: Value = serde_json::from_str(&content)?;
                 let len = plan
                     .get("statuses")
@@ -379,7 +381,7 @@ impl ToolHandler for BuiltinTools {
             "plan_view" => {
                 let plans_dir = ctx.sandbox_dir.join(".plans");
                 let title = resolve_plan_title(&plans_dir, &args).await?;
-                let content = read_plan_file(&plans_dir, &title).await?;
+                let (_, content) = read_plan_file(&plans_dir, &title).await?;
                 let mut plan: Value = serde_json::from_str(&content)?;
                 ensure_plan_notes(&mut plan);
                 Ok(serde_json::to_string_pretty(&plan)?)
@@ -687,8 +689,334 @@ fn reject_plan_title(title: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Longest encoded stem kept verbatim before truncating + hashing (ADR-0026).
+const PLAN_STEM_MAX: usize = 120;
+
+/// ADR-0026: `p_` + percent-encoded title bytes; only `[a-z0-9_%A-F-]` + `.json`.
+/// Uppercase letters are encoded too, so names never collide on case-insensitive
+/// filesystems (NTFS, APFS).
+fn plan_file_name(title: &str) -> String {
+    use std::fmt::Write;
+    let mut stem = String::new();
+    for b in title.bytes() {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' {
+            stem.push(b as char);
+        } else {
+            let _ = write!(stem, "%{b:02X}");
+        }
+    }
+    if stem.len() + 2 > PLAN_STEM_MAX {
+        use sha2::Digest;
+        let mut cut = PLAN_STEM_MAX - 19;
+        // Never split a `%XX` triple.
+        while stem[..cut].ends_with('%') || stem[..cut - 1].ends_with('%') {
+            cut -= 1;
+        }
+        let hash = sha2::Sha256::digest(title.as_bytes());
+        stem.truncate(cut);
+        // Distinct `h_` prefix: a short title can never equal a hashed name.
+        let mut name = format!("h_{stem}_");
+        for b in &hash[..8] {
+            let _ = write!(name, "{b:02x}");
+        }
+        return name + ".json";
+    }
+    format!("p_{stem}.json")
+}
+
 fn plan_file(plans_dir: &std::path::Path, title: &str) -> PathBuf {
-    plans_dir.join(format!("{title}.json"))
+    plans_dir.join(plan_file_name(title))
+}
+
+/// Title stored inside a plan file, if it parses.
+fn plan_json_title(content: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(content).ok()?;
+    v.get("title")?.as_str().map(str::to_string)
+}
+
+/// All `(path, title)` pairs: every `*.json` in the dir, title from its JSON.
+async fn scan_plans(plans_dir: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let Ok(mut dir) = tokio::fs::read_dir(plans_dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Some(title) = plan_json_title(&content) {
+                out.push((path, title));
+            }
+        }
+    }
+    out
+}
+
+/// Encoded file first, then any old-format file whose JSON title matches.
+/// An encoded-name file holding a different title is a conflict (ADR-0026).
+async fn find_plan_path(
+    plans_dir: &std::path::Path,
+    title: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    let encoded = plan_file(plans_dir, title);
+    if tokio::fs::try_exists(&encoded).await.unwrap_or(false) {
+        let content = tokio::fs::read_to_string(&encoded).await?;
+        let found = plan_json_title(&content);
+        if found.as_deref() != Some(title) {
+            let existing = found.unwrap_or_else(|| encoded.display().to_string());
+            anyhow::bail!(
+                "Another plan named \"{existing}\" already exists. Please choose a different name."
+            );
+        }
+        return Ok(Some(encoded));
+    }
+    Ok(scan_plans(plans_dir)
+        .await
+        .into_iter()
+        .find(|(_, t)| t == title)
+        .map(|(p, _)| p))
+}
+
+/// ADR-0026: recover plans hidden in NTFS alternate data streams (Windows only).
+/// Runs once per plans dir per process.
+async fn migrate_plans_dir(plans_dir: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static DONE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        let dir = plans_dir.to_path_buf();
+        let first = DONE
+            .get_or_init(Default::default)
+            .lock()
+            .map(|mut set| set.insert(dir.clone()))
+            .unwrap_or(false);
+        if !first {
+            return;
+        }
+        if let Err(err) = tokio::task::spawn_blocking(move || ads_migrate::run(&dir)).await {
+            tracing::warn!("plan ADS migration task failed: {err}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = plans_dir;
+}
+
+#[cfg(windows)]
+mod ads_migrate {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    #[repr(C)]
+    struct Win32FindStreamData {
+        stream_size: i64,
+        stream_name: [u16; 296],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn FindFirstStreamW(
+            file_name: *const u16,
+            info_level: i32,
+            data: *mut Win32FindStreamData,
+            flags: u32,
+        ) -> isize;
+        fn FindNextStreamW(handle: isize, data: *mut Win32FindStreamData) -> i32;
+        fn FindClose(handle: isize) -> i32;
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    const INVALID_HANDLE_VALUE: isize = -1;
+    const ERROR_HANDLE_EOF: i32 = 38;
+    const ERROR_FILE_EXISTS: i32 = 80;
+    const ERROR_ALREADY_EXISTS: i32 = 183;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain([0]).collect()
+    }
+
+    /// Move without replacing an existing target (std::fs::rename replaces).
+    fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+        let (f, t) = (wide(from), wide(to));
+        // SAFETY: both buffers are NUL-terminated UTF-16.
+        if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Named stream names (without leading `:` and trailing `:$DATA`).
+    pub(super) fn named_streams(path: &Path) -> Vec<String> {
+        let wide = wide(path);
+        let mut data = Win32FindStreamData {
+            stream_size: 0,
+            stream_name: [0; 296],
+        };
+        let mut names = Vec::new();
+        // SAFETY: wide is NUL-terminated; data is a valid out-buffer.
+        let handle = unsafe { FindFirstStreamW(wide.as_ptr(), 0, &mut data, 0) };
+        if handle == INVALID_HANDLE_VALUE {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(ERROR_HANDLE_EOF) {
+                tracing::warn!("plan migration: FindFirstStreamW {path:?}: {err}");
+            }
+            return names;
+        }
+        loop {
+            let len = data.stream_name.iter().position(|&c| c == 0).unwrap_or(296);
+            let raw = String::from_utf16_lossy(&data.stream_name[..len]);
+            if let Some(name) = raw.strip_prefix(':').and_then(|r| r.strip_suffix(":$DATA")) {
+                if !name.is_empty() {
+                    names.push(name.to_string());
+                }
+            }
+            // SAFETY: handle came from FindFirstStreamW.
+            if unsafe { FindNextStreamW(handle, &mut data) } == 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(ERROR_HANDLE_EOF) {
+                    tracing::warn!("plan migration: FindNextStreamW {path:?}: {err}");
+                }
+                break;
+            }
+        }
+        // SAFETY: valid find handle.
+        unsafe { FindClose(handle) };
+        names
+    }
+
+    const MIGRATION_TMP_SUFFIX: &str = ".rfmig.tmp";
+
+    pub(super) fn run(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        // Only migration-owned temp files (`*.rfmig.tmp`); other `*.tmp` files are left alone.
+        let is_tmp = |p: &Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(MIGRATION_TMP_SUFFIX))
+        };
+        let entries: Vec<_> = entries.flatten().collect();
+        for entry in &entries {
+            let path = entry.path();
+            if is_tmp(&path) {
+                if let Err(err) = std::fs::remove_file(&path) {
+                    tracing::warn!("plan migration: remove leftover {path:?}: {err}");
+                }
+            }
+        }
+        for entry in entries {
+            if is_tmp(&entry.path()) {
+                continue;
+            }
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let base = entry.path();
+            let Some(base_name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let mut migrated = false;
+            for stream in named_streams(&base) {
+                let Some(rest) = stream.strip_suffix(".json") else {
+                    continue;
+                };
+                if migrate_stream(dir, &base_name, &stream, rest) {
+                    migrated = true;
+                }
+            }
+            if migrated && named_streams(&base).is_empty() {
+                match std::fs::metadata(&base) {
+                    Ok(m) if m.len() == 0 => {
+                        if let Err(err) = std::fs::remove_file(&base) {
+                            tracing::warn!("plan migration: remove {base:?}: {err}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// True when the stream was migrated and deleted. On a name collision the
+    /// plan is recovered as "<title> (recovered)", "<title> (recovered 2)", ...
+    fn migrate_stream(dir: &Path, base_name: &str, stream: &str, rest: &str) -> bool {
+        let stream_path = dir.join(format!("{base_name}:{stream}"));
+        let content = match std::fs::read_to_string(&stream_path) {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!("plan migration: read {stream_path:?}: {err}");
+                return false;
+            }
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            tracing::warn!("plan migration: {stream_path:?} is not valid JSON; left as-is");
+            return false;
+        };
+        let original =
+            super::plan_json_title(&content).unwrap_or_else(|| format!("{base_name}:{rest}"));
+        for n in 0..1000u32 {
+            let title = match n {
+                0 => original.clone(),
+                1 => format!("{original} (recovered)"),
+                n => format!("{original} (recovered {n})"),
+            };
+            let target = super::plan_file(dir, &title);
+            if target.exists() {
+                tracing::warn!("plan migration: {target:?} already exists; not overwriting");
+                continue;
+            }
+            let mut plan = value.clone();
+            let Some(obj) = plan.as_object_mut() else {
+                tracing::warn!("plan migration: {stream_path:?} is not a JSON object; kept");
+                return false;
+            };
+            obj.insert("title".into(), serde_json::Value::String(title.clone()));
+            let body = match serde_json::to_string_pretty(&plan) {
+                Ok(b) => b,
+                Err(err) => {
+                    tracing::warn!("plan migration: serialize {stream_path:?}: {err}");
+                    return false;
+                }
+            };
+            // Temp file (`*.rfmig.tmp`, never listed) -> move without replace -> verify.
+            let mut tmp_name = target.clone().into_os_string();
+            tmp_name.push(MIGRATION_TMP_SUFFIX);
+            let tmp = std::path::PathBuf::from(tmp_name);
+            let moved = std::fs::write(&tmp, body).and_then(|_| move_no_replace(&tmp, &target));
+            if let Err(err) = moved {
+                let _ = std::fs::remove_file(&tmp);
+                if matches!(
+                    err.raw_os_error(),
+                    Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS)
+                ) {
+                    tracing::warn!("plan migration: {target:?} already exists; not overwriting");
+                    continue;
+                }
+                tracing::warn!("plan migration: write {target:?}: {err}; stream kept");
+                return false;
+            }
+            let verified = std::fs::read_to_string(&target)
+                .ok()
+                .and_then(|c| super::plan_json_title(&c));
+            if verified.as_deref() != Some(title.as_str()) {
+                tracing::warn!("plan migration: {target:?} failed verification; stream kept");
+                let _ = std::fs::remove_file(&target);
+                return false;
+            }
+            if let Err(err) = std::fs::remove_file(&stream_path) {
+                tracing::warn!("plan migration: delete stream {stream_path:?}: {err}");
+                return false;
+            }
+            tracing::info!("plan migration: recovered {title:?} from {stream_path:?}");
+            return true;
+        }
+        tracing::warn!("plan migration: no free name for {original:?}; stream kept");
+        false
+    }
 }
 
 fn ensure_plan_notes(plan: &mut Value) {
@@ -709,18 +1037,14 @@ fn ensure_plan_notes(plan: &mut Value) {
 }
 
 async fn list_plan_titles(plans_dir: &std::path::Path) -> Vec<String> {
-    let mut titles = Vec::new();
-    let mut dir = match tokio::fs::read_dir(plans_dir).await {
-        Ok(dir) => dir,
-        Err(_) => return titles,
-    };
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(title) = name.strip_suffix(".json") {
-            titles.push(title.to_string());
-        }
-    }
+    migrate_plans_dir(plans_dir).await;
+    let mut titles: Vec<String> = scan_plans(plans_dir)
+        .await
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
     titles.sort();
+    titles.dedup();
     titles
 }
 
@@ -758,18 +1082,20 @@ async fn resolve_plan_title(plans_dir: &std::path::Path, args: &Value) -> anyhow
     }
 }
 
-async fn read_plan_file(plans_dir: &std::path::Path, title: &str) -> anyhow::Result<String> {
-    match tokio::fs::read_to_string(plan_file(plans_dir, title)).await {
-        Ok(content) => Ok(content),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let existing = list_plan_titles(plans_dir).await;
-            anyhow::bail!(
-                "plan {title:?} not found. existing plans: {}",
-                plans_list(&existing)
-            )
-        }
-        Err(err) => Err(err.into()),
+async fn read_plan_file(
+    plans_dir: &std::path::Path,
+    title: &str,
+) -> anyhow::Result<(PathBuf, String)> {
+    migrate_plans_dir(plans_dir).await;
+    if let Some(path) = find_plan_path(plans_dir, title).await? {
+        let content = tokio::fs::read_to_string(&path).await?;
+        return Ok((path, content));
     }
+    let existing = list_plan_titles(plans_dir).await;
+    anyhow::bail!(
+        "plan {title:?} not found. existing plans: {}",
+        plans_list(&existing)
+    )
 }
 
 #[cfg(test)]
@@ -1065,5 +1391,339 @@ mod tests {
             assert!(allowed_strs.contains(&"AGENTS.md"));
             assert!(allowed_strs.contains(&"USER.md"));
         }
+    }
+
+    /// Test-only inverse of `plan_file_name` (non-truncated names).
+    fn decode_plan_file_name(name: &str) -> Option<String> {
+        let stem = name.strip_prefix("p_")?.strip_suffix(".json")?;
+        let bytes = stem.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                out.push(u8::from_str_radix(stem.get(i + 1..i + 3)?, 16).ok()?);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    #[test]
+    fn plan_file_name_encodes_and_round_trips() {
+        for title in [
+            "Plan: A",
+            "a:b:c",
+            "x/y\\z",
+            "v1.0.6 release",
+            "第一份: plan",
+            "CON",
+            "NUL",
+            "com1",
+            "..",
+            "plain_title-1",
+        ] {
+            let name = plan_file_name(title);
+            assert!(name.starts_with("p_") && name.ends_with(".json"), "{name}");
+            let stem = name.strip_suffix(".json").unwrap();
+            assert!(
+                stem.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b"_%-ABCDEF".contains(&b)),
+                "{name}"
+            );
+            assert_eq!(decode_plan_file_name(&name).as_deref(), Some(title));
+        }
+        // A crafted short title shaped like a hashed stem stays in `p_` space.
+        let long = plan_file_name(&"x".repeat(300));
+        let crafted = long
+            .strip_prefix("h_")
+            .unwrap()
+            .strip_suffix(".json")
+            .unwrap();
+        let crafted_name = plan_file_name(crafted);
+        assert!(crafted_name.starts_with("p_"), "{crafted_name}");
+        assert_ne!(crafted_name, long);
+        let crafted2 = long.strip_suffix(".json").unwrap();
+        assert_ne!(plan_file_name(crafted2), long);
+        let literal = plan_file_name("h_abc_0123456789abcdef");
+        assert_eq!(literal, "p_h_abc_0123456789abcdef.json");
+        assert!(!literal.starts_with("h_"));
+        assert_eq!(plan_file_name("Plan: A"), "p_%50lan%3A%20%41.json");
+        assert_eq!(plan_file_name("CON"), "p_%43%4F%4E.json");
+        assert_eq!(plan_file_name("plan"), "p_plan.json");
+        assert_ne!(
+            plan_file_name("Plan").to_lowercase(),
+            plan_file_name("plan").to_lowercase()
+        );
+    }
+
+    #[test]
+    fn long_plan_titles_truncate_with_hash() {
+        let a = "计划".repeat(200);
+        let b = format!("{a}x");
+        let (na, nb) = (plan_file_name(&a), plan_file_name(&b));
+        assert!(na.len() <= PLAN_STEM_MAX + 5, "{}", na.len());
+        assert_ne!(na, nb);
+        assert_eq!(na, plan_file_name(&a));
+        let stem = na.strip_suffix(".json").unwrap();
+        assert!(na.starts_with("h_"), "{na}");
+        let (head, hash) = stem.rsplit_once('_').unwrap();
+        assert_eq!(hash.len(), 16);
+        assert!(!head.ends_with('%') && !head[..head.len() - 1].ends_with('%'));
+    }
+
+    #[tokio::test]
+    async fn colon_titles_create_list_view_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools();
+        let ctx = || plan_ctx(dir.path());
+        for title in ["Plan: A", "Plan: B", "a:b:c", "CON", "计划：一"] {
+            tools
+                .execute(
+                    "plan_create",
+                    json!({"title": title, "steps": ["s"]}),
+                    ctx(),
+                )
+                .await
+                .unwrap();
+        }
+        let plans_dir = dir.path().join(".plans");
+        assert!(plans_dir.join("p_%50lan%3A%20%41.json").is_file());
+        assert!(plans_dir.join("p_a%3Ab%3Ac.json").is_file());
+        for name in std::fs::read_dir(&plans_dir).unwrap() {
+            let name = name.unwrap().file_name().into_string().unwrap();
+            assert!(!name.contains(':'), "{name}");
+        }
+        let titles = list_plan_titles(&plans_dir).await;
+        assert_eq!(
+            titles,
+            vec!["CON", "Plan: A", "Plan: B", "a:b:c", "计划：一"]
+        );
+        for title in &titles {
+            let viewed = tools
+                .execute("plan_view", json!({"title": title}), ctx())
+                .await
+                .unwrap();
+            let plan: Value = serde_json::from_str(&viewed).unwrap();
+            assert_eq!(plan["title"], title.as_str());
+        }
+        tools
+            .execute(
+                "plan_update",
+                json!({"title": "a:b:c", "step_id": 0, "status": "done"}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let err = tools
+            .execute("plan_view", json!({"title": "missing"}), ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a:b:c") && err.contains("Plan: A"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn case_only_titles_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools();
+        let ctx = || plan_ctx(dir.path());
+        for (title, step) in [("Plan", "upper"), ("plan", "lower")] {
+            tools
+                .execute(
+                    "plan_create",
+                    json!({"title": title, "steps": [step]}),
+                    ctx(),
+                )
+                .await
+                .unwrap();
+        }
+        let plans_dir = dir.path().join(".plans");
+        assert_eq!(list_plan_titles(&plans_dir).await, vec!["Plan", "plan"]);
+        for (title, step) in [("Plan", "upper"), ("plan", "lower")] {
+            let plan: Value = serde_json::from_str(
+                &tools
+                    .execute("plan_view", json!({"title": title}), ctx())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(plan["title"], title);
+            assert_eq!(plan["steps"], json!([step]));
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_title_at_encoded_path_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let path = plans_dir.join(plan_file_name("mine"));
+        let other =
+            json!({"title": "someone else", "steps": ["x"], "statuses": ["todo"]}).to_string();
+        std::fs::write(&path, &other).unwrap();
+        let tools = make_tools();
+        let ctx = || plan_ctx(dir.path());
+        for (tool, args) in [
+            ("plan_create", json!({"title": "mine", "steps": ["a"]})),
+            ("plan_view", json!({"title": "mine"})),
+            (
+                "plan_update",
+                json!({"title": "mine", "step_id": 0, "status": "done"}),
+            ),
+        ] {
+            let err = tools
+                .execute(tool, args, ctx())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("Another plan named \"someone else\" already exists"),
+                "{tool}: {err}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), other);
+    }
+
+    #[tokio::test]
+    async fn old_format_plan_files_still_listed_and_updated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let old = plans_dir.join("legacy plan.json");
+        std::fs::write(
+            &old,
+            json!({"title": "legacy plan", "steps": ["a"], "statuses": ["todo"]}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(plans_dir.join("README"), "not a plan").unwrap();
+        std::fs::write(
+            plans_dir.join("p_x.json.tmp"),
+            json!({"title": "temp", "steps": []}).to_string(),
+        )
+        .unwrap();
+        let tools = make_tools();
+        let ctx = || plan_ctx(dir.path());
+        assert_eq!(list_plan_titles(&plans_dir).await, vec!["legacy plan"]);
+        tools
+            .execute(
+                "plan_update",
+                json!({"title": "legacy plan", "step_id": 0, "status": "done"}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let plan: Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
+        assert_eq!(plan["statuses"][0], "done");
+        assert!(!plans_dir.join(plan_file_name("legacy plan")).exists());
+        // Re-creating the same title overwrites the old file, no duplicate.
+        tools
+            .execute(
+                "plan_create",
+                json!({"title": "legacy plan", "steps": ["b"]}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_plan_titles(&plans_dir).await, vec!["legacy plan"]);
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("README")).unwrap(),
+            "not a plan"
+        );
+    }
+
+    /// Real NTFS alternate-data-stream fixture; reproduces v1.0.5 writes.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_ads_hidden_plans_are_migrated_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let plan = |t: &str| json!({"title": t, "steps": ["s"], "statuses": ["todo"]}).to_string();
+        // v1.0.5 wrote `{title}.json`: these land in streams of base file `Plan`.
+        std::fs::write(plans_dir.join("Plan: A.json"), plan("Plan: A")).unwrap();
+        std::fs::write(plans_dir.join("Plan: B.json"), plan("Plan: B")).unwrap();
+        // Stream on base `Busy` whose target encoded name already exists.
+        std::fs::write(plans_dir.join("Busy: x.json"), plan("Busy: x")).unwrap();
+        std::fs::write(
+            plans_dir.join("p_%42usy%3A%20x.json"),
+            "{\"title\":\"Busy: x\",\"keep\":1}",
+        )
+        .unwrap();
+        // Leftover temp file from an interrupted run: removed on first pass.
+        std::fs::write(plans_dir.join("p_x.json.rfmig.tmp"), "{\"title\":\"x\"}").unwrap();
+        // Unrelated `*.tmp` (not migration-owned): must stay byte-for-byte.
+        std::fs::write(plans_dir.join("foo.tmp"), "user data").unwrap();
+        // Ordinary extensionless files with no named streams: untouched.
+        std::fs::write(plans_dir.join("notes"), "").unwrap();
+        std::fs::write(plans_dir.join("notes2"), "data").unwrap();
+
+        let visible: Vec<String> = std::fs::read_dir(&plans_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        if visible.iter().any(|n| n.contains(':')) {
+            eprintln!("skipping: filesystem has no NTFS alternate data streams (e.g. Wine)");
+            return;
+        }
+        assert!(ads_migrate::named_streams(&plans_dir.join("Plan")).len() == 2);
+
+        let titles = list_plan_titles(&plans_dir).await;
+        assert_eq!(
+            titles,
+            vec!["Busy: x", "Busy: x (recovered)", "Plan: A", "Plan: B"]
+        );
+        assert!(
+            !plans_dir.join("Plan").exists(),
+            "0-byte stream-free base removed"
+        );
+        assert!(plans_dir.join("p_%50lan%3A%20%41.json").is_file());
+        // Collision: existing file untouched, stream recovered under a new title.
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("p_%42usy%3A%20x.json")).unwrap(),
+            "{\"title\":\"Busy: x\",\"keep\":1}"
+        );
+        let (_, recovered) = read_plan_file(&plans_dir, "Busy: x (recovered)")
+            .await
+            .unwrap();
+        let recovered: Value = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(recovered["steps"], json!(["s"]));
+        assert!(!plans_dir.join("Busy").exists());
+        assert!(
+            !plans_dir.join("p_x.json.rfmig.tmp").exists(),
+            "leftover migration tmp cleaned"
+        );
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("foo.tmp")).unwrap(),
+            "user data",
+            "unrelated tmp untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("notes")).unwrap(),
+            ""
+        );
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("notes2")).unwrap(),
+            "data"
+        );
+
+        let snapshot = |d: &std::path::Path| {
+            let mut v: Vec<_> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name(), std::fs::read(e.path()).unwrap())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let before = snapshot(&plans_dir);
+        ads_migrate::run(&plans_dir);
+        migrate_plans_dir(&plans_dir).await;
+        assert_eq!(before, snapshot(&plans_dir), "second run is a no-op");
     }
 }
