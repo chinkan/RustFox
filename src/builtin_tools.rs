@@ -995,6 +995,7 @@ mod ads_migrate {
                 .and_then(|c| super::plan_json_title(&c));
             if verified.as_deref() != Some(title.as_str()) {
                 tracing::warn!("plan migration: {target:?} failed verification; stream kept");
+                let _ = std::fs::remove_file(&target);
                 return false;
             }
             if let Err(err) = std::fs::remove_file(&stream_path) {
@@ -1438,6 +1439,9 @@ mod tests {
         assert_ne!(crafted_name, long);
         let crafted2 = long.strip_suffix(".json").unwrap();
         assert_ne!(plan_file_name(crafted2), long);
+        let literal = plan_file_name("h_abc_0123456789abcdef");
+        assert_eq!(literal, "p_h_abc_0123456789abcdef.json");
+        assert!(!literal.starts_with("h_"));
         assert_eq!(plan_file_name("Plan: A"), "p_%50lan%3A%20%41.json");
         assert_eq!(plan_file_name("CON"), "p_%43%4F%4E.json");
         assert_eq!(plan_file_name("plan"), "p_plan.json");

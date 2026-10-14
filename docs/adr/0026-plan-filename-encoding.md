@@ -8,7 +8,7 @@
 ## Context
 
 Plans were saved as `.plans/{title}.json` since v1.0.4. On Windows NTFS a title
-containing `:` (AI titles such as `Plan: A`) is parsed as `file:stream`, so
+containing `:` (titles such as `Plan: A`) is parsed as `file:stream`, so
 `Plan: A.json` writes a 0-byte base file `Plan` plus a hidden alternate data
 stream ` A.json`. Directory listing never shows the stream, so the plan is
 invisible. Titles with two or more colons (`a:b:c`) failed to save at all.
