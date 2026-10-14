@@ -186,7 +186,7 @@ mod tests {
             api_key = "key"
             system_prompt = "GLOBAL_INLINE_PROMPT"
             [general]
-            home = "{home}"
+            home = '{home}'
             "#,
             bots_toml = bots_toml,
             home = home.display()

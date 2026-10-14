@@ -3,22 +3,19 @@
 use super::*;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
-/// Serialises tests that read or set `RUSTFOX_BWRAP_PATH` (process-wide env).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use super::test_env::{bwrap_env_lock as env_lock, ForcedBwrapPath};
 
-fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+fn expect_sandbox_ok() -> bool {
+    std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_some()
 }
 
-/// Test 16: prepare / probe fail closed — never a silent trusted wrap.
 /// Regression (#191): a workspace under /tmp must stay visible in sandbox mode.
 #[test]
 #[cfg(target_os = "linux")]
 fn confinement_workspace_under_tmp() {
     let _env = env_lock();
-    if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_none() {
+    if !expect_sandbox_ok() {
         eprintln!("skip: set RUSTFOX_EXPECT_SANDBOX_OK=1 in userns-enabled CI job");
         return;
     }
@@ -38,18 +35,11 @@ fn confinement_workspace_under_tmp() {
     );
 }
 
+/// Test 16: prepare / probe fail closed — never a silent trusted wrap.
 #[test]
 #[cfg(target_os = "linux")]
 fn fail_closed_when_bwrap_path_forced_missing() {
-    let _env = env_lock();
-    std::env::set_var("RUSTFOX_BWRAP_PATH", "/nonexistent/rustfox-no-bwrap-xyz");
-    struct ClearBwrap;
-    impl Drop for ClearBwrap {
-        fn drop(&mut self) {
-            std::env::remove_var("RUSTFOX_BWRAP_PATH");
-        }
-    }
-    let _clear = ClearBwrap;
+    let _bwrap = ForcedBwrapPath::set("/nonexistent/rustfox-no-bwrap-xyz");
     let outcome = probe_sandbox(None);
     assert!(
         matches!(
@@ -64,17 +54,34 @@ fn fail_closed_when_bwrap_path_forced_missing() {
 }
 
 /// Test 30: default runner — blocked / missing ⇒ trusted + matching UX.
+///
+/// With `RUSTFOX_EXPECT_BWRAP_INSTALLED=1` (default-AppArmor CI job, bwrap
+/// installed, userns restricted) the probe must actually find bwrap and
+/// classify the outcome as a real start or "blocked by system settings";
+/// a blocked probe must also make sandboxed commands fail closed.
 #[test]
 #[cfg(target_os = "linux")]
 fn default_runner_probe_trusted_ux() {
     let _env = env_lock();
-    if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_some() {
+    if expect_sandbox_ok() {
         return;
     }
-    let outcome = probe_sandbox(None);
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = probe_sandbox(Some(dir.path()));
+    eprintln!("default runner probe outcome: {outcome:?}");
+    if std::env::var_os("RUSTFOX_EXPECT_BWRAP_INSTALLED").is_some() {
+        assert!(
+            matches!(
+                outcome,
+                ProbeOutcome::Success | ProbeOutcome::Failed(ProbeFailure::BlockedBySystemSettings)
+            ),
+            "bwrap is installed: expected Success or BlockedBySystemSettings, got {outcome:?}"
+        );
+    }
     match &outcome {
         ProbeOutcome::Success => {
             // Local/dev host where bwrap works without sysctl tweak.
+            assert_eq!(wizard_mode_from_probe(&outcome).0, SandboxMode::Sandbox);
         }
         ProbeOutcome::Failed(ProbeFailure::BlockedBySystemSettings) => {
             let (mode, msg) = wizard_mode_from_probe(&outcome);
@@ -84,6 +91,13 @@ fn default_runner_probe_trusted_ux() {
                 install_ux_for_probe(&outcome),
                 InstallUx::BlockedBySystemSettings
             );
+            // Fail closed: the sandboxed command must not run on the host.
+            let marker = dir.path().join("ran-unconfined");
+            if let Ok(mut cmd) = wrap::build_bwrap_std(dir.path(), "touch ran-unconfined") {
+                let out = cmd.output().unwrap();
+                assert!(!out.status.success(), "blocked probe but bwrap ran");
+            }
+            assert!(!marker.exists(), "command escaped a blocked sandbox");
         }
         ProbeOutcome::Failed(_) => {
             let (mode, _) = wizard_mode_from_probe(&outcome);
@@ -97,7 +111,7 @@ fn default_runner_probe_trusted_ux() {
 #[cfg(target_os = "linux")]
 fn confinement_when_userns_enabled() {
     let _env = env_lock();
-    if std::env::var_os("RUSTFOX_EXPECT_SANDBOX_OK").is_none() {
+    if !expect_sandbox_ok() {
         eprintln!("skip: set RUSTFOX_EXPECT_SANDBOX_OK=1 in userns-enabled CI job");
         return;
     }
@@ -135,6 +149,45 @@ fn confinement_when_userns_enabled() {
     );
 }
 
+/// Test 17: the host home directory (outside the workspace) is not visible
+/// or writable from inside the sandbox.
+#[test]
+#[cfg(target_os = "linux")]
+fn confinement_home_not_visible() {
+    let _env = env_lock();
+    if !expect_sandbox_ok() {
+        eprintln!("skip: set RUSTFOX_EXPECT_SANDBOX_OK=1 in userns-enabled CI job");
+        return;
+    }
+    let home = PathBuf::from(std::env::var("HOME").expect("HOME set in CI"));
+    assert!(home.is_dir(), "host HOME must exist: {}", home.display());
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    assert!(
+        !ws.starts_with(&home),
+        "workspace must be outside HOME for this test"
+    );
+    let marker = home.join(format!("rustfox-t17-{}", std::process::id()));
+
+    // `ls ~` fails: HOME is not mounted in the sandbox.
+    let mut cmd = wrap::build_bwrap_std(ws, "ls \"$HOME\"").unwrap();
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "home listing visible in sandbox: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // `touch ~/outside` fails and nothing appears on the host.
+    let script = format!("touch \"{}\"", marker.display());
+    let mut cmd = wrap::build_bwrap_std(ws, &script).unwrap();
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "write to HOME succeeded in sandbox");
+    assert!(!marker.exists(), "sandbox created {}", marker.display());
+}
+
+/// macOS Seatbelt confinement (tests 11 + 17). With
+/// `RUSTFOX_EXPECT_SANDBOX_OK=1` (macOS CI job) a failed probe fails the test.
 #[test]
 #[cfg(target_os = "macos")]
 fn macos_seatbelt_confinement() {
@@ -143,7 +196,11 @@ fn macos_seatbelt_confinement() {
     let ws = dir.path();
     let outcome = probe_sandbox(Some(ws));
     if outcome != ProbeOutcome::Success {
-        eprintln!("macOS probe failed: {outcome:?}");
+        assert!(
+            !expect_sandbox_ok(),
+            "macOS Seatbelt probe failed: {outcome:?}"
+        );
+        eprintln!("skip: macOS probe failed: {outcome:?}");
         return;
     }
     let mut cmd = wrap::build_seatbelt_shell_std(ws, "echo ok > inside.txt").unwrap();
@@ -158,12 +215,30 @@ fn macos_seatbelt_confinement() {
         "ok"
     );
 
-    // Home outside workspace should not be readable as the real home listing.
-    let mut cmd = wrap::build_seatbelt_shell_std(ws, "test -f \"$HOME/.bashrc\"").unwrap();
+    // A file outside the workspace (not under an allowed system path) is not readable.
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    fs::write(&secret, "SECRET").unwrap();
+    let script = format!("cat \"{}\"", secret.display());
+    let mut cmd = wrap::build_seatbelt_shell_std(ws, &script).unwrap();
     let out = cmd.output().unwrap();
-    // Expect failure when HOME points outside the allowed subpath.
+    assert!(
+        !out.status.success() && !String::from_utf8_lossy(&out.stdout).contains("SECRET"),
+        "outside file readable under Seatbelt"
+    );
+
+    // Test 17: home listing is denied and home is not writable.
+    let mut cmd = wrap::build_seatbelt_shell_std(ws, "ls \"$HOME\"").unwrap();
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "home listing visible under Seatbelt");
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let marker = home.join(format!("rustfox-t17-{}", std::process::id()));
+    let script = format!("touch \"{}\"", marker.display());
+    let mut cmd = wrap::build_seatbelt_shell_std(ws, &script).unwrap();
+    let out = cmd.output().unwrap();
     assert!(
         !out.status.success(),
-        "home file unexpectedly readable under Seatbelt"
+        "write to HOME succeeded under Seatbelt"
     );
+    assert!(!marker.exists());
 }

@@ -198,8 +198,17 @@ fn seatbelt_profile(workspace: &Path) -> Result<String, SandboxStartError> {
 (allow sysctl-read)
 (allow mach-lookup)
 (allow mach-register)
-(allow device-read*)
 (allow file-read-metadata)
+(allow file-read* (literal "/"))
+; dyld must map system libraries executable; without this every binary is
+; killed at launch with no stderr under (deny default).
+(allow file-map-executable
+  (subpath "/usr/lib")
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/System/Library/SubFrameworks")
+  (subpath "/Library/Apple/usr/lib")
+)
 (allow file-read*
   (subpath "/usr")
   (subpath "/bin")
@@ -208,6 +217,7 @@ fn seatbelt_profile(workspace: &Path) -> Result<String, SandboxStartError> {
   (subpath "/Library")
   (subpath "/private/etc")
   (subpath "/private/var/db")
+  (subpath "/private/var/select")
   (subpath "/private/tmp")
   (subpath "/tmp")
   (subpath "/dev")
@@ -311,6 +321,10 @@ mod tests {
     #[cfg(windows)]
     fn windows_prepare_refuses() {
         let err = prepare_sandboxed_command(Path::new("C:\\"), "echo hi");
-        assert_eq!(err, Err(SandboxStartError::WindowsUnavailable));
+        assert!(
+            matches!(err, Err(SandboxStartError::WindowsUnavailable)),
+            "{:?}",
+            err.err()
+        );
     }
 }

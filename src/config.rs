@@ -1336,7 +1336,7 @@ mod tests {
             [openrouter]
             api_key = "key"
             [general]
-            home = "{}"
+            home = '{}'
             "#,
             home.display()
         );
@@ -1839,7 +1839,7 @@ mod tests {
             system_prompt = "inline prompt"
             system_prompt_file = "prompts/system.md"
             [general]
-            home = "{}"
+            home = '{}'
             "#,
             home.display()
         ))
@@ -1875,7 +1875,7 @@ mod tests {
             allowed_user_ids = [1]
             [openrouter]
             api_key = "key"
-            system_prompt_file = "{}"
+            system_prompt_file = '{}'
             "#,
             prompt_file.display()
         ))
@@ -2307,7 +2307,7 @@ mod tests {
             [openrouter]
             api_key = "key"
             [general]
-            home = "{}"
+            home = '{}'
             "#,
             home.display()
         );
@@ -2334,7 +2334,7 @@ mod tests {
             [openrouter]
             api_key = "key"
             [general]
-            home = "{}"
+            home = '{}'
             "#,
             home.display()
         );

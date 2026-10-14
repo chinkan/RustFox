@@ -375,6 +375,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)] // systemd / launchd templates only
     fn test_render_template_replaces_placeholders() {
         let template = "bin={{RUSTFOX_BIN}}\nconfig={{RUSTFOX_CONFIG}}\nhome={{RUSTFOX_HOME}}\npath={{RUSTFOX_PATH}}\n";
         let bin_path = Path::new("/usr/local/bin/rustfox");

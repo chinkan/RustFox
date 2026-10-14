@@ -281,26 +281,35 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Platform-absolute form of a Unix-style test path (`C:\...` on Windows).
+    fn abs(p: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{}", p.replace('/', "\\"))
+        } else {
+            p.to_string()
+        }
+    }
+
     #[test]
     fn env_takes_priority_when_absolute() {
         let got = resolve_home(
-            Some("/abs/env/home"),
-            Some(Path::new("/abs/cfg/home")),
-            Some(Path::new("/os/home")),
+            Some(abs("/abs/env/home").as_str()),
+            Some(Path::new(&abs("/abs/cfg/home"))),
+            Some(Path::new(&abs("/os/home"))),
         )
         .unwrap();
-        assert_eq!(got, PathBuf::from("/abs/env/home"));
+        assert_eq!(got, PathBuf::from(abs("/abs/env/home")));
     }
 
     #[test]
     fn relative_env_is_ignored_falls_to_config() {
         let got = resolve_home(
             Some("rel/env"),
-            Some(Path::new("/abs/cfg/home")),
-            Some(Path::new("/os/home")),
+            Some(Path::new(&abs("/abs/cfg/home"))),
+            Some(Path::new(&abs("/os/home"))),
         )
         .unwrap();
-        assert_eq!(got, PathBuf::from("/abs/cfg/home"));
+        assert_eq!(got, PathBuf::from(abs("/abs/cfg/home")));
     }
 
     #[test]
@@ -308,16 +317,16 @@ mod tests {
         let got = resolve_home(
             None,
             Some(Path::new("rel/cfg")),
-            Some(Path::new("/os/home")),
+            Some(Path::new(&abs("/os/home"))),
         )
         .unwrap();
-        assert_eq!(got, PathBuf::from("/os/home/.rustfox"));
+        assert_eq!(got, PathBuf::from(abs("/os/home/.rustfox")));
     }
 
     #[test]
     fn default_is_os_home_dot_rustfox() {
-        let got = resolve_home(None, None, Some(Path::new("/os/home"))).unwrap();
-        assert_eq!(got, PathBuf::from("/os/home/.rustfox"));
+        let got = resolve_home(None, None, Some(Path::new(&abs("/os/home")))).unwrap();
+        assert_eq!(got, PathBuf::from(abs("/os/home/.rustfox")));
     }
 
     #[test]
@@ -329,35 +338,38 @@ mod tests {
     #[test]
     fn default_home_prefers_absolute_env() {
         assert_eq!(
-            default_home(Some("/srv/rfx"), Some(Path::new("/home/u"))),
-            Some(PathBuf::from("/srv/rfx"))
+            default_home(
+                Some(abs("/srv/rfx").as_str()),
+                Some(Path::new(&abs("/home/u")))
+            ),
+            Some(PathBuf::from(abs("/srv/rfx")))
         );
         assert_eq!(
-            default_home(None, Some(Path::new("/home/u"))),
-            Some(PathBuf::from("/home/u/.rustfox"))
+            default_home(None, Some(Path::new(&abs("/home/u")))),
+            Some(PathBuf::from(abs("/home/u/.rustfox")))
         );
         assert_eq!(
-            default_home(Some("rel"), Some(Path::new("/home/u"))),
-            Some(PathBuf::from("/home/u/.rustfox"))
+            default_home(Some("rel"), Some(Path::new(&abs("/home/u")))),
+            Some(PathBuf::from(abs("/home/u/.rustfox")))
         );
     }
 
     #[test]
     fn unset_path_resolves_under_home() {
         let (path, origin) =
-            resolve_data_path(Path::new(""), Path::new("/h/.rustfox"), "rustfox.db");
-        assert_eq!(path, PathBuf::from("/h/.rustfox/rustfox.db"));
+            resolve_data_path(Path::new(""), Path::new(&abs("/h/.rustfox")), "rustfox.db");
+        assert_eq!(path, PathBuf::from(abs("/h/.rustfox/rustfox.db")));
         assert_eq!(origin, PathOrigin::Default);
     }
 
     #[test]
     fn absolute_path_used_verbatim() {
         let (path, origin) = resolve_data_path(
-            Path::new("/data/rustfox.db"),
-            Path::new("/h/.rustfox"),
+            Path::new(&abs("/data/rustfox.db")),
+            Path::new(&abs("/h/.rustfox")),
             "rustfox.db",
         );
-        assert_eq!(path, PathBuf::from("/data/rustfox.db"));
+        assert_eq!(path, PathBuf::from(abs("/data/rustfox.db")));
         assert_eq!(origin, PathOrigin::Absolute);
     }
 
@@ -367,10 +379,10 @@ mod tests {
     fn relative_path_is_rebased_onto_home() {
         let (path, origin) = resolve_data_path(
             Path::new("rustfox.db"),
-            Path::new("/h/.rustfox"),
+            Path::new(&abs("/h/.rustfox")),
             "rustfox.db",
         );
-        assert_eq!(path, PathBuf::from("/h/.rustfox/rustfox.db"));
+        assert_eq!(path, PathBuf::from(abs("/h/.rustfox/rustfox.db")));
         assert_eq!(origin, PathOrigin::RebasedRelative);
         assert!(
             path.is_absolute(),
@@ -382,10 +394,10 @@ mod tests {
     fn nested_relative_path_is_rebased_onto_home() {
         let (path, origin) = resolve_data_path(
             Path::new("sub/data/skills"),
-            Path::new("/h/.rustfox"),
+            Path::new(&abs("/h/.rustfox")),
             "skills",
         );
-        assert_eq!(path, PathBuf::from("/h/.rustfox/sub/data/skills"));
+        assert_eq!(path, PathBuf::from(abs("/h/.rustfox/sub/data/skills")));
         assert_eq!(origin, PathOrigin::RebasedRelative);
     }
 

@@ -221,7 +221,12 @@ pub fn sandbox_list_dir(sandbox_dir: &Path, requested: &str) -> Result<Vec<Strin
     let mut entries = Vec::new();
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
-        let kind = if entry.file_type()?.is_dir() {
+        let ft = entry.file_type()?;
+        // Symlinks and Windows junctions are reparse points / links, not
+        // regular files: label them so the agent does not treat them as files.
+        let kind = if ft.is_symlink() {
+            "link"
+        } else if ft.is_dir() {
             "dir"
         } else {
             "file"
@@ -394,13 +399,68 @@ pub fn validate_home_path(home_dir: &Path, requested: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     fn outside_msg(path: &str) -> String {
         path_outside_sandbox_msg(path)
+    }
+
+    /// Unwrap a symlink creation result. On Windows, creating symlinks needs
+    /// admin or Developer Mode; `ERROR_PRIVILEGE_NOT_HELD` (1314) skips the
+    /// test with a printed reason (junction variants still run unprivileged).
+    /// Any other error panics.
+    fn symlink_created(res: std::io::Result<()>, test: &str) -> bool {
+        match res {
+            Ok(()) => true,
+            Err(e) if cfg!(windows) && e.raw_os_error() == Some(1314) => {
+                eprintln!("skip {test}: symlink creation needs admin or Developer Mode ({e})");
+                false
+            }
+            Err(e) => panic!("{test}: symlink creation failed: {e}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    fn file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+    #[cfg(unix)]
+    fn dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    fn dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    /// Create a directory junction with `mklink /J` (no privilege needed).
+    /// Returns false (test skips) if junctions are unavailable.
+    #[cfg(windows)]
+    fn junction_created(link: &Path, target: &Path, test: &str) -> bool {
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                link.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        if !status.success() {
+            eprintln!("skip {test}: mklink /J failed");
+        }
+        status.success()
     }
 
     #[test]
@@ -435,10 +495,9 @@ mod tests {
         let ws = dir.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
         let target = PathBuf::from("/nonexistent/x");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, ws.join("a")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&target, ws.join("a")).unwrap();
+        if !symlink_created(file_link(&target, &ws.join("a")), "adr0025_1") {
+            return;
+        }
 
         let err = sandbox_write(&ws, "a", "pwned").unwrap_err().to_string();
         assert_eq!(err, outside_msg("a"));
@@ -454,10 +513,9 @@ mod tests {
         fs::create_dir_all(&outside_dir).unwrap();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, "SECRET").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside_file, ws.join("b")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&outside_file, ws.join("b")).unwrap();
+        if !symlink_created(file_link(&outside_file, &ws.join("b")), "adr0025_2") {
+            return;
+        }
 
         let err = sandbox_read_to_string(&ws, "b").unwrap_err().to_string();
         assert_eq!(err, outside_msg("b"));
@@ -469,25 +527,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let ws = dir.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
-        // Create a junction to an outside directory via std if available;
-        // otherwise skip when junction creation is unsupported.
         let outside = dir.path().join("outside_j");
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("win.ini"), "x").unwrap();
         let junction = ws.join("j");
-        // Use mklink /J via cmd
-        let status = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                junction.to_str().unwrap(),
-                outside.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
-        if !status.success() {
-            eprintln!("skip: mklink /J failed");
+        if !junction_created(&junction, &outside, "adr0025_3") {
             return;
         }
         let err = validate_sandbox_path(&ws, "j").unwrap_err().to_string();
@@ -495,6 +539,9 @@ mod tests {
         // list_files on the junction itself.
         let err = sandbox_list_dir(&ws, "j").unwrap_err().to_string();
         assert_eq!(err, outside_msg("j"));
+        // Listing the workspace shows the junction as a link, not a file.
+        let listed = sandbox_list_dir(&ws, ".").unwrap();
+        assert!(listed.contains(&"[link] j".to_string()), "{listed:?}");
         // read_file / send_file of a file through the junction.
         let err = sandbox_read_to_string(&ws, "j\\win.ini")
             .unwrap_err()
@@ -534,6 +581,51 @@ mod tests {
                 .to_string(),
             outside_msg(r"C:\Windows")
         );
+    }
+
+    /// Junction variant of test 1: a dangling junction (target removed) must
+    /// not let a write create anything at the old target.
+    #[test]
+    #[cfg(windows)]
+    fn adr0025_1_windows_dangling_junction_write_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let gone = dir.path().join("gone");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&gone).unwrap();
+        if !junction_created(&ws.join("a"), &gone, "adr0025_1_junction") {
+            return;
+        }
+        fs::remove_dir(&gone).unwrap();
+        for path in ["a", "a\\new.txt"] {
+            assert!(sandbox_write(&ws, path, "pwned").is_err(), "path={path}");
+        }
+        assert!(
+            !gone.exists(),
+            "nothing created at dangling junction target"
+        );
+    }
+
+    /// Junction variants of tests 6 and 7b: writing through a junction parent,
+    /// or onto a junction at the final name, is rejected and leaves the
+    /// outside directory untouched.
+    #[test]
+    #[cfg(windows)]
+    fn adr0025_6_7b_windows_junction_write_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let outside = dir.path().join("tmp_outside");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        if !junction_created(&ws.join("d"), &outside, "adr0025_6_junction") {
+            return;
+        }
+        let err = sandbox_write(&ws, "d\\new.txt", "nope")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, outside_msg("d\\new.txt"));
+        assert!(sandbox_write(&ws, "d", "nope").is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
     }
 
     #[test]
@@ -624,10 +716,9 @@ mod tests {
         let outside = dir.path().join("tmp_outside");
         fs::create_dir_all(&ws).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, ws.join("d")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&outside, ws.join("d")).unwrap();
+        if !symlink_created(dir_link(&outside, &ws.join("d")), "adr0025_6") {
+            return;
+        }
 
         let err = sandbox_write(&ws, "d/new.txt", "nope")
             .unwrap_err()
@@ -668,10 +759,9 @@ mod tests {
         fs::create_dir_all(&outside_dir).unwrap();
         let outside_file = outside_dir.join("passwd");
         fs::write(&outside_file, "x").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside_file, ws.join("e")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&outside_file, ws.join("e")).unwrap();
+        if !symlink_created(file_link(&outside_file, &ws.join("e")), "adr0025_7a") {
+            return;
+        }
 
         for path in ["../out/passwd", "/etc/passwd", "e"] {
             let err = validate_sandbox_path(&ws, path).unwrap_err().to_string();
@@ -703,6 +793,22 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn list_files_labels_symlinks_as_link() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::write(ws.join("a.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(ws.join("sub"), ws.join("to_sub")).unwrap();
+        std::os::unix::fs::symlink(ws.join("a.txt"), ws.join("to_a")).unwrap();
+        let listed = sandbox_list_dir(&ws, ".").unwrap();
+        assert_eq!(
+            listed,
+            vec!["[dir] sub", "[file] a.txt", "[link] to_a", "[link] to_sub"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn adr0025_nofollow_open_rejects_symlink_final_component() {
         // Simulates a symlink swapped in after validation: the helper used by
         // list_files / send_file must refuse to follow it.
@@ -730,10 +836,9 @@ mod tests {
         let _ = fs::remove_file(&target);
         let outside = dir.path().join("outside_raced.txt");
         fs::write(&outside, "OUT").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &target).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&outside, &target).unwrap();
+        if !symlink_created(file_link(&outside, &target), "adr0025_7b") {
+            return;
+        }
 
         let err = sandbox_write(&ws, "raced.txt", "NEW")
             .unwrap_err()

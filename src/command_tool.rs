@@ -462,16 +462,21 @@ mod tests {
             .with_secrets(bridge.clone(), vec!["MY_SECRET".into()]);
 
         // Write env value to a file so we can assert injection even after result redaction.
+        let secret_cmd = if cfg!(windows) {
+            "echo %MY_SECRET%> secret_out.txt"
+        } else {
+            "printf '%s' \"$MY_SECRET\" > secret_out.txt"
+        };
         let result = tool
             .execute(
                 "execute_command",
-                json!({ "command": "printf \'%s\' \"$MY_SECRET\" > secret_out.txt" }),
+                json!({ "command": secret_cmd }),
                 ctx(dir.path()),
             )
             .await
             .unwrap();
         let written = std::fs::read_to_string(dir.path().join("secret_out.txt")).unwrap();
-        assert_eq!(written, "inject-me-VALUE-zz9");
+        assert_eq!(written.trim_end(), "inject-me-VALUE-zz9");
         // Tool result / echoes must not leak the raw value.
         assert!(
             !result.contains("inject-me-VALUE-zz9"),
@@ -576,7 +581,8 @@ mod tests {
         });
         let tool = CommandTool::new(dir.path().to_path_buf(), Arc::new(CancelRegistry::new()));
         let result = tool
-            .execute("execute_command", json!({ "command": "true" }), context)
+            // `exit 0` works under both `sh -c` and `cmd /C`.
+            .execute("execute_command", json!({ "command": "exit 0" }), context)
             .await
             .unwrap();
         assert!(result.contains("Exit code: 0"), "{result}");
@@ -613,14 +619,9 @@ mod tests {
     #[tokio::test]
     async fn sandbox_mode_fail_closed_when_bwrap_missing() {
         // Force missing bwrap via env override to a nonexistent path.
-        std::env::set_var("RUSTFOX_BWRAP_PATH", "/nonexistent/rustfox-no-bwrap");
-        struct ClearBwrap;
-        impl Drop for ClearBwrap {
-            fn drop(&mut self) {
-                std::env::remove_var("RUSTFOX_BWRAP_PATH");
-            }
-        }
-        let _clear = ClearBwrap;
+        // Shared lock: other tests probe bwrap through the same env var.
+        let _bwrap =
+            crate::sandbox::test_env::ForcedBwrapPath::set("/nonexistent/rustfox-no-bwrap");
         let dir = tempdir().unwrap();
         let tool = CommandTool::new(dir.path().to_path_buf(), Arc::new(CancelRegistry::new()))
             .with_mode(crate::sandbox::SandboxMode::Sandbox);
