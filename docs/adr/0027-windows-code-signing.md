@@ -38,11 +38,12 @@ this code).
 4. Signing secrets live in GitHub Actions secrets, scoped to a protected
    environment (e.g. `release-signing`) that only allows `v*` tags.
 5. The provider is chosen by the maintainer from the options below.
-6. **Rollout gating.** The gate in item 2 is enabled only once the
-   certificate and secrets are configured, controlled by the presence of the
-   signing environment and its secret (e.g. `SIGNPATH_API_TOKEN`). Until
-   then, Windows releases ship unsigned and the release notes must say so
-   plainly.
+6. **Rollout gating.** The gate in item 2 is controlled by an explicit repo
+   variable `REQUIRE_SIGNING`, not by whether a secret exists. While it is
+   unset, Windows releases ship unsigned and the release notes must say so
+   plainly. When `REQUIRE_SIGNING=true`, a missing or expired secret or any
+   signing failure fails the release; unsigned Windows binaries are never
+   published silently.
 7. **SmartScreen.** Even signed binaries may show "Windows protected your PC"
    until the publisher builds reputation. The README must explain in plain,
    non-technical words: click "More info", then "Run anyway". This is
@@ -106,6 +107,13 @@ this code).
   steps, and states that Smart App Control blocks have no such option.
 - While signing is not yet configured, release notes for each release state
   that the Windows binaries are unsigned.
+- While `REQUIRE_SIGNING` is not enabled, the release notes and README state
+  that Windows with Smart App Control on cannot open the unsigned build;
+  users should wait for a signed release or build it themselves, and are not
+  told to turn SAC off. The SmartScreen "Run anyway" steps are described
+  separately.
+- With `REQUIRE_SIGNING=true`, a release run with the signing secret removed
+  fails instead of publishing unsigned binaries.
 
 ## Consequences
 
