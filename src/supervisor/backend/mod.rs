@@ -331,8 +331,11 @@ pub async fn run_cli_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::supervisor::job::JobStatus;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::time::Instant;
 
     struct DummyReasoning;
@@ -374,6 +377,7 @@ mod tests {
         assert_eq!(chosen.name(), "dummy-reasoning");
     }
 
+    #[cfg(unix)]
     async fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         let stub = dir.join(name);
         tokio::fs::write(&stub, body).await.unwrap();
@@ -384,6 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // `#!/bin/sh` stub
     async fn cli_timeout_kills_and_retains_partial_output() {
         let dir = tempfile::tempdir().unwrap();
         let stub = write_stub(
@@ -430,6 +435,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // `#!/bin/sh` stub
     async fn cli_cancel_kills_running_job() {
         let dir = tempfile::tempdir().unwrap();
         let stub = write_stub(
@@ -480,6 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // `#!/bin/sh` stub
     async fn cli_timeout_zero_cancel_does_not_hang() {
         let dir = tempfile::tempdir().unwrap();
         let stub = write_stub(
@@ -521,6 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // `#!/bin/sh` stub
     async fn backend_cancel_delegates_to_cli_registry() {
         let dir = tempfile::tempdir().unwrap();
         let stub = write_stub(

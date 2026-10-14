@@ -76,6 +76,10 @@ jobs:
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Sandbox unit/integration (expect blocked or fail-closed)
+        env:
+          # bwrap is installed: the probe must find it and classify the
+          # outcome (blocked by AppArmor or a real start), not soft-pass.
+          RUSTFOX_EXPECT_BWRAP_INSTALLED: "1"
         run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
 
   # ADR-0025 Linux CI (b): userns enabled — smoke bwrap then confinement (11, 17).
@@ -106,7 +110,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Seatbelt sandbox tests
+        env:
+          # A failed Seatbelt probe fails the job instead of returning early.
+          RUSTFOX_EXPECT_SANDBOX_OK: "1"
         run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
+
+  # Compile and run the lib tests on Windows (file-tool Test 3 junction,
+  # Test 5 `C:\` path, sandbox-mode refusal) instead of only `cargo check`.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Lib tests
+        run: cargo test -p rustfox --lib -- --nocapture
 
   web:
     name: Web portal

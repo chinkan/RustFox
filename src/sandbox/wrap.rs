@@ -198,7 +198,6 @@ fn seatbelt_profile(workspace: &Path) -> Result<String, SandboxStartError> {
 (allow sysctl-read)
 (allow mach-lookup)
 (allow mach-register)
-(allow device-read*)
 (allow file-read-metadata)
 (allow file-read*
   (subpath "/usr")
@@ -311,6 +310,10 @@ mod tests {
     #[cfg(windows)]
     fn windows_prepare_refuses() {
         let err = prepare_sandboxed_command(Path::new("C:\\"), "echo hi");
-        assert_eq!(err, Err(SandboxStartError::WindowsUnavailable));
+        assert!(
+            matches!(err, Err(SandboxStartError::WindowsUnavailable)),
+            "{:?}",
+            err.err()
+        );
     }
 }

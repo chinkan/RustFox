@@ -38,7 +38,8 @@ impl Backend for ScriptBackend {
     }
 }
 
-#[cfg(test)]
+// Stub CLIs are `#!/bin/sh` scripts made executable with Unix modes.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -43,7 +43,8 @@ impl Backend for ClaudeCodeCliBackend {
     }
 }
 
-#[cfg(test)]
+// Stub CLIs are `#!/bin/sh` scripts made executable with Unix modes.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

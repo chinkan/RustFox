@@ -221,7 +221,12 @@ pub fn sandbox_list_dir(sandbox_dir: &Path, requested: &str) -> Result<Vec<Strin
     let mut entries = Vec::new();
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
-        let kind = if entry.file_type()?.is_dir() {
+        let ft = entry.file_type()?;
+        // Symlinks and Windows junctions are reparse points / links, not
+        // regular files: label them so the agent does not treat them as files.
+        let kind = if ft.is_symlink() {
+            "link"
+        } else if ft.is_dir() {
             "dir"
         } else {
             "file"
@@ -394,8 +399,11 @@ pub fn validate_home_path(home_dir: &Path, requested: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
@@ -495,6 +503,9 @@ mod tests {
         // list_files on the junction itself.
         let err = sandbox_list_dir(&ws, "j").unwrap_err().to_string();
         assert_eq!(err, outside_msg("j"));
+        // Listing the workspace shows the junction as a link, not a file.
+        let listed = sandbox_list_dir(&ws, ".").unwrap();
+        assert!(listed.contains(&"[link] j".to_string()), "{listed:?}");
         // read_file / send_file of a file through the junction.
         let err = sandbox_read_to_string(&ws, "j\\win.ini")
             .unwrap_err()
@@ -699,6 +710,22 @@ mod tests {
             let err = sandbox_open_for_send(&ws, path).unwrap_err().to_string();
             assert_eq!(err, outside_msg(path), "path={path}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn list_files_labels_symlinks_as_link() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::write(ws.join("a.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(ws.join("sub"), ws.join("to_sub")).unwrap();
+        std::os::unix::fs::symlink(ws.join("a.txt"), ws.join("to_a")).unwrap();
+        let listed = sandbox_list_dir(&ws, ".").unwrap();
+        assert_eq!(
+            listed,
+            vec!["[dir] sub", "[file] a.txt", "[link] to_a", "[link] to_sub"]
+        );
     }
 
     #[test]

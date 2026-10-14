@@ -93,6 +93,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg(unix)] // ShellBackend spawns `sh`
     async fn shell_backend_runs_echo_in_sandbox() {
         let dir = tempfile::tempdir().unwrap();
         let b = ShellBackend::new(dir.path().into());

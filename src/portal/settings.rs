@@ -350,16 +350,6 @@ async fn sandbox_status_json(
     live_mode: crate::sandbox::SandboxMode,
     workspace: std::path::PathBuf,
 ) -> Value {
-    let platform = if cfg!(windows) {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        "other"
-    };
-
     let outcome = tokio::task::spawn_blocking(move || {
         crate::sandbox::probe_sandbox(Some(workspace.as_path()))
     })
@@ -370,6 +360,24 @@ async fn sandbox_status_json(
         ))
     });
     let ux = crate::sandbox::install_ux_for_probe(&outcome);
+    sandbox_status_json_from_ux(live_mode, &ux)
+}
+
+/// Pure projection of a probe's install UX into the Settings JSON (testable
+/// without a real probe).
+fn sandbox_status_json_from_ux(
+    live_mode: crate::sandbox::SandboxMode,
+    ux: &crate::sandbox::InstallUx,
+) -> Value {
+    let platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
     let already_sandbox = live_mode == crate::sandbox::SandboxMode::Sandbox;
 
     let mut can_install = false;
@@ -377,7 +385,7 @@ async fn sandbox_status_json(
     let mut blocked_by_system = false;
     let mut status_message: Option<&'static str> = None;
 
-    match &ux {
+    match ux {
         crate::sandbox::InstallUx::OfferButton { command } if !already_sandbox => {
             // Linux + bwrap missing + not sandbox mode + can_offer_install_button()
             can_install = true;
@@ -574,7 +582,11 @@ mod sandbox_settings_tests {
     use super::*;
 
     #[tokio::test]
+    // Std lock on purpose: it is shared with sync tests; held for the whole
+    // test so no concurrent test changes RUSTFOX_BWRAP_PATH mid-probe.
+    #[allow(clippy::await_holding_lock)]
     async fn sandbox_status_json_has_mode() {
+        let _bwrap = crate::sandbox::test_env::bwrap_env_lock();
         let ws = std::env::temp_dir().join("rustfox-portal-sandbox-status-test");
         let _ = std::fs::create_dir_all(&ws);
         let v = sandbox_status_json(crate::sandbox::SandboxMode::Trusted, ws).await;
@@ -590,5 +602,43 @@ mod sandbox_settings_tests {
             v2["installCommand"].is_null(),
             "sandbox mode must not expose installCommand"
         );
+    }
+
+    /// ADR-0025 test 30: blocked by AppArmor / userns — system-settings copy
+    /// only, no Install button and no install command.
+    #[test]
+    fn sandbox_status_json_blocked_by_system() {
+        let v = sandbox_status_json_from_ux(
+            crate::sandbox::SandboxMode::Trusted,
+            &crate::sandbox::InstallUx::BlockedBySystemSettings,
+        );
+        assert_eq!(v["mode"], "trusted");
+        assert_eq!(v["blockedBySystem"], true);
+        assert_eq!(v["canInstall"], false);
+        assert!(v["installCommand"].is_null());
+        assert_eq!(v["statusMessage"], crate::sandbox::MSG_BLOCKED_BY_SYSTEM);
+    }
+
+    /// ADR-0025 test 28: unsupported package manager — canonical copy, no
+    /// button and no invented install command.
+    #[test]
+    fn sandbox_status_json_unsupported_package_manager() {
+        let v = sandbox_status_json_from_ux(
+            crate::sandbox::SandboxMode::Trusted,
+            &crate::sandbox::InstallUx::UnsupportedPackageManager,
+        );
+        assert_eq!(v["blockedBySystem"], false);
+        assert_eq!(v["canInstall"], false);
+        assert!(v["installCommand"].is_null());
+        assert_eq!(
+            v["statusMessage"],
+            crate::sandbox::MSG_UNSUPPORTED_PACKAGE_MANAGER
+        );
+        // Already in sandbox mode: no install advice at all.
+        let v2 = sandbox_status_json_from_ux(
+            crate::sandbox::SandboxMode::Sandbox,
+            &crate::sandbox::InstallUx::UnsupportedPackageManager,
+        );
+        assert!(v2["statusMessage"].is_null());
     }
 }

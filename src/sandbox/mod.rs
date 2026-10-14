@@ -93,7 +93,41 @@ pub fn choose_wizard_sandbox_mode() -> (SandboxMode, Option<&'static str>, crate
     }
 }
 
+/// Test-only helpers shared by every test that reads or sets the process-wide
+/// `RUSTFOX_BWRAP_PATH` override (directly or via a probe / `which_bwrap`).
 #[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard};
+
+    static BWRAP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialise access to `RUSTFOX_BWRAP_PATH` across the whole lib test binary.
+    pub(crate) fn bwrap_env_lock() -> MutexGuard<'static, ()> {
+        BWRAP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Holds the lock and forces `RUSTFOX_BWRAP_PATH` until dropped.
+    pub(crate) struct ForcedBwrapPath {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl ForcedBwrapPath {
+        pub(crate) fn set(path: &str) -> Self {
+            let lock = bwrap_env_lock();
+            std::env::set_var("RUSTFOX_BWRAP_PATH", path);
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for ForcedBwrapPath {
+        fn drop(&mut self) {
+            std::env::remove_var("RUSTFOX_BWRAP_PATH");
+        }
+    }
+}
+
+// Live bwrap / Seatbelt tests; nothing here applies to Windows.
+#[cfg(all(test, unix))]
 mod confinement_tests;
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+// process_group / killpg / `sh -c` are Unix-only.
+#![cfg(unix)]
+
 use std::time::Duration;
 use tokio::time::sleep;
 
