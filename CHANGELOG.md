@@ -5,6 +5,36 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.6] — 2026-10-14
+
+Bug-fix release on main after `v1.0.5`. No tag in this commit.
+
+### Fixed
+
+- **Windows plans with `:` in the title (ADR-0026, #197).** Plan files now use
+  safe, encoded file names, so titles containing `:` work on Windows. Plans
+  that earlier versions had hidden this way are recovered automatically the
+  first time a plan tool runs. If a recovered plan has the same name as an
+  existing plan, it is kept as "title (recovered)" and the existing plan is
+  left untouched.
+- **Case-only title clashes (ADR-0026, #197).** Plans whose titles differ only
+  in upper or lower case no longer overwrite each other.
+- **macOS sandbox mode (ADR-0025, #192, #196).** Sandbox mode now starts
+  correctly on macOS.
+
+### Known limitations
+
+- Plans that were already overwritten by a case-only title clash in v1.0.4 or
+  v1.0.5 cannot be recovered. This release only prevents it from happening
+  again.
+- Windows binaries in this release are not code-signed yet. On Windows with
+  Smart App Control turned on, the unsigned `rustfox.exe` cannot be opened and
+  there is no "Run anyway" option. Please wait for a signed release (#198); we
+  do not recommend turning Smart App Control off. Advanced users can build
+  RustFox themselves on a machine without Smart App Control.
+- If Windows SmartScreen shows "Windows protected your PC", click "More info",
+  then "Run anyway".
+
 ## [1.0.5] — 2026-10-13
 
 Release candidate on main after `v1.0.4`. Headline: sandbox / trusted mode
