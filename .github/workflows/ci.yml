@@ -114,6 +114,9 @@ jobs:
           # A failed Seatbelt probe fails the job instead of returning early.
           RUSTFOX_EXPECT_SANDBOX_OK: "1"
         run: cargo test -p rustfox --lib "sandbox::" -- --nocapture --test-threads=1
+      - name: Seatbelt denials (diagnostics on failure)
+        if: failure()
+        run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -n 200
 
   # Compile and run the lib tests on Windows (file-tool Test 3 junction,
   # Test 5 `C:\` path, sandbox-mode refusal) instead of only `cargo check`.

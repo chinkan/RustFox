@@ -85,7 +85,11 @@ fn probe_unix(workspace: Option<&Path>) -> ProbeOutcome {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{stderr}\n{stdout}");
+    let mut combined = format!("{stderr}\n{stdout}");
+    if combined.trim().is_empty() {
+        // No output (e.g. killed by the sandbox at exec): keep the exit status.
+        combined = format!("sandbox probe exited with {} and no output", output.status);
+    }
     ProbeOutcome::Failed(classify_stderr(&combined, wrap::bwrap_on_path()))
 }
 

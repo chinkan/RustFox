@@ -199,6 +199,16 @@ fn seatbelt_profile(workspace: &Path) -> Result<String, SandboxStartError> {
 (allow mach-lookup)
 (allow mach-register)
 (allow file-read-metadata)
+(allow file-read* (literal "/"))
+; dyld must map system libraries executable; without this every binary is
+; killed at launch with no stderr under (deny default).
+(allow file-map-executable
+  (subpath "/usr/lib")
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/System/Library/SubFrameworks")
+  (subpath "/Library/Apple/usr/lib")
+)
 (allow file-read*
   (subpath "/usr")
   (subpath "/bin")
@@ -207,6 +217,7 @@ fn seatbelt_profile(workspace: &Path) -> Result<String, SandboxStartError> {
   (subpath "/Library")
   (subpath "/private/etc")
   (subpath "/private/var/db")
+  (subpath "/private/var/select")
   (subpath "/private/tmp")
   (subpath "/tmp")
   (subpath "/dev")
