@@ -39,9 +39,11 @@ invisible. Titles with two or more colons (`a:b:c`) failed to save at all.
    files on Linux/macOS keep working. Updates and re-creates write back to
    the file where the plan was found; old files are not renamed (no
    delete/rename on the hot path, no duplicate listing).
-6. **Windows-only ADS migration**, once per plans dir per process, on first
-   plan access. Errors are logged with `tracing::warn!` and never propagate.
-   - Leftover `*.tmp` files in the plans dir are deleted first.
+6. **Windows-only ADS migration** runs once per plans dir per process, the
+   first time a plan tool is used in that process (not at startup), so plans
+   are recovered before the first listing. Errors are logged with `tracing::warn!` and never propagate.
+   - Leftover migration temp files (`*.rfmig.tmp`) in the plans dir are
+     deleted first. Other `*.tmp` files are never touched.
    - Every regular file (any extension, e.g. base `Plan`) has its named
      streams enumerated with `FindFirstStreamW`/`FindNextStreamW` (minimal
      `kernel32` FFI, no new dependency; `ERROR_HANDLE_EOF` ends the scan,
@@ -49,7 +51,7 @@ invisible. Titles with two or more colons (`a:b:c`) failed to save at all.
      ending in `.json` are skipped.
    - Stream `: A.json:$DATA` on base `Plan` gives title `Plan: A` (leading
      space preserved); the JSON `title` wins when present.
-   - The stream must parse as JSON. It is written to `<target>.tmp` in the
+   - The stream must parse as JSON. It is written to `<target>.rfmig.tmp` in the
      same dir, moved to the target with `MoveFileExW` **without**
      `MOVEFILE_REPLACE_EXISTING` (`MOVEFILE_WRITE_THROUGH` only), re-read
      and verified, and only then is the stream deleted.
@@ -67,6 +69,10 @@ invisible. Titles with two or more colons (`a:b:c`) failed to save at all.
 - Plans with `:` are visible on Windows; `a:b:c` and case-only-different
   titles save everywhere.
 - New plans use new on-disk names; old names stay readable indefinitely.
+- Known limitation: on v1.0.4/v1.0.5, two titles differing only in case
+  (`Plan` / `plan`) map to the same file on NTFS/APFS, so the later one
+  overwrote the earlier. Data already overwritten that way cannot be
+  recovered by this migration.
 - The `cfg(windows)` test uses a real NTFS ADS fixture (two streams on one
-  base, a pre-placed target, a leftover `.tmp`, plain extensionless files)
+  base, a pre-placed target, a leftover `.rfmig.tmp`, an unrelated `foo.tmp` that must stay untouched, plain extensionless files)
   and skips itself when the filesystem has no ADS (e.g. Wine on Unix).

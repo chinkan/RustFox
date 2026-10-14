@@ -887,11 +887,18 @@ mod ads_migrate {
         names
     }
 
+    const MIGRATION_TMP_SUFFIX: &str = ".rfmig.tmp";
+
     pub(super) fn run(dir: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        let is_tmp = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("tmp");
+        // Only migration-owned temp files (`*.rfmig.tmp`); other `*.tmp` files are left alone.
+        let is_tmp = |p: &Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(MIGRATION_TMP_SUFFIX))
+        };
         let entries: Vec<_> = entries.flatten().collect();
         for entry in &entries {
             let path = entry.path();
@@ -975,8 +982,10 @@ mod ads_migrate {
                     return false;
                 }
             };
-            // Temp file (`*.tmp`, never listed) -> move without replace -> verify.
-            let tmp = target.with_extension("json.tmp");
+            // Temp file (`*.rfmig.tmp`, never listed) -> move without replace -> verify.
+            let mut tmp_name = target.clone().into_os_string();
+            tmp_name.push(MIGRATION_TMP_SUFFIX);
+            let tmp = std::path::PathBuf::from(tmp_name);
             let moved = std::fs::write(&tmp, body).and_then(|_| move_no_replace(&tmp, &target));
             if let Err(err) = moved {
                 let _ = std::fs::remove_file(&tmp);
@@ -1645,7 +1654,9 @@ mod tests {
         )
         .unwrap();
         // Leftover temp file from an interrupted run: removed on first pass.
-        std::fs::write(plans_dir.join("p_x.json.tmp"), "{\"title\":\"x\"}").unwrap();
+        std::fs::write(plans_dir.join("p_x.json.rfmig.tmp"), "{\"title\":\"x\"}").unwrap();
+        // Unrelated `*.tmp` (not migration-owned): must stay byte-for-byte.
+        std::fs::write(plans_dir.join("foo.tmp"), "user data").unwrap();
         // Ordinary extensionless files with no named streams: untouched.
         std::fs::write(plans_dir.join("notes"), "").unwrap();
         std::fs::write(plans_dir.join("notes2"), "data").unwrap();
@@ -1682,8 +1693,13 @@ mod tests {
         assert_eq!(recovered["steps"], json!(["s"]));
         assert!(!plans_dir.join("Busy").exists());
         assert!(
-            !plans_dir.join("p_x.json.tmp").exists(),
-            "leftover tmp cleaned"
+            !plans_dir.join("p_x.json.rfmig.tmp").exists(),
+            "leftover migration tmp cleaned"
+        );
+        assert_eq!(
+            std::fs::read_to_string(plans_dir.join("foo.tmp")).unwrap(),
+            "user data",
+            "unrelated tmp untouched"
         );
         assert_eq!(
             std::fs::read_to_string(plans_dir.join("notes")).unwrap(),
