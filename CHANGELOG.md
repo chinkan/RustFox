@@ -27,6 +27,13 @@ Bug-fix release on main after `v1.0.5`. No tag in this commit.
 - Plans that were already overwritten by a case-only title clash in v1.0.4 or
   v1.0.5 cannot be recovered. This release only prevents it from happening
   again.
+- Windows binaries in this release are not code-signed yet. On Windows with
+  Smart App Control turned on, the unsigned `rustfox.exe` cannot be opened and
+  there is no "Run anyway" option. Please wait for a signed release (#198); we
+  do not recommend turning Smart App Control off. Advanced users can build
+  RustFox themselves on a machine without Smart App Control.
+- If Windows SmartScreen shows "Windows protected your PC", click "More info",
+  then "Run anyway".
 
 ## [1.0.5] — 2026-10-13
 
