@@ -257,7 +257,8 @@ pub(crate) fn build_seatbelt_std(
     Ok(cmd)
 }
 
-#[cfg(target_os = "macos")]
+// Only the Seatbelt confinement tests use this; non-test builds deny dead code.
+#[cfg(all(target_os = "macos", test))]
 pub(crate) fn build_seatbelt_shell_std(
     workspace: &Path,
     shell_cmd: &str,
