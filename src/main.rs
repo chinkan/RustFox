@@ -560,14 +560,58 @@ fn spawn_bare_user_turns(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,rustfox=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Resolve home early so the tracing file sink matches config home
+    // (RUSTFOX_HOME / [general].home / ~/.rustfox) before Config::load.
+    let log_home = {
+        let cfg_path = rustfox::home::resolve_config_path(
+            std::env::var("RUSTFOX_CONFIG_PATH").ok().as_deref(),
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            dirs::home_dir().as_deref(),
+        );
+        if let Ok(content) = std::fs::read_to_string(&cfg_path) {
+            rustfox::home::home_for_config_text(&content).ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            rustfox::home::resolve_home(
+                std::env::var("RUSTFOX_HOME").ok().as_deref(),
+                None,
+                dirs::home_dir().as_deref(),
+            )
+            .unwrap_or_else(|_| PathBuf::from(".rustfox"))
+        })
+    };
+
+    // Initialize logging: stdout + `{home}/logs/rustfox.log` (ADR-0031).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,rustfox=debug".into());
+    let stdout_layer = tracing_subscriber::fmt::layer();
+    match rustfox::log_file::RotatingFileWriter::open(
+        &log_home,
+        rustfox::log_file::LOG_ROTATE_MAX_BYTES,
+    ) {
+        Ok(file_writer) => {
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer);
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+        }
+        Err(e) => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(stdout_layer)
+                .init();
+            warn!(
+                "log file sink unavailable ({}): {e}; continuing with stdout only",
+                rustfox::log_file::log_file_path(&log_home).display()
+            );
+        }
+    }
 
     // Check for --setup / service verbs / --service before normal bot start
     if let Some(cmd) = setup::parse_args() {

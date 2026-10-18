@@ -15,6 +15,7 @@ pub mod home;
 pub mod langsmith;
 pub mod learning;
 pub mod llm;
+pub mod log_file;
 pub mod loop_detector;
 pub mod loop_runner;
 pub mod mcp;

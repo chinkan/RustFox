@@ -6,6 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Telegram `/logs` + in-app log file sink (ADR-0031):** bot writes `{resolved_home}/logs/rustfox.log` (32 MiB → `.1` rotation); allowlisted `/logs` sends the file (last 16 MiB if larger). macOS LaunchAgent no longer redirects to Library/Logs.
 - **Telegram `/selfupgrade` labels (ADR-0030):** bare → auto; `main` → source+branch main (refuse clearly if no source tree); `release` → GitHub latest binary. Unknown args are rejected with a tip (not treated as git branches).
 - **Portal Settings self-upgrade (ADR-0030):** API `POST /api/settings/self-upgrade` + Settings UI for `auto` | `main` | `release` (same mapping as Telegram); sync POST then restart; no SSE / branch picker.
 
