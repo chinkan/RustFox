@@ -516,6 +516,15 @@ pub fn user_facing_llm_error(err: &anyhow::Error) -> String {
     s
 }
 
+/// True when the provider error is Ollama's userless-payload reject
+/// (`no user query found` or equivalent). Used by ADR-0029 fallback skip
+/// and ADR-0034 primary omit-retry.
+pub fn is_ollama_no_user_query_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}")
+        .to_lowercase()
+        .contains("no user query found")
+}
+
 #[derive(Clone)]
 pub struct LlmClient {
     pub client: reqwest::Client,
@@ -590,12 +599,30 @@ impl LlmClient {
             Ok(completion) => return Ok(completion),
             Err(e) => e,
         };
+        // ADR-0034: keep-tools first pass unchanged (above). If primary Ollama
+        // still returns no-user-query with tools present, rewrite+omit and
+        // retry ONCE on the same primary (journal WARN). No loop.
+        let mut last_err = primary_err;
+        if primary_tool_weak
+            && !primary_tools.is_empty()
+            && is_ollama_no_user_query_error(&last_err)
+        {
+            tracing::warn!(
+                "Primary Ollama {model}: no-user-query after keep-tools; rewrite+omit tools, retry once (ADR-0034)"
+            );
+            let omit_msgs = rewrite_messages_for_tool_weak(messages);
+            match self.try_model(&omit_msgs, &[], model).await {
+                Ok(completion) => return Ok(completion),
+                Err(e) => {
+                    last_err = e;
+                }
+            }
+        }
         // ADR-0019: walk on any failure except hard exclusions (401/403,
         // pre-HTTP missing-key/config). 400/402/timeout/network/parse all walk.
-        if !crate::provider::should_walk_fallback(&primary_err) || self.fallback_chain.is_empty() {
-            return Err(primary_err);
+        if !crate::provider::should_walk_fallback(&last_err) || self.fallback_chain.is_empty() {
+            return Err(last_err);
         }
-        let mut last_err = primary_err;
         for cand in &self.fallback_chain {
             let known = match cand.split_once('/') {
                 Some((prefix, _)) => self.registry.get_provider(prefix).is_some(),
@@ -643,11 +670,7 @@ impl LlmClient {
                     return Ok(completion);
                 }
                 Err(e) => {
-                    if tool_weak
-                        && format!("{e:#}")
-                            .to_lowercase()
-                            .contains("no user query found")
-                    {
+                    if tool_weak && is_ollama_no_user_query_error(&e) {
                         if did_rewrite {
                             tracing::warn!(
                                 "Fallback: {cand} returned no-user-query after rewrite; skipping"
@@ -2239,5 +2262,224 @@ mod tests {
         assert!(is_foreign_id_for_ollama(&reg, "deepseek/deepseek-v4-flash"));
         assert!(!is_foreign_id_for_ollama(&reg, "ollama/qwen"));
         assert!(!is_foreign_id_for_ollama(&reg, "qwen3.8:27b"));
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0034: primary Ollama no-user-query → rewrite+omit retry once
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn is_ollama_no_user_query_detects_message() {
+        let err = anyhow::anyhow!(
+            "Ollama API error (500): {{\"error\":\"no user query found in messages\"}}"
+        );
+        assert!(is_ollama_no_user_query_error(&err));
+        assert!(!is_ollama_no_user_query_error(&anyhow::anyhow!(
+            "rate limited"
+        )));
+    }
+
+    /// Keep-tools first call 500s with no-user-query; omit-retry on same
+    /// primary succeeds (tools empty). ADR-0032 first-pass keep-tools unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn primary_ollama_no_user_query_omit_retries_once() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let cap = Arc::clone(&calls);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                cap.lock().unwrap().push(body.clone());
+                let tools_present = body
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                if tools_present {
+                    // Simulate keep-tools 500 (large tool-set / compaction).
+                    ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg);
+
+        let c = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "ollama/qwen",
+            )
+            .await
+            .expect("ADR-0034 omit-retry must succeed on same primary");
+        assert_eq!(c.model, "ollama/qwen");
+
+        let bodies = calls.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "exactly one keep-tools attempt + one omit-retry: {bodies:?}"
+        );
+        let tools0 = bodies[0]
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert!(
+            tools0 > 0,
+            "first pass must keep tools (ADR-0032): {}",
+            bodies[0]
+        );
+        let tools1_empty = bodies[1]
+            .get("tools")
+            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true);
+        assert!(
+            tools1_empty,
+            "omit-retry must omit tools (ADR-0034): {}",
+            bodies[1]
+        );
+        let msgs1 = bodies[1]["messages"].as_array().unwrap();
+        assert!(
+            msgs1.iter().any(|m| m["role"] == "user"),
+            "omit-retry payload must include user: {}",
+            bodies[1]
+        );
+    }
+
+    /// Omit-retry also fails → existing fallback chain (ADR-0029) unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn primary_omit_retry_fail_walks_fallback() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+
+        // Primary Ollama: keep-tools → 500; omit-retry → 500 again.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        // Fallback cloud answers.
+        let fb_hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&fb_hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "m2" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p2", server.uri(), "m2"),
+        ));
+        providers.insert("ollama".to_string(), ollama);
+        providers.insert("p2".to_string(), cloud);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["p2/m2".to_string()]);
+
+        let c = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "ollama/qwen",
+            )
+            .await
+            .expect("fallback must run after primary omit-retry fails");
+        assert_eq!(c.model, "p2/m2");
+        assert_eq!(
+            fb_hits.load(Ordering::SeqCst),
+            1,
+            "fallback cloud must be tried once"
+        );
+    }
+
+    /// Non no-user-query primary failure must NOT trigger omit-retry (no second
+    /// same-model call); walk fallback directly when chain is set.
+    #[tokio::test(start_paused = true)]
+    async fn primary_other_error_skips_omit_retry() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let ollama_hits = Arc::new(AtomicUsize::new(0));
+        let oh = Arc::clone(&ollama_hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                oh.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(500).set_body_string(r#"{"error":"model overloaded"}"#)
+            })
+            .mount(&server)
+            .await;
+
+        let fb_hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&fb_hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "m2" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p2", server.uri(), "m2"),
+        ));
+        providers.insert("ollama".to_string(), ollama);
+        providers.insert("p2".to_string(), cloud);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["p2/m2".to_string()]);
+
+        let c = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "ollama/qwen",
+            )
+            .await
+            .expect("fallback after non-userless primary error");
+        assert_eq!(c.model, "p2/m2");
+        assert_eq!(
+            ollama_hits.load(Ordering::SeqCst),
+            1,
+            "omit-retry must not run for non no-user-query errors"
+        );
+        assert_eq!(fb_hits.load(Ordering::SeqCst), 1);
     }
 }

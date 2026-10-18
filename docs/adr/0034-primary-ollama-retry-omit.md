@@ -1,6 +1,6 @@
 # ADR-0034: Primary Ollama `no user query` → rewrite+omit retry once
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-19
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0032 (primary Ollama keep-tools; #213 / #216), ADR-0029 (fallback → tool-weak rewrite+omit; #203 / #218 / #220)
