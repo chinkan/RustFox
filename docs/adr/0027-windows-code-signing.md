@@ -7,6 +7,18 @@
 - **Depends on:** none
 - **Issue:** #198
 
+
+## Implementation status (deferred)
+
+**Implementation is deferred** (2026-10-18 Kan/PO): skip Windows signing for
+now. This ADR remains **Accepted** and documents the locked plan (Option A /
+SignPath Foundation and the product locks below). The current
+`.github/workflows/release.yml` on `main` does **not** wire SignPath,
+`REQUIRE_SIGNING`, `signtool`, or a `release-signing` environment. Windows
+GitHub release binaries stay **unsigned** until the maintainer resumes
+SignPath setup, configures secrets, and explicitly turns on
+`REQUIRE_SIGNING`.
+
 ## Context
 
 `.github/workflows/release.yml` (trigger: `v*` tag push or `workflow_dispatch`)
@@ -141,8 +153,9 @@ Maintainer setup before enabling the gate:
 
 ## Consequences
 
-- `release.yml` gains a conditional SignPath path gated by `REQUIRE_SIGNING`.
-- Tag releases with the gate enabled wait for SignPath manual approval.
-- Until the maintainer finishes SignPath setup and sets `REQUIRE_SIGNING=true`,
-  Windows release zips remain unsigned (same as today).
-- Target: v1.0.7.
+- When implementation resumes, `release.yml` will gain a conditional SignPath
+  path gated by `REQUIRE_SIGNING` (not present in the workflow today).
+- Tag releases with the gate enabled will wait for SignPath manual approval.
+- Until the maintainer resumes SignPath setup and sets `REQUIRE_SIGNING=true`,
+  Windows release zips remain **unsigned** (current default).
+- Target when resumed: v1.0.7 or later.

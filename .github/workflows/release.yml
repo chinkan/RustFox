@@ -15,15 +15,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Least privilege: build only reads the repo/artifacts it produces.
     # Fixes CodeQL actions/missing-workflow-permissions (alert 2).
-    # actions:read lets SignPath download the unsigned GitHub artifact.
     permissions:
       contents: read
-      actions: read
-    # SignPath secrets should live in the protected environment
-    # `release-signing` (v* tags only) once the maintainer creates it.
-    # Attach `environment: release-signing` to this job (or a Windows-only
-    # sign job) before setting REQUIRE_SIGNING=true — an empty environment
-    # expression breaks Linux/macOS matrix entries, so it is not conditional here.
     strategy:
       matrix:
         include:
@@ -87,93 +80,6 @@ jobs:
             *) ext=tar.gz ;;
           esac
           echo "name=rustfox-${safe}-${{ matrix.target }}.${ext}" >> "$GITHUB_OUTPUT"
-
-      # --- Windows SignPath (ADR-0027 Option A) ---
-      # Runs only on tag pushes when repo variable REQUIRE_SIGNING=true.
-      - name: Require SignPath config when REQUIRE_SIGNING
-        id: signing
-        if: runner.os == 'Windows' && vars.REQUIRE_SIGNING == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env:
-          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-        run: |
-          missing=0
-          [ -n "$SIGNPATH_API_TOKEN" ] || { echo "::error::SIGNPATH_API_TOKEN secret is missing (release-signing environment)"; missing=1; }
-          [ -n "$SIGNPATH_ORGANIZATION_ID" ] || { echo "::error::SIGNPATH_ORGANIZATION_ID variable is missing"; missing=1; }
-          [ -n "$SIGNPATH_PROJECT_SLUG" ] || { echo "::error::SIGNPATH_PROJECT_SLUG variable is missing"; missing=1; }
-          [ -n "$SIGNPATH_SIGNING_POLICY_SLUG" ] || { echo "::error::SIGNPATH_SIGNING_POLICY_SLUG variable is missing"; missing=1; }
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::REQUIRE_SIGNING=true but SignPath is not configured; refusing to publish unsigned Windows binaries (ADR-0027)."
-            exit 1
-          fi
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload unsigned Windows binary for SignPath
-        id: upload-unsigned-artifact
-        if: steps.signing.outputs.enabled == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: rustfox-windows-unsigned-${{ github.run_id }}
-          path: staging/rustfox.exe
-          archive: false
-          if-no-files-found: error
-
-      - name: Sign Windows binary (SignPath Foundation)
-        if: steps.signing.outputs.enabled == 'true'
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.upload-unsigned-artifact.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 3600
-          output-artifact-directory: ${{ github.workspace }}/signed
-
-      - name: Replace staging exe with signed binary
-        if: steps.signing.outputs.enabled == 'true'
-        shell: pwsh
-        run: |
-          $signed = Get-ChildItem -Path signed -Recurse -Filter rustfox.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $signed) {
-            $signed = Get-ChildItem -Path signed -Recurse -Filter *.exe -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-          }
-          if (-not $signed) {
-            Write-Error "SignPath returned no .exe under signed/"
-            Get-ChildItem -Path signed -Recurse | ForEach-Object { $_.FullName }
-            exit 1
-          }
-          Copy-Item -Force $signed.FullName staging/rustfox.exe
-          Write-Host "Installed signed binary from $($signed.FullName)"
-
-      - name: Verify Windows signature (signtool)
-        if: steps.signing.outputs.enabled == 'true'
-        shell: pwsh
-        run: |
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signtool) {
-            Write-Error "signtool.exe not found under Windows Kits"
-            exit 1
-          }
-          $bins = Get-ChildItem staging -Include *.exe,*.dll -Recurse -File
-          if (-not $bins) {
-            Write-Error "No .exe/.dll under staging to verify"
-            exit 1
-          }
-          foreach ($b in $bins) {
-            Write-Host "signtool verify /pa /v $($b.FullName)"
-            & $signtool.FullName verify /pa /v $b.FullName
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'

@@ -99,25 +99,27 @@ tar xzf rustfox-*.tar.gz
 
 #### Windows: Smart App Control and SmartScreen
 
+- **Unsigned by default.** GitHub [Releases](https://github.com/chinkan/RustFox/releases)
+  Windows zips are **unsigned** today. Treat every published `rustfox.exe` like
+  any other unsigned build under SAC (below).
 - **Smart App Control (SAC).** Unsigned `rustfox.exe` builds are blocked on Windows
-  with SAC turned on, and there is **no** "Run anyway" button. Prefer a
-  **signed release** from the [Releases page](https://github.com/chinkan/RustFox/releases)
-  once signing is enabled (#198). If you build from source and hit
-  `os error 4551`, build on a machine that does not enforce SAC. We do **not**
-  recommend turning Smart App Control off — turning it back on can require a
-  Windows reset when optional diagnostic data is off.
-- **SmartScreen.** A signed or unsigned download may still show
+  with SAC turned on, and there is **no** "Run anyway" button. If you build from
+  source and hit `os error 4551`, build on a machine that does not enforce SAC.
+  We do **not** recommend turning Smart App Control off — turning it back on can
+  require a Windows reset when optional diagnostic data is off.
+- **SmartScreen.** An unsigned (or future signed) download may still show
   "Windows protected your PC". Click **More info**, then **Run anyway**. This
   is separate from SAC.
-- **Code signing.** Free code signing provided by SignPath.io, certificate by
-  SignPath Foundation (ADR-0027). Until the maintainer turns on
-  `REQUIRE_SIGNING` for tag releases, published Windows zips may still be
-  unsigned — treat them like any other unsigned build under SAC.
-- **Privacy (SignPath OSS).** RustFox is self-hosted. Depending on your config it
-  may talk to **Telegram** (bot API) and an LLM provider such as **OpenRouter**
-  (or a local Ollama / OpenAI-compatible endpoint you choose). No SignPath
-  traffic is involved at runtime — SignPath only signs the Windows release
-  binary in CI.
+- **Code signing (planned, deferred).** ADR-0027 locks Option A (SignPath
+  Foundation) as the plan. Implementation is deferred: CI does not run SignPath
+  or `REQUIRE_SIGNING` yet. Windows release binaries stay unsigned until the
+  maintainer resumes that work. Planned credit when live: free code signing
+  provided by SignPath.io, certificate by SignPath Foundation.
+- **Privacy.** RustFox is self-hosted. Depending on your config it may talk to
+  **Telegram** (bot API) and an LLM provider such as **OpenRouter** (or a local
+  Ollama / OpenAI-compatible endpoint you choose). SignPath is not used at
+  runtime; it would only sign the Windows release binary in CI if signing is
+  later enabled.
 
 **Option B — Build from source (recommended script)**
 
