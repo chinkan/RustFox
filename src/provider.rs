@@ -1289,7 +1289,9 @@ mod tests {
         let config = retry_config(server.uri(), 3, 3);
         let err = call_with_retry(&config).await.unwrap_err();
         assert!(
-            format!("{err:#}").to_lowercase().contains("no user query found"),
+            format!("{err:#}")
+                .to_lowercase()
+                .contains("no user query found"),
             "{err:#}"
         );
         assert_eq!(
