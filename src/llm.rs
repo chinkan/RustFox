@@ -614,11 +614,17 @@ impl LlmClient {
                 tracing::warn!("Fallback: skipping foreign id '{cand}' for Ollama (ADR-0032)");
                 continue;
             }
-            let needs_safe =
-                tool_weak && (is_mid_tool_loop(messages) || !has_plain_user_turn(messages));
+            // ADR-0029 (+ #218): any tool-weak fallback with tools present
+            // (incl. first turn + plain user), mid-loop, or user-less → rewrite + omit tools.
+            // Do NOT reuse primary keep-tools shaping (ADR-0032) on the fallback walk.
+            let needs_safe = tool_weak
+                && (is_mid_tool_loop(messages)
+                    || !has_plain_user_turn(messages)
+                    || !tools.is_empty());
+            let did_rewrite = needs_safe;
             let (req_messages, req_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if needs_safe {
                 tracing::warn!(
-                    "Fallback: rewriting mid-tool-loop payload for tool-weak provider {cand} (ADR-0029)"
+                    "Fallback: rewriting payload for tool-weak provider {cand} (ADR-0029; tools omitted)"
                 );
                 (rewrite_messages_for_tool_weak(messages), Vec::new())
             } else {
@@ -642,9 +648,15 @@ impl LlmClient {
                             .to_lowercase()
                             .contains("no user query found")
                     {
-                        tracing::warn!(
-                            "Fallback: {cand} returned no-user-query after rewrite; skipping"
-                        );
+                        if did_rewrite {
+                            tracing::warn!(
+                                "Fallback: {cand} returned no-user-query after rewrite; skipping"
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Fallback: {cand} returned no-user-query (no rewrite applied); skipping"
+                            );
+                        }
                         last_err = anyhow::anyhow!(USER_FACING_LLM_UNAVAILABLE);
                         continue;
                     }
@@ -1953,6 +1965,113 @@ mod tests {
                 parameters: serde_json::json!({"type":"object","properties":{}}),
             },
         }
+    }
+
+    /// #218 / ADR-0029 amend: OpenRouter primary fail → Ollama first turn with
+    /// tools + plain user must rewrite + omit tools (never raw tools that 500).
+    #[tokio::test(start_paused = true)]
+    async fn fallback_ollama_first_turn_with_tools_rewrites_and_omits_tools() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        // If raw tools were forwarded (pre-#218 bug), Ollama-style 500.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "qwen",
+                "tools": [{"type": "function"}]
+            })))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#),
+            )
+            .mount(&server)
+            .await;
+        // Accept rewritten omit-tools payload with a plain user turn.
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body.clone());
+                let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+                let has_user = msgs.iter().any(|m| {
+                    m["role"] == "user"
+                        && m["content"]
+                            .as_str()
+                            .map(|c| !c.trim().is_empty())
+                            .unwrap_or(false)
+                });
+                let tools_empty = body
+                    .get("tools")
+                    .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+                    .unwrap_or(true);
+                if has_user && tools_empty {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                } else {
+                    ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["ollama/qwen".to_string()]);
+
+        // Primary OpenRouter fails (402 credits) → walk to Ollama.
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "credits"})),
+        )
+        .await;
+
+        let c = llm
+            .chat_completion_with_model(&first_turn_with_tools_user(), &[sample_tool()], "p1/m1")
+            .await
+            .expect("Ollama first-turn fallback must succeed after rewrite+omit-tools");
+        assert_eq!(c.model, "ollama/qwen");
+        let body = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("ollama request captured");
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs.iter().any(|m| m["role"] == "user"),
+            "rewritten request must include user: {body}"
+        );
+        let tools_empty = body
+            .get("tools")
+            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true);
+        assert!(
+            tools_empty,
+            "first-turn tool-weak fallback must omit tools (ADR-0029/#218): {body}"
+        );
+        // User text from the original plain turn must survive rewrite.
+        let user_text = msgs
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .filter_map(|m| m["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            user_text.contains("HK weather"),
+            "plain user text must be preserved: {body}"
+        );
     }
 
     #[test]
