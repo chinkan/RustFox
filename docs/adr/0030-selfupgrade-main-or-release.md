@@ -5,6 +5,7 @@
 - **Target release:** v1.0.7
 - **Depends on:** ADR-0018 (error surfacing / optional GitHub token)
 - **Amends:** Telegram `/selfupgrade` UX only; reuses existing `learning::self_upgrade` / `UpgradeMode`
+- **Locks:** PO lock 2026-10-18 — Telegram arg allowlist **A** (reject other)
 
 ## Context
 
@@ -33,9 +34,15 @@ Kan / Product asked for an explicit **main | release** choice on Telegram (and p
 4. **Surfaces (Q4).** Same semantics everywhere an upgrade entry exists:
    - **Telegram:** `/selfupgrade main|release` (optional buttons). Bare = auto.
    - **Portal / CLI:** if an upgrade control exists (or is added), use the same `main` / `release` / bare-auto meanings. Portal visual work is owned by RustFox UI after this ADR is accepted and implementation is assigned.
-   - **Built-in tool `self_upgrade`:** already has `mode` + `branch`; align docs and any Telegram parsing so `main`/`release` tokens are not mistaken for random branch names when that is the product intent. Optional advanced branch names for source builds remain allowed only where the API already supports `branch` + `mode=source` (tool / future advanced UX), not as the primary Telegram labels.
+   - **Built-in tool `self_upgrade`:** already has `mode` + `branch`; align docs and any Telegram parsing so `main`/`release` tokens are not mistaken for random branch names when that is the product intent.
 
-5. **Out of scope for this ADR’s implementation slice:** changing release asset naming; baking GitHub credentials; auto-cloning; rewriting `self_update` internals (beyond the refuse-on-no-source-tree path for `main`).
+5. **Telegram arg allowlist (PO lock A, 2026-10-18).** Telegram `/selfupgrade <arg>` accepts only:
+   - bare (empty) → auto (per item 2);
+   - `main` → source + branch `main` (per item 1);
+   - `release` → release binary (per item 1).
+   Any other arg (e.g. `develop`) is **rejected** with a clear tip that only `main` | `release` | bare are accepted. Do **not** silently treat unknown args as git branch names. Other git branches remain allowed only via the built-in tool with `mode=source` + `branch=…` (advanced), not via Telegram UX.
+
+6. **Out of scope for this ADR’s implementation slice:** changing release asset naming; baking GitHub credentials; auto-cloning; rewriting `self_update` internals (beyond the refuse-on-no-source-tree path for `main`).
 
 ## Non-goals
 
@@ -46,10 +53,11 @@ Kan / Product asked for an explicit **main | release** choice on Telegram (and p
 ## Acceptance criteria (implementation — later assign)
 
 - Telegram: `/selfupgrade` → auto; `/selfupgrade main` → source+branch main (or refuse if no source tree); `/selfupgrade release` → GitHub latest binary.
+- Telegram: unknown arg (not empty / `main` / `release`) → reject with a clear tip that only `main` | `release` | bare are accepted; no silent treat-as-branch.
 - Optional Telegram buttons for main / release with the same semantics.
 - Portal/CLI upgrade entry (if present) matches Telegram semantics; UI bot owns portal chrome.
 - No silent clone when release binary users pick `main`.
-- Regression tests cover parse mapping and the refuse path.
+- Regression tests cover parse mapping, unknown-arg reject, and the refuse path.
 - English on GitHub; four gates before merge of the impl PR.
 
 ## Consequences
