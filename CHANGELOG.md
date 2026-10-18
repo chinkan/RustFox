@@ -18,6 +18,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **ADR-0034 soft-omit on openai-compat Ollama (#226):** tool-weak detection now includes `openai_compatible` Active named `ollama` or listening on `:11434` (live tip `25dc563` skipped omit-retry WARN). Deterministic `no user query found` 500s fail fast in ADR-0009 (no same-payload Rate/transient storm) so rewrite+omit can run. Does not block v1.0.6 (v1.0.7+).
 - **Primary Ollama keep-tools 500 recovery (ADR-0034, #226):** when primary Ollama returns `no user query found` after ADR-0032 keep-tools, rewrite+omit tools and retry once on the same primary (WARN), then existing fallback. Does not block v1.0.6 (v1.0.7+).
 - **Agent invoke follows Active model (ADR-0033, #223):** `run_subagent` no longer defaults to `[openrouter].model` when the agent has no `model` override — uses `current_model` (banner Active). Explicit agent/override `model` stays sticky. Does not block v1.0.6 (v1.0.7+).
 - **Ollama fallback first turn + tools (ADR-0029 amend, #218):** walking onto tool-weak Ollama with tools present (including first turn + plain user) always rewrites and omits tools — never raw tools that 500 with `no user query found`. Log says “after rewrite” only when rewrite ran. Primary keep-tools (ADR-0032) unchanged.

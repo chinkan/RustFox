@@ -314,15 +314,21 @@ async fn chat_completion_with_retry(
                 .map(|v| v.to_string());
             let body = response.text().await.unwrap_or_default();
             log_envelope_if_interesting(provider_name, status, &body);
+            // Ollama's deterministic "no user query found" 500 is not transient.
+            // ADR-0009 same-payload retries burn the rate-limit budget and delay
+            // ADR-0034 omit-retry (live soft-fail: Rate/transient 1/3..3/3 then
+            // Fallback with no rewrite+omit WARN when omit gate was also skipped).
+            let no_user_query = body.to_lowercase().contains("no user query found");
             let err = anyhow::Error::from(LlmHttpError {
                 provider: provider_name.to_string(),
                 status,
                 body,
             });
-            let retryable =
-                status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            let retryable = !no_user_query
+                && (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error());
             if !retryable || rate_limit_attempts >= config.rate_limit_retry_limit {
-                // 400/401/… fail fast (unchanged); 429/5xx after budget spent.
+                // 400/401/… fail fast (unchanged); no-user-query 500 fail fast;
+                // 429/5xx after budget spent.
                 return Err(err);
             }
 
@@ -1267,6 +1273,29 @@ mod tests {
             hits.load(Ordering::SeqCst),
             1,
             "4xx (except 429) must never retry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_user_query_500_fails_fast_no_adr0009_retry() {
+        let server = MockServer::start().await;
+        let hits = mount_script(
+            &server,
+            vec![ResponseTemplate::new(500).set_body_string(
+                r#"{"error":{"message":"no user query found in messages","type":"api_error"}}"#,
+            )],
+        )
+        .await;
+        let config = retry_config(server.uri(), 3, 3);
+        let err = call_with_retry(&config).await.unwrap_err();
+        assert!(
+            format!("{err:#}").to_lowercase().contains("no user query found"),
+            "{err:#}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "no-user-query 500 must not burn ADR-0009 rate-limit retries"
         );
     }
 
