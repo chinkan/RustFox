@@ -94,7 +94,32 @@ Download from the [Releases page](https://github.com/chinkan/RustFox/releases):
 
 ```bash
 tar xzf rustfox-*.tar.gz
+# Windows: expand the .zip from the Releases page instead
 ```
+
+#### Windows: Smart App Control and SmartScreen
+
+- **Unsigned by default.** GitHub [Releases](https://github.com/chinkan/RustFox/releases)
+  Windows zips are **unsigned** today. Treat every published `rustfox.exe` like
+  any other unsigned build under SAC (below).
+- **Smart App Control (SAC).** Unsigned `rustfox.exe` builds are blocked on Windows
+  with SAC turned on, and there is **no** "Run anyway" button. If you build from
+  source and hit `os error 4551`, build on a machine that does not enforce SAC.
+  We do **not** recommend turning Smart App Control off — turning it back on can
+  require a Windows reset when optional diagnostic data is off.
+- **SmartScreen.** An unsigned (or future signed) download may still show
+  "Windows protected your PC". Click **More info**, then **Run anyway**. This
+  is separate from SAC.
+- **Code signing (planned, deferred).** ADR-0027 locks Option A (SignPath
+  Foundation) as the plan. Implementation is deferred: CI does not run SignPath
+  or `REQUIRE_SIGNING` yet. Windows release binaries stay unsigned until the
+  maintainer resumes that work. Planned credit when live: free code signing
+  provided by SignPath.io, certificate by SignPath Foundation.
+- **Privacy.** RustFox is self-hosted. Depending on your config it may talk to
+  **Telegram** (bot API) and an LLM provider such as **OpenRouter** (or a local
+  Ollama / OpenAI-compatible endpoint you choose). SignPath is not used at
+  runtime; it would only sign the Windows release binary in CI if signing is
+  later enabled.
 
 **Option B — Build from source (recommended script)**
 

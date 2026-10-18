@@ -1,10 +1,23 @@
 # ADR-0027: Code signing for Windows release binaries
 
-- **Status:** Proposed (pending maintainer choice of Option A or B)
+- **Status:** Accepted (Option A locked 2026-10-18 — SignPath Foundation)
 - **Date:** 2026-10-14
+- **Accepted:** 2026-10-18
 - **Target release:** v1.0.7
 - **Depends on:** none
 - **Issue:** #198
+
+
+## Implementation status (deferred)
+
+**Implementation is deferred** (2026-10-18 Kan/PO): skip Windows signing for
+now. This ADR remains **Accepted** and documents the locked plan (Option A /
+SignPath Foundation and the product locks below). The current
+`.github/workflows/release.yml` on `main` does **not** wire SignPath,
+`REQUIRE_SIGNING`, `signtool`, or a `release-signing` environment. Windows
+GitHub release binaries stay **unsigned** until the maintainer resumes
+SignPath setup, configures secrets, and explicitly turns on
+`REQUIRE_SIGNING`.
 
 ## Context
 
@@ -18,7 +31,7 @@ zips it with `Compress-Archive` as `rustfox-<tag>-x86_64-pc-windows-msvc.zip`;
 "Upload artifact" (`actions/upload-artifact@v7`) uploads it. The `release` job
 (`ubuntu-latest`, tag pushes only) downloads all artifacts and publishes them
 with `softprops/action-gh-release@v3`. Today only `rustfox.exe` is shipped
-(no DLLs, no installer), and nothing is signed.
+(no DLLs, no installer).
 
 Unsigned Windows binaries are blocked by Windows Smart App Control (SAC) with
 no "Run anyway" option. This conflicts with the goal that non-technical users
@@ -30,14 +43,18 @@ this code).
 ## Decision
 
 1. Sign every Windows `.exe` and `.dll` shipped in a release (and any future
-   installer) in CI, with an RFC 3161 timestamp, **before** it is zipped.
+   installer) in CI **before** it is zipped (never sign inside the zip). Use an
+   RFC 3161 timestamp; timestamping is **on by default** in the SignPath
+   policy (do not disable it).
 2. Once the gate in item 6 is enabled, a signing failure fails the release and
    unsigned Windows binaries are not published.
 3. Signing runs only in the tag/release path of `release.yml`, not in `ci.yml`,
-   `check-compile.yml` or pull requests.
-4. Signing secrets live in GitHub Actions secrets, scoped to a protected
-   environment (e.g. `release-signing`) that only allows `v*` tags.
-5. The provider is chosen by the maintainer from the options below.
+   `check-compile.yml` or pull requests. Manual `workflow_dispatch` builds may
+   remain unsigned for testing.
+4. Signing secrets live in GitHub Actions, scoped to a protected environment
+   `release-signing` that only allows `v*` tags (maintainer creates this).
+5. **Provider: Option A — SignPath Foundation** (locked 2026-10-18). Option B
+   (Certum) remains a documented fallback only if SignPath rejects the project.
 6. **Rollout gating.** The gate in item 2 is controlled by an explicit repo
    variable `REQUIRE_SIGNING`, not by whether a secret exists. While it is
    unset, Windows releases ship unsigned and the release notes must say so
@@ -49,28 +66,47 @@ this code).
    non-technical words: click "More info", then "Run anyway". This is
    distinct from Smart App Control, which offers no such option.
 
-### Option A (preferred): SignPath Foundation OSS program
+### Option A (locked): SignPath Foundation OSS program
 
 - Upload the unsigned `rustfox.exe` with `actions/upload-artifact` v4+
-  (step id `upload-unsigned-artifact`), then call
+  (step id `upload-unsigned-artifact`, prefer `archive: false`), then call
   `signpath/github-action-submit-signing-request@v3` with
   `github-artifact-id: ${{ steps.upload-unsigned-artifact.outputs.artifact-id }}`,
-  `api-token: ${{ secrets.SIGNPATH_API_TOKEN }}`, `organization-id`,
-  `project-slug`, `signing-policy-slug`; download the signed result and zip it.
+  `api-token: ${{ secrets.SIGNPATH_API_TOKEN }}`, and organization / project /
+  signing-policy slugs from repo variables; download the signed result into
+  staging, verify with `signtool`, then zip.
 - All jobs before signing must run on GitHub-hosted runners (already true).
 - Each release signing request needs manual approval in SignPath.
 - The publisher shown to users is "SignPath Foundation".
-- Requirements: a code signing policy in the README and release page
+- Requirements: a code signing policy line in the README and release page
   ("Free code signing provided by SignPath.io, certificate by SignPath
   Foundation"); named roles (Author, Reviewer, Approver); a privacy statement
   naming the external services RustFox talks to (OpenRouter, Telegram); MFA on
   GitHub and SignPath accounts; the CI workflow and build scripts are treated
   as source code and reviewed carefully.
-- Open questions: can SignPath sign an exe/DLL inside the zip, or must we
-  sign before zipping; is timestamping on by default; may one person hold all
-  roles; typical approval turnaround per release.
 
-### Option B (fallback if SignPath rejects): Certum Open Source certificate
+#### Product locks (2026-10-18, closes open questions)
+
+| Decision | Lock |
+|----------|------|
+| Sign vs zip | **Sign the bare exe/DLL first, then zip** (never rely on signing inside the archive). |
+| Timestamp | **On by default** (RFC 3161); do not turn timestamping off in the SignPath policy. |
+| Roles | **One person may hold Author, Reviewer, and Approver** (solo OSS maintainer). |
+| Approval SLA | Each release needs **manual SignPath approval by the maintainer (Kan)**; **no SLA** is promised for turnaround. |
+
+Maintainer setup before enabling the gate:
+
+| Item | Where |
+|------|--------|
+| SignPath org / project / signing policy | SignPath.io (OSS application) |
+| `SIGNPATH_API_TOKEN` | Environment secret on `release-signing` |
+| `SIGNPATH_ORGANIZATION_ID` | Repo or environment variable |
+| `SIGNPATH_PROJECT_SLUG` | Repo or environment variable |
+| `SIGNPATH_SIGNING_POLICY_SLUG` | Repo or environment variable |
+| Environment `release-signing` | GitHub → Environments; restrict to `v*` tags |
+| `REQUIRE_SIGNING=true` | Repo variable — set only after the rows above work |
+
+### Option B (fallback only if SignPath rejects)
 
 - Certum Open Source Code Signing in the cloud (SimplySign), from about
   EUR 49/year, issued to an individual, for open-source use only.
@@ -85,7 +121,7 @@ this code).
   and Hong Kong is not an eligible region for organizations.
 - **EV certificates:** no SmartScreen reputation advantage since 2024, and
   they require a registered company.
-- **Shipping unsigned:** keeps SAC blocking the target audience.
+- **Shipping unsigned forever:** keeps SAC blocking the target audience.
 
 ## Non-goals
 
@@ -117,6 +153,9 @@ this code).
 
 ## Consequences
 
-- No code or workflow changes until the maintainer picks Option A or B.
-- Releases gain a signing step (and, for Option A, a manual approval wait).
-- Target: v1.0.7.
+- When implementation resumes, `release.yml` will gain a conditional SignPath
+  path gated by `REQUIRE_SIGNING` (not present in the workflow today).
+- Tag releases with the gate enabled will wait for SignPath manual approval.
+- Until the maintainer resumes SignPath setup and sets `REQUIRE_SIGNING=true`,
+  Windows release zips remain **unsigned** (current default).
+- Target when resumed: v1.0.7 or later.
