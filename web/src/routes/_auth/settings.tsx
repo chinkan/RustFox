@@ -2,6 +2,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ApiError } from '../../api/client'
 import type { AutonomyMode, SelfUpgradeChoice, SettingsPatch, SoulName } from '../../api/types'
 import { ensureAuthBootstrapped } from '../../auth'
 
@@ -171,8 +172,13 @@ function SettingsPage() {
     onSuccess: () => {
       setUpgradeMsg({ text: t('settings.upgradeSuccess'), ok: true })
     },
-    onError: (e: Error) =>
-      setUpgradeMsg({ text: t('settings.upgradeFailed', { message: e.message }), ok: false }),
+    onError: (e: Error) => {
+      if (e instanceof ApiError && e.code === 'invalid_selfupgrade_choice') {
+        setUpgradeMsg({ text: t('settings.upgradeRejectUnknown'), ok: false })
+        return
+      }
+      setUpgradeMsg({ text: t('settings.upgradeFailed', { message: e.message }), ok: false })
+    },
   })
 
   const editable = settings.data?.editable
@@ -426,19 +432,20 @@ function SettingsPage() {
             <h2 className="section-title">{t('settings.upgradeTitle')}</h2>
             <div className="card">
               <p className="hint" style={{ marginBottom: 12 }}>{t('settings.upgradeHint')}</p>
-              <label style={{ display: 'block', fontSize: 13, marginBottom: 6 }}>
-                {t('settings.upgradeMode')}
-              </label>
-              <select
-                value={choice}
-                onChange={(e) => setChoice(e.target.value as SelfUpgradeChoice)}
-                disabled={selfUpgrade.isPending}
-                style={{ marginBottom: 12, maxWidth: 320 }}
-              >
-                <option value="auto">{t('settings.upgradeModeAuto')}</option>
-                <option value="main">{t('settings.upgradeModeMain')}</option>
-                <option value="release">{t('settings.upgradeModeRelease')}</option>
-              </select>
+              <div className="field">
+                <label htmlFor="settings-self-upgrade-mode">{t('settings.upgradeMode')}</label>
+                <select
+                  id="settings-self-upgrade-mode"
+                  value={choice}
+                  onChange={(e) => setChoice(e.target.value as SelfUpgradeChoice)}
+                  disabled={selfUpgrade.isPending}
+                  style={{ maxWidth: 320 }}
+                >
+                  <option value="auto">{t('settings.upgradeModeAuto')}</option>
+                  <option value="main">{t('settings.upgradeModeMain')}</option>
+                  <option value="release">{t('settings.upgradeModeRelease')}</option>
+                </select>
+              </div>
               <div className="row" style={{ gap: 8 }}>
                 <button
                   type="button"
@@ -452,9 +459,15 @@ function SettingsPage() {
                   {selfUpgrade.isPending ? t('settings.upgradeRunning') : t('settings.upgradeRun')}
                 </button>
               </div>
+              {selfUpgrade.isPending ? (
+                <div className="hint" role="status" style={{ marginTop: 8 }}>
+                  {t('settings.upgradeRunning')}
+                </div>
+              ) : null}
               {upgradeMsg ? (
                 <div
                   className={upgradeMsg.ok ? 'hint' : 'error-note'}
+                  role="status"
                   style={{ marginTop: 8 }}
                 >
                   {upgradeMsg.text}

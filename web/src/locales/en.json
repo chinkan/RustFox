@@ -191,7 +191,7 @@
     "upgradeModeRelease": "Release (GitHub binary)",
     "upgradeRun": "Upgrade now",
     "upgradeRunning": "Upgrading…",
-    "upgradeSuccess": "Upgrade started successfully. The portal will reconnect after restart.",
+    "upgradeSuccess": "Upgrade succeeded. The portal will reconnect after restart.",
     "upgradeFailed": "Upgrade failed: {{message}}",
     "upgradeRejectUnknown": "Only Auto, Main, or Release are allowed."
   },

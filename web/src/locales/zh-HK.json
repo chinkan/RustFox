@@ -191,7 +191,7 @@
     "upgradeModeRelease": "Release（GitHub 二進位）",
     "upgradeRun": "立即升級",
     "upgradeRunning": "升級中…",
-    "upgradeSuccess": "升級已成功開始。重啟後入口網站會重新連線。",
+    "upgradeSuccess": "升級成功。重啟後入口網站會重新連線。",
     "upgradeFailed": "升級失敗：{{message}}",
     "upgradeRejectUnknown": "只接受自動、Main 或 Release。"
   },
