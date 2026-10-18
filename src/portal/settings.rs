@@ -577,6 +577,69 @@ pub async fn switch_to_trusted_mode(
     })))
 }
 
+/// Map portal Settings choice → Telegram `/selfupgrade` arg (ADR-0030).
+///
+/// Only `auto` | `main` | `release`. Free-text branches are not accepted.
+pub fn portal_selfupgrade_choice_to_arg(choice: &str) -> Option<&'static str> {
+    match choice.trim() {
+        "auto" => Some(""),
+        "main" => Some("main"),
+        "release" => Some("release"),
+        _ => None,
+    }
+}
+
+/// POST body for `/api/settings/self-upgrade` (camelCase).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfUpgradeBody {
+    pub choice: String,
+}
+
+/// POST /api/settings/self-upgrade — sync upgrade then restart (ADR-0030).
+///
+/// Waits on [`crate::learning::self_upgrade`] (can take many minutes for a
+/// cargo build or release download). There is no axum/tower request-timeout
+/// middleware on the portal; the handler blocks until upgrade finishes, then
+/// returns 200 and schedules [`crate::learning::restart_bot`] after a short
+/// delay so the response can flush (Telegram parity).
+pub async fn self_upgrade(Json(body): Json<SelfUpgradeBody>) -> Result<Json<Value>, PortalError> {
+    let Some(arg) = portal_selfupgrade_choice_to_arg(&body.choice) else {
+        return Err(PortalError::bad_request(
+            "invalid_selfupgrade_choice",
+            "Only Auto, Main, or Release are allowed.",
+        ));
+    };
+
+    let (mode, branch) = match crate::learning::parse_telegram_selfupgrade_arg(arg) {
+        crate::learning::TelegramSelfUpgradeParse::RejectUnknown => {
+            return Err(PortalError::bad_request(
+                "invalid_selfupgrade_choice",
+                "Only Auto, Main, or Release are allowed.",
+            ));
+        }
+        crate::learning::TelegramSelfUpgradeParse::Ok { mode, branch } => (mode, branch),
+    };
+
+    let log = crate::learning::self_upgrade(branch, mode, None)
+        .await
+        .map_err(|e| PortalError::bad_request("self_upgrade_failed", format!("{e:#}")))?;
+
+    // Mirror Telegram: deliver success, then restart after a short delay.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if let Err(e) = crate::learning::restart_bot() {
+            tracing::error!("Portal self-upgrade: restart_bot failed: {e:#}");
+        }
+    });
+
+    Ok(Json(json!({
+        "ok": true,
+        "mode": mode,
+        "log": log,
+    })))
+}
+
 #[cfg(test)]
 mod sandbox_settings_tests {
     use super::*;
@@ -640,5 +703,68 @@ mod sandbox_settings_tests {
             &crate::sandbox::InstallUx::UnsupportedPackageManager,
         );
         assert!(v2["statusMessage"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod self_upgrade_settings_tests {
+    use super::*;
+    use crate::learning::{parse_telegram_selfupgrade_arg, TelegramSelfUpgradeParse};
+
+    #[test]
+    fn choice_auto_maps_to_bare_arg_and_auto_mode() {
+        let arg = portal_selfupgrade_choice_to_arg("auto").expect("auto");
+        assert_eq!(arg, "");
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(arg),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "auto",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn choice_main_maps_to_source() {
+        let arg = portal_selfupgrade_choice_to_arg("main").expect("main");
+        assert_eq!(arg, "main");
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(arg),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "source",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn choice_release_maps_to_release() {
+        let arg = portal_selfupgrade_choice_to_arg("release").expect("release");
+        assert_eq!(arg, "release");
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(arg),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "release",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_choice_rejected() {
+        for bad in [
+            "develop",
+            "feature/x",
+            "",
+            "AUTO",
+            "Main",
+            "Release",
+            "source",
+        ] {
+            assert!(
+                portal_selfupgrade_choice_to_arg(bad).is_none(),
+                "expected reject for {bad:?}"
+            );
+        }
     }
 }

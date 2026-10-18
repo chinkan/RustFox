@@ -182,7 +182,18 @@
     "sandboxSwitchSafe": "切換至安全模式",
     "sandboxInstallButton": "為我安裝",
     "sandboxInstallingHint": "正在安裝安全工具。你的電腦可能會要求輸入密碼；RustFox 不會看到密碼。",
-    "sandboxWindowsNote": "安全模式指令暫時未能在 Windows 使用。"
+    "sandboxWindowsNote": "安全模式指令暫時未能在 Windows 使用。",
+    "upgradeTitle": "自我升級",
+    "upgradeHint": "同 Telegram：自動偵測來源／發行版；Main 從 git main 重建；Release 下載 GitHub 最新二進位。",
+    "upgradeMode": "模式",
+    "upgradeModeAuto": "自動（偵測）",
+    "upgradeModeMain": "Main（原始碼／git main）",
+    "upgradeModeRelease": "Release（GitHub 二進位）",
+    "upgradeRun": "立即升級",
+    "upgradeRunning": "升級中…",
+    "upgradeSuccess": "升級成功。重啟後入口網站會重新連線。",
+    "upgradeFailed": "升級失敗：{{message}}",
+    "upgradeRejectUnknown": "只接受自動、Main 或 Release。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",

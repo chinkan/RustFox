@@ -182,7 +182,18 @@
     "sandboxSwitchSafe": "Switch to safe mode",
     "sandboxInstallButton": "Install for me",
     "sandboxInstallingHint": "Installing the safety tool. Your computer may ask for your password; RustFox never sees it.",
-    "sandboxWindowsNote": "Safe mode for commands is not yet available on Windows."
+    "sandboxWindowsNote": "Safe mode for commands is not yet available on Windows.",
+    "upgradeTitle": "Self-upgrade",
+    "upgradeHint": "Same as Telegram: Auto detects source vs release; Main rebuilds from git main; Release downloads the latest GitHub binary.",
+    "upgradeMode": "Mode",
+    "upgradeModeAuto": "Auto (detect)",
+    "upgradeModeMain": "Main (source / git main)",
+    "upgradeModeRelease": "Release (GitHub binary)",
+    "upgradeRun": "Upgrade now",
+    "upgradeRunning": "Upgrading…",
+    "upgradeSuccess": "Upgrade succeeded. The portal will reconnect after restart.",
+    "upgradeFailed": "Upgrade failed: {{message}}",
+    "upgradeRejectUnknown": "Only Auto, Main, or Release are allowed."
   },
   "notFound": {
     "title": "404 — Route not found",
