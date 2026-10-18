@@ -94,7 +94,25 @@ Download from the [Releases page](https://github.com/chinkan/RustFox/releases):
 
 ```bash
 tar xzf rustfox-*.tar.gz
+# Windows: expand the .zip from the Releases page instead
 ```
+
+#### Windows: Smart App Control and SmartScreen
+
+- **Smart App Control (SAC).** Unsigned `rustfox.exe` builds are blocked on Windows
+  with SAC turned on, and there is **no** "Run anyway" button. Prefer a
+  **signed release** from the [Releases page](https://github.com/chinkan/RustFox/releases)
+  once signing is enabled (#198). If you build from source and hit
+  `os error 4551`, build on a machine that does not enforce SAC. We do **not**
+  recommend turning Smart App Control off — turning it back on can require a
+  Windows reset when optional diagnostic data is off.
+- **SmartScreen.** A signed or unsigned download may still show
+  "Windows protected your PC". Click **More info**, then **Run anyway**. This
+  is separate from SAC.
+- **Code signing.** Free code signing provided by SignPath.io, certificate by
+  SignPath Foundation (ADR-0027). Until the maintainer turns on
+  `REQUIRE_SIGNING` for tag releases, published Windows zips may still be
+  unsigned — treat them like any other unsigned build under SAC.
 
 **Option B — Build from source (recommended script)**
 

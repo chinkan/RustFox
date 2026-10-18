@@ -5,6 +5,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Windows SignPath signing path (ADR-0027 Option A, #198).** `release.yml` can
+  sign `rustfox.exe` via SignPath Foundation on `v*` tag pushes when the repo
+  variable `REQUIRE_SIGNING=true`. Signed binaries are verified with
+  `signtool verify /pa /v` before the zip is built. While the variable is
+  unset, Windows releases stay unsigned (same as today).
+
 ### Changed
 - **CLI service verbs (ADR-0028):** `rustfox install|uninstall|status|start|stop|restart` and `rustfox run` (foreground alias). `--service …` and `remove` still work with a deprecation hint (removed next minor). macOS `stop` unloads the agent so KeepAlive cannot respawn it; `restart` uses `launchctl kickstart -k`. Portal / wizard / `install.sh` teach the new verbs (no new portal control buttons).
 
