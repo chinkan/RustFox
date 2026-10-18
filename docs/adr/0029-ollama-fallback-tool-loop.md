@@ -69,6 +69,15 @@ reuse primary keep-tools shaping from ADR-0032 on the fallback walk —
 ADR-0032 remains **primary-only**. Mid-loop rewrite+omit behaviour unchanged.
 Log text must only say “after rewrite” when rewrite actually ran.
 
+## Amendment (#223) — 2026-10-19
+
+**Product lock:** rewrite + omit-tools applies to **every** fallback → tool-weak
+walk, including **agent/subagent invoke** (first-turn or mid-loop), the same as
+main chat (#218 / #220). If tip ≥ `01db8f6` still lacks the rewrite warn on the
+agent-invoke path, treat as a code gap and fix under the #223 impl PR. Agent /
+Active / `[openrouter].model` resolution is locked in **ADR-0033** — this amend
+only extends the fallback shaping scope.
+
 ## Non-goals
 
 - Removing `[fallback] chain` or reverting ADR-0019 for cloud providers.
