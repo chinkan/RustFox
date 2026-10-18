@@ -113,6 +113,11 @@ tar xzf rustfox-*.tar.gz
   SignPath Foundation (ADR-0027). Until the maintainer turns on
   `REQUIRE_SIGNING` for tag releases, published Windows zips may still be
   unsigned — treat them like any other unsigned build under SAC.
+- **Privacy (SignPath OSS).** RustFox is self-hosted. Depending on your config it
+  may talk to **Telegram** (bot API) and an LLM provider such as **OpenRouter**
+  (or a local Ollama / OpenAI-compatible endpoint you choose). No SignPath
+  traffic is involved at runtime — SignPath only signs the Windows release
+  binary in CI.
 
 **Option B — Build from source (recommended script)**
 
