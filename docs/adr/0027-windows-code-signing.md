@@ -31,7 +31,9 @@ this code).
 ## Decision
 
 1. Sign every Windows `.exe` and `.dll` shipped in a release (and any future
-   installer) in CI, with an RFC 3161 timestamp, **before** it is zipped.
+   installer) in CI **before** it is zipped (never sign inside the zip). Use an
+   RFC 3161 timestamp; timestamping is **on by default** in the SignPath
+   policy (do not disable it).
 2. Once the gate in item 6 is enabled, a signing failure fails the release and
    unsigned Windows binaries are not published.
 3. Signing runs only in the tag/release path of `release.yml`, not in `ci.yml`,
@@ -70,6 +72,15 @@ this code).
   naming the external services RustFox talks to (OpenRouter, Telegram); MFA on
   GitHub and SignPath accounts; the CI workflow and build scripts are treated
   as source code and reviewed carefully.
+
+#### Product locks (2026-10-18, closes open questions)
+
+| Decision | Lock |
+|----------|------|
+| Sign vs zip | **Sign the bare exe/DLL first, then zip** (never rely on signing inside the archive). |
+| Timestamp | **On by default** (RFC 3161); do not turn timestamping off in the SignPath policy. |
+| Roles | **One person may hold Author, Reviewer, and Approver** (solo OSS maintainer). |
+| Approval SLA | Each release needs **manual SignPath approval by the maintainer (Kan)**; **no SLA** is promised for turnaround. |
 
 Maintainer setup before enabling the gate:
 
