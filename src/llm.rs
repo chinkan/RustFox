@@ -380,10 +380,31 @@ pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
     }
 }
 
-/// ADR-0029: Ollama (and any future tool-weak provider) must not receive a
-/// mid-tool-loop transcript unchanged — it 500s with "no user query found".
-pub fn is_tool_weak_provider(provider_type: &crate::config::ProviderType) -> bool {
-    matches!(provider_type, crate::config::ProviderType::Ollama)
+/// ADR-0029 / ADR-0032 / ADR-0034: tool-weak backends must not receive a
+/// mid-tool-loop transcript unchanged — they 500 with "no user query found".
+///
+/// Matches `ProviderType::Ollama` and OpenAI-compatible endpoints that are
+/// actually Ollama (common live misconfig: `type = "openai_compatible"` +
+/// `name = "ollama"` or `base_url` on `:11434`). Soft-fail on tip `25dc563`:
+/// omit-retry gated only on `ProviderType::Ollama`, so openai-compat Active
+/// skipped ADR-0034 WARN and fell straight to fallback.
+pub fn is_tool_weak_provider(config: &crate::provider::ProviderConfig) -> bool {
+    use crate::config::ProviderType;
+    match config.provider_type {
+        ProviderType::Ollama => true,
+        ProviderType::OpenAICompatible => is_ollama_openai_compat_endpoint(config),
+        ProviderType::OpenRouter => false,
+    }
+}
+
+/// True when an openai_compatible provider is almost certainly Ollama's
+/// OpenAI-compatible listener (Kan live / config.example `localhost:11434/v1`).
+fn is_ollama_openai_compat_endpoint(config: &crate::provider::ProviderConfig) -> bool {
+    if config.name.eq_ignore_ascii_case("ollama") {
+        return true;
+    }
+    let u = config.base_url.to_lowercase();
+    u.contains(":11434")
 }
 
 /// True when the history already has assistant tool_calls and/or `tool` roles.
@@ -573,7 +594,7 @@ impl LlmClient {
         model: &str,
     ) -> Result<ChatCompletion> {
         let (provider, _) = self.registry.resolve_model(model);
-        let primary_tool_weak = is_tool_weak_provider(&provider.config().provider_type);
+        let primary_tool_weak = is_tool_weak_provider(provider.config());
         let (primary_msgs, primary_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) =
             if primary_tool_weak {
                 match shape_primary_ollama_payload(messages, tools) {
@@ -635,7 +656,7 @@ impl LlmClient {
                 continue;
             }
             let (provider, _) = self.registry.resolve_model(cand);
-            let tool_weak = is_tool_weak_provider(&provider.config().provider_type);
+            let tool_weak = is_tool_weak_provider(provider.config());
             // ADR-0032: never 404-loop foreign OpenRouter-style ids on Ollama.
             if tool_weak && is_foreign_id_for_ollama(&self.registry, cand) {
                 tracing::warn!("Fallback: skipping foreign id '{cand}' for Ollama (ADR-0032)");
@@ -704,7 +725,7 @@ impl LlmClient {
     ) -> Result<ChatCompletion> {
         let (provider, actual_model) = self.registry.resolve_model(model);
         // ADR-0032: do not send unknown-prefix OpenRouter-style ids to Ollama.
-        if is_tool_weak_provider(&provider.config().provider_type)
+        if is_tool_weak_provider(provider.config())
             && is_foreign_id_for_ollama(&self.registry, model)
         {
             tracing::warn!(
@@ -2481,5 +2502,108 @@ mod tests {
             "omit-retry must not run for non no-user-query errors"
         );
         assert_eq!(fb_hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Live soft-fail regression (tip 25dc563 / PID 455070): Active registered as
+    /// `openai_compatible` named `ollama` (not `ProviderType::Ollama`), keep-tools
+    /// 500 with nested OpenAI-shaped `no user query found in messages`, and
+    /// `rate_limit_retry_limit > 0`. Pre-fix: ADR-0009 Rate/transient same-payload
+    /// retries then Fallback — no ADR-0034 WARN because `primary_tool_weak` was false.
+    #[tokio::test(start_paused = true)]
+    async fn soft_omit_retry_openai_compat_ollama_live_skip() {
+        use crate::provider::OpenAICompatibleProvider;
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let cap = Arc::clone(&calls);
+        // Live Ollama OpenAI-compat envelope (not the flat `{"error":"..."}` string).
+        const LIVE_BODY: &str = r#"{"error":{"message":"no user query found in messages","type":"api_error","param":null,"code":null}}"#;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                cap.lock().unwrap().push(body.clone());
+                let tools_present = body
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                if tools_present {
+                    ResponseTemplate::new(500).set_body_string(LIVE_BODY)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut cfg = ollama_cfg("ollama", server.uri(), "qwen");
+        // Live Kan misconfig / OpenAI-compat listener: type openai_compatible,
+        // name ollama, rate_limit_retry_limit default 3.
+        cfg.provider_type = ProviderType::OpenAICompatible;
+        cfg.rate_limit_retry_limit = 3;
+        assert!(
+            is_tool_weak_provider(&cfg),
+            "openai_compatible named ollama must be tool-weak"
+        );
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> =
+            Arc::new(OpenAICompatibleProvider::new(cfg));
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg);
+
+        let c = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "ollama/qwen",
+            )
+            .await
+            .expect("ADR-0034 omit-retry must arm for openai-compat Ollama");
+        assert_eq!(c.model, "ollama/qwen");
+
+        let bodies = calls.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "fail-fast no-user-query (no ADR-0009 keep-tools storm) + one omit-retry: {bodies:?}"
+        );
+        let tools0 = bodies[0]
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert!(tools0 > 0, "first pass must keep tools: {}", bodies[0]);
+        let tools1_empty = bodies[1]
+            .get("tools")
+            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true);
+        assert!(
+            tools1_empty,
+            "omit-retry must omit tools (ADR-0034): {}",
+            bodies[1]
+        );
+    }
+
+    #[test]
+    fn tool_weak_detects_openai_compat_ollama_by_name_or_port() {
+        let mut by_name = ollama_cfg("ollama", "http://example:9999/v1".into(), "qwen");
+        by_name.provider_type = ProviderType::OpenAICompatible;
+        assert!(is_tool_weak_provider(&by_name));
+
+        let mut by_port = ollama_cfg("local", "http://127.0.0.1:11434/v1".into(), "qwen");
+        by_port.provider_type = ProviderType::OpenAICompatible;
+        assert!(is_tool_weak_provider(&by_port));
+
+        let mut other = ollama_cfg("lmstudio", "http://127.0.0.1:1234/v1".into(), "qwen");
+        other.provider_type = ProviderType::OpenAICompatible;
+        assert!(!is_tool_weak_provider(&other));
+
+        assert!(is_tool_weak_provider(&ollama_cfg(
+            "ollama",
+            "http://localhost:11434/v1".into(),
+            "qwen"
+        )));
     }
 }
