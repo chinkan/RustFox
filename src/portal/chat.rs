@@ -150,7 +150,7 @@ pub async fn send(
                 let _ = evt_tx.send(Event::default().event("done").data(data)).await;
             }
             Err(e) => {
-                let data = json!({ "message": e.to_string() }).to_string();
+                let data = json!({ "message": crate::llm::user_facing_llm_error(&e) }).to_string();
                 let _ = evt_tx
                     .send(Event::default().event("error").data(data))
                     .await;

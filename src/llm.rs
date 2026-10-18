@@ -380,6 +380,91 @@ pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
     }
 }
 
+/// ADR-0029: Ollama (and any future tool-weak provider) must not receive a
+/// mid-tool-loop transcript unchanged — it 500s with "no user query found".
+pub fn is_tool_weak_provider(provider_type: &crate::config::ProviderType) -> bool {
+    matches!(provider_type, crate::config::ProviderType::Ollama)
+}
+
+/// True when the history already has assistant tool_calls and/or `tool` roles.
+pub fn is_mid_tool_loop(messages: &[ChatMessage]) -> bool {
+    messages
+        .iter()
+        .any(|m| m.role == "tool" || m.has_tool_calls())
+}
+
+pub fn has_plain_user_turn(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|m| m.role == "user")
+}
+
+/// Fold system + last user + tool results into a payload Ollama can accept.
+/// Tools are omitted by the caller.
+pub fn rewrite_messages_for_tool_weak(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .cloned()
+        .collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(user) = messages.iter().rev().find(|m| m.role == "user") {
+        let t = user
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        if !t.trim().is_empty() {
+            parts.push(t);
+        }
+    }
+    let tool_bits: Vec<String> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.content.as_ref().map(|c| c.as_text()))
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    if !tool_bits.is_empty() {
+        parts.push(format!("Tool results:\n{}", tool_bits.join("\n\n")));
+    }
+    let body = if parts.is_empty() {
+        "Please continue from the previous step.".to_string()
+    } else {
+        parts.join("\n\n")
+    };
+    out.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(MessageContent::from_text(body)),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    debug_assert!(
+        has_plain_user_turn(&out),
+        "rewrite_messages_for_tool_weak must always emit a user turn"
+    );
+    out
+}
+
+/// Plain sentence for Telegram / portal. Never forward Ollama 500 JSON.
+pub fn user_facing_llm_error(err: &anyhow::Error) -> String {
+    const PLAIN: &str =
+        "The AI service is temporarily unavailable or out of quota. Please try again in a moment.";
+    let s = format!("{err:#}");
+    let lower = s.to_lowercase();
+    if lower.contains("no user query found")
+        || lower.contains("ollama api error")
+        || lower.contains("temporarily unavailable or out of quota")
+        || s.contains("{\"error\"")
+        || s.contains("\\\"error\\\"")
+    {
+        return PLAIN.to_string();
+    }
+    // Keep short non-JSON errors readable; still strip huge bodies.
+    if s.len() > 240 || s.contains('{') {
+        return PLAIN.to_string();
+    }
+    s
+}
+
 #[derive(Clone)]
 pub struct LlmClient {
     pub client: reqwest::Client,
@@ -427,7 +512,18 @@ impl LlmClient {
         tools: &[ToolDefinition],
         model: &str,
     ) -> Result<ChatCompletion> {
-        let primary_err = match self.try_model(messages, tools, model).await {
+        let (provider, _) = self.registry.resolve_model(model);
+        let primary_tool_weak = is_tool_weak_provider(&provider.config().provider_type);
+        let (primary_msgs, primary_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) =
+            if primary_tool_weak && (is_mid_tool_loop(messages) || !has_plain_user_turn(messages)) {
+                tracing::warn!(
+                    "Rewriting mid-tool-loop payload for tool-weak primary {model} (ADR-0029)"
+                );
+                (rewrite_messages_for_tool_weak(messages), Vec::new())
+            } else {
+                (messages.to_vec(), tools.to_vec())
+            };
+        let primary_err = match self.try_model(&primary_msgs, &primary_tools, model).await {
             Ok(completion) => return Ok(completion),
             Err(e) => e,
         };
@@ -448,19 +544,44 @@ impl LlmClient {
                 );
                 continue;
             }
+            let (provider, _) = self.registry.resolve_model(cand);
+            let tool_weak = is_tool_weak_provider(&provider.config().provider_type);
+            let needs_safe =
+                tool_weak && (is_mid_tool_loop(messages) || !has_plain_user_turn(messages));
+            let (req_messages, req_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if needs_safe {
+                tracing::warn!(
+                    "Fallback: rewriting mid-tool-loop payload for tool-weak provider {cand} (ADR-0029)"
+                );
+                (rewrite_messages_for_tool_weak(messages), Vec::new())
+            } else {
+                (messages.to_vec(), tools.to_vec())
+            };
             tracing::warn!(
                 "Fallback: {} failed ({:#}) → trying {}",
                 model,
                 last_err,
                 cand
             );
-            match self.try_model(messages, tools, cand).await {
+            match self.try_model(&req_messages, &req_tools, cand).await {
                 Ok(mut completion) => {
                     completion.model = cand.clone();
                     tracing::info!("Fallback: {} answered after {} failed", cand, model);
                     return Ok(completion);
                 }
                 Err(e) => {
+                    if tool_weak
+                        && format!("{e:#}")
+                            .to_lowercase()
+                            .contains("no user query found")
+                    {
+                        tracing::warn!(
+                            "Fallback: {cand} returned no-user-query after rewrite; skipping"
+                        );
+                        last_err = anyhow::anyhow!(
+                            "The AI service is temporarily unavailable or out of quota. Please try again in a moment."
+                        );
+                        continue;
+                    }
                     if !crate::provider::should_walk_fallback(&e) {
                         // Auth hard-exclusion on a backup: surface it — do not
                         // keep hammering later chain entries with a bad key story.
@@ -1486,6 +1607,241 @@ mod tests {
         assert!(
             err.to_string().contains("401"),
             "misconfigured backup (401) must be surfaced, not masked by later models: {err}"
+        );
+    }
+    // ---------------------------------------------------------------
+    // ADR-0029: Ollama / tool-weak mid-tool-loop rewrite (not raw send)
+    // ---------------------------------------------------------------
+
+    fn mid_tool_loop_no_user() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text("sys")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "c1".into(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "run_command".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::from_text("tool-out")),
+                tool_calls: None,
+                tool_call_id: Some("c1".into()),
+            },
+        ]
+    }
+
+    fn mid_tool_loop_with_user() -> Vec<ChatMessage> {
+        let mut m = mid_tool_loop_no_user();
+        m.insert(
+            1,
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text("list files")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        );
+        m
+    }
+
+    fn ollama_cfg(name: &str, base_url: String, model: &str) -> ProviderConfig {
+        ProviderConfig {
+            name: name.to_string(),
+            provider_type: ProviderType::Ollama,
+            base_url,
+            api_key: None,
+            default_model: model.to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 100,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+        }
+    }
+
+    #[test]
+    fn rewrite_mid_tool_loop_always_has_plain_user() {
+        let rewritten = rewrite_messages_for_tool_weak(&mid_tool_loop_no_user());
+        assert!(has_plain_user_turn(&rewritten));
+        assert!(!is_mid_tool_loop(&rewritten));
+        assert_eq!(rewritten[0].role, "system");
+        assert_eq!(rewritten.last().unwrap().role, "user");
+        let body = rewritten
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text();
+        assert!(body.contains("tool-out"));
+    }
+
+    #[test]
+    fn rewrite_preserves_last_user_text() {
+        let rewritten = rewrite_messages_for_tool_weak(&mid_tool_loop_with_user());
+        let body = rewritten
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text();
+        assert!(body.contains("list files"));
+        assert!(body.contains("tool-out"));
+    }
+
+    #[test]
+    fn user_facing_hides_ollama_no_user_json() {
+        let err = anyhow::anyhow!(
+            "Ollama API error (500): {{\"error\":\"no user query found, message role must be user before tool / assistant with tool_calls\"}}"
+        );
+        let msg = user_facing_llm_error(&err);
+        assert!(!msg.to_lowercase().contains("no user query found"));
+        assert!(!msg.contains('{'));
+        assert!(msg.contains("temporarily unavailable") || msg.contains("quota"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_ollama_mid_tool_loop_rewrites_and_omits_tools() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        // Reject raw mid-tool payload (no user) — simulates Ollama 500.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "assistant"}
+                ]
+            })))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#),
+            )
+            .mount(&server)
+            .await;
+        // Accept rewritten payload: must include a user turn; tools empty.
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body.clone());
+                let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+                let has_user = msgs.iter().any(|m| m["role"] == "user");
+                let tools_empty = body
+                    .get("tools")
+                    .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+                    .unwrap_or(true);
+                if has_user && tools_empty {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                } else {
+                    ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["ollama/qwen".to_string()]);
+
+        // Primary fails → walk to Ollama with mid-tool no-user history + tools.
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+
+        let tool = ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "run_command".into(),
+                description: "x".into(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            },
+        };
+        let c = llm
+            .chat_completion_with_model(&mid_tool_loop_no_user(), &[tool], "p1/m1")
+            .await
+            .expect("Ollama fallback must succeed after rewrite");
+        assert_eq!(c.model, "ollama/qwen");
+        let body = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("ollama request captured");
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs.iter().any(|m| m["role"] == "user"),
+            "rewritten request must include user: {body}"
+        );
+        assert!(
+            !msgs.iter().any(|m| m["role"] == "tool"),
+            "raw tool roles must not be forwarded: {body}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_cloud_to_cloud_still_sends_raw_mid_tool_loop() {
+        let server = MockServer::start().await;
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": "rl"})),
+        )
+        .await;
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "m2" })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        let llm = LlmClient::new(fb_registry(server.uri()))
+            .with_fallback_chain(vec!["p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&mid_tool_loop_no_user(), &[], "p1/m1")
+            .await
+            .unwrap();
+        assert_eq!(c.model, "p2/m2");
+        let body = captured.lock().unwrap().clone().unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs.iter().any(|m| m["role"] == "tool"),
+            "cloud→cloud must keep ADR-0019 raw walk: {body}"
         );
     }
 }
