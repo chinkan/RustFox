@@ -131,8 +131,8 @@ rustfox --config /path/to/config.toml
 ### 4. (Optional) Background service
 
 ```bash
-rustfox --service install   # Linux (systemd), macOS (launchd), or Windows
-rustfox --service status
+rustfox install   # Linux (systemd), macOS (launchd), or Windows
+rustfox status
 ```
 
 ---

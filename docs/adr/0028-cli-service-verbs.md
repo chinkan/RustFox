@@ -1,6 +1,6 @@
 # ADR-0028: CLI verb subcommands for OS service management
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-18
 - **Target release:** v1.0.7
 - **Depends on:** none (does not block #201 / v1.0.6)

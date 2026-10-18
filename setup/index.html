@@ -826,7 +826,7 @@ async function installService() {
       status.className = 'success-msg visible';
       btn.textContent = '✓ Installed';
     } else {
-      status.textContent = '⚠ Service installation failed: ' + (data.error || 'unknown error') + '. You can retry later with: rustfox --service install';
+      status.textContent = '⚠ Service installation failed: ' + (data.error || 'unknown error') + '. You can retry later with: rustfox install';
       status.className = 'success-msg visible';
       status.style.color = '#fc8181';
       btn.disabled = false;
