@@ -47,6 +47,14 @@ Product: **primary Ollama + tools** is P1 for local/private use. Not Exa / ADR-0
 - Portal UI redesign.
 - Requiring operators to raise Ollama `num_ctx` as the primary fix (same stance as ADR-0029 §4).
 
+
+## Cross-reference (#218)
+
+Primary **keep-tools** shaping in this ADR applies to **primary Ollama only**.
+Fallback onto tool-weak Ollama (including first turn with tools + plain user)
+remains ADR-0029 rewrite + **omit tools** — do not reuse `shape_primary_ollama_payload`
+on the fallback walk.
+
 ## Acceptance criteria (implementation — later assign; not this docs PR)
 
 - With Ollama as **primary**, a tool-calling turn completes (tool bubble + useful reply) without `no user query found in messages`.

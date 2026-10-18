@@ -36,15 +36,18 @@ Facts locked so far:
 2. **When the next candidate is Ollama** (provider type `ollama`), or a
    provider we mark as tool-weak / no-tools in config:
    - **Do not** send the raw mid-tool-loop history unchanged.
+   - **Do not** send a first-turn (or any) payload that still carries a tools
+     schema to tool-weak Ollama without rewrite (#218): rewrite + **omit
+     tools** whenever tools are present on the fallback walk.
    - Either:
      - **(preferred)** rewrite a fallback payload that always includes at
        least one non-tool `user` turn (keep the latest real user text;
        fold recent tool results into that user content or a short
-       assistant summary), and omit or degrade tools if the target cannot
-       use them safely; or
+       assistant summary), and omit tools; or
      - **skip** that candidate and continue the chain / fail the turn.
    - Choosing rewrite vs skip is an implementation detail as long as Ollama
-     never receives a tool-only / user-less transcript.
+     never receives a tool-only / user-less transcript **or** a raw tools
+     schema that 500s with `no user query found`.
 3. **User-visible errors** on Telegram and the portal must be one plain
    sentence (quota / temporarily unavailable). Do not leak Ollama’s 500 JSON
    or internal stack text to the user.
@@ -54,6 +57,17 @@ Facts locked so far:
 5. **Tests:** unit/integration coverage for (a) mid-tool-loop messages →
    Ollama path never sends a payload without a plain `user` role;
    (b) user-facing error mapping hides the Ollama envelope.
+
+
+## Amendment (#218) — 2026-10-18
+
+**Product lock:** when walking onto tool-weak Ollama with **tools present**
+(including **first turn + plain user**), always run the ADR-0029 rewrite and
+**omit tools**. Do **not** send a raw tools schema on first-turn fallback
+(that path 500s with `no user query found` on qwen3.8 / similar). Do **not**
+reuse primary keep-tools shaping from ADR-0032 on the fallback walk —
+ADR-0032 remains **primary-only**. Mid-loop rewrite+omit behaviour unchanged.
+Log text must only say “after rewrite” when rewrite actually ran.
 
 ## Non-goals
 

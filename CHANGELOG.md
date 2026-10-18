@@ -16,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Ollama fallback first turn + tools (ADR-0029 amend, #218):** walking onto tool-weak Ollama with tools present (including first turn + plain user) always rewrites and omits tools — never raw tools that 500 with `no user query found`. Log says “after rewrite” only when rewrite ran. Primary keep-tools (ADR-0032) unchanged.
 - **Telegram online banner `Model:` (#217):** startup/online notify now shows `current_model` (same as `/models` Active), not `config.openrouter.model`.
 
 ## [1.0.6] — 2026-10-14
