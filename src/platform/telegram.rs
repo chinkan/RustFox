@@ -144,7 +144,7 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
         BotCommand::new("queryrewrite", "Toggle query rewriting for memory search"),
         BotCommand::new(
             "selfupgrade",
-            "Upgrade the bot to the latest version (source or release binary)",
+            "Upgrade: bare=auto, main=source, release=binary",
         ),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
         BotCommand::new("mode", "Set steer/queue mode for mid-processing messages"),
@@ -1415,7 +1415,7 @@ pub async fn handle_message(
              **/verbose** — Toggle tool call progress display\n\
              **/queryrewrite** — Toggle query rewriting for memory search\n\
              **/format** — Switch message format: rich, markdown, or auto\n\
-             **/selfupgrade** — Upgrade the bot (source or release binary)\n\
+             **/selfupgrade** — Upgrade: bare=auto, `main`=source, `release`=binary\n\
              **/models** — Browse and change the model\n\
              **/stop** — Cancel the current turn (user or scheduled) and clear queued messages\n\
              **/btw** — Ask a parallel question while the bot is busy\n\
@@ -1682,7 +1682,21 @@ pub async fn handle_message(
     if let Some((cmd, arg)) = parse_command(&text) {
         match cmd.as_str() {
             "self-upgrade" | "selfupgrade" => {
-                let branch = if arg.is_empty() { "main" } else { &arg };
+                // ADR-0030: only bare | main | release; never treat unknown as git branch.
+                let (mode_owned, branch_owned) =
+                    match crate::learning::parse_telegram_selfupgrade_arg(&arg) {
+                        crate::learning::TelegramSelfUpgradeParse::RejectUnknown => {
+                            bot.send_message(
+                                msg.chat.id,
+                                "❌ Unknown `/selfupgrade` argument. Only `main`, `release`, or bare `/selfupgrade` (auto) are accepted. Other values are not treated as git branches.",
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        crate::learning::TelegramSelfUpgradeParse::Ok { mode, branch } => {
+                            (mode.to_string(), branch.to_string())
+                        }
+                    };
 
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1695,7 +1709,6 @@ pub async fn handle_message(
                 let bot_progress = bot.clone();
                 let chat_id = msg.chat.id;
                 let msg_id = sent.id;
-                let branch_owned = branch.to_string();
 
                 let progress_handle = tokio::spawn(async move {
                     let mut buffer = String::from("🔄 Self-upgrading...\n");
@@ -1715,7 +1728,8 @@ pub async fn handle_message(
                 });
 
                 let result =
-                    crate::learning::self_upgrade(&branch_owned, "auto", Some(progress_tx)).await;
+                    crate::learning::self_upgrade(&branch_owned, &mode_owned, Some(progress_tx))
+                        .await;
 
                 // Wait for progress to be fully displayed.
                 progress_handle.await.ok();
@@ -2896,6 +2910,40 @@ mod tests {
         assert_eq!(
             super::parse_command("/start"),
             Some(("start".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn selfupgrade_command_args_map_per_adr_0030() {
+        use crate::learning::{parse_telegram_selfupgrade_arg, TelegramSelfUpgradeParse};
+        let (_, bare) = super::parse_command("/selfupgrade").unwrap();
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(&bare),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "auto",
+                branch: "main",
+            }
+        );
+        let (_, main) = super::parse_command("/selfupgrade main").unwrap();
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(&main),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "source",
+                branch: "main",
+            }
+        );
+        let (_, rel) = super::parse_command("/selfupgrade release").unwrap();
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(&rel),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "release",
+                branch: "main",
+            }
+        );
+        let (_, bad) = super::parse_command("/selfupgrade develop").unwrap();
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(&bad),
+            TelegramSelfUpgradeParse::RejectUnknown
         );
     }
 
