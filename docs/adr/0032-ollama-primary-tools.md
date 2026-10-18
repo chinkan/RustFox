@@ -55,6 +55,12 @@ Fallback onto tool-weak Ollama (including first turn with tools + plain user)
 remains ADR-0029 rewrite + **omit tools** — do not reuse `shape_primary_ollama_payload`
 on the fallback walk.
 
+## Cross-reference (#223)
+
+Agent/subagent invoke with **no** agent-level model must follow **Active**
+(`current_model` / banner), not `[openrouter].model`. Sticky explicit agent
+`model` and ADR-0029 on the agent-invoke fallback walk: see **ADR-0033**.
+
 ## Acceptance criteria (implementation — later assign; not this docs PR)
 
 - With Ollama as **primary**, a tool-calling turn completes (tool bubble + useful reply) without `no user query found in messages`.
