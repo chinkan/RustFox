@@ -58,7 +58,7 @@ Facts locked so far:
 ## Non-goals
 
 - Removing `[fallback] chain` or reverting ADR-0019 for cloud providers.
-- Making Ollama the primary production model.
+- Making Ollama the primary production model for cloud-first deployments (local/private **primary** Ollama + tools: see ADR-0032 / #213).
 - Portal UI redesign.
 - Blocking v1.0.6 / #201.
 
