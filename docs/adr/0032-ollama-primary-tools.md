@@ -61,6 +61,10 @@ Agent/subagent invoke with **no** agent-level model must follow **Active**
 (`current_model` / banner), not `[openrouter].model`. Sticky explicit agent
 `model` and ADR-0029 on the agent-invoke fallback walk: see **ADR-0033**.
 
+When Active resolves to Ollama, agent-invoke **primary** uses this ADR’s
+keep-tools shaping via the shared `chat_completion_with_model` path (no
+extra agent-only omit). Verified on tip ≥ `a5ea4ab`.
+
 ## Cross-reference (#226)
 
 First-pass **keep-tools** on primary Ollama is unchanged by this ADR.
