@@ -882,10 +882,10 @@ pub async fn self_upgrade(
         send_progress(&mut log);
         let exe = std::env::current_exe().context("Failed to get current executable path")?;
         let service_output = tokio::process::Command::new(&exe)
-            .args(["--service", "install"])
+            .args(["install"])
             .output()
             .await
-            .context("Failed to run rustfox --service install")?;
+            .context("Failed to run rustfox install")?;
         if !service_output.status.success() {
             let combined = format!(
                 "{}{}",
@@ -893,7 +893,7 @@ pub async fn self_upgrade(
                 String::from_utf8_lossy(&service_output.stderr)
             );
             anyhow::bail!(
-                "rustfox --service install failed (exit {:?}): {}",
+                "rustfox install failed (exit {:?}): {}",
                 service_output.status.code(),
                 combined.trim()
             );

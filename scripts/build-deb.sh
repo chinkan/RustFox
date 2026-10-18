@@ -65,7 +65,7 @@ echo "To configure your bot:"
 echo "  rustfox --setup"
 echo ""
 echo "To install as a background service after configuration:"
-echo "  rustfox --service install"
+echo "  rustfox install"
 POSTINST
 chmod 755 "$PKG_DIR/DEBIAN/postinst"
 
