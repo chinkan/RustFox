@@ -178,10 +178,7 @@ fn install_launchd(exe: &Path) -> Result<()> {
 
     println!("✓ RustFox installed as a launchd agent");
     println!("  Status: launchctl list com.rustfox.bot");
-    println!(
-        "  Logs:   {}/Library/Logs/rustfox.log",
-        dirs::home_dir().unwrap_or_default().display()
-    );
+    println!("  Logs:   {}/logs/rustfox.log", home_dir().display());
     Ok(())
 }
 

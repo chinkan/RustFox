@@ -20,9 +20,5 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>{{RUSTFOX_HOME}}/Library/Logs/rustfox.log</string>
-    <key>StandardErrorPath</key>
-    <string>{{RUSTFOX_HOME}}/Library/Logs/rustfox.log</string>
 </dict>
 </plist>

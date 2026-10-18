@@ -146,6 +146,7 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "selfupgrade",
             "Upgrade: bare=auto, main=source, release=binary",
         ),
+        BotCommand::new("logs", "Download the current bot log file"),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
         BotCommand::new("mode", "Set steer/queue mode for mid-processing messages"),
         BotCommand::new("stop", "Cancel the current processing gracefully"),
@@ -1416,6 +1417,7 @@ pub async fn handle_message(
              **/queryrewrite** — Toggle query rewriting for memory search\n\
              **/format** — Switch message format: rich, markdown, or auto\n\
              **/selfupgrade** — Upgrade: bare=auto, `main`=source, `release`=binary\n\
+             **/logs** — Download the current bot log file\n\
              **/models** — Browse and change the model\n\
              **/stop** — Cancel the current turn (user or scheduled) and clear queued messages\n\
              **/btw** — Ask a parallel question while the bot is busy\n\
@@ -1764,6 +1766,69 @@ pub async fn handle_message(
                     }
                 }
 
+                return Ok(());
+            }
+            "logs" => {
+                // ADR-0031: bare /logs only; allowlist already enforced by dispatcher.
+                match crate::log_file::parse_telegram_logs_arg(&arg) {
+                    crate::log_file::TelegramLogsParse::RejectUnknown => {
+                        bot.send_message(
+                            msg.chat.id,
+                            "❌ Unknown `/logs` argument. Only bare `/logs` is accepted.",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    crate::log_file::TelegramLogsParse::Ok => {}
+                }
+
+                let home = agent
+                    .config
+                    .resolved_home()
+                    .cloned()
+                    .or_else(|| dirs::home_dir().map(|h| h.join(".rustfox")))
+                    .unwrap_or_else(|| std::path::PathBuf::from(".rustfox"));
+                let path = crate::log_file::log_file_path(&home);
+
+                if !path.is_file() {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "❌ No log file found yet at `{}`. The bot writes logs there after startup (ADR-0031).",
+                            path.display()
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
+                let send_path = match crate::log_file::prepare_log_for_send(
+                    &path,
+                    crate::log_file::LOG_SEND_MAX_BYTES,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("❌ Could not read log file at `{}`: {e}", path.display()),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+
+                let input_file = teloxide::types::InputFile::file(&send_path);
+                let send_result = bot.send_document(msg.chat.id, input_file).await;
+                if send_path != path {
+                    let _ = std::fs::remove_file(&send_path);
+                    if let Some(parent) = send_path.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+                if let Err(e) = send_result {
+                    bot.send_message(msg.chat.id, format!("❌ Failed to send log file: {e}"))
+                        .await?;
+                }
                 return Ok(());
             }
             "models" => {
@@ -2914,6 +2979,20 @@ mod tests {
     }
 
     #[test]
+    fn logs_command_args_map_per_adr_0031() {
+        use crate::log_file::{parse_telegram_logs_arg, TelegramLogsParse};
+        let (_, bare) = super::parse_command("/logs").unwrap();
+        assert_eq!(parse_telegram_logs_arg(&bare), TelegramLogsParse::Ok);
+        let (_, spaced) = super::parse_command("/logs   ").unwrap();
+        assert_eq!(parse_telegram_logs_arg(&spaced), TelegramLogsParse::Ok);
+        let (_, bad) = super::parse_command("/logs tail").unwrap();
+        assert_eq!(
+            parse_telegram_logs_arg(&bad),
+            TelegramLogsParse::RejectUnknown
+        );
+    }
+
+    #[test]
     fn selfupgrade_command_args_map_per_adr_0030() {
         use crate::learning::{parse_telegram_selfupgrade_arg, TelegramSelfUpgradeParse};
         let (_, bare) = super::parse_command("/selfupgrade").unwrap();
@@ -3126,6 +3205,8 @@ mod tests {
             "skills",
             "verbose",
             "queryrewrite",
+            "selfupgrade",
+            "logs",
             "config",
             "agents",
             "restart",
