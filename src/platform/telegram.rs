@@ -2392,8 +2392,13 @@ async fn run_telegram_user_turn(
 
     if let Err(e) = &process_result {
         warn!(error = %e, "Agent processing failed");
-        let _ =
-            send_markdown_message(&bot, chat_id, &format!("**Error:** {}", e), msg_format).await;
+        let _ = send_markdown_message(
+            &bot,
+            chat_id,
+            &format!("**Error:** {}", crate::llm::user_facing_llm_error(e)),
+            msg_format,
+        )
+        .await;
         return None;
     }
     // Ok text is not always streamed. Max iterations, cancel, and the
