@@ -232,6 +232,8 @@ fn install_windows_service(exe: &Path) -> Result<()> {
 fn remove_windows_service() -> Result<()> {
     use std::os::windows::process::CommandExt;
 
+    require_windows_service()?;
+
     let template = include_str!("../../scripts/services/uninstall-service.bat.template");
     let rendered = render_template(template, &std::env::current_exe().unwrap_or_default());
 
@@ -270,6 +272,29 @@ fn linux_unit_path() -> Result<PathBuf> {
         .join("systemd")
         .join("user")
         .join("rustfox.service"))
+}
+
+/// ADR-0028 §4: `sc query RustFox` succeeds only when the service is registered.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_sc_query_means_installed(exit_success: bool) -> bool {
+    exit_success
+}
+
+#[cfg(target_os = "windows")]
+fn windows_service_installed() -> Result<bool> {
+    let output = std::process::Command::new("sc")
+        .args(["query", "RustFox"])
+        .output()
+        .context("Failed to run sc query")?;
+    Ok(windows_sc_query_means_installed(output.status.success()))
+}
+
+#[cfg(target_os = "windows")]
+fn require_windows_service() -> Result<()> {
+    if !windows_service_installed()? {
+        return Err(not_installed_err());
+    }
+    Ok(())
 }
 
 fn restart() -> Result<()> {
@@ -323,6 +348,7 @@ fn restart() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        require_windows_service()?;
         // sc stop may fail if already stopped — continue to start.
         let _ = std::process::Command::new("sc")
             .args(["stop", "RustFox"])
@@ -438,6 +464,7 @@ fn start() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        require_windows_service()?;
         let status = std::process::Command::new("sc")
             .args(["start", "RustFox"])
             .status()
@@ -490,6 +517,7 @@ fn stop() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        require_windows_service()?;
         let status = std::process::Command::new("sc")
             .args(["stop", "RustFox"])
             .status()
@@ -545,5 +573,16 @@ mod tests {
         assert_eq!(Action::Install.cli_verb(), "install");
         assert_eq!(Action::Uninstall.cli_verb(), "uninstall");
         assert_eq!(Action::Restart.cli_verb(), "restart");
+    }
+
+    #[test]
+    fn windows_sc_query_gate_matches_exit() {
+        assert!(windows_sc_query_means_installed(true));
+        assert!(!windows_sc_query_means_installed(false));
+        let msg = not_installed_err().to_string();
+        assert!(
+            msg.contains("rustfox install"),
+            "not-installed hint must name rustfox install: {msg}"
+        );
     }
 }
