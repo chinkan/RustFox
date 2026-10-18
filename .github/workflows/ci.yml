@@ -117,6 +117,11 @@ jobs:
       - name: Seatbelt denials (diagnostics on failure)
         if: failure()
         run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -n 200
+      # Same command as release.yml: catches macOS-only dead code that
+      # `#![deny(dead_code)]` rejects in non-test builds.
+      - name: Release build (macOS)
+        if: success()
+        run: cargo build --release
 
   # Compile and run the lib tests on Windows (file-tool Test 3 junction,
   # Test 5 `C:\` path, sandbox-mode refusal) instead of only `cargo check`.
