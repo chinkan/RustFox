@@ -393,8 +393,17 @@ pub fn is_mid_tool_loop(messages: &[ChatMessage]) -> bool {
         .any(|m| m.role == "tool" || m.has_tool_calls())
 }
 
+/// True when at least one `role:user` turn has non-empty text that is not a
+/// wrapped tool-response (Qwen 3.5+ / Ollama qwen3.8 template requirement).
 pub fn has_plain_user_turn(messages: &[ChatMessage]) -> bool {
-    messages.iter().any(|m| m.role == "user")
+    messages.iter().any(|m| {
+        if m.role != "user" {
+            return false;
+        }
+        let t = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+        let t = t.trim();
+        !t.is_empty() && !(t.starts_with("<tool_response>") && t.ends_with("</tool_response>"))
+    })
 }
 
 /// Fold system + last user + tool results into a payload Ollama can accept.
@@ -407,15 +416,21 @@ pub fn rewrite_messages_for_tool_weak(messages: &[ChatMessage]) -> Vec<ChatMessa
         .collect();
 
     let mut parts: Vec<String> = Vec::new();
-    if let Some(user) = messages.iter().rev().find(|m| m.role == "user") {
+    // Prefer a plain user query (not a <tool_response>-wrapped stand-in).
+    if let Some(user) = messages.iter().rev().find(|m| {
+        if m.role != "user" {
+            return false;
+        }
+        let t = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+        let t = t.trim();
+        !t.is_empty() && !(t.starts_with("<tool_response>") && t.ends_with("</tool_response>"))
+    }) {
         let t = user
             .content
             .as_ref()
             .map(|c| c.as_text())
             .unwrap_or_default();
-        if !t.trim().is_empty() {
-            parts.push(t);
-        }
+        parts.push(t);
     }
     let tool_bits: Vec<String> = messages
         .iter()
@@ -444,15 +459,51 @@ pub fn rewrite_messages_for_tool_weak(messages: &[ChatMessage]) -> Vec<ChatMessa
     out
 }
 
+/// ADR-0032: OpenRouter-style `org/model` whose first `/` segment is not a
+/// registered provider must not be sent to Ollama (incl. default fallthrough).
+/// Bare Ollama library names (no `/`) and `ollama/...` (or any registered
+/// provider prefix) are allowed.
+pub fn is_foreign_id_for_ollama(registry: &crate::provider::ProviderRegistry, model: &str) -> bool {
+    match model.split_once('/') {
+        Some((prefix, _)) => registry.get_provider(prefix).is_none(),
+        None => false,
+    }
+}
+
+/// Shape messages/tools for **primary** Ollama (ADR-0032). Prefer keeping tools.
+/// Mid-loop / user-less: rewrite to guarantee a plain user turn; keep tools.
+/// If a valid payload still cannot be built, returns Err with
+/// [`USER_FACING_LLM_UNAVAILABLE`].
+pub fn shape_primary_ollama_payload(
+    messages: &[ChatMessage],
+    tools: &[ToolDefinition],
+) -> Result<(Vec<ChatMessage>, Vec<ToolDefinition>), String> {
+    let needs_rewrite = is_mid_tool_loop(messages) || !has_plain_user_turn(messages);
+    let shaped = if needs_rewrite {
+        rewrite_messages_for_tool_weak(messages)
+    } else {
+        messages.to_vec()
+    };
+    if !has_plain_user_turn(&shaped) {
+        return Err(USER_FACING_LLM_UNAVAILABLE.to_string());
+    }
+    // Prefer keeping tools on primary (unlike ADR-0029 fallback omit).
+    Ok((shaped, tools.to_vec()))
+}
+
+/// Same plain sentence as ADR-0029 §3 / ADR-0032 (Telegram / portal).
+pub const USER_FACING_LLM_UNAVAILABLE: &str =
+    "The AI service is temporarily unavailable or out of quota. Please try again in a moment.";
+
 /// Plain sentence for Telegram / portal. Never forward Ollama 500 JSON.
 pub fn user_facing_llm_error(err: &anyhow::Error) -> String {
-    const PLAIN: &str =
-        "The AI service is temporarily unavailable or out of quota. Please try again in a moment.";
+    const PLAIN: &str = USER_FACING_LLM_UNAVAILABLE;
     let s = format!("{err:#}");
     let lower = s.to_lowercase();
     if lower.contains("no user query found")
         || lower.contains("ollama api error")
         || lower.contains("temporarily unavailable or out of quota")
+        || lower.contains("not a valid ollama model id")
         || s.contains("{\"error\"")
         || s.contains("\\\"error\\\"")
     {
@@ -515,11 +566,23 @@ impl LlmClient {
         let (provider, _) = self.registry.resolve_model(model);
         let primary_tool_weak = is_tool_weak_provider(&provider.config().provider_type);
         let (primary_msgs, primary_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) =
-            if primary_tool_weak && (is_mid_tool_loop(messages) || !has_plain_user_turn(messages)) {
-                tracing::warn!(
-                    "Rewriting mid-tool-loop payload for tool-weak primary {model} (ADR-0029)"
-                );
-                (rewrite_messages_for_tool_weak(messages), Vec::new())
+            if primary_tool_weak {
+                match shape_primary_ollama_payload(messages, tools) {
+                    Ok((msgs, tls)) => {
+                        if is_mid_tool_loop(messages) || !has_plain_user_turn(messages) {
+                            tracing::warn!(
+                                "Shaping primary Ollama payload for {model} (ADR-0032; tools kept)"
+                            );
+                        }
+                        (msgs, tls)
+                    }
+                    Err(msg) => {
+                        tracing::warn!(
+                            "Cannot build valid primary Ollama payload for {model}: {msg}"
+                        );
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                }
             } else {
                 (messages.to_vec(), tools.to_vec())
             };
@@ -546,6 +609,11 @@ impl LlmClient {
             }
             let (provider, _) = self.registry.resolve_model(cand);
             let tool_weak = is_tool_weak_provider(&provider.config().provider_type);
+            // ADR-0032: never 404-loop foreign OpenRouter-style ids on Ollama.
+            if tool_weak && is_foreign_id_for_ollama(&self.registry, cand) {
+                tracing::warn!("Fallback: skipping foreign id '{cand}' for Ollama (ADR-0032)");
+                continue;
+            }
             let needs_safe =
                 tool_weak && (is_mid_tool_loop(messages) || !has_plain_user_turn(messages));
             let (req_messages, req_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if needs_safe {
@@ -577,9 +645,7 @@ impl LlmClient {
                         tracing::warn!(
                             "Fallback: {cand} returned no-user-query after rewrite; skipping"
                         );
-                        last_err = anyhow::anyhow!(
-                            "The AI service is temporarily unavailable or out of quota. Please try again in a moment."
-                        );
+                        last_err = anyhow::anyhow!(USER_FACING_LLM_UNAVAILABLE);
                         continue;
                     }
                     if !crate::provider::should_walk_fallback(&e) {
@@ -602,6 +668,18 @@ impl LlmClient {
         model: &str,
     ) -> Result<ChatCompletion> {
         let (provider, actual_model) = self.registry.resolve_model(model);
+        // ADR-0032: do not send unknown-prefix OpenRouter-style ids to Ollama.
+        if is_tool_weak_provider(&provider.config().provider_type)
+            && is_foreign_id_for_ollama(&self.registry, model)
+        {
+            tracing::warn!(
+                "Rejecting foreign model id '{model}' for Ollama (ADR-0032); not calling provider"
+            );
+            anyhow::bail!(
+                "Model '{model}' is not a valid Ollama model id (unknown provider prefix). \
+                 Use a bare Ollama library name or a registered provider/model."
+            );
+        }
         let max_tokens = provider.config().max_tokens;
 
         let mut completion = provider
@@ -1843,5 +1921,204 @@ mod tests {
             msgs.iter().any(|m| m["role"] == "tool"),
             "cloud→cloud must keep ADR-0019 raw walk: {body}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0032: primary Ollama shaping + foreign-id routing
+    // ---------------------------------------------------------------
+
+    fn first_turn_with_tools_user() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text("sys")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text("HK weather please")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ]
+    }
+
+    fn sample_tool() -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "get_weather".into(),
+                description: "weather".into(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            },
+        }
+    }
+
+    #[test]
+    fn shape_primary_first_turn_keeps_tools_and_user() {
+        let (msgs, tools) =
+            shape_primary_ollama_payload(&first_turn_with_tools_user(), &[sample_tool()]).unwrap();
+        assert!(has_plain_user_turn(&msgs));
+        assert_eq!(tools.len(), 1);
+        assert!(!is_mid_tool_loop(&msgs));
+        let body = serde_json::to_value(&msgs).unwrap();
+        let arr = body.as_array().unwrap();
+        assert!(
+            arr.iter().any(|m| {
+                m["role"] == "user" && m["content"].as_str().is_some_and(|c| !c.trim().is_empty())
+            }),
+            "serialized payload must include non-empty user text: {body}"
+        );
+    }
+
+    #[test]
+    fn shape_primary_mid_loop_rewrites_but_keeps_tools() {
+        let (msgs, tools) =
+            shape_primary_ollama_payload(&mid_tool_loop_no_user(), &[sample_tool()]).unwrap();
+        assert!(has_plain_user_turn(&msgs));
+        assert!(!msgs.iter().any(|m| m.role == "tool"));
+        assert_eq!(tools.len(), 1, "ADR-0032 primary keeps tools");
+    }
+
+    #[test]
+    fn empty_user_role_is_not_plain_user_turn() {
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::from_text("   ")),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        assert!(!has_plain_user_turn(&msgs));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn primary_ollama_first_turn_with_tools_never_sends_userless() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body.clone());
+                let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+                let has_user = msgs.iter().any(|m| {
+                    m["role"] == "user"
+                        && m["content"]
+                            .as_str()
+                            .map(|c| !c.trim().is_empty())
+                            .unwrap_or(false)
+                });
+                if has_user {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                } else {
+                    ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg);
+
+        let c = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "ollama/qwen",
+            )
+            .await
+            .expect("primary Ollama + tools + user must succeed");
+        assert_eq!(c.model, "ollama/qwen");
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs.iter().any(|m| m["role"] == "user"),
+            "must include user: {body}"
+        );
+        let tools = body.get("tools").and_then(|t| t.as_array());
+        assert!(
+            tools.is_some_and(|t| !t.is_empty()),
+            "primary must keep tools: {body}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreign_prefix_with_ollama_default_does_not_call_ollama() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                // If somehow called with the foreign model string, fail the test path.
+                if body["model"].as_str() == Some("deepseek/deepseek-v4-flash") {
+                    ResponseTemplate::new(404).set_body_string(r#"{"error":"model not found"}"#)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "ollama".to_string()));
+        let llm = LlmClient::new(reg);
+
+        let err = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[],
+                "deepseek/deepseek-v4-flash",
+            )
+            .await
+            .expect_err("foreign id must not be sent to Ollama");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "Ollama must not be called with foreign model string"
+        );
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("not a valid ollama") || msg.contains("temporarily unavailable"),
+            "clear RustFox error expected, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn is_foreign_id_detects_unknown_prefix_only() {
+        use crate::provider::OllamaProvider;
+
+        let mut providers = HashMap::new();
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            "http://127.0.0.1:9".into(),
+            "qwen",
+        )));
+        providers.insert("ollama".to_string(), ollama);
+        let reg = ProviderRegistry::new(providers, "ollama".to_string());
+        assert!(is_foreign_id_for_ollama(&reg, "deepseek/deepseek-v4-flash"));
+        assert!(!is_foreign_id_for_ollama(&reg, "ollama/qwen"));
+        assert!(!is_foreign_id_for_ollama(&reg, "qwen3.8:27b"));
     }
 }
