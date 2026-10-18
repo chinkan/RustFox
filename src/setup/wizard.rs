@@ -1346,7 +1346,7 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
     if buf.trim().is_empty() || buf.trim().eq_ignore_ascii_case("y") {
         if let Err(e) = crate::setup::service::handle(crate::setup::service::Action::Install) {
             eprintln!("Warning: Service installation failed: {e}");
-            eprintln!("You can retry later with: rustfox --service install");
+            eprintln!("You can retry later with: rustfox install");
         }
     }
 

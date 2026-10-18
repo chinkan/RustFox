@@ -569,7 +569,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Check for --setup and --service subcommands before doing anything else
+    // Check for --setup / service verbs / --service before normal bot start
     if let Some(cmd) = setup::parse_args() {
         match cmd {
             setup::Command::Setup { cli } => {
@@ -589,6 +589,9 @@ async fn main() -> Result<()> {
             setup::Command::Service { action } => {
                 setup::service::handle(action)?;
                 return Ok(());
+            }
+            setup::Command::Run => {
+                // Explicit foreground alias — same path as bare `rustfox`.
             }
         }
     }

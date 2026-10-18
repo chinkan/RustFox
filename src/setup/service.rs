@@ -4,10 +4,25 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Install,
-    Remove,
+    Uninstall,
     Status,
     Start,
     Stop,
+    Restart,
+}
+
+impl Action {
+    /// Canonical CLI verb for deprecation hints (`remove` maps to uninstall).
+    pub fn cli_verb(self) -> &'static str {
+        match self {
+            Action::Install => "install",
+            Action::Uninstall => "uninstall",
+            Action::Status => "status",
+            Action::Start => "start",
+            Action::Stop => "stop",
+            Action::Restart => "restart",
+        }
+    }
 }
 
 fn home_dir() -> PathBuf {
@@ -30,11 +45,16 @@ fn render_template(template: &str, bin_path: &Path) -> String {
 pub fn handle(action: Action) -> Result<()> {
     match action {
         Action::Install => install(),
-        Action::Remove => remove(),
+        Action::Uninstall => remove(),
         Action::Status => status(),
         Action::Start => start(),
         Action::Stop => stop(),
+        Action::Restart => restart(),
     }
+}
+
+fn not_installed_err() -> anyhow::Error {
+    anyhow::anyhow!("Service is not installed. Run `rustfox install` first.")
 }
 
 fn install() -> Result<()> {
@@ -98,6 +118,9 @@ fn install_systemd(exe: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn remove_systemd() -> Result<()> {
+    if !linux_unit_path()?.exists() {
+        return Err(not_installed_err());
+    }
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "stop", "rustfox.service"])
         .status();
@@ -136,6 +159,11 @@ fn install_launchd(exe: &Path) -> Result<()> {
     std::fs::create_dir_all(&agent_dir).context("Failed to create LaunchAgents directory")?;
 
     let plist_path = agent_dir.join("com.rustfox.bot.plist");
+    // Idempotent install (ADR-0028): unload any prior agent, overwrite template, load.
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .status();
     std::fs::write(&plist_path, &rendered)
         .with_context(|| format!("Failed to write {}", plist_path.display()))?;
 
@@ -159,11 +187,10 @@ fn install_launchd(exe: &Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn remove_launchd() -> Result<()> {
-    let agent_dir = dirs::home_dir()
-        .context("HOME not set")?
-        .join("Library")
-        .join("LaunchAgents");
-    let plist_path = agent_dir.join("com.rustfox.bot.plist");
+    let plist_path = macos_plist_path()?;
+    if !plist_path.exists() {
+        return Err(not_installed_err());
+    }
 
     let _ = std::process::Command::new("launchctl")
         .args(["unload", "-w"])
@@ -205,6 +232,8 @@ fn install_windows_service(exe: &Path) -> Result<()> {
 fn remove_windows_service() -> Result<()> {
     use std::os::windows::process::CommandExt;
 
+    require_windows_service()?;
+
     let template = include_str!("../../scripts/services/uninstall-service.bat.template");
     let rendered = render_template(template, &std::env::current_exe().unwrap_or_default());
 
@@ -224,6 +253,120 @@ fn remove_windows_service() -> Result<()> {
     let _ = std::fs::remove_file(&tmp);
     println!("✓ RustFox Windows service removed");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_plist_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("HOME not set")?
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.rustfox.bot.plist"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_unit_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("HOME not set")?
+        .join(".config")
+        .join("systemd")
+        .join("user")
+        .join("rustfox.service"))
+}
+
+/// ADR-0028 §4: `sc query RustFox` succeeds only when the service is registered.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_sc_query_means_installed(exit_success: bool) -> bool {
+    exit_success
+}
+
+#[cfg(target_os = "windows")]
+fn windows_service_installed() -> Result<bool> {
+    let output = std::process::Command::new("sc")
+        .args(["query", "RustFox"])
+        .output()
+        .context("Failed to run sc query")?;
+    Ok(windows_sc_query_means_installed(output.status.success()))
+}
+
+#[cfg(target_os = "windows")]
+fn require_windows_service() -> Result<()> {
+    if !windows_service_installed()? {
+        return Err(not_installed_err());
+    }
+    Ok(())
+}
+
+fn restart() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !linux_unit_path()?.exists() {
+            return Err(not_installed_err());
+        }
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "restart", "rustfox.service"])
+            .status()
+            .context("Failed to restart service")?;
+        if !status.success() {
+            anyhow::bail!("systemctl restart failed");
+        }
+        println!("✓ Service restarted");
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = macos_plist_path()?;
+        if !plist_path.exists() {
+            return Err(not_installed_err());
+        }
+        // Ensure loaded, then kickstart -k (kill + restart).
+        let _ = std::process::Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist_path)
+            .status();
+        let uid = unsafe { libc::getuid() };
+        let label = format!("gui/{uid}/com.rustfox.bot");
+        let status = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &label])
+            .status()
+            .context("Failed to kickstart launchd agent")?;
+        if !status.success() {
+            // Fallback for older launchd: stop+start after load.
+            let _ = std::process::Command::new("launchctl")
+                .args(["stop", "com.rustfox.bot"])
+                .status();
+            let status = std::process::Command::new("launchctl")
+                .args(["start", "com.rustfox.bot"])
+                .status()
+                .context("Failed to restart service")?;
+            if !status.success() {
+                anyhow::bail!("launchctl restart failed");
+            }
+        }
+        println!("✓ Service restarted");
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        require_windows_service()?;
+        // sc stop may fail if already stopped — continue to start.
+        let _ = std::process::Command::new("sc")
+            .args(["stop", "RustFox"])
+            .status();
+        let status = std::process::Command::new("sc")
+            .args(["start", "RustFox"])
+            .status()
+            .context("Failed to restart service")?;
+        if !status.success() {
+            anyhow::bail!("sc start failed during restart");
+        }
+        println!("✓ Service restarted");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        anyhow::bail!("Restarting services is not supported on this platform")
+    }
 }
 
 fn remove() -> Result<()> {
@@ -285,6 +428,9 @@ fn status() -> Result<()> {
 fn start() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        if !linux_unit_path()?.exists() {
+            return Err(not_installed_err());
+        }
         let status = std::process::Command::new("systemctl")
             .args(["--user", "start", "rustfox.service"])
             .status()
@@ -297,6 +443,15 @@ fn start() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
+        let plist_path = macos_plist_path()?;
+        if !plist_path.exists() {
+            return Err(not_installed_err());
+        }
+        // After a true stop (unload), load again before start.
+        let _ = std::process::Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist_path)
+            .status();
         let status = std::process::Command::new("launchctl")
             .args(["start", "com.rustfox.bot"])
             .status()
@@ -309,6 +464,7 @@ fn start() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        require_windows_service()?;
         let status = std::process::Command::new("sc")
             .args(["start", "RustFox"])
             .status()
@@ -328,6 +484,9 @@ fn start() -> Result<()> {
 fn stop() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        if !linux_unit_path()?.exists() {
+            return Err(not_installed_err());
+        }
         let status = std::process::Command::new("systemctl")
             .args(["--user", "stop", "rustfox.service"])
             .status()
@@ -340,18 +499,25 @@ fn stop() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
+        let plist_path = macos_plist_path()?;
+        if !plist_path.exists() {
+            return Err(not_installed_err());
+        }
+        // True stop under KeepAlive: unload so launchd does not respawn.
         let status = std::process::Command::new("launchctl")
-            .args(["stop", "com.rustfox.bot"])
+            .args(["unload", "-w"])
+            .arg(&plist_path)
             .status()
-            .context("Failed to stop service")?;
+            .context("Failed to unload launchd agent")?;
         if !status.success() {
-            anyhow::bail!("launchctl stop failed");
+            anyhow::bail!("launchctl unload failed");
         }
         println!("✓ Service stopped");
         Ok(())
     }
     #[cfg(target_os = "windows")]
     {
+        require_windows_service()?;
         let status = std::process::Command::new("sc")
             .args(["stop", "RustFox"])
             .status()
@@ -400,5 +566,23 @@ mod tests {
         let bin_path = Path::new("/usr/local/bin/rustfox");
         let result = render_template(template, bin_path);
         assert!(!result.contains("{{"));
+    }
+
+    #[test]
+    fn cli_verb_names() {
+        assert_eq!(Action::Install.cli_verb(), "install");
+        assert_eq!(Action::Uninstall.cli_verb(), "uninstall");
+        assert_eq!(Action::Restart.cli_verb(), "restart");
+    }
+
+    #[test]
+    fn windows_sc_query_gate_matches_exit() {
+        assert!(windows_sc_query_means_installed(true));
+        assert!(!windows_sc_query_means_installed(false));
+        let msg = not_installed_err().to_string();
+        assert!(
+            msg.contains("rustfox install"),
+            "not-installed hint must name rustfox install: {msg}"
+        );
     }
 }
