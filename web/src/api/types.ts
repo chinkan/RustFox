@@ -463,6 +463,16 @@ export interface SandboxSwitchResult {
   detail?: string
 }
 
+/** Portal Settings self-upgrade choice (ADR-0030). No free-text branches. */
+export type SelfUpgradeChoice = 'auto' | 'main' | 'release'
+
+export interface SelfUpgradeResult {
+  ok: boolean
+  mode: string
+  log: string
+}
+
+
 export interface Settings {
   editable: SettingsEditable
   masked: SettingsMasked

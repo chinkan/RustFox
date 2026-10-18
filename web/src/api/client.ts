@@ -23,6 +23,8 @@ import type {
   SettingsPatch,
   SettingsPatchResult,
   SandboxSwitchResult,
+  SelfUpgradeChoice,
+  SelfUpgradeResult,
   Skill,
   SkillEntry,
   SoulFile,
@@ -177,6 +179,17 @@ export const api = {
     request<SandboxSwitchResult>('/settings/sandbox/trusted', { method: 'POST', body: '{}' }),
   installSandboxTool: () =>
     request<SandboxSwitchResult>('/settings/sandbox/install', { method: 'POST', body: '{}' }),
+  /**
+   * Sync self-upgrade (ADR-0030). Can take many minutes (cargo build / release
+   * download). Uses a 30-minute AbortSignal so the browser does not drop the
+   * request at the default ~30s fetch timeout.
+   */
+  selfUpgrade: (choice: SelfUpgradeChoice) =>
+    request<SelfUpgradeResult>('/settings/self-upgrade', {
+      method: 'POST',
+      body: JSON.stringify({ choice }),
+      signal: AbortSignal.timeout(30 * 60 * 1000),
+    }),
   getSoul: (name: SoulName) => get<SoulFile>(`/soul?name=${encodeURIComponent(name)}`),
   putSoul: (name: SoulName, content: string) =>
     request<{ ok: boolean; name: string; bytes: number }>('/soul', {

@@ -2,7 +2,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AutonomyMode, SettingsPatch, SoulName } from '../../api/types'
+import type { AutonomyMode, SelfUpgradeChoice, SettingsPatch, SoulName } from '../../api/types'
 import { ensureAuthBootstrapped } from '../../auth'
 
 /**
@@ -91,6 +91,8 @@ function SettingsPage() {
   const [soulText, setSoulText] = useState('')
   const [soulMsg, setSoulMsg] = useState<string | null>(null)
   const [sandboxMsg, setSandboxMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [choice, setChoice] = useState<SelfUpgradeChoice>('auto')
+  const [upgradeMsg, setUpgradeMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
   // Seed the form once data arrives (and refresh after invalidation).
   useEffect(() => {
@@ -162,6 +164,15 @@ function SettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (e: Error) => setSandboxMsg({ text: e.message, ok: false }),
+  })
+
+  const selfUpgrade = useMutation({
+    mutationFn: () => api.selfUpgrade(choice),
+    onSuccess: () => {
+      setUpgradeMsg({ text: t('settings.upgradeSuccess'), ok: true })
+    },
+    onError: (e: Error) =>
+      setUpgradeMsg({ text: t('settings.upgradeFailed', { message: e.message }), ok: false }),
   })
 
   const editable = settings.data?.editable
@@ -408,6 +419,47 @@ function SettingsPage() {
               ) : (
                 <div className="loading">{t('common.loading')}</div>
               )}
+            </div>
+          </section>
+
+          <section className="section" style={{ gridColumn: '1 / -1' }}>
+            <h2 className="section-title">{t('settings.upgradeTitle')}</h2>
+            <div className="card">
+              <p className="hint" style={{ marginBottom: 12 }}>{t('settings.upgradeHint')}</p>
+              <label style={{ display: 'block', fontSize: 13, marginBottom: 6 }}>
+                {t('settings.upgradeMode')}
+              </label>
+              <select
+                value={choice}
+                onChange={(e) => setChoice(e.target.value as SelfUpgradeChoice)}
+                disabled={selfUpgrade.isPending}
+                style={{ marginBottom: 12, maxWidth: 320 }}
+              >
+                <option value="auto">{t('settings.upgradeModeAuto')}</option>
+                <option value="main">{t('settings.upgradeModeMain')}</option>
+                <option value="release">{t('settings.upgradeModeRelease')}</option>
+              </select>
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={selfUpgrade.isPending}
+                  onClick={() => {
+                    setUpgradeMsg(null)
+                    selfUpgrade.mutate()
+                  }}
+                >
+                  {selfUpgrade.isPending ? t('settings.upgradeRunning') : t('settings.upgradeRun')}
+                </button>
+              </div>
+              {upgradeMsg ? (
+                <div
+                  className={upgradeMsg.ok ? 'hint' : 'error-note'}
+                  style={{ marginTop: 8 }}
+                >
+                  {upgradeMsg.text}
+                </div>
+              ) : null}
             </div>
           </section>
 

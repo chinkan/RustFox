@@ -406,6 +406,10 @@ pub fn router(state: PortalState) -> Router {
             "/settings/sandbox/install",
             axum::routing::post(settings::install_sandbox_tool),
         )
+        .route(
+            "/settings/self-upgrade",
+            axum::routing::post(settings::self_upgrade),
+        )
         .route("/soul", get(settings::get_soul))
         .route("/soul", axum::routing::put(settings::put_soul))
         // Slice 2: authenticated pending-secret admin.

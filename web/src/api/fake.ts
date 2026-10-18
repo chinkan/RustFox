@@ -122,6 +122,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       message: 'We could not install the safety tool. You can install it yourself by running: sudo apt install bubblewrap',
       includesInstallCommand: true,
     }),
+    selfUpgrade: async () => ({ ok: true, mode: 'auto', log: 'fake' }),
     getSoul: async (name: string) => ({ name, content: `# ${name}\nbody`, mtime: '2026-09-22T00:00:00Z' }),
     putSoul: async (name: string, content: string) => ({ ok: true, name, bytes: content.length }),
     // -- control plane (T5) --
