@@ -78,6 +78,14 @@ agent-invoke path, treat as a code gap and fix under the #223 impl PR. Agent /
 Active / `[openrouter].model` resolution is locked in **ADR-0033** — this amend
 only extends the fallback shaping scope.
 
+## Amendment (#226) — 2026-10-19
+
+**Cross-ref only:** when **primary** Ollama returns `no user query found` after
+ADR-0032 keep-tools, **ADR-0034** locks rewrite + omit tools and retry **once**
+on the **same primary** (journal WARN), then this ADR’s fallback walk if that
+retry fails. Fallback rewrite+omit behaviour in this document is unchanged;
+primary first-pass keep-tools remains ADR-0032.
+
 ## Non-goals
 
 - Removing `[fallback] chain` or reverting ADR-0019 for cloud providers.

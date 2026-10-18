@@ -65,6 +65,15 @@ When Active resolves to Ollama, agent-invoke **primary** uses this ADR’s
 keep-tools shaping via the shared `chat_completion_with_model` path (no
 extra agent-only omit). Verified on tip ≥ `a5ea4ab`.
 
+## Cross-reference (#226)
+
+First-pass **keep-tools** on primary Ollama is unchanged by this ADR.
+When primary still returns `no user query found` after that keep-tools
+attempt, **ADR-0034** adds a **recovery**: rewrite + omit tools and retry
+**once** on the same primary (journal WARN), then the existing fallback
+chain (ADR-0029). Do not treat omit-retry as a replacement for first-pass
+keep-tools.
+
 ## Acceptance criteria (implementation — later assign; not this docs PR)
 
 - With Ollama as **primary**, a tool-calling turn completes (tool bubble + useful reply) without `no user query found in messages`.
