@@ -1,6 +1,6 @@
 # ADR-0033: Agent/subagent model vs Active vs `[openrouter].model`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-19
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0029 (fallback → tool-weak rewrite+omit; #203 / #218 / #220), ADR-0032 (primary Ollama + tools; banner Active / `current_model` adjacent to #217)
@@ -50,18 +50,24 @@ Product lock (PO, 2026-10-19 HKT) is authoritative for the Decision below.
 
 5. **ADR-0029 on every agent/subagent fallback → tool-weak walk.** Same as
    main chat (#218 / #220): rewrite + omit-tools whenever tools are present
-   (first-turn or mid-loop). If tip ≥ `01db8f6` still lacks the rewrite warn
-   on the agent-invoke path, treat as a **code gap** and fix in the impl PR
-   (amend note on ADR-0029).
+   (first-turn or mid-loop). Agent/subagent loops set `LoopConfig.model =
+   Some(...)` and share `chat_completion_with_model`, so the rewrite+omit
+   walk already applies (no separate agent omit path).
 
-6. **Release:** target v1.0.7+. Must not block v1.0.6. GitHub English only.
-   Four gates on the **impl** PR; this ADR PR is docs-only.
+6. **ADR-0032 on agent-invoke primary when Active resolves to tool-weak
+   Ollama.** Same shared `chat_completion_with_model` →
+   `shape_primary_ollama_payload` (keep-tools). Do **not** duplicate shaping
+   or invent omit-on-primary for agent invoke.
 
-## Current gap (pre-impl)
+7. **Release:** target v1.0.7+. Must not block v1.0.6. GitHub English only.
+   Four gates on the **impl** PR.
 
-Until the impl PR lands, agents without an override may still resolve to
-`[openrouter].model` and diverge from banner Active. Document that gap here;
-do not claim the runtime already follows Decision §3.
+## Impl note (#223)
+
+`run_subagent` resolves no-override model via Active (`current_model`). Explicit
+agent/bot/override `model` remains sticky. Primary ADR-0032 and fallback
+ADR-0029 shaping are not reimplemented in `agent.rs` — they ride the shared
+LLM client (tip ≥ `a5ea4ab` / `01db8f6`).
 
 ## Non-goals
 
@@ -88,10 +94,8 @@ do not claim the runtime already follows Decision §3.
 
 ## Consequences
 
-- Docs-only first (this ADR + ADR-0029 amendment). Tech lead assigns RustFox
-  Rust Developer for impl after merge (`fix/223-agent-active-model` or
-  similar). Leave #223 open for impl — this PR is a docs slice only.
-- Banner Active / `current_model` (#217) becomes the source of truth for
+- Banner Active / `current_model` (#217) is the source of truth for
   no-override agent invoke, matching operator expectation.
 - Specialist agents with an explicit cloud `model` remain valid even when
   Active is local Ollama.
+- Impl: `fix/223-agent-active-model` (`resolve_invoke_model` in `agent.rs`).

@@ -23,7 +23,7 @@ Agents are isolated agentic mini-loops with their own model, tool whitelist, and
 ---
 name: agent-name          # lowercase letters, numbers, hyphens only
 description: One sentence — when to invoke this agent and what it returns.
-model: provider/model-id  # required: the model this agent uses
+model: provider/model-id  # optional: omit to inherit Active (ADR-0033); sticky when set
 tools: [tool1, tool2]     # required: exact tool names the agent may call
 max_iterations: 5         # optional: default is global max (25)
 tags: [tag1, tag2]        # optional

@@ -6,7 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Agent model vs Active (ADR-0033, #223):** docs lock — explicit agent/subagent `model` is sticky; shipped examples inherit Active; no-agent-model invoke follows Active (`current_model` / banner), not `[openrouter].model`. ADR-0029 rewrite+omit applies on agent-invoke fallback → tool-weak. Target **v1.0.7+**; does not block v1.0.6. Impl follows (docs slice only).
+- **Agent model vs Active (ADR-0033, #223):** explicit agent/subagent `model` is sticky; shipped examples inherit Active; no-agent-model invoke follows Active (`current_model` / banner), not `[openrouter].model`. Agent primary Ollama uses shared ADR-0032 keep-tools; fallback → tool-weak uses shared ADR-0029 rewrite+omit. Target **v1.0.7+**; does not block v1.0.6.
 - **Primary Ollama + tools (ADR-0032, #213):** shape primary Ollama chat payloads so a plain non-empty `user` turn is always present (keep tools on primary; mid-loop may rewrite). Reject unknown-prefix OpenRouter-style model ids (e.g. `deepseek/…`) when the resolved provider is Ollama — no 404-loop. ADR-0029 fallback rewrite/omit-tools unchanged.
 - **Telegram `/logs` + in-app log file sink (ADR-0031):** bot writes `{resolved_home}/logs/rustfox.log` (32 MiB → `.1` rotation); allowlisted `/logs` sends the file (last 16 MiB if larger). macOS LaunchAgent no longer redirects to Library/Logs.
 - **Telegram `/selfupgrade` labels (ADR-0030):** bare → auto; `main` → source+branch main (refuse clearly if no source tree); `release` → GitHub latest binary. Unknown args are rejected with a tip (not treated as git branches).
@@ -17,6 +17,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Agent invoke follows Active model (ADR-0033, #223):** `run_subagent` no longer defaults to `[openrouter].model` when the agent has no `model` override — uses `current_model` (banner Active). Explicit agent/override `model` stays sticky. Does not block v1.0.6 (v1.0.7+).
 - **Ollama fallback first turn + tools (ADR-0029 amend, #218):** walking onto tool-weak Ollama with tools present (including first turn + plain user) always rewrites and omits tools — never raw tools that 500 with `no user query found`. Log says “after rewrite” only when rewrite ran. Primary keep-tools (ADR-0032) unchanged.
 - **Telegram online banner `Model:` (#217):** startup/online notify now shows `current_model` (same as `/models` Active), not `config.openrouter.model`.
 

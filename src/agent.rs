@@ -1844,9 +1844,9 @@ impl Agent {
     ) -> String {
         // --- Ad-hoc mode (no predefined skill/agent) ---
         if skill_name.is_none() {
-            let model = model_override
-                .map(str::to_string)
-                .unwrap_or_else(|| self.config.openrouter.model.clone());
+            // ADR-0033: no override → Active (`current_model`), not `[openrouter].model`.
+            let active_model = self.current_model.read().await.clone();
+            let model = resolve_invoke_model(model_override, None, &active_model);
 
             let resolved_today = tools_override
                 .clone()
@@ -1925,7 +1925,8 @@ impl Agent {
         // Resolve model and tool list from registry metadata (or overrides).
         // Order (§7.5): agents registry → skills registry → [[bots]] persona.
         let (resolved_model, allowed_tools, max_iter, bot_persona_fallback) = {
-            let default_model = self.config.openrouter.model.clone();
+            // ADR-0033: no agent-level model → Active (`current_model`), not `[openrouter].model`.
+            let active_model = self.current_model.read().await.clone();
 
             let skill_opt = {
                 let agents = self.agents.read().await;
@@ -1945,15 +1946,15 @@ impl Agent {
                 None
             };
 
-            let model = model_override
-                .map(str::to_string)
-                .or_else(|| skill_opt.as_ref().and_then(|s| s.model.clone()))
-                .or_else(|| bot_peer.and_then(|b| b.model.clone()))
-                .unwrap_or_else(|| default_model.clone());
-            if model == default_model && skill_opt.is_none() && bot_peer.is_none() {
+            let skill_or_bot_model = skill_opt
+                .as_ref()
+                .and_then(|s| s.model.as_deref())
+                .or_else(|| bot_peer.and_then(|b| b.model.as_deref()));
+            let model = resolve_invoke_model(model_override, skill_or_bot_model, &active_model);
+            if skill_opt.is_none() && bot_peer.is_none() {
                 warn!(
-                    "Agent/skill/bot persona '{}' not found; using default model.",
-                    skill_name
+                    "Agent/skill/bot persona '{}' not found; using Active model {}.",
+                    skill_name, active_model
                 );
             }
             let agent_declared = skill_opt
@@ -2572,6 +2573,28 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Resolve the model string for agent/subagent invoke (ADR-0033).
+///
+/// Precedence: explicit `model_override` → skill/bot frontmatter `model` →
+/// **Active** (`current_model` / banner). Never uses `[openrouter].model` alone
+/// when Active differs. Explicit override / agent `model` stays sticky (cloud
+/// OK while Active is local Ollama).
+///
+/// Primary/fallback shaping for the resolved model is unchanged: `run_subagent_loop`
+/// sets `LoopConfig.model = Some(...)` so calls go through
+/// [`crate::llm::LlmClient::chat_completion_with_model`] (ADR-0032 primary
+/// keep-tools; ADR-0029 fallback rewrite+omit).
+pub(crate) fn resolve_invoke_model(
+    model_override: Option<&str>,
+    skill_or_bot_model: Option<&str>,
+    active_model: &str,
+) -> String {
+    model_override
+        .map(str::to_string)
+        .or_else(|| skill_or_bot_model.map(str::to_string))
+        .unwrap_or_else(|| active_model.to_string())
+}
+
 /// ADR-0025 canonical copy when tools_override ∩ parent ∩ declared is empty.
 pub(crate) const EMPTY_SUBAGENT_TOOLS_MSG: &str =
     "No tools are available for this agent with the tools you asked for, so it was not started.";
@@ -2687,6 +2710,128 @@ fn is_compacted_regurgitation(raw: &str, parsed: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ADR-0033: agent invoke model vs Active ---
+
+    #[test]
+    fn test_resolve_invoke_model_no_override_uses_active() {
+        // Kan weather gap: Active = ollama while [openrouter].model = deepseek.
+        let active = "ollama/qwen3.8:27b";
+        let resolved = resolve_invoke_model(None, None, active);
+        assert_eq!(resolved, active);
+        assert_ne!(resolved, "deepseek/deepseek-v4.1-flash");
+    }
+
+    #[test]
+    fn test_resolve_invoke_model_explicit_override_is_sticky() {
+        let active = "ollama/qwen3.8:27b";
+        let cloud = "openrouter/deepseek/deepseek-v4.1-flash";
+        let resolved = resolve_invoke_model(Some(cloud), None, active);
+        assert_eq!(
+            resolved, cloud,
+            "explicit override stays sticky while Active is Ollama"
+        );
+    }
+
+    #[test]
+    fn test_resolve_invoke_model_skill_model_beats_active() {
+        let active = "ollama/qwen3.8:27b";
+        let skill = "openrouter/anthropic/claude-sonnet-4";
+        let resolved = resolve_invoke_model(None, Some(skill), active);
+        assert_eq!(resolved, skill);
+    }
+
+    #[test]
+    fn test_resolve_invoke_model_override_beats_skill_and_active() {
+        let resolved =
+            resolve_invoke_model(Some("override/model"), Some("skill/model"), "ollama/active");
+        assert_eq!(resolved, "override/model");
+    }
+
+    /// Agent invoke with Active=Ollama uses shared ADR-0032 primary keep-tools
+    /// shaping (`chat_completion_with_model` → `shape_primary_ollama_payload`).
+    #[test]
+    fn test_agent_active_ollama_primary_keeps_tools_adr0032() {
+        let model = resolve_invoke_model(None, None, "ollama/qwen3.8:27b");
+        assert!(model.starts_with("ollama/"));
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text("sys")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text("HK weather please")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let tools = vec![ToolDefinition {
+            tool_type: "function".into(),
+            function: crate::llm::FunctionDefinition {
+                name: "get_weather".into(),
+                description: "weather".into(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            },
+        }];
+        let (shaped, kept) =
+            crate::llm::shape_primary_ollama_payload(&messages, &tools).expect("shape");
+        assert_eq!(kept.len(), 1, "ADR-0032 primary keeps tools on agent path");
+        assert!(crate::llm::has_plain_user_turn(&shaped));
+    }
+
+    /// Agent-invoke fallback → tool-weak uses shared ADR-0029 rewrite+omit
+    /// (same helper as main chat; `LoopConfig.model=Some` → `chat_completion_with_model`).
+    #[test]
+    fn test_agent_fallback_tool_weak_rewrites_adr0029() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text("sys")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text("HK weather please")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::llm::ToolCall {
+                    id: "c1".into(),
+                    call_type: "function".into(),
+                    function: crate::llm::FunctionCall {
+                        name: "get_weather".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::from_text("sunny")),
+                tool_calls: None,
+                tool_call_id: Some("c1".into()),
+            },
+        ];
+        assert!(crate::llm::is_mid_tool_loop(&messages));
+        let rewritten = crate::llm::rewrite_messages_for_tool_weak(&messages);
+        assert!(
+            crate::llm::has_plain_user_turn(&rewritten),
+            "ADR-0029 rewrite must leave a plain user turn for agent fallback"
+        );
+        assert!(
+            !rewritten
+                .iter()
+                .any(|m| m.role == "tool" || m.has_tool_calls()),
+            "rewrite folds tool roles away"
+        );
+    }
 
     #[test]
     fn test_effective_subagent_tools_includes_read_tools() {
