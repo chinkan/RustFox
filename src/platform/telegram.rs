@@ -306,11 +306,13 @@ pub async fn run(
 
     info!(bot_id = %bot_id, "Starting Telegram platform...");
 
-    // Send startup notifications (best-effort) — before agent is moved into dptree
+    // Send startup notifications (best-effort) — before agent is moved into dptree.
+    // Banner Model: must match /models Active (`current_model`), not config.openrouter.model (#217).
+    let active_model = agent.current_model.read().await.clone();
     notify_startup(
         &bot,
         &allowed_user_ids,
-        &agent.config.openrouter.model,
+        &active_model,
         agent.mcp.server_count(),
         agent.skills.read().await.len(),
         agent.memory.embeddings.is_available(),
@@ -2871,6 +2873,31 @@ mod tests {
             .unwrap()
             .contains("check the user id"));
         assert_eq!(hint("timed out").await, None);
+    }
+
+    /// #217: banner `Model:` must reflect the active model passed at notify time
+    /// (same source as `/models` Active / `current_model`), not a static config default.
+    #[test]
+    fn startup_notify_model_line_uses_active_model_argument() {
+        let config_default = "deepseek/deepseek-v4.1-flash";
+        let active = "ollama/qwen3.8:27b";
+        let msg = format_startup_notify(
+            "1.0.7",
+            "2026-10-18 20:16 +08:00",
+            active,
+            1,
+            0,
+            "embedding enabled",
+        );
+        assert!(
+            msg.contains(&format!("Model: {active}")),
+            "banner must show active model: {msg}"
+        );
+        assert!(
+            !msg.contains(config_default),
+            "banner must not show config.openrouter.model when Active differs: {msg}"
+        );
+        assert!(msg.contains("Memory: embedding enabled"));
     }
 
     #[test]

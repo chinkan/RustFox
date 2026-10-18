@@ -15,6 +15,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - **CLI service verbs (ADR-0028):** `rustfox install|uninstall|status|start|stop|restart` and `rustfox run` (foreground alias). `--service …` and `remove` still work with a deprecation hint (removed next minor). macOS `stop` unloads the agent so KeepAlive cannot respawn it; `restart` uses `launchctl kickstart -k`. Portal / wizard / `install.sh` teach the new verbs (no new portal control buttons).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
+### Fixed
+- **Telegram online banner `Model:` (#217):** startup/online notify now shows `current_model` (same as `/models` Active), not `config.openrouter.model`.
+
 ## [1.0.6] — 2026-10-14
 
 Bug-fix release on main after `v1.0.5`. No tag in this commit.
