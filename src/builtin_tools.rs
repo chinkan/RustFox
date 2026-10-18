@@ -168,12 +168,12 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "self_upgrade".to_string(),
-                    description: "Upgrade the bot to the latest version.".to_string(),
+                    description: "Upgrade the bot to the latest version. Telegram /selfupgrade accepts only bare (auto), main (source+main), or release; other git branches need this tool with mode=source.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
-                            "branch": { "type": "string", "description": "Git branch to build from (source mode only, default: 'main')" },
-                            "mode": { "type": "string", "enum": ["auto", "source", "release"], "description": "Force a specific upgrade mode (default: 'auto')" }
+                            "branch": { "type": "string", "description": "Git branch to build from (source mode only, default: 'main'). Advanced: any branch with mode=source; Telegram UX is limited to main|release|bare." },
+                            "mode": { "type": "string", "enum": ["auto", "source", "release"], "description": "Force a specific upgrade mode (default: 'auto'). Explicit source refuses if no Cargo.toml near the exe (ADR-0030)." }
                         },
                         "required": []
                     }),

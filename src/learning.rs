@@ -40,6 +40,63 @@ fn detect_deployment_mode() -> UpgradeMode {
     UpgradeMode::Release
 }
 
+/// Result of parsing a Telegram `/selfupgrade` argument (ADR-0030).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramSelfUpgradeParse {
+    /// Mapped mode string for [`self_upgrade`] and git branch when source applies.
+    ///
+    /// For bare (`mode=auto`), `branch` is `"main"` as the source-branch default
+    /// when auto selects source; it is ignored for release.
+    Ok {
+        mode: &'static str,
+        branch: &'static str,
+    },
+    /// Unknown arg — Telegram must reject with a tip; never treat as a git branch.
+    RejectUnknown,
+}
+
+/// Parse Telegram `/selfupgrade` arg per ADR-0030 allowlist.
+///
+/// - bare / empty → `mode=auto`, branch `main` (source default when auto picks source)
+/// - `main` → `mode=source`, branch `main`
+/// - `release` → `mode=release` (branch ignored by the engine)
+/// - anything else → [`TelegramSelfUpgradeParse::RejectUnknown`]
+pub fn parse_telegram_selfupgrade_arg(arg: &str) -> TelegramSelfUpgradeParse {
+    match arg.trim() {
+        "" => TelegramSelfUpgradeParse::Ok {
+            mode: "auto",
+            branch: "main",
+        },
+        "main" => TelegramSelfUpgradeParse::Ok {
+            mode: "source",
+            branch: "main",
+        },
+        "release" => TelegramSelfUpgradeParse::Ok {
+            mode: "release",
+            // Placeholder; release mode ignores branch.
+            branch: "main",
+        },
+        _ => TelegramSelfUpgradeParse::RejectUnknown,
+    }
+}
+
+/// Resolve the project root for source upgrades (ADR-0030 Q2).
+///
+/// Explicit `mode=source` refuses when no `Cargo.toml` is found near the exe
+/// (no silent clone / current_dir fallback). Auto-selected source keeps the
+/// historical `current_dir` fallback.
+fn resolve_source_root(explicit_source: bool, found: Option<PathBuf>) -> Result<PathBuf> {
+    match found {
+        Some(root) => Ok(root),
+        None if explicit_source => anyhow::bail!(
+            "Source upgrade (`main`) requires a RustFox source tree (Cargo.toml near the executable). \
+This deployment looks like a release binary — no silent clone. \
+Use `/selfupgrade release` (or mode=release), or clone the repo and run from source."
+        ),
+        None => Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    }
+}
+
 /// Detect if RustFox is running as a systemd/launchd service.
 pub fn is_service_installed() -> bool {
     #[cfg(target_os = "linux")]
@@ -773,9 +830,10 @@ pub async fn self_upgrade(
         UpgradeMode::Source => {
             log.push_str(&format!("Mode: source (branch: {})\n", branch));
 
-            let project_root = find_project_root().unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
+            // Explicit mode=source refuses without a tree (ADR-0030 Q2).
+            // Auto keeps historical current_dir fallback when detect picked source.
+            let explicit_source = mode == "source";
+            let project_root = resolve_source_root(explicit_source, find_project_root())?;
 
             // Step 0: Check for uncommitted changes.
             log.push_str("→ Checking for uncommitted changes...\n");
@@ -1468,6 +1526,80 @@ mod tests {
             "must not invent rate-limit copy: {text}"
         );
         assert!(text.contains("permission denied"), "{text}");
+    }
+
+    #[test]
+    fn parse_telegram_selfupgrade_bare_is_auto_main() {
+        assert_eq!(
+            parse_telegram_selfupgrade_arg(""),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "auto",
+                branch: "main",
+            }
+        );
+        assert_eq!(
+            parse_telegram_selfupgrade_arg("  "),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "auto",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn parse_telegram_selfupgrade_main_is_source() {
+        assert_eq!(
+            parse_telegram_selfupgrade_arg("main"),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "source",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn parse_telegram_selfupgrade_release_is_release() {
+        assert_eq!(
+            parse_telegram_selfupgrade_arg("release"),
+            TelegramSelfUpgradeParse::Ok {
+                mode: "release",
+                branch: "main",
+            }
+        );
+    }
+
+    #[test]
+    fn parse_telegram_selfupgrade_unknown_rejected() {
+        for arg in ["develop", "v1.0.6", "origin/main", "MAIN", "Release"] {
+            assert_eq!(
+                parse_telegram_selfupgrade_arg(arg),
+                TelegramSelfUpgradeParse::RejectUnknown,
+                "expected reject for {arg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_source_root_explicit_refuses_without_tree() {
+        let err = resolve_source_root(true, None).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("source tree") && text.contains("no silent clone"),
+            "refuse message missing: {text}"
+        );
+    }
+
+    #[test]
+    fn resolve_source_root_auto_falls_back_without_tree() {
+        let root = resolve_source_root(false, None).unwrap();
+        assert!(!root.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn resolve_source_root_uses_found_tree() {
+        let p = PathBuf::from("/tmp/rustfox-source");
+        assert_eq!(resolve_source_root(true, Some(p.clone())).unwrap(), p);
+        assert_eq!(resolve_source_root(false, Some(p.clone())).unwrap(), p);
     }
 
     static GITHUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

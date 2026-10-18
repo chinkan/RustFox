@@ -5,8 +5,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Telegram `/selfupgrade` labels (ADR-0030):** bare → auto; `main` → source+branch main (refuse clearly if no source tree); `release` → GitHub latest binary. Unknown args are rejected with a tip (not treated as git branches).
+
 ### Changed
 - **CLI service verbs (ADR-0028):** `rustfox install|uninstall|status|start|stop|restart` and `rustfox run` (foreground alias). `--service …` and `remove` still work with a deprecation hint (removed next minor). macOS `stop` unloads the agent so KeepAlive cannot respawn it; `restart` uses `launchctl kickstart -k`. Portal / wizard / `install.sh` teach the new verbs (no new portal control buttons).
+- Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ## [1.0.6] — 2026-10-14
 
