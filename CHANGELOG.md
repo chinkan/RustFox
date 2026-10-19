@@ -6,6 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`/models` Active persist + `default_provider` (ADR-0035, #233):** docs lock — top-level `default_provider`; boot uses key when valid, missing → `providers[0]` compat, unknown name → fail boot; `/models` persist writes that provider `model` + `default_provider`; success Telegram copy must include **saved**; disk-fail still applies live and says not saved. Target **v1.0.7+**; does not close #233.
 - **Primary Ollama no-user-query retry omit (ADR-0034, #226):** after ADR-0032 keep-tools, if primary Ollama returns `no user query found`, rewrite+omit tools and retry **once** on the same primary (journal WARN); then existing fallback (ADR-0029). First-pass keep-tools unchanged. Target **v1.0.7+**; does not block v1.0.6.
 - **Agent model vs Active (ADR-0033, #223):** explicit agent/subagent `model` is sticky; shipped examples inherit Active; no-agent-model invoke follows Active (`current_model` / banner), not `[openrouter].model`. Agent primary Ollama uses shared ADR-0032 keep-tools; fallback → tool-weak uses shared ADR-0029 rewrite+omit. Target **v1.0.7+**; does not block v1.0.6.
 - **Primary Ollama + tools (ADR-0032, #213):** shape primary Ollama chat payloads so a plain non-empty `user` turn is always present (keep tools on primary; mid-loop may rewrite). Reject unknown-prefix OpenRouter-style model ids (e.g. `deepseek/…`) when the resolved provider is Ollama — no 404-loop. ADR-0029 fallback rewrite/omit-tools unchanged.

@@ -81,7 +81,10 @@ Be concise and helpful."""
 # Define additional LLM providers alongside OpenRouter.
 # Each [[provider]] block adds a new provider. Model strings use the
 # format `provider_name/model_id` (e.g., `ollama/llama3.1`).
-# The first provider becomes the default.
+# Boot default provider: set top-level default_provider = "<name>" (ADR-0035 / #233).
+# When that key is missing, the first [[provider]] is used (compat, including legacy
+# [openrouter] when synthesized). If the key is set to an unknown name, boot fails.
+# /models Active persist writes that provider's model and default_provider.
 
 # Example: Ollama (local models)
 # [[provider]]
