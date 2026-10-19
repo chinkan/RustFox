@@ -725,7 +725,9 @@ async fn main() -> Result<()> {
     rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
 
     // Build provider registry from config
-    let (provider_sections, default_provider, fallback_chain) = config.build_providers();
+    let (provider_sections, default_provider, fallback_chain) = config
+        .build_providers()
+        .context("Failed to resolve providers / default_provider")?;
     let registry = Arc::new(
         provider::build_registry(
             &provider_sections,

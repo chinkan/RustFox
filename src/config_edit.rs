@@ -431,12 +431,19 @@ pub fn write_config_validated(path: &Path, new_content: &str) -> Result<PathBuf>
 
 /// Persist a live model change to `config.toml` via [`write_config_validated`].
 ///
-/// Updates the matching `[[provider]]` entry's `model`, or falls back to the
-/// legacy `[openrouter]` section when `provider_name == "openrouter"`.
-/// Returns the `.bak` path.
+/// Updates (ADR-0035 / #233):
+/// - (a) the matching `[[provider]]` entry's `model`, or the legacy
+///   `[openrouter]` section when `provider_name == "openrouter"` and no
+///   explicit `[[provider]]` row matched;
+/// - (b) top-level `default_provider` to `provider_name` (boot Active).
+///
+/// Other providers' sections are left untouched. Returns the `.bak` path.
 pub fn persist_model_edit(path: &Path, provider_name: &str, actual_model: &str) -> Result<PathBuf> {
     if actual_model.is_empty() {
         bail!("Model ID cannot be empty");
+    }
+    if provider_name.trim().is_empty() {
+        bail!("Provider name cannot be empty");
     }
 
     let content = std::fs::read_to_string(path)
@@ -467,6 +474,15 @@ pub fn persist_model_edit(path: &Path, provider_name: &str, actual_model: &str) 
             );
         }
     }
+
+    // Boot Active: always write default_provider so /restart keeps the choice.
+    let root = doc
+        .as_table_mut()
+        .context("config.toml root must be a table")?;
+    root.insert(
+        "default_provider".to_string(),
+        toml::Value::String(provider_name.to_string()),
+    );
 
     let new_content =
         toml::to_string_pretty(&doc).context("Failed to serialize config after model edit")?;
@@ -1036,7 +1052,15 @@ model = "m"
             !new_content.contains("moonshotai/kimi-k2.6"),
             "old model should be replaced: {new_content}"
         );
+        assert!(
+            new_content.contains("default_provider") && new_content.contains("\"openrouter\""),
+            "persist must write default_provider: {new_content}"
+        );
         validate_config_str(&new_content).unwrap();
+        let cfg: Config = toml::from_str(&new_content).unwrap();
+        assert_eq!(cfg.default_provider.as_deref(), Some("openrouter"));
+        let (_, boot, _) = cfg.build_providers().unwrap();
+        assert_eq!(boot, "openrouter");
     }
 
     #[test]
@@ -1088,6 +1112,54 @@ model = "m"
         assert!(err.contains("empty"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert!(!path.with_extension("toml.bak").exists());
+    }
+
+    /// ADR-0035: set Active away from providers[0] → persist → reload → same Active.
+    #[test]
+    fn persist_model_edit_reload_keeps_active_not_providers_zero() {
+        let dir = tempdir().unwrap();
+        let toml = r#"
+[telegram]
+bot_token = "123456:ABC-SECRETTOKEN"
+allowed_user_ids = [42]
+
+[openrouter]
+api_key = "sk-or-v1-SECRETKEY000"
+model = "moonshotai/kimi-k2.6"
+
+[[provider]]
+name = "ollama"
+type = "ollama"
+base_url = "http://localhost:11434/v1"
+model = "qwen3.8:27b"
+
+[sandbox]
+allowed_directory = "/tmp/sandbox"
+"#;
+        let path = write_cfg(&dir, toml);
+        let cfg_before: Config = toml::from_str(toml).unwrap();
+        let (_, boot_before, _) = cfg_before.build_providers().unwrap();
+        assert_eq!(
+            boot_before, "ollama",
+            "precondition: first [[provider]] is boot"
+        );
+
+        persist_model_edit(&path, "openrouter", "deepseek/deepseek-v4.1-flash").unwrap();
+
+        let new_content = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&new_content).unwrap();
+        assert_eq!(cfg.default_provider.as_deref(), Some("openrouter"));
+        assert_eq!(cfg.openrouter.model, "deepseek/deepseek-v4.1-flash");
+        // ollama section untouched
+        assert_eq!(cfg.provider.len(), 1);
+        assert_eq!(cfg.provider[0].name, "ollama");
+        assert_eq!(cfg.provider[0].model, "qwen3.8:27b");
+
+        let (providers, boot, _) = cfg.build_providers().unwrap();
+        assert_eq!(boot, "openrouter");
+        assert_eq!(providers[0].name, "ollama");
+        let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
+        assert_eq!(or.model, "deepseek/deepseek-v4.1-flash");
     }
 
     fn ids_in(path: &Path, bot_id: Option<&str>) -> Vec<i64> {

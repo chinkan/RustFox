@@ -430,7 +430,7 @@ model = "m"
         let toml = minimal_bots_toml().replace("sk-test", "secret:openrouter.api_key");
         let mut cfg: Config = toml::from_str(&toml).unwrap();
         resolve_openrouter_api_key(&mut cfg, &bridge).unwrap();
-        let (providers, _, _) = cfg.build_providers();
+        let (providers, _, _) = cfg.build_providers().unwrap();
         let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
         assert_eq!(or.api_key.as_deref(), Some("sk-or-x"));
 

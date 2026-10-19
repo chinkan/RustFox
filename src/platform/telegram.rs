@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use async_trait::async_trait;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ReactionType};
 
-use crate::agent::{session_key, Agent, LoopCallbackChoice, MidRunMode, RunStop};
+use crate::agent::{session_key, Agent, LoopCallbackChoice, MidRunMode, RunStop, SetModelOutcome};
 use crate::platform::sender::{
     MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender,
 };
@@ -771,6 +771,18 @@ async fn handle_model_search(
     Ok(())
 }
 
+/// Telegram copy for a successful [`Agent::set_model`] (ADR-0035 lock).
+fn format_set_model_reply(model_id: &str, outcome: &SetModelOutcome) -> String {
+    match outcome {
+        SetModelOutcome::Saved => {
+            format!("✅ Model changed to `{model_id}` (saved)")
+        }
+        SetModelOutcome::LiveOnly { persist_error } => {
+            format!("⚠️ Model changed to `{model_id}` live, but not saved: {persist_error}")
+        }
+    }
+}
+
 /// Set the model and send a success/failure reply.
 async fn set_model_and_reply(
     bot: Bot,
@@ -779,8 +791,8 @@ async fn set_model_and_reply(
     model_id: &str,
 ) -> ResponseResult<()> {
     match agent.set_model(model_id).await {
-        Ok(()) => {
-            let reply = format!("✅ Model changed to `{}`", model_id);
+        Ok(outcome) => {
+            let reply = format_set_model_reply(model_id, &outcome);
             bot.send_message(chat_id, escape_text(&reply))
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
@@ -788,7 +800,7 @@ async fn set_model_and_reply(
         Err(e) => {
             bot.send_message(
                 chat_id,
-                escape_text(&format!("Failed to save model: {:#}", e)),
+                escape_text(&format!("Failed to change model: {:#}", e)),
             )
             .parse_mode(ParseMode::MarkdownV2)
             .await?;
@@ -2642,14 +2654,14 @@ async fn handle_model_callback(
 
     if let Some(model_id) = data.strip_prefix("model_select:") {
         match agent.set_model(model_id).await {
-            Ok(()) => {
-                let reply = format!("✅ Model changed to `{}`", model_id);
+            Ok(outcome) => {
+                let reply = format_set_model_reply(model_id, &outcome);
                 if let Some(m) = msg {
                     bot.edit_message_text(m.chat.id, m.id, &reply).await?;
                 }
             }
             Err(e) => {
-                let reply = format!("Failed to save model: {:#}", e);
+                let reply = format!("Failed to change model: {:#}", e);
                 if let Some(m) = msg {
                     bot.edit_message_text(m.chat.id, m.id, &reply).await?;
                 }

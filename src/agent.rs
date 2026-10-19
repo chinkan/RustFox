@@ -118,6 +118,15 @@ impl RunOutcome {
     }
 }
 
+/// Outcome of [`Agent::set_model`] (ADR-0035 Telegram copy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetModelOutcome {
+    /// Disk write succeeded; live Active updated.
+    Saved,
+    /// Live Active updated; disk write failed (surface `{persist_error}` to user).
+    LiveOnly { persist_error: String },
+}
+
 /// The core agent that processes messages through LLM + tools.
 /// Platform-agnostic — receives IncomingMessage, returns response text.
 pub struct Agent {
@@ -627,25 +636,49 @@ impl Agent {
         }
     }
 
-    /// Change the active model and persist to config.toml via the shared
-    /// validate → `.bak` → atomic write → restore-on-fail path
-    /// ([`crate::config_edit::persist_model_edit`]).
-    pub async fn set_model(&self, model_id: &str) -> anyhow::Result<()> {
+    /// Change the active model: always apply **live**; persist to config.toml
+    /// via [`crate::config_edit::persist_model_edit`] (ADR-0035 / #233).
+    ///
+    /// Disk success → [`SetModelOutcome::Saved`]. Disk failure → still live,
+    /// [`SetModelOutcome::LiveOnly`] with the error (Telegram must say not saved).
+    /// Validation failure → `Err` (no live change).
+    pub async fn set_model(&self, model_id: &str) -> anyhow::Result<SetModelOutcome> {
         let (provider_name, actual_model) = self.validate_model_id(model_id)?;
 
         // Disk write on blocking thread — same sync bak helpers as `/config set`.
         let path = self.config_path.clone();
         let provider_name_owned = provider_name.clone();
         let actual_owned = actual_model.to_string();
-        tokio::task::spawn_blocking(move || {
+        let persist_result = tokio::task::spawn_blocking(move || {
             crate::config_edit::persist_model_edit(&path, &provider_name_owned, &actual_owned)
         })
         .await
-        .map_err(|e| anyhow::anyhow!("set_model persist task join error: {e}"))??;
+        .map_err(|e| anyhow::anyhow!("set_model persist task join error: {e}"))?;
 
+        // Live Active always follows a validated choice (ADR-0035 disk-fail path).
         self.apply_model_in_memory(model_id).await;
-        tracing::info!(model = %model_id, provider = %provider_name, "Model changed and persisted");
-        Ok(())
+
+        match persist_result {
+            Ok(_) => {
+                tracing::info!(
+                    model = %model_id,
+                    provider = %provider_name,
+                    "Model changed and persisted"
+                );
+                Ok(SetModelOutcome::Saved)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    model = %model_id,
+                    provider = %provider_name,
+                    error = %e,
+                    "Model changed live but disk persist failed"
+                );
+                Ok(SetModelOutcome::LiveOnly {
+                    persist_error: format!("{e:#}"),
+                })
+            }
+        }
     }
 
     /// Apply a model id live in memory only (no disk write).
