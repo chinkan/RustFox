@@ -305,14 +305,26 @@ fn classify_message(msg: &Message) -> InjectedKind {
 ///
 /// Returns a fixed assistant reply (no tool calls) so `Agent::process_message`
 /// completes in one turn. Used with [`UpdateInjector::drive_handle_message`].
+///
+/// `models_seen` records stripped `actual_model` ids from each
+/// `chat_completion` (ADR-0036 live Active regression).
 pub struct FixtureLlm {
     config: ProviderConfig,
     reply: String,
+    models_seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl FixtureLlm {
     /// Build a fixture provider named `fixture` with model `stub`.
     pub fn new(reply: impl Into<String>) -> Self {
+        Self::with_models_seen(reply, Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Like [`Self::new`], sharing a caller's recorder for model-id asserts.
+    pub fn with_models_seen(
+        reply: impl Into<String>,
+        models_seen: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
         Self {
             config: ProviderConfig {
                 name: "fixture".into(),
@@ -329,11 +341,17 @@ impl FixtureLlm {
                 rate_limit_retry_limit: 0,
             },
             reply: reply.into(),
+            models_seen,
         }
     }
 
     pub fn reply(&self) -> &str {
         &self.reply
+    }
+
+    /// Shared list of stripped model ids passed to `chat_completion`.
+    pub fn models_seen(&self) -> Arc<std::sync::Mutex<Vec<String>>> {
+        Arc::clone(&self.models_seen)
     }
 
     /// Wrap as a one-entry [`crate::provider::ProviderRegistry`] (default = `fixture`).
@@ -367,6 +385,9 @@ impl Provider for FixtureLlm {
         model: &str,
         _max_tokens: u32,
     ) -> anyhow::Result<ChatCompletion> {
+        if let Ok(mut seen) = self.models_seen.lock() {
+            seen.push(model.to_string());
+        }
         Ok(ChatCompletion {
             message: ChatMessage {
                 role: "assistant".into(),

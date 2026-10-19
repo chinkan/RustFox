@@ -771,14 +771,19 @@ async fn handle_model_search(
     Ok(())
 }
 
-/// Telegram copy for a successful [`Agent::set_model`] (ADR-0035 lock).
+/// Telegram copy for a successful [`Agent::set_model`] (ADR-0036; extends ADR-0035).
+///
+/// Success: Active switched **now** + saved; cold start follows; no `/restart`
+/// required for live chat. Disk-fail: live follows + not saved; cold may revert.
 fn format_set_model_reply(model_id: &str, outcome: &SetModelOutcome) -> String {
     match outcome {
         SetModelOutcome::Saved => {
-            format!("✅ Model changed to `{model_id}` (saved)")
+            format!("✅ Active is now `{model_id}` (saved). Cold start will follow.")
         }
         SetModelOutcome::LiveOnly { persist_error } => {
-            format!("⚠️ Model changed to `{model_id}` live, but not saved: {persist_error}")
+            format!(
+                "⚠️ Active is now `{model_id}` live, but not saved: {persist_error}. Cold start may revert."
+            )
         }
     }
 }
@@ -2885,6 +2890,45 @@ mod tests {
             .unwrap()
             .contains("check the user id"));
         assert_eq!(hint("timed out").await, None);
+    }
+
+    // --- ADR-0036: /models success + disk-fail copy ---
+
+    #[test]
+    fn format_set_model_reply_saved_says_now_and_saved_no_restart() {
+        let reply = format_set_model_reply("ollama/qwen3.8:27b", &SetModelOutcome::Saved);
+        assert!(reply.contains("Active is now"), "{reply}");
+        assert!(reply.contains("`ollama/qwen3.8:27b`"), "{reply}");
+        assert!(reply.contains("(saved)"), "{reply}");
+        assert!(
+            reply.to_lowercase().contains("cold start will follow"),
+            "{reply}"
+        );
+        assert!(
+            !reply.to_lowercase().contains("/restart"),
+            "must not require /restart for live path: {reply}"
+        );
+    }
+
+    #[test]
+    fn format_set_model_reply_live_only_says_not_saved_cold_may_revert() {
+        let reply = format_set_model_reply(
+            "fixture/live",
+            &SetModelOutcome::LiveOnly {
+                persist_error: "disk busy".into(),
+            },
+        );
+        assert!(reply.contains("Active is now"), "{reply}");
+        assert!(reply.contains("not saved"), "{reply}");
+        assert!(reply.contains("disk busy"), "{reply}");
+        assert!(
+            reply.to_lowercase().contains("cold start may revert"),
+            "{reply}"
+        );
+        assert!(
+            !reply.to_lowercase().contains("/restart"),
+            "must not require /restart: {reply}"
+        );
     }
 
     /// #217: banner `Model:` must reflect the active model passed at notify time

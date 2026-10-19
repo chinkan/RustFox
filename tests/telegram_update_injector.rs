@@ -375,6 +375,8 @@ struct HandleMessageHarness {
     agent: Arc<Agent>,
     bot: Bot,
     api: MockTelegramApi,
+    /// Stripped model ids seen by FixtureLlm::chat_completion (ADR-0036).
+    models_seen: Arc<Mutex<Vec<String>>>,
 }
 
 impl HandleMessageHarness {
@@ -425,7 +427,10 @@ impl HandleMessageHarness {
         let bot = api.bot();
         let bot_arc = Arc::new(bot.clone());
 
-        let registry = Arc::new(FixtureLlm::new(stub_reply).into_registry());
+        let models_seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(
+            FixtureLlm::with_models_seen(stub_reply, Arc::clone(&models_seen)).into_registry(),
+        );
         let memory = MemoryStore::open_in_memory().expect("in-memory sqlite");
         let task_store = ScheduledTaskStore::new(memory.connection());
         let scheduler = Arc::new(Scheduler::new().await.expect("scheduler"));
@@ -483,6 +488,7 @@ impl HandleMessageHarness {
             agent,
             bot,
             api,
+            models_seen,
         }
     }
 
@@ -601,6 +607,7 @@ impl HandleMessageHarness {
             agent,
             bot,
             api,
+            models_seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -829,6 +836,46 @@ async fn drive_handle_message_chat_with_fixture_llm() {
     assert!(
         texts.iter().any(|t| t.contains(STUB_REPLY)),
         "expected fixture LLM reply in outbound SendMessage/sendRichMessage; got {texts:?}"
+    );
+}
+
+/// ADR-0036: after `set_model`, next chat without restart uses live Active
+/// (not boot-frozen `registry.default_qualified_model`) when no sticky model.
+#[tokio::test]
+async fn after_set_model_next_chat_uses_live_active_not_boot() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    let boot = h.agent.registry.default_qualified_model();
+    assert_eq!(boot, "fixture/stub", "harness boot Active");
+
+    // Live switch (same in-memory path as set_model after validation).
+    h.agent
+        .set_model_live("fixture/live-after-switch")
+        .await
+        .expect("set_model_live");
+    let active = h.agent.current_model.read().await.clone();
+    assert_eq!(active, "fixture/live-after-switch");
+    assert_ne!(active, boot);
+
+    let upd = UpdateInjector::parse_update_file(fixture("chat_hello.json")).unwrap();
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("drive chat after set_model");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let seen = h.models_seen.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "expected at least one llm_call; got {seen:?}"
+    );
+    // Provider receives stripped actual_model (`live-after-switch`), not boot `stub`.
+    assert!(
+        seen.iter().any(|m| m == "live-after-switch"),
+        "next chat must use live Active, not boot registry; seen={seen:?} boot={boot}"
+    );
+    assert!(
+        seen.iter().all(|m| m != "stub"),
+        "must not call boot default model after set_model; seen={seen:?}"
     );
 }
 
