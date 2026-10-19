@@ -1,6 +1,6 @@
 # ADR-0035: `/models` Active persist + top-level `default_provider`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-19
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0033 (Active ≠ `[openrouter].model`; #223 / #225), #217 (banner shows Active / `current_model`)
