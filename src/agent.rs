@@ -1183,6 +1183,10 @@ impl Agent {
         };
 
         let parent_tools_for_children = loop_tools.clone();
+        // ADR-0036: no sticky bots[]/persona model → live Active (`current_model`),
+        // not boot-frozen `registry.default_qualified_model()` via `llm.chat()`.
+        // Sticky `Some` unchanged (ADR-0033). `current_model` already read above.
+        let primary_model = resolve_primary_loop_model(loop_model.as_deref(), &current_model);
         let ld = self.config.loop_detection_config();
         let loop_config = crate::loop_runner::LoopConfig {
             max_iterations: self.config.max_iterations(),
@@ -1193,7 +1197,7 @@ impl Agent {
             interactive_loop_callback: true,
             allowed_tools: loop_tools,
             langsmith_project: Some(ls_project.clone()),
-            model: loop_model,
+            model: Some(primary_model),
             tool_event_tx,
             stream_token_tx,
             recovery_nudge: None,
@@ -2614,6 +2618,20 @@ pub fn split_response_chunks(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Resolve primary chat `LoopConfig.model` (ADR-0036).
+///
+/// Sticky `bots[]` / persona `model` (`Some`) wins and stays unchanged
+/// (ADR-0033). When none, inject live **Active** (`current_model`), not
+/// boot-frozen [`crate::provider::ProviderRegistry::default_qualified_model`].
+/// Callers set `LoopConfig.model = Some(...)` so the loop uses
+/// [`crate::llm::LlmClient::chat_completion_with_model`] instead of
+/// [`crate::llm::LlmClient::chat`].
+pub(crate) fn resolve_primary_loop_model(sticky: Option<&str>, active_model: &str) -> String {
+    sticky
+        .map(str::to_string)
+        .unwrap_or_else(|| active_model.to_string())
+}
+
 /// Resolve the model string for agent/subagent invoke (ADR-0033).
 ///
 /// Precedence: explicit `model_override` → skill/bot frontmatter `model` →
@@ -2787,6 +2805,28 @@ mod tests {
         let resolved =
             resolve_invoke_model(Some("override/model"), Some("skill/model"), "ollama/active");
         assert_eq!(resolved, "override/model");
+    }
+
+    // --- ADR-0036: primary loop model vs boot registry ---
+
+    #[test]
+    fn test_resolve_primary_loop_model_none_uses_live_active() {
+        let boot = "fixture/stub";
+        let active = "fixture/live-after-set-model";
+        let resolved = resolve_primary_loop_model(None, active);
+        assert_eq!(resolved, active);
+        assert_ne!(resolved, boot);
+    }
+
+    #[test]
+    fn test_resolve_primary_loop_model_sticky_unchanged() {
+        let active = "ollama/qwen3.8:27b";
+        let sticky = "openrouter/deepseek/deepseek-v4.1-flash";
+        let resolved = resolve_primary_loop_model(Some(sticky), active);
+        assert_eq!(
+            resolved, sticky,
+            "ADR-0033 sticky bots[]/persona must not be overridden by Active"
+        );
     }
 
     /// Agent invoke with Active=Ollama uses shared ADR-0032 primary keep-tools
