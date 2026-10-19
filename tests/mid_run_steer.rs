@@ -193,6 +193,7 @@ fn cfg(max_iterations: u32) -> LoopConfig {
         empty_response_retry_limit: 1,
         context_window: 4096,
         loop_detection_enabled: false,
+        loop_detection_threshold: 3,
         interactive_loop_callback: false,
         allowed_tools: None,
         langsmith_project: None,

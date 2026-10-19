@@ -313,7 +313,11 @@ impl Agent {
         restart_pending: Arc<AtomicBool>,
         soul_updated: Arc<AtomicBool>,
     ) -> Self {
-        let llm = LlmClient::new(registry.clone()).with_fallback_chain(config.fallback_chain());
+        let llm = LlmClient::with_request_timeout_secs(
+            registry.clone(),
+            config.llm_request_timeout_secs(),
+        )
+        .with_fallback_chain(config.fallback_chain());
         let initial_model = registry.default_qualified_model();
         let schedule_tz = crate::scheduler::timezone::resolve_schedule_timezone(
             config.schedule_timezone_config(),
@@ -1146,11 +1150,13 @@ impl Agent {
         };
 
         let parent_tools_for_children = loop_tools.clone();
+        let ld = self.config.loop_detection_config();
         let loop_config = crate::loop_runner::LoopConfig {
             max_iterations: self.config.max_iterations(),
             empty_response_retry_limit: self.config.empty_response_retry_limit(),
             context_window,
-            loop_detection_enabled: true,
+            loop_detection_enabled: ld.enabled,
+            loop_detection_threshold: ld.threshold,
             interactive_loop_callback: true,
             allowed_tools: loop_tools,
             langsmith_project: Some(ls_project.clone()),
@@ -2326,11 +2332,13 @@ impl Agent {
 
             let allowed_tools_vec: Vec<String> = allowed_tools.to_vec();
             let subagent_window = self.registry.effective_context_window(model);
+            let ld = self.config.loop_detection_config();
             let loop_config = crate::loop_runner::LoopConfig {
                 max_iterations: max_iter,
                 empty_response_retry_limit: self.config.empty_response_retry_limit(),
                 context_window: subagent_window,
-                loop_detection_enabled: true,
+                loop_detection_enabled: ld.enabled,
+                loop_detection_threshold: ld.threshold,
                 interactive_loop_callback: false,
                 allowed_tools: Some(allowed_tools_vec),
                 langsmith_project: trace.as_ref().map(|t| t.project.clone()),

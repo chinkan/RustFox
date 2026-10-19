@@ -1310,7 +1310,11 @@ async fn main() -> Result<()> {
     register_builtin_tasks(
         &scheduler,
         memory.clone(),
-        rustfox::llm::LlmClient::new(registry.clone()).with_fallback_chain(config.fallback_chain()),
+        rustfox::llm::LlmClient::with_request_timeout_secs(
+            registry.clone(),
+            config.llm_request_timeout_secs(),
+        )
+        .with_fallback_chain(config.fallback_chain()),
         config.memory.summarize_cron.clone(),
         config.memory.summarize_threshold,
         config.learning.user_model_cron.clone(),

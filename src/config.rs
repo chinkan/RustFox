@@ -511,6 +511,10 @@ pub struct AgentConfig {
     /// Retries when a provider answers 429/5xx (honouring `Retry-After`).
     #[serde(default = "default_rate_limit_retry_limit")]
     pub rate_limit_retry_limit: u32,
+    /// Per-request HTTP timeout for LLM calls (seconds). Soft hang safety net
+    /// (#231); 0 → default. Does not replace agent-loop progress gates.
+    #[serde(default = "default_llm_request_timeout_secs")]
+    pub llm_request_timeout_secs: u64,
     #[serde(default)]
     pub loop_detection: LoopDetectionConfig,
 }
@@ -685,6 +689,10 @@ fn default_max_iterations() -> u32 {
     25
 }
 
+fn default_llm_request_timeout_secs() -> u64 {
+    180
+}
+
 fn default_empty_response_retry_limit() -> u32 {
     3
 }
@@ -703,6 +711,7 @@ fn default_agent_config() -> AgentConfig {
         empty_response_retry_limit: default_empty_response_retry_limit(),
         parse_retry_limit: default_parse_retry_limit(),
         rate_limit_retry_limit: default_rate_limit_retry_limit(),
+        llm_request_timeout_secs: default_llm_request_timeout_secs(),
         loop_detection: LoopDetectionConfig::default(),
     }
 }
@@ -859,6 +868,18 @@ impl Config {
     /// Maximum agent loop iterations (from [agent] max_iterations, default 25).
     pub fn max_iterations(&self) -> u32 {
         self.agent.max_iterations
+    }
+
+    /// LLM HTTP request timeout in seconds ([agent] llm_request_timeout_secs;
+    /// default 180). 0 → default. Socket safety net for #231; loop progress
+    /// gates are the primary hang bound.
+    pub fn llm_request_timeout_secs(&self) -> u64 {
+        let s = self.agent.llm_request_timeout_secs;
+        if s == 0 {
+            default_llm_request_timeout_secs()
+        } else {
+            s
+        }
     }
 
     /// Scheduled-run wall-clock timeout in seconds (ADR-0024; default 900).
@@ -1565,6 +1586,39 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.supervisor.default_autonomy_mode, "standard");
         assert_eq!(cfg.supervisor.artifacts_dir, std::path::PathBuf::new());
+    }
+
+    #[test]
+    fn test_llm_request_timeout_secs_defaults_to_180() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.llm_request_timeout_secs, 180);
+        assert_eq!(cfg.llm_request_timeout_secs(), 180);
+    }
+
+    #[test]
+    fn test_llm_request_timeout_secs_zero_becomes_default() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [agent]
+            llm_request_timeout_secs = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.llm_request_timeout_secs(), 180);
     }
 
     #[test]

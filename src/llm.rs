@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A single part in a multi-modal message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -559,9 +560,41 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    /// Default LLM HTTP request timeout (seconds) when config omits it.
+    pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
+
+    /// Untimed HTTP client (used by unit tests with `start_paused` time).
+    /// Production paths must call [`Self::with_request_timeout_secs`].
     pub fn new(registry: Arc<crate::provider::ProviderRegistry>) -> Self {
         Self {
             client: reqwest::Client::new(),
+            registry,
+            fallback_chain: Vec::new(),
+        }
+    }
+
+    /// Build a client with an explicit per-request HTTP timeout (socket safety
+    /// net for #231). `secs == 0` uses [`Self::DEFAULT_REQUEST_TIMEOUT_SECS`].
+    pub fn with_request_timeout_secs(
+        registry: Arc<crate::provider::ProviderRegistry>,
+        secs: u64,
+    ) -> Self {
+        let secs = if secs == 0 {
+            Self::DEFAULT_REQUEST_TIMEOUT_SECS
+        } else {
+            secs
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(secs))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to build reqwest client with {secs}s timeout ({e}); using default client"
+                );
+                reqwest::Client::new()
+            });
+        Self {
+            client,
             registry,
             fallback_chain: Vec::new(),
         }
@@ -737,10 +770,27 @@ impl LlmClient {
             );
         }
         let max_tokens = provider.config().max_tokens;
+        let tools_n = tools.len();
+        tracing::info!(model = %model, tools = tools_n, "llm_call start");
 
-        let mut completion = provider
+        let mut completion = match provider
             .chat_completion(&self.client, messages, tools, actual_model, max_tokens)
-            .await?;
+            .await
+        {
+            Ok(c) => {
+                tracing::info!(model = %model, tools = tools_n, "llm_call done");
+                c
+            }
+            Err(e) => {
+                let msg = format!("{e:#}").to_lowercase();
+                if msg.contains("timed out") || msg.contains("timeout") {
+                    tracing::warn!(model = %model, tools = tools_n, "llm_call timeout");
+                } else {
+                    tracing::debug!(model = %model, tools = tools_n, error = %e, "llm_call error");
+                }
+                return Err(e);
+            }
+        };
 
         completion.model = model.to_string();
         Ok(completion)
@@ -2605,5 +2655,35 @@ mod tests {
             "http://localhost:11434/v1".into(),
             "qwen"
         )));
+    }
+
+    /// #231: hanging provider HTTP must fail via client timeout (not spin forever).
+    #[tokio::test(start_paused = true)]
+    async fn llm_request_timeout_fails_hanging_http() {
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(60))
+                    .set_body_string(ok_body()),
+            )
+            .mount(&server)
+            .await;
+
+        let llm = LlmClient::with_request_timeout_secs(fb_registry(server.uri()), 1);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
+            .await
+            .expect_err("hanging HTTP must time out");
+        let s = format!("{err:#}").to_lowercase();
+        assert!(
+            s.contains("timed out") || s.contains("timeout"),
+            "expected timeout error, got: {s}"
+        );
     }
 }

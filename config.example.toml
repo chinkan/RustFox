@@ -165,11 +165,12 @@ Be concise and helpful."""
 # max_iterations = 25              # Agent loop cap (default 25)
 # empty_response_retry_limit = 3   # Recovery attempts for empty model responses (default 3; 0 = fail immediately)
 # parse_retry_limit = 3            # Retries when API response is missing 'choices' field (default 3; 0 = fail immediately; exponential backoff: 1s, 2s, 4s...)
+# llm_request_timeout_secs = 180   # Per-request LLM HTTP timeout (default 180). Socket safety net (#231); 0 → default.
 
 # [agent.loop_detection]
 # enabled = true          # Detect exact tool-call repetition inside the agent loop (default true)
 # threshold = 3           # Repetitions of the same tool+args before a loop is flagged (default 3)
-# timeout_seconds = 120   # Idle window for the loop detector; tool calls older than this don't count (default 120)
+# timeout_seconds = 120   # Reserved (Telegram interactive pause); AgenticLoop auto-nudges then stops (#231)
 
 # Scheduled-run wall-clock timeout (ADR-0024 / #175). Optional; defaults apply if omitted.
 # [scheduler]

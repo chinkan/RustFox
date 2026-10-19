@@ -206,6 +206,7 @@ fn loop_config(allowed: Option<Vec<String>>, project: Option<String>) -> LoopCon
         empty_response_retry_limit: 1,
         context_window: 4096,
         loop_detection_enabled: false,
+        loop_detection_threshold: 3,
         interactive_loop_callback: false,
         allowed_tools: allowed,
         langsmith_project: project,

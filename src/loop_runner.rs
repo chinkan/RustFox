@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::conversation::ConversationManager;
 use crate::langsmith::LangSmithClient;
 use crate::llm::{ChatMessage, LlmClient, MessageContent};
+use crate::loop_detector::LoopDetector;
 use crate::mcp::McpManager;
 use crate::platform::sender::PlatformSender;
 use crate::platform::tool_notifier::ToolEvent;
@@ -34,6 +35,8 @@ pub struct LoopConfig {
     pub empty_response_retry_limit: u32,
     pub context_window: usize,
     pub loop_detection_enabled: bool,
+    /// Exact-repetition threshold for [`crate::loop_detector::LoopDetector`] (default 3).
+    pub loop_detection_threshold: usize,
     pub interactive_loop_callback: bool,
     pub allowed_tools: Option<Vec<String>>,
     pub langsmith_project: Option<String>,
@@ -180,6 +183,16 @@ impl<'a> AgenticLoop<'a> {
         let context_window = self.config.context_window;
         let mut empty_count = 0u32;
         let mut iterations;
+        // Wire the existing LoopDetector (dropped when AgenticLoop was extracted).
+        // Exact tool+args repetition → recovery nudge; repeated detection → stop.
+        // Auto-nudge for all paths (incl. portal); Telegram interactive pause stays
+        // out of this ponytail so portal cannot hang waiting on a oneshot.
+        let mut loop_detector = LoopDetector::new(
+            self.config.loop_detection_threshold,
+            self.config.loop_detection_enabled,
+        );
+        let mut loop_recovery_count = 0u32;
+        const MAX_LOOP_RECOVERIES: u32 = 2;
 
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
@@ -263,6 +276,42 @@ impl<'a> AgenticLoop<'a> {
             }
 
             if !tool_calls.is_empty() {
+                loop_detector.record(&tool_calls, iteration as usize);
+                if let Some(loop_info) = loop_detector.detect_loop() {
+                    tracing::warn!(
+                        tool = %loop_info.tool_name,
+                        count = loop_info.call_count,
+                        recovery = loop_recovery_count,
+                        "Tool-call loop detected — no progress on repeated tool+args"
+                    );
+                    loop_recovery_count += 1;
+                    if loop_recovery_count > MAX_LOOP_RECOVERIES {
+                        return Ok(LoopOutcome::FinalResponse {
+                            text: format!(
+                                "I noticed I was calling {} repeatedly without progress, so I stopped. Please try rephrasing your request.",
+                                loop_info.tool_name
+                            ),
+                            iterations,
+                        });
+                    }
+                    // Push the assistant tool_calls, then nudge results (do not re-execute).
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(MessageContent::Text(text.clone())),
+                        tool_calls: Some(tool_calls.clone()),
+                        tool_call_id: None,
+                    });
+                    let nudge_text = format!(
+                        "Error: You have called {} {} times with the same arguments.                          The result has not changed. Try a different approach or answer the user now.",
+                        loop_info.tool_name, loop_info.call_count,
+                    );
+                    for tc in &tool_calls {
+                        messages.push_tool_result(&tc.id, nudge_text.clone());
+                    }
+                    loop_detector.clear();
+                    continue;
+                }
+
                 messages.push(ChatMessage {
                     role: "assistant".to_string(),
                     content: Some(MessageContent::Text(text.clone())),
