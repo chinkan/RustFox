@@ -112,6 +112,14 @@ Decision below.
   impl.
 - This docs PR does **not** close #233.
 
+
+## Cross-reference (#236)
+
+Live primary chat when `LoopConfig.model` is `None` must follow live
+`current_model` (not boot-frozen registry default) — locked in **ADR-0036**.
+This ADR’s boot/`default_provider` persist and Telegram saved / not-saved
+copy locks are unchanged; #237 fallback UI stays out.
+
 ## Consequences
 
 - Docs-only first (this ADR + optional `config.example.toml` comment + short
