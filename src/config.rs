@@ -46,6 +46,11 @@ pub struct Config {
     /// provider from the legacy `[openrouter]` section.
     #[serde(default)]
     pub provider: Vec<ProviderSection>,
+    /// Boot Active provider name (ADR-0035 / #233). When set, must match a
+    /// configured provider (`[[provider]]` name or legacy synthesized
+    /// `"openrouter"`). Missing → compat `providers[0]`. Unknown → fail boot.
+    #[serde(default)]
+    pub default_provider: Option<String>,
     /// Fallback chain — additional provider/model names tried when
     /// the primary call fails.
     #[serde(default)]
@@ -1164,8 +1169,14 @@ impl Config {
     }
 
     /// Build the provider list from config, handling legacy [openrouter] backward compat.
-    /// Returns (providers, default_provider_name, fallback_chain).
-    pub fn build_providers(&self) -> (Vec<ProviderSection>, String, Vec<String>) {
+    ///
+    /// Returns `(providers, default_provider_name, fallback_chain)`.
+    ///
+    /// Boot Active (ADR-0035):
+    /// - `default_provider` present + name exists → that provider
+    /// - key missing → compat `providers[0]` (incl. legacy openrouter synthesis)
+    /// - key set but unknown → **Err** (fail boot; no silent `[0]`)
+    pub fn build_providers(&self) -> Result<(Vec<ProviderSection>, String, Vec<String>)> {
         let mut providers: Vec<ProviderSection> = self.provider.clone();
 
         // Backward compat: if [openrouter] section exists and no explicit provider named "openrouter"
@@ -1188,14 +1199,29 @@ impl Config {
             });
         }
 
-        let default = if providers.is_empty() {
-            "openrouter".to_string()
-        } else {
-            providers[0].name.clone()
+        let default = match self.default_provider.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                if providers.iter().any(|p| p.name == name) {
+                    name.to_string()
+                } else {
+                    let known: Vec<_> = providers.iter().map(|p| p.name.as_str()).collect();
+                    anyhow::bail!(
+                        "default_provider = \"{name}\" does not match any configured provider                          (known: {known:?}). Fix the name or remove the key to use providers[0] compat."
+                    );
+                }
+            }
+            _ => {
+                // Missing / blank → compat providers[0]
+                if providers.is_empty() {
+                    "openrouter".to_string()
+                } else {
+                    providers[0].name.clone()
+                }
+            }
         };
 
         let fallback = self.fallback.chain.clone();
-        (providers, default, fallback)
+        Ok((providers, default, fallback))
     }
 }
 
@@ -1824,7 +1850,7 @@ mod tests {
             model = "moonshotai/kimi-k2.6"
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (providers, default_name, _) = cfg.build_providers();
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
         assert!(providers.iter().any(|p| p.name == "openrouter"));
         assert_eq!(default_name, "openrouter");
     }
@@ -1846,7 +1872,7 @@ mod tests {
             model = "anthropic/claude-sonnet-4-6"
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (providers, _default, _) = cfg.build_providers();
+        let (providers, _default, _) = cfg.build_providers().unwrap();
         // Should not have duplicate openrouter providers
         let or_count = providers.iter().filter(|p| p.name == "openrouter").count();
         assert_eq!(
@@ -1858,6 +1884,80 @@ mod tests {
             or.api_key.as_deref(),
             Some("new-key"),
             "explicit [[provider]] should win"
+        );
+    }
+
+    #[test]
+    fn default_provider_selects_boot_active_when_valid() {
+        let toml = r#"
+            default_provider = "openrouter"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            model = "deepseek/deepseek-v4.1-flash"
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://localhost:11434/v1"
+            model = "qwen3.8:27b"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "openrouter");
+        let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
+        assert_eq!(or.model, "deepseek/deepseek-v4.1-flash");
+        // First [[provider]] is still ollama — default_provider must win over [0].
+        assert_eq!(providers[0].name, "ollama");
+    }
+
+    #[test]
+    fn default_provider_missing_uses_providers_zero_compat() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            model = "moonshotai/kimi-k2.6"
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://localhost:11434/v1"
+            model = "llama3.1"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.default_provider.is_none());
+        let (_providers, default_name, _) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "ollama");
+    }
+
+    #[test]
+    fn default_provider_unknown_fails_boot() {
+        let toml = r#"
+            default_provider = "nope"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            model = "moonshotai/kimi-k2.6"
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://localhost:11434/v1"
+            model = "llama3.1"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let err = cfg.build_providers().unwrap_err().to_string();
+        assert!(
+            err.contains("default_provider") && err.contains("nope"),
+            "expected clear unknown-name error, got: {err}"
+        );
+        assert!(
+            err.contains("does not match"),
+            "expected fail-boot wording, got: {err}"
         );
     }
 

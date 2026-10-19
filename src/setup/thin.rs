@@ -514,7 +514,7 @@ mod tests {
         assert!(cfg.bots[0].tools.is_none());
         assert!(sandbox_safe_tools_stay_on(cfg.bots[0].tools.as_deref()));
         assert_eq!(cfg.bots[0].allowed_user_ids, vec![CLOSED_ALLOWLIST_USER]);
-        let (providers, default_name, _) = cfg.build_providers();
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
         assert_eq!(default_name, "openrouter");
         assert_eq!(
             providers[0].provider_type,
@@ -599,7 +599,7 @@ mod tests {
         assert!(!sandbox_safe_tools_stay_on(Some(
             &["web_search".into()][..]
         )));
-        let (_providers, default_name, _) = cfg.build_providers();
+        let (_providers, default_name, _) = cfg.build_providers().unwrap();
         assert_eq!(default_name, "ollama");
     }
 

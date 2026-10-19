@@ -91,7 +91,7 @@ impl AgentOps for Agent {
         })
     }
     fn set_model(&self, model_id: String) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
-        Box::pin(async move { self.set_model(&model_id).await })
+        Box::pin(async move { self.set_model(&model_id).await.map(|_| ()) })
     }
     fn reload_skills_and_agents(&self) -> futures::future::BoxFuture<'_, (usize, usize)> {
         Box::pin(async move { self.reload_skills_and_agents().await })
