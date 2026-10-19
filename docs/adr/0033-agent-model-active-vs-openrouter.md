@@ -99,6 +99,13 @@ top-level key; `/models` persist writes that provider’s `model` + the key).
 This ADR’s Active ≠ `[openrouter].model` invoke lock is unchanged; #217 banner
 display stays closed.
 
+
+## Cross-reference (#236)
+
+Primary chat with `LoopConfig.model = None` must use live `current_model`
+(ADR-0036). Explicit sticky `Some(bots[]/persona)` from this ADR is unchanged
+and must not be overridden by Active.
+
 ## Consequences
 
 - Banner Active / `current_model` (#217) is the source of truth for
