@@ -92,6 +92,13 @@ LLM client (tip ≥ `a5ea4ab` / `01db8f6`).
 - CHANGELOG entry under the shipping release (impl) / Unreleased note for
   this docs slice.
 
+## Cross-reference (#233)
+
+Boot **which** provider is Active is locked in **ADR-0035** (`default_provider`
+top-level key; `/models` persist writes that provider’s `model` + the key).
+This ADR’s Active ≠ `[openrouter].model` invoke lock is unchanged; #217 banner
+display stays closed.
+
 ## Consequences
 
 - Banner Active / `current_model` (#217) is the source of truth for
