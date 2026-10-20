@@ -4,6 +4,7 @@
 - **Date:** 2026-09-26
 - **Branch:** `fix/429-backup-model`
 - **Depends on:** ADR-0012 (chat already tries fallbacks; queue catches what still dies)
+- **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate)
 
 ## Context
 
@@ -141,3 +142,12 @@ Two holes found after #60 merged; queue not trusted until this fixup lands.
    (cron `rerun_id=None` or re-fire) calls `supersede_live_for_task(task_id)` so
    leftover `queued|awaiting_user` siblings cannot be stale-replayed. Re-fires
    still `mark_done(rid)` first (row shows `done`, not `superseded`).
+
+## Cross-reference (#240 / ADR-0039)
+
+Optional **transcript continue** on the wall-clock **timeout** human-gate
+(messages + iteration + dangling tool ids; same Retry → continue if
+checkpoint else full replay) is locked in **ADR-0039** (Proposed;
+Slice B). Until that lands, this ADR’s **full replay** Retry default is
+unchanged. Slice A copy/inline is **ADR-0038** (separate). Stall /
+failed-twice gates stay full-replay in ADR-0039’s first scope.
