@@ -226,15 +226,17 @@ impl RerunQueue {
     }
 
     /// Human gate `retry`: reset to queued with a fresh attempt budget.
+    /// ADR-0040: eligibility is **now** (not +30m) so sync kick / due() can
+    /// fire immediately. Auto `enqueue` keeps the 30m congestion delay.
     pub async fn retry(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
         let n = conn
             .execute(
                 "UPDATE pending_reruns
                  SET state = 'queued', attempts = 0,
-                     next_eligible_at = datetime('now', ?2), updated_at = datetime('now')
+                     next_eligible_at = datetime('now'), updated_at = datetime('now')
                  WHERE id = ?1 AND state IN ('awaiting_user', 'abandoned')",
-                rusqlite::params![id, format!("+{ELIGIBILITY_DELAY_MINUTES} minutes")],
+                rusqlite::params![id],
             )
             .context("Failed to retry rerun")?;
         Ok(n > 0)
@@ -563,6 +565,48 @@ mod tests {
         assert_eq!(
             r.attempts, 0,
             "fresh auto-attempt budget after human says retry"
+        );
+        // ADR-0040: human retry is due immediately (not +30m like enqueue).
+        let due = q.due().await.unwrap();
+        assert_eq!(due.len(), 1, "human retry must be eligible now");
+        assert_eq!(due[0].id, id);
+        let mins: f64 = {
+            let c = conn.lock().await;
+            c.query_row(
+                "SELECT (julianday(next_eligible_at)-julianday('now'))*24*60 FROM pending_reruns WHERE id=?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            mins <= 0.05,
+            "human retry eligibility must be ~now, got {mins}m offset"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_still_delayed_30m_after_human_retry_semantics() {
+        // Guard: auto first-strike enqueue keeps +30m (ADR-0040 Q8).
+        let (q, conn) = queue_with_tasks().await;
+        seed_task(&conn, "t1", "active", false).await;
+        let id = q.enqueue("t1", "run-t1", "429").await.unwrap();
+        assert!(
+            q.due().await.unwrap().is_empty(),
+            "auto enqueue must not be due immediately"
+        );
+        let mins: f64 = {
+            let c = conn.lock().await;
+            c.query_row(
+                "SELECT (julianday(next_eligible_at)-julianday('now'))*24*60 FROM pending_reruns WHERE id=?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            (15.0..45.0).contains(&mins),
+            "enqueue eligibility ~30m out, got {mins}m"
         );
     }
 

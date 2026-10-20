@@ -4,7 +4,7 @@
 - **Date:** 2026-09-26
 - **Branch:** `fix/429-backup-model`
 - **Depends on:** ADR-0012 (chat already tries fallbacks; queue catches what still dies)
-- **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate)
+- **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate); #246 / ADR-0040 (human Retry eligible now + sync kick — amends human `retry` timing)
 
 ## Context
 
@@ -160,3 +160,14 @@ skeleton for timeout / stall / failed-twice) plus **inline Retry/Cancel**
 `/retry <id>` / `/cancel <id>` backup are locked in **ADR-0038** (Accepted;
 Slice A). This ADR’s two-strike, `enqueue_manual`, watchdog, and **full
 replay** semantics are unchanged. Slice B true resume remains out.
+
+## Cross-reference (#246 / ADR-0040)
+
+Human gate **Retry** eligibility and dispatch timing are amended in
+**ADR-0040** (Accepted): `RerunQueue::retry` sets `next_eligible_at = now`
+(not +30m), and after successful Retried the bot sync claim+dispatches
+that one row on the same path as this ADR’s hourly watchdog
+(`mark_dispatched` → `build_rerun_request`). Auto `enqueue` keeps +30m;
+hourly sweep interval unchanged. Cancel does not kick. Full-replay /
+two-strike semantics here are otherwise unchanged.
+
