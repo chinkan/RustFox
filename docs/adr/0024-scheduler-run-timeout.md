@@ -114,3 +114,11 @@ present, is locked in **ADR-0039** (Proposed; Slice B). This ADR’s
 wall-clock timeout, cancel-on-expiry, human-gate-once (no timeout
 auto-retry), startup reconcile, and stale-run watchdog locks are
 unchanged. Slice A copy/inline is **ADR-0038** (separate).
+
+## Cross-reference (#240 / ADR-0038)
+
+Human-gate **copy** for the timeout DM (and sibling gates) plus inline /
+`/retry` `/cancel` UX is locked in **ADR-0038**. This ADR’s wall-clock
+timeout, cancel-on-expiry, `enqueue_manual` human-gate-once, startup
+reconcile, and stale-run watchdog locks are unchanged. No timeout
+auto-retry; Slice B resume out.
