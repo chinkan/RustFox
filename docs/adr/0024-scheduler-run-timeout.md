@@ -4,6 +4,7 @@
 - **Date:** 2026-10-12
 - **Issue:** #175 (canonical; #174 closed as duplicate)
 - **Depends on:** ADR-0013 (human-gate / dead-letter), ADR-0020 slice 1b (TurnGate `begin_scheduled` / `finish`)
+- **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate)
 - **Amends:** none (scheduler-side analogue of #58 CLI unbound timeout)
 
 ## Context
@@ -104,3 +105,12 @@ watchdog; **no** concurrent runner in this slice. `#166` timezone yields.
 - #173 verifier sandbox tools  
 - Concurrent / sharded job runners  
 - Portal UI for timeout config (config.toml / docs enough for v1)
+
+## Cross-reference (#240 / ADR-0039)
+
+Writing a **transcript checkpoint** on this ADR’s timeout →
+`enqueue_manual` path, and Retry continuing from that checkpoint when
+present, is locked in **ADR-0039** (Proposed; Slice B). This ADR’s
+wall-clock timeout, cancel-on-expiry, human-gate-once (no timeout
+auto-retry), startup reconcile, and stale-run watchdog locks are
+unchanged. Slice A copy/inline is **ADR-0038** (separate).
