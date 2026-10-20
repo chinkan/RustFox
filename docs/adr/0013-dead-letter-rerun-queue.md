@@ -151,3 +151,12 @@ checkpoint else full replay) is locked in **ADR-0039** (Proposed;
 Slice B). Until that lands, this ADR’s **full replay** Retry default is
 unchanged. Slice A copy/inline is **ADR-0038** (separate). Stall /
 failed-twice gates stay full-replay in ADR-0039’s first scope.
+
+## Cross-reference (#240 / ADR-0038)
+
+Operator-facing human-gate **Telegram copy** (readable duration, shared
+skeleton for timeout / stall / failed-twice) plus **inline Retry/Cancel**
+(`rerun:retry:<uuid>` / `rerun:cancel:<uuid>`) and deterministic
+`/retry <id>` / `/cancel <id>` backup are locked in **ADR-0038** (Proposed;
+Slice A). This ADR’s two-strike, `enqueue_manual`, watchdog, and **full
+replay** semantics are unchanged. Slice B true resume remains out.
