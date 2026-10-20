@@ -157,6 +157,6 @@ failed-twice gates stay full-replay in ADR-0039’s first scope.
 Operator-facing human-gate **Telegram copy** (readable duration, shared
 skeleton for timeout / stall / failed-twice) plus **inline Retry/Cancel**
 (`rerun:retry:<uuid>` / `rerun:cancel:<uuid>`) and deterministic
-`/retry <id>` / `/cancel <id>` backup are locked in **ADR-0038** (Proposed;
+`/retry <id>` / `/cancel <id>` backup are locked in **ADR-0038** (Accepted;
 Slice A). This ADR’s two-strike, `enqueue_manual`, watchdog, and **full
 replay** semantics are unchanged. Slice B true resume remains out.

@@ -1,4 +1,5 @@
 pub mod history;
+pub mod human_gate;
 pub mod reminders;
 pub mod reruns;
 pub mod schedule;

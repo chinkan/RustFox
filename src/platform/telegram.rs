@@ -175,6 +175,8 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
             "restart",
             "Clean process exit so the service/shell brings the bot back",
         ),
+        BotCommand::new("retry", "Retry a scheduled human-gate queue row by id"),
+        BotCommand::new("cancel", "Cancel a scheduled human-gate queue row by id"),
     ]
 }
 
@@ -509,6 +511,22 @@ pub async fn send_markdown_message(
             }
         }
     }
+}
+
+/// ADR-0038: human-gate DM with inline Retry/Cancel (entities + keyboard).
+pub async fn send_human_gate_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    markdown: &str,
+    queue_id: &str,
+) -> ResponseResult<()> {
+    let (text, entities) = markdown_to_entities(markdown);
+    let keyboard = crate::scheduler::human_gate::human_gate_keyboard(queue_id);
+    bot.send_message(chat_id, text)
+        .entities(entities)
+        .reply_markup(keyboard)
+        .await?;
+    Ok(())
 }
 
 /// Read the tool UI mode for a user, with backward compatibility for the old
@@ -1791,6 +1809,18 @@ pub async fn handle_message(
 
     // Combined parse_command dispatch for /self-upgrade and /models.
     if let Some((cmd, arg)) = parse_command(&text) {
+        // ADR-0038: deterministic /retry <id> /cancel <id> human-gate (no LLM).
+        if let Some(action) = crate::scheduler::human_gate::parse_gate_slash(&cmd, &arg) {
+            return handle_human_gate_slash(bot, msg.chat.id, &agent, &bot_id, action).await;
+        }
+        if matches!(cmd.as_str(), "retry" | "cancel") {
+            bot.send_message(
+                msg.chat.id,
+                "Usage: `/retry <id>` or `/cancel <id>` (scheduled human-gate queue id).",
+            )
+            .await?;
+            return Ok(());
+        }
         match cmd.as_str() {
             "self-upgrade" | "selfupgrade" => {
                 // ADR-0030: only bare | main | release; never treat unknown as git branch.
@@ -2622,6 +2652,83 @@ async fn run_telegram_user_turn(
     run_stop
 }
 
+/// ADR-0038: apply human-gate Retry/Cancel from inline callback.
+async fn handle_human_gate_callback(
+    bot: Bot,
+    agent: Arc<Agent>,
+    bot_id: String,
+    callback_id: teloxide::types::CallbackQueryId,
+    msg: Option<teloxide::types::Message>,
+    action: crate::scheduler::human_gate::GateAction,
+) -> ResponseResult<()> {
+    let queue = crate::scheduler::reruns::RerunQueue::new(agent.memory.connection());
+    let outcome = match crate::scheduler::human_gate::apply_gate_action(
+        &queue,
+        &agent.task_store,
+        &bot_id,
+        &action,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "human-gate callback failed");
+            bot.answer_callback_query(callback_id)
+                .text("Something went wrong")
+                .await
+                .ok();
+            return Ok(());
+        }
+    };
+    let label = outcome.as_str();
+    bot.answer_callback_query(callback_id.clone())
+        .text(label)
+        .await
+        .ok();
+    if let Some(m) = msg {
+        let base = m.text().unwrap_or("").to_string();
+        let updated = if base.is_empty() {
+            label.to_string()
+        } else {
+            format!("{base}\n\n{label}")
+        };
+        bot.edit_message_text(m.chat.id, m.id, updated)
+            .reply_markup(crate::scheduler::human_gate::empty_keyboard())
+            .await
+            .ok();
+    }
+    Ok(())
+}
+
+/// ADR-0038: `/retry <id>` / `/cancel <id>` text backup.
+async fn handle_human_gate_slash(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    bot_id: &str,
+    action: crate::scheduler::human_gate::GateAction,
+) -> ResponseResult<()> {
+    let queue = crate::scheduler::reruns::RerunQueue::new(agent.memory.connection());
+    let outcome = match crate::scheduler::human_gate::apply_gate_action(
+        &queue,
+        &agent.task_store,
+        bot_id,
+        &action,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "human-gate slash failed");
+            bot.send_message(chat_id, "Something went wrong applying that gate action.")
+                .await?;
+            return Ok(());
+        }
+    };
+    bot.send_message(chat_id, outcome.as_str()).await?;
+    Ok(())
+}
+
 /// Handle callback query from loop detection inline keyboard.
 /// Resolves the oneshot sender so the suspended agent loop can continue.
 async fn handle_loop_callback(
@@ -2684,6 +2791,11 @@ async fn handle_model_callback(
     // Each branch below now answers with the appropriate text (or silently)
     // exactly once. A second answer for the same callback_id is ignored by
     // Telegram, which previously swallowed the "⛔ Command cancelled" toast.
+
+    // ADR-0038: scheduler human-gate Retry/Cancel inline buttons.
+    if let Some(action) = crate::scheduler::human_gate::parse_rerun_callback(&data) {
+        return handle_human_gate_callback(bot, agent, bot_id, callback_id, msg, action).await;
+    }
 
     if let Some(provider_name) = data.strip_prefix("provider_select:") {
         bot.answer_callback_query(callback_id.clone()).await.ok();

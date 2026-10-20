@@ -33,6 +33,22 @@ async fn send_schedule_reply(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// ADR-0038 human-gate DM: copy skeleton + inline Retry/Cancel.
+async fn send_human_gate_reply(
+    bot: &Option<Arc<teloxide::Bot>>,
+    chat_id: teloxide::types::ChatId,
+    text: &str,
+    queue_id: &str,
+) -> anyhow::Result<()> {
+    let Some(bot) = bot else {
+        tracing::info!("human-gate reply skipped; this telegram bot does not own the run");
+        return Ok(());
+    };
+    rustfox::platform::telegram::send_human_gate_message(bot, chat_id, text, queue_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// One scheduled job: persist, `process_message_outcome`, reply / ADR-0013 dead-letter.
 /// Returns the stop reason for [`TurnGate::finish`] (`None` on hard error).
 async fn run_one_scheduled_job(
@@ -108,22 +124,16 @@ async fn run_one_scheduled_job(
                         tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
                     }
                     if let Some(cv) = chat_id_opt {
-                        let ask = format!(
-                            "**Scheduled task needs your call** — the re-run hit the wall-clock timeout ({timeout_secs}s).
-
-{reason}
-
-Reply with:
-- retry → try once more automatically
-- cancel → give up
-
-(queue id: `{rid}`)"
+                        let ask = rustfox::scheduler::human_gate::format_human_gate_message(
+                            rustfox::scheduler::human_gate::HumanGateKind::RerunTimeout,
+                            &rustfox::scheduler::human_gate::format_readable_duration(timeout_secs),
+                            rid,
                         );
-                        let _ = send_schedule_reply(
+                        let _ = send_human_gate_reply(
                             &req.owning_telegram_bot,
                             teloxide::types::ChatId(cv),
                             &ask,
-                            rustfox::platform::telegram::MessageFormat::Auto,
+                            rid,
                         )
                         .await;
                     }
@@ -138,22 +148,18 @@ Reply with:
                             req.task_id
                         );
                         if let Some(cv) = chat_id_opt {
-                            let note = format!(
-                                "**Scheduled task timed out** after {timeout_secs}s without finishing, so I did NOT auto-retry (it may have half-done work).
-
-{reason}
-
-Reply with:
-- retry → try once more automatically
-- cancel → give up
-
-(queue id: `{qid}`)"
+                            let note = rustfox::scheduler::human_gate::format_human_gate_message(
+                                rustfox::scheduler::human_gate::HumanGateKind::FirstRunTimeout,
+                                &rustfox::scheduler::human_gate::format_readable_duration(
+                                    timeout_secs,
+                                ),
+                                &qid,
                             );
-                            let _ = send_schedule_reply(
+                            let _ = send_human_gate_reply(
                                 &req.owning_telegram_bot,
                                 teloxide::types::ChatId(cv),
                                 &note,
-                                rustfox::platform::telegram::MessageFormat::Auto,
+                                &qid,
                             )
                             .await;
                         }
@@ -220,15 +226,16 @@ Reply with:
                             tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
                         }
                         if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                            let ask = format!(
-                                "**Scheduled task needs your call** — the re-run ran out of iteration budget.\n\n{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                                reason, rid
+                            let ask = rustfox::scheduler::human_gate::format_human_gate_message(
+                                rustfox::scheduler::human_gate::HumanGateKind::IterationStall,
+                                &agent.config.max_iterations().to_string(),
+                                rid,
                             );
-                            let _ = send_schedule_reply(
+                            let _ = send_human_gate_reply(
                                 &req.owning_telegram_bot,
                                 teloxide::types::ChatId(cv),
                                 &ask,
-                                rustfox::platform::telegram::MessageFormat::Auto,
+                                rid,
                             )
                             .await;
                         }
@@ -244,17 +251,16 @@ Reply with:
                                     req.task_id
                                 );
                                 if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                                    let note = format!(
-                                        "**Scheduled task stalled:** it hit the iteration cap ({}) without finishing, so I did NOT auto-retry (it may have half-done work).\n\n{}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                                        agent.config.max_iterations(),
-                                        reason,
-                                        qid
+                                    let note = rustfox::scheduler::human_gate::format_human_gate_message(
+                                        rustfox::scheduler::human_gate::HumanGateKind::IterationStall,
+                                        &agent.config.max_iterations().to_string(),
+                                        &qid,
                                     );
-                                    let _ = send_schedule_reply(
+                                    let _ = send_human_gate_reply(
                                         &req.owning_telegram_bot,
                                         teloxide::types::ChatId(cv),
                                         &note,
-                                        rustfox::platform::telegram::MessageFormat::Auto,
+                                        &qid,
                                     )
                                     .await;
                                 }
@@ -330,17 +336,16 @@ Reply with:
                         tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
                     }
                     if let Some(cv) = chat_id_opt {
-                        let ask = format!(
-                            "**Scheduled task failed twice** (re-run {}), holding for your decision.\n\nLast error: {}\n\nReply with:\n- retry → try once more automatically\n- cancel → give up\n\n(queue id: `{}`)",
-                            &rid[..8.min(rid.len())],
-                            err_str,
-                            rid
+                        let ask = rustfox::scheduler::human_gate::format_human_gate_message(
+                            rustfox::scheduler::human_gate::HumanGateKind::FailedTwice,
+                            &err_str,
+                            rid,
                         );
-                        let _ = send_schedule_reply(
+                        let _ = send_human_gate_reply(
                             &req.owning_telegram_bot,
                             teloxide::types::ChatId(cv),
                             &ask,
-                            rustfox::platform::telegram::MessageFormat::Auto,
+                            rid,
                         )
                         .await;
                     }

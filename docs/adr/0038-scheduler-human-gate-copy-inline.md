@@ -1,6 +1,6 @@
 # ADR-0038: Scheduler human-gate Telegram copy + inline retry/cancel
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0013 (dead-letter / human-gate / full replay), ADR-0024 (scheduler run timeout → human-gate once)
