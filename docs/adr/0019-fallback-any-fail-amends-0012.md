@@ -73,3 +73,8 @@ Wiremock (or equivalent): primary 400 → fallback 200 (model rewritten); primar
 401/403 → zero fallback hits; primary 402 → fallback tried; primary timeout /
 connect fail → fallback tried; primary 429 exhausts ADR-0009 then fallback;
 envelope body with outer 400 + inner 429 still walks (and logs inner code).
+
+## Cross-reference (#237 / ADR-0037)
+
+Operator Telegram edit of `[fallback].chain` is **ADR-0037**. This ADR’s
+walk-on-any-fail / hard-exclusion locks are unchanged.

@@ -118,7 +118,14 @@ Decision below.
 Live primary chat when `LoopConfig.model` is `None` must follow live
 `current_model` (not boot-frozen registry default) — locked in **ADR-0036**.
 This ADR’s boot/`default_provider` persist and Telegram saved / not-saved
-copy locks are unchanged; #237 fallback UI stays out.
+copy locks are unchanged; Telegram `/fallback` chain edit is **ADR-0037** (#237).
+
+
+## Cross-reference (#237)
+
+Telegram `/fallback` list/add/remove for `[fallback].chain` (persist + live,
+no portal/reorder this slice) is locked in **ADR-0037**. This ADR’s
+`default_provider` / `/models` persist locks are unchanged.
 
 ## Consequences
 

@@ -4,7 +4,7 @@
 - **Date:** 2026-10-19
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0035 (`/models` Active persist + `default_provider`; #233 / #235), ADR-0033 (sticky agent/bot/persona `model`; #223 / #225)
-- **Related:** #217 (banner shows Active / `current_model`; closed), #237 (fallback UI; out of this slice)
+- **Related:** #217 (banner shows Active / `current_model`; closed), #237 / ADR-0037 (Telegram `/fallback` chain edit; separate slice)
 - **Issue:** #236
 
 ## Context
@@ -82,6 +82,13 @@ the Decision below.
   **without** `/restart` uses the new Active when there is no sticky model.
 - CHANGELOG Unreleased note for this docs slice; shipping release note on
   impl.
+
+
+## Cross-reference (#237)
+
+Telegram view/add/remove of `[fallback].chain` is locked in **ADR-0037**
+(Proposed). This ADR’s live `current_model` / `/models` copy locks are
+unchanged; fallback walk semantics remain ADR-0012 / ADR-0019.
 
 ## Consequences
 
