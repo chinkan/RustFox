@@ -127,6 +127,18 @@ pub enum SetModelOutcome {
     LiveOnly { persist_error: String },
 }
 
+/// Outcome of fallback chain add/remove (ADR-0037).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackEditOutcome {
+    /// Disk write succeeded; live chain updated.
+    Saved { chain: Vec<String> },
+    /// Live chain updated; disk write failed.
+    LiveOnly {
+        chain: Vec<String>,
+        persist_error: String,
+    },
+}
+
 /// The core agent that processes messages through LLM + tools.
 /// Platform-agnostic — receives IncomingMessage, returns response text.
 pub struct Agent {
@@ -694,6 +706,65 @@ impl Agent {
             "Model changed live (memory only; disk already updated)"
         );
         Ok(())
+    }
+
+    /// Current live fallback chain snapshot (ADR-0037 list).
+    pub fn fallback_chain_list(&self) -> Vec<String> {
+        self.llm.fallback_chain_snapshot()
+    }
+
+    /// Add a fully-qualified `provider/model` to the fallback chain: validate →
+    /// persist disk → update live (ADR-0037). Rejects duplicate / at-cap / bad
+    /// model before any disk write.
+    pub async fn fallback_chain_add(&self, entry: &str) -> anyhow::Result<FallbackEditOutcome> {
+        let validated = crate::fallback_edit::validate_fallback_entry(&self.registry, entry)
+            .map_err(anyhow::Error::msg)?;
+        let mut chain = self.llm.fallback_chain_snapshot();
+        crate::fallback_edit::try_add(&mut chain, validated).map_err(anyhow::Error::msg)?;
+        self.persist_and_apply_fallback(chain).await
+    }
+
+    /// Remove by 1-based index or exact `provider/model` (ADR-0037).
+    pub async fn fallback_chain_remove(&self, arg: &str) -> anyhow::Result<FallbackEditOutcome> {
+        let mut chain = self.llm.fallback_chain_snapshot();
+        let removed =
+            crate::fallback_edit::try_remove(&mut chain, arg).map_err(anyhow::Error::msg)?;
+        let outcome = self.persist_and_apply_fallback(chain).await?;
+        tracing::info!(removed = %removed, "Fallback chain entry removed");
+        Ok(outcome)
+    }
+
+    async fn persist_and_apply_fallback(
+        &self,
+        chain: Vec<String>,
+    ) -> anyhow::Result<FallbackEditOutcome> {
+        let path = self.config_path.clone();
+        let chain_for_disk = chain.clone();
+        let persist_result = tokio::task::spawn_blocking(move || {
+            crate::config_edit::persist_fallback_chain(&path, &chain_for_disk)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("fallback persist task join error: {e}"))?;
+
+        self.llm.set_fallback_chain_live(chain.clone());
+
+        match persist_result {
+            Ok(_) => {
+                tracing::info!(entries = chain.len(), "Fallback chain persisted and live");
+                Ok(FallbackEditOutcome::Saved { chain })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    entries = chain.len(),
+                    "Fallback chain updated live but disk persist failed"
+                );
+                Ok(FallbackEditOutcome::LiveOnly {
+                    chain,
+                    persist_error: format!("{e:#}"),
+                })
+            }
+        }
     }
 
     fn validate_model_id<'a>(&'a self, model_id: &'a str) -> anyhow::Result<(String, &'a str)> {

@@ -9,6 +9,7 @@ pub mod command_tool;
 pub mod config;
 pub mod config_edit;
 pub mod conversation;
+pub mod fallback_edit;
 pub mod file_processor;
 pub mod google_mcp;
 pub mod home;

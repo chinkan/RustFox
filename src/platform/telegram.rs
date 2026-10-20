@@ -11,7 +11,10 @@ use tracing::{error, info, warn};
 use async_trait::async_trait;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ReactionType};
 
-use crate::agent::{session_key, Agent, LoopCallbackChoice, MidRunMode, RunStop, SetModelOutcome};
+use crate::agent::{
+    session_key, Agent, FallbackEditOutcome, LoopCallbackChoice, MidRunMode, RunStop,
+    SetModelOutcome,
+};
 use crate::platform::sender::{
     MessageFormat as PlatformMsgFormat, PlatformMessageId, PlatformSender,
 };
@@ -148,6 +151,7 @@ pub(crate) fn supported_commands() -> Vec<teloxide::types::BotCommand> {
         ),
         BotCommand::new("logs", "Download the current bot log file"),
         BotCommand::new("models", "Browse and change the OpenRouter model"),
+        BotCommand::new("fallback", "List/add/remove [fallback].chain backup models"),
         BotCommand::new("mode", "Set steer/queue mode for mid-processing messages"),
         BotCommand::new("stop", "Cancel the current processing gracefully"),
         BotCommand::new("btw", "Ask a parallel question while the bot is busy"),
@@ -783,6 +787,91 @@ fn format_set_model_reply(model_id: &str, outcome: &SetModelOutcome) -> String {
         SetModelOutcome::LiveOnly { persist_error } => {
             format!(
                 "⚠️ Active is now `{model_id}` live, but not saved: {persist_error}. Cold start may revert."
+            )
+        }
+    }
+}
+
+/// `/fallback` — list / add / remove `[fallback].chain` (ADR-0037 / #237).
+///
+/// Auth is the dispatcher allowlist. Portal editor / reorder are out of slice.
+async fn handle_fallback_command(
+    bot: Bot,
+    chat_id: ChatId,
+    agent: &Arc<Agent>,
+    arg: &str,
+) -> ResponseResult<()> {
+    let arg = arg.trim();
+    if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
+        let chain = agent.fallback_chain_list();
+        let reply = crate::fallback_edit::format_fallback_list(&chain);
+        bot.send_message(chat_id, escape_text(&reply))
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        return Ok(());
+    }
+
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let verb = parts.next().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.next().unwrap_or("").trim();
+
+    match verb.as_str() {
+        "add" => match agent.fallback_chain_add(rest).await {
+            Ok(outcome) => {
+                let reply = format_fallback_edit_reply("Added", &outcome);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(chat_id, escape_text(&format!("❌ {e:#}")))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+        },
+        "remove" | "rm" | "del" | "delete" => match agent.fallback_chain_remove(rest).await {
+            Ok(outcome) => {
+                let reply = format_fallback_edit_reply("Removed", &outcome);
+                bot.send_message(chat_id, escape_text(&reply))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+            Err(e) => {
+                bot.send_message(chat_id, escape_text(&format!("❌ {e:#}")))
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await?;
+            }
+        },
+        _ => {
+            let tip = format!(
+                "Unknown `/fallback` subcommand `{verb}`.\n{}",
+                crate::fallback_edit::FALLBACK_USAGE
+            );
+            bot.send_message(chat_id, escape_text(&tip))
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn format_fallback_edit_reply(action: &str, outcome: &FallbackEditOutcome) -> String {
+    match outcome {
+        FallbackEditOutcome::Saved { chain } => {
+            format!(
+                "✅ {action}. Chain updated now (saved, {} entr{}).\n\n{}",
+                chain.len(),
+                if chain.len() == 1 { "y" } else { "ies" },
+                crate::fallback_edit::format_fallback_list(chain)
+            )
+        }
+        FallbackEditOutcome::LiveOnly {
+            chain,
+            persist_error,
+        } => {
+            format!(
+                "⚠️ {action} live, but not saved: {persist_error}. Cold start may revert.\n\n{}",
+                crate::fallback_edit::format_fallback_list(chain)
             )
         }
     }
@@ -1438,6 +1527,7 @@ pub async fn handle_message(
              **/selfupgrade** — Upgrade: bare=auto, `main`=source, `release`=binary\n\
              **/logs** — Download the current bot log file\n\
              **/models** — Browse and change the model\n\
+             **/fallback** — List / add / remove fallback chain\n\
              **/stop** — Cancel the current turn (user or scheduled) and clear queued messages\n\
              **/btw** — Ask a parallel question while the bot is busy\n\
              **/portal** — Portal URLs (web UI) for this network
@@ -1913,6 +2003,9 @@ pub async fn handle_message(
                     .reply_markup(InlineKeyboardMarkup::new(keyboard))
                     .await?;
                 return Ok(());
+            }
+            "fallback" => {
+                return handle_fallback_command(bot, msg.chat.id, &agent, &arg).await;
             }
             "config" => {
                 return handle_config_command(bot, msg.chat.id, &agent, &arg, msg_format).await;

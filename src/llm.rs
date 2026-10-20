@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// A single part in a multi-modal message
@@ -547,6 +547,10 @@ pub fn is_ollama_no_user_query_error(err: &anyhow::Error) -> bool {
         .contains("no user query found")
 }
 
+/// Cap on `[fallback].chain` length (ADR-0012 attach + ADR-0037 Telegram add).
+/// Boot/attach may truncate oversized config; Telegram `add` must **reject**.
+pub const MAX_FALLBACK_CHAIN: usize = 5;
+
 #[derive(Clone)]
 pub struct LlmClient {
     pub client: reqwest::Client,
@@ -556,7 +560,10 @@ pub struct LlmClient {
     /// Hard-excludes only HTTP 401/403 and pre-HTTP config errors — see
     /// [`crate::provider::should_walk_fallback`]. Empty (default) = ADR-0009
     /// behaviour exactly: primary only.
-    pub fallback_chain: Vec<String>,
+    ///
+    /// Shared via `Arc` so Telegram `/fallback` (ADR-0037) can update live
+    /// without restart; walk snapshots under a short read lock.
+    pub fallback_chain: Arc<RwLock<Vec<String>>>,
 }
 
 impl LlmClient {
@@ -569,7 +576,7 @@ impl LlmClient {
         Self {
             client: reqwest::Client::new(),
             registry,
-            fallback_chain: Vec::new(),
+            fallback_chain: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -596,24 +603,45 @@ impl LlmClient {
         Self {
             client,
             registry,
-            fallback_chain: Vec::new(),
+            fallback_chain: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     /// Attach a fallback chain (from `[fallback] chain` in config). Entries
     /// whose provider prefix is not in the registry are dropped with a
     /// warning at call time, never attempted against the wrong provider.
-    pub fn with_fallback_chain(mut self, chain: Vec<String>) -> Self {
+    pub fn with_fallback_chain(self, chain: Vec<String>) -> Self {
         // Bound worst-case latency (primary budget + N fallback budgets).
-        const MAX_FALLBACK_CHAIN: usize = 5;
         if chain.len() > MAX_FALLBACK_CHAIN {
             tracing::warn!(
                 "[fallback] chain: {} entries exceeds cap {MAX_FALLBACK_CHAIN}, truncating",
                 chain.len()
             );
         }
-        self.fallback_chain = chain.into_iter().take(MAX_FALLBACK_CHAIN).collect();
+        let capped: Vec<String> = chain.into_iter().take(MAX_FALLBACK_CHAIN).collect();
+        *self
+            .fallback_chain
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = capped;
         self
+    }
+
+    /// Snapshot the live fallback chain (ADR-0037 list / edit).
+    pub fn fallback_chain_snapshot(&self) -> Vec<String> {
+        self.fallback_chain
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Replace the live in-memory fallback chain (no disk). Caller validates
+    /// and persists; length should already be ≤ [`MAX_FALLBACK_CHAIN`].
+    pub fn set_fallback_chain_live(&self, chain: Vec<String>) {
+        let capped: Vec<String> = chain.into_iter().take(MAX_FALLBACK_CHAIN).collect();
+        *self
+            .fallback_chain
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = capped;
     }
 
     /// Core chat method returning full completion metadata (message, finish_reason, model).
@@ -674,10 +702,11 @@ impl LlmClient {
         }
         // ADR-0019: walk on any failure except hard exclusions (401/403,
         // pre-HTTP missing-key/config). 400/402/timeout/network/parse all walk.
-        if !crate::provider::should_walk_fallback(&last_err) || self.fallback_chain.is_empty() {
+        let fallback_chain = self.fallback_chain_snapshot();
+        if !crate::provider::should_walk_fallback(&last_err) || fallback_chain.is_empty() {
             return Err(last_err);
         }
-        for cand in &self.fallback_chain {
+        for cand in &fallback_chain {
             let known = match cand.split_once('/') {
                 Some((prefix, _)) => self.registry.get_provider(prefix).is_some(),
                 None => true, // bare model → default provider, resolvable

@@ -489,6 +489,35 @@ pub fn persist_model_edit(path: &Path, provider_name: &str, actual_model: &str) 
     write_config_validated(path, &new_content)
 }
 
+/// Persist `[fallback].chain` via [`write_config_validated`] (ADR-0037 / #237).
+///
+/// Replaces the whole array (empty allowed). Returns the `.bak` path.
+pub fn persist_fallback_chain(path: &Path, chain: &[String]) -> Result<PathBuf> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut doc: toml::Value =
+        toml::from_str(&content).context("Failed to parse config.toml before fallback edit")?;
+
+    let root = doc
+        .as_table_mut()
+        .context("config.toml root must be a table")?;
+    let fallback = root
+        .entry("fallback")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let fallback_table = fallback
+        .as_table_mut()
+        .context("[fallback] must be a table")?;
+    let arr: Vec<toml::Value> = chain
+        .iter()
+        .map(|s| toml::Value::String(s.clone()))
+        .collect();
+    fallback_table.insert("chain".to_string(), toml::Value::Array(arr));
+
+    let new_content =
+        toml::to_string_pretty(&doc).context("Failed to serialize config after fallback edit")?;
+    write_config_validated(path, &new_content)
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     // config.toml → config.toml.bak (same as portal/settings.rs)
     path.with_extension("toml.bak")
@@ -1099,6 +1128,32 @@ model = "m"
             "restore must recover bak (first persist): {restored}"
         );
         validate_config_str(&restored).unwrap();
+    }
+
+    #[test]
+    fn persist_fallback_chain_writes_array_and_bak() {
+        let dir = tempdir().unwrap();
+        let path = write_cfg(&dir, &minimal_toml());
+        let bak =
+            persist_fallback_chain(&path, &["ollama/a".to_string(), "openrouter/b".to_string()])
+                .unwrap();
+        assert!(bak.exists());
+        let new_content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            new_content.contains("ollama/a") && new_content.contains("openrouter/b"),
+            "{new_content}"
+        );
+        validate_config_str(&new_content).unwrap();
+        let cfg: Config = toml::from_str(&new_content).unwrap();
+        assert_eq!(
+            cfg.fallback.chain,
+            vec!["ollama/a".to_string(), "openrouter/b".to_string()]
+        );
+
+        // Empty chain allowed.
+        persist_fallback_chain(&path, &[]).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg.fallback.chain.is_empty());
     }
 
     #[test]
