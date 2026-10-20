@@ -51,3 +51,8 @@ Primary 200 → chain never touched (request counts). Primary always-429 → fal
 rewritten `model`. Fallback #1 5xx → fallback #2 tried in order. Primary 400 → **no** fallback.
 Empty/missing chain → exactly ADR-0009 behaviour. Unknown chain entry → warn + skip, primary
 error preserved. `LlmHttpError` downcast carries status.
+
+## Cross-reference (#237 / ADR-0037)
+
+Telegram list/add/remove of `[fallback].chain` (persist + live; cap reject on
+add; walk semantics of this ADR unchanged) is locked in **ADR-0037**.
