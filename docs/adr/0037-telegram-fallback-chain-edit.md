@@ -1,6 +1,6 @@
 # ADR-0037: Telegram `/fallback` chain list / add / remove
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0012 (request-layer fallback chain), ADR-0019 (walk on any primary failure), ADR-0035 / ADR-0036 (persist + live memory pattern for operator edits)
@@ -79,10 +79,9 @@ Q6–Q8=A, Q9=C) is authoritative for the Decision below.
     rewrite-of-answered-model behaviour. It only locks operator edit of the
     configured chain via Telegram.
 
-11. **Release / process:** target **v1.0.7+**. Docs-only this PR; impl after
-    merge + TL assign. Does **not** close #237 — leave open for impl.
-    GitHub English only. Four gates on the **impl** PR. No tag from this
-    issue.
+11. **Release / process:** target **v1.0.7+**. Impl lands in `feat/237-telegram-fallback`
+    (**Closes #237**). GitHub English only. Four gates on the impl PR. No tag
+    from this issue.
 
 ## Non-goals
 
@@ -107,16 +106,11 @@ Q6–Q8=A, Q9=C) is authoritative for the Decision below.
   with clear message (no silent truncate on add).
 - Docs state: remove accepts 1-based index **or** exact `provider/model`.
 - Docs state: ADR-0012 / ADR-0019 walk semantics unchanged.
-- CHANGELOG Unreleased note for this docs slice; shipping release note on
-  impl.
-- This docs PR does **not** close #237.
+- CHANGELOG Unreleased note for the shipping feature (impl).
 
 ## Consequences
 
-- Docs-only first (this ADR + short cross-refs on ADR-0035 / ADR-0036 and
-  ADR-0012 / ADR-0019). Tech lead assigns RustFox Rust Developer for impl
-  after merge (`feat/237-telegram-fallback` or similar). Leave #237 open for
-  impl — this PR is a docs slice only.
+- Impl on `feat/237-telegram-fallback` after ADR merge. Closes #237 via PR.
 - Operators can inspect and edit the backup chain from Telegram without
   hand-editing TOML or restarting, matching the persist+live trust model of
   `/models`.
