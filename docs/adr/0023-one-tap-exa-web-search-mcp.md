@@ -1,13 +1,16 @@
 # ADR-0023: One-tap built-in Exa MCP for web search
 
-- **Status:** Accepted (Product GO 2026-10-06)
+- **Status:** Accepted (Product GO 2026-10-06). **Amended by ADR-0041** — Exa
+  converges into presets + Custom HTTP MCP. Tools pin, consent, `web_search` stub,
+  and soft 429 stay on the Exa preset. Where Decision 2 storage or the single-built-in
+  scope disagrees with ADR-0041, ADR-0041 wins.
 - **Date:** 2026-10-06
 - **Issue:** none yet. Tracked in the Notion task "Setup: one-tap built-in MCP"; a GitHub
   issue will be opened for the implementation.
 - **Branch:** `docs/adr-0023-exa-web-search` (decision); implementation in a follow-up PR
 - **Related:** #119 (Google MCP one-tap, the built-in connector precedent), ADR-0004 / ADR-0007
   (portal bind, `/portal` command), ADR-0016 (API keys in SecretStore), ADR-0020 (mid-run
-  queue; implementation of this ADR waits for it)
+  queue; implementation of this ADR waits for it), ADR-0041 / #172 (amends this ADR)
 - **Source:** Exa MCP reference, <https://docs.exa.ai/reference/exa-mcp>
 
 ## Context
@@ -217,9 +220,18 @@ Facts in the current code that shape the decision:
 5. **Storage for `enabled` / `privacy_accepted_at`.** Config section vs SQLite. **Left to
    implementation.**
 
+## Cross-reference (#172 / ADR-0041)
+
+**Amended by ADR-0041 (Accepted):** Exa converges into presets + Custom. This
+ADR’s tools pin, privacy consent, `web_search` stub, and soft 429 stay on the
+Exa preset. The preset is stored as `[[mcp_servers]]` plus secret refs, which
+replaces Decision 2’s “not a user-editable row / config built only in code”
+for the preset-managed server. The form is portal Settings. There is still no
+wizard MCP step and no Telegram full form. Implementation is #172 and starts
+after #240 Slice B.
+
 ## Follow-ups
 
-- GitHub issue for the implementation; link it here.
-- Implementation PR. It starts after the ADR-0020 implementation lands and the TL assigns it.
+- Implementation is #172 under ADR-0041, after #240 Slice B.
 - Rewrite the Exa example in `config.example.toml`; update `docs/portal-api.md` and the user
-  guide; changelog entry.
+  guide in that implementation PR.
