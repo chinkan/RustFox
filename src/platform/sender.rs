@@ -48,4 +48,10 @@ pub trait PlatformSender: Send + Sync {
     async fn delete_message(&self, chat_id: &str, message_id: &PlatformMessageId) -> Result<()>;
 
     async fn notify_shutdown(&self, chat_id: &str) -> Result<()>;
+
+    /// ADR-0023 §7 / ADR-0042: once-per-conversation Exa enable offer (Telegram).
+    /// Default: no-op. `conversation_key` is `session_key(bot_id, user_id)`.
+    async fn offer_exa_web_search(&self, _chat_id: &str, _conversation_key: &str) -> Result<()> {
+        Ok(())
+    }
 }

@@ -401,7 +401,6 @@
     color: #fbd38d;
     line-height: 1.6;
   }
-  /* Custom MCP server section */
   .custom-mcp-section { margin-top: 1.75rem; border-top: 1px solid #2d3748; padding-top: 1.25rem; }
   .custom-mcp-section h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.75rem; }
   .custom-card {
@@ -499,10 +498,12 @@ const state = {
   system_prompt: '',
   ollama_running: false,
   ollama_models: [],
+  exa_enable: false,
+  exa_privacy_accepted: false,
 };
 
-const WIZARD_STEPS = 2;
-const TOTAL_STEPS = 3;
+const WIZARD_STEPS = 3;
+const TOTAL_STEPS = 4;
 let currentStep = 1;
 
 function showStep(n) {
@@ -525,7 +526,13 @@ function showStep(n) {
   btnBack.style.display = n > 1 ? 'inline-block' : 'none';
   btnNext.style.display = 'inline-block';
   btnNext.disabled = false;
-  btnNext.textContent = n === WIZARD_STEPS ? 'Save config.toml' : 'Continue →';
+  if (n === WIZARD_STEPS) {
+    btnNext.textContent = 'Save config.toml';
+  } else if (n === 2) {
+    btnNext.textContent = 'Skip →';
+  } else {
+    btnNext.textContent = 'Continue →';
+  }
   if (n === WIZARD_STEPS) {
     collectStep();
     renderSummary();
@@ -537,9 +544,26 @@ function prevStep() { if (currentStep > 1) showStep(currentStep - 1); }
 
 function nextStep() {
   if (currentStep === 1 && !validateStep()) return;
+  if (currentStep === 2) {
+    // Skip Exa (default off). Enable uses enableExaAndContinue().
+    state.exa_enable = false;
+  }
   collectStep();
   if (currentStep === WIZARD_STEPS) { saveConfig(); return; }
   showStep(currentStep + 1);
+}
+
+function enableExaAndContinue() {
+  const consent = document.getElementById('f-exa-privacy');
+  if (!consent || !consent.checked) {
+    const err = document.getElementById('exa-privacy-error');
+    if (err) err.classList.add('visible');
+    return;
+  }
+  state.exa_privacy_accepted = true;
+  state.exa_enable = true;
+  collectStep();
+  showStep(3);
 }
 
 function requireField(id, valid) {
@@ -583,6 +607,8 @@ function collectStep() {
   state.openrouter_model = (document.getElementById('f-openrouter-model')?.value || '').trim();
   state.ollama_model = (document.getElementById('f-ollama-model')?.value || '').trim();
   state.system_prompt = (document.getElementById('f-system-prompt')?.value || '').trim();
+  const consent = document.getElementById('f-exa-privacy');
+  if (consent) state.exa_privacy_accepted = !!consent.checked;
 }
 
 function thinBody() {
@@ -593,6 +619,8 @@ function thinBody() {
     ollama_model: state.provider === 'ollama' ? state.ollama_model : '',
     bot_token: state.telegram_token,
     system_prompt: state.system_prompt,
+    exa_enable: !!state.exa_enable,
+    exa_privacy_accepted: !!state.exa_privacy_accepted,
   };
 }
 
@@ -768,6 +796,7 @@ function renderSummary() {
     modelRow +
     row('Bot token', escHtml(state.telegram_token ? maskSecret(state.telegram_token) : '(missing)')) +
     row('System prompt', escHtml(state.system_prompt || '(missing)')) +
+    row('Exa web search', state.exa_enable ? 'On (keyless)' : 'Off') +
     '</div></div>';
 }
 
@@ -918,8 +947,24 @@ function buildSteps() {
   </div>
 </div>
 <div class="step" id="step-2">
+  <div id="step-exa">
+  <h2>🔍 Web search (optional)</h2>
+  <p class="subtitle">Turn on Exa web search (keyless). Skip to leave it off. Same for OpenRouter and Ollama. No API key here — add one later in Settings if you want more quota.</p>
+  <p class="hint" style="margin-bottom:0.75rem">Search queries and fetched page content are sent to Exa.</p>
+  <div class="field">
+    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
+      <input type="checkbox" id="f-exa-privacy" onchange="document.getElementById('exa-privacy-error')?.classList.remove('visible')">
+      <span>I accept Exa’s privacy terms for web search</span>
+    </label>
+    <div class="error-msg" id="exa-privacy-error">Accept privacy terms before enabling.</div>
+  </div>
+  <button type="button" class="btn-primary" style="margin-top:0.75rem" onclick="enableExaAndContinue()">Enable web search</button>
+  <p class="hint" style="margin-top:0.75rem">Or press Skip below to continue without Exa.</p>
+  </div>
+</div>
+<div class="step" id="step-3">
   <h2>✅ Review &amp; Save</h2>
-  <p class="subtitle">These four answers are what gets written. Everything else stays a safe default.</p>
+  <p class="subtitle">These answers are what gets written. Everything else stays a safe default.</p>
   <div id="summary"></div>
   <details style="margin-top:1.25rem">
     <summary style="cursor:pointer;color:#a0aec0;font-size:0.85rem;font-weight:600">📋 Show raw TOML</summary>

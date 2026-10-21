@@ -64,6 +64,8 @@ pub struct LoopConfig {
     pub tool_event_tx: Option<mpsc::Sender<ToolEvent>>,
     pub stream_token_tx: Option<mpsc::Sender<String>>,
     pub recovery_nudge: Option<String>,
+    /// ADR-0023 §7: `session_key(bot_id, user_id)` for once-per-conversation Exa offer.
+    pub session_key: Option<String>,
 }
 
 /// Parent chain created by `process_message_outcome`. Subagent loops reuse it
@@ -404,6 +406,12 @@ impl<'a> AgenticLoop<'a> {
                         } else if tc.function.name == "web_search"
                             && !self.mcp.is_connected(crate::mcp_presets::EXA_NAME)
                         {
+                            if let Some(key) = self.config.session_key.as_deref() {
+                                let _ = self
+                                    .platform_sender
+                                    .offer_exa_web_search(chat_id, key)
+                                    .await;
+                            }
                             Ok(crate::mcp_presets::WEB_SEARCH_STUB_RESULT.to_string())
                         } else {
                             let ctx = (self.make_tool_ctx)(user_id, chat_id);
@@ -599,6 +607,7 @@ mod tests {
             tool_event_tx: None,
             stream_token_tx: None,
             recovery_nudge: None,
+            session_key: None,
         }
     }
 

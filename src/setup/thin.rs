@@ -305,6 +305,9 @@ pub struct ThinAnswers {
     pub system_prompt: String,
     /// ADR-0025: wizard-chosen `[sandbox] mode` (`sandbox` | `trusted`).
     pub sandbox_mode: crate::sandbox::SandboxMode,
+    /// ADR-0042: optional Exa one-tap. Written only when enable+consent.
+    pub exa_enable: bool,
+    pub exa_privacy_accepted: bool,
 }
 
 pub fn render_config(answers: &ThinAnswers) -> Result<String> {
@@ -381,6 +384,21 @@ pub fn render_config(answers: &ThinAnswers) -> Result<String> {
     );
     root.insert("sandbox".into(), toml::Value::Table(sandbox));
 
+    // ADR-0042: persist-only Exa row when Enable+consent. Skip/off → no row.
+    if answers.exa_enable && answers.exa_privacy_accepted {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let cfg = crate::mcp_presets::exa_preset_config(true, Some(ts));
+        root.insert(
+            "mcp_servers".into(),
+            toml::Value::Array(vec![toml::Value::Table(
+                crate::mcp_presets::exa_server_toml_table(&cfg),
+            )]),
+        );
+    }
+
     toml::to_string(&toml::Value::Table(root)).context("serialize thin config")
 }
 
@@ -449,6 +467,8 @@ mod tests {
             bot_token: "123:abc".into(),
             system_prompt: "Be brief and kind.".into(),
             sandbox_mode: crate::sandbox::SandboxMode::Trusted,
+            exa_enable: false,
+            exa_privacy_accepted: false,
         }
     }
 
@@ -579,6 +599,8 @@ mod tests {
             bot_token: "123:abc".into(),
             system_prompt: "Speak plainly.".into(),
             sandbox_mode: crate::sandbox::SandboxMode::Trusted,
+            exa_enable: false,
+            exa_privacy_accepted: false,
         };
         let text = render_config(&answers).unwrap();
         assert!(!text.contains("mcp"));
@@ -721,8 +743,12 @@ mod tests {
         assert!(!html.contains("id=\"f-model\""));
         assert!(!html.contains("id=\"f-base-url\""));
         assert!(!html.contains("Add another bot"));
+        // ADR-0042: optional Exa-only page is allowed; full MCP catalog is not.
+        assert!(html.contains("id=\"step-exa\""));
+        assert!(html.contains("id=\"f-exa-privacy\""));
         assert!(!html.contains("id=\"mcp-catalog\""));
-        assert!(!html.contains("id=\"step-3\""));
+        assert!(!html.contains("id=\"mcp-custom\""));
+        assert!(!html.to_ascii_lowercase().contains("jina"));
         assert!(!html.contains("Show all settings"));
         assert!(!html.contains("fully_silent"));
         assert!(!html.to_ascii_lowercase().contains("silent"));
@@ -761,5 +787,49 @@ mod tests {
         let text = render_config(&answers).unwrap();
         assert!(text.contains("[sandbox]"), "{text}");
         assert!(text.contains("mode = \"trusted\""), "{text}");
+    }
+
+    #[test]
+    fn wizard_exa_enable_writes_row_and_privacy() {
+        let mut answers = openrouter_answers();
+        answers.exa_enable = true;
+        answers.exa_privacy_accepted = true;
+        let text = render_config(&answers).unwrap();
+        let cfg = parse(&text);
+        assert_eq!(cfg.mcp_servers.len(), 1);
+        assert_eq!(cfg.mcp_servers[0].name, crate::mcp_presets::EXA_NAME);
+        assert!(cfg.mcp_servers[0].enabled);
+        assert!(cfg.mcp_servers[0].privacy_accepted_at.is_some());
+        assert_eq!(
+            cfg.mcp_servers[0].url.as_deref(),
+            Some(crate::mcp_presets::EXA_URL)
+        );
+        assert!(!text.to_ascii_lowercase().contains("jina"));
+    }
+
+    #[test]
+    fn wizard_exa_skip_leaves_mcp_empty() {
+        let mut answers = openrouter_answers();
+        answers.exa_enable = false;
+        answers.exa_privacy_accepted = true;
+        let text = render_config(&answers).unwrap();
+        assert!(!text.contains("mcp_servers"), "{text}");
+        assert!(parse(&text).mcp_servers.is_empty());
+
+        answers.exa_enable = true;
+        answers.exa_privacy_accepted = false;
+        let text = render_config(&answers).unwrap();
+        assert!(parse(&text).mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn wizard_fields_still_omit_mcp() {
+        for provider in [ThinProvider::OpenRouter, ThinProvider::Ollama] {
+            let joined = wizard_fields(provider).join(" ");
+            assert!(
+                !joined.contains("exa") && !joined.contains("mcp"),
+                "{joined}"
+            );
+        }
     }
 }
