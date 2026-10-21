@@ -660,4 +660,58 @@ mod tests {
             .unwrap();
         assert_eq!(result, crate::sandbox::MSG_WINDOWS_SANDBOX);
     }
+
+    /// #250: cancel_all (wired from cancel_processing on timeout) must interrupt
+    /// an in-flight long execute_command so the scheduler's ~2s wait can finish.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cancel_all_interrupts_long_execute_command() {
+        use std::time::{Duration, Instant};
+        let dir = tempdir().unwrap();
+        let reg = Arc::new(CancelRegistry::new());
+        let tool = Arc::new(CommandTool::new(dir.path().to_path_buf(), Arc::clone(&reg)));
+        let mut tool_ctx = ctx(dir.path());
+        tool_ctx.cancel_registry = Arc::clone(&reg);
+
+        let tool2 = Arc::clone(&tool);
+        let exec = tokio::spawn(async move {
+            tool2
+                .execute(
+                    "execute_command",
+                    json!({ "command": "sleep 60" }),
+                    tool_ctx,
+                )
+                .await
+        });
+
+        // Wait until the command registers its oneshot (spawn + UI settle).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut cancelled = 0usize;
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancelled = reg.cancel_all().await;
+            if cancelled >= 1 {
+                break;
+            }
+        }
+        assert!(
+            cancelled >= 1,
+            "sleep must have registered a cancel channel within 2s"
+        );
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(2), exec)
+            .await
+            .expect("cancel_all must finish execute_command within 2s")
+            .expect("join")
+            .expect("execute must not error");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not wait for sleep 60"
+        );
+        assert!(
+            result.contains("cancelled") || result.contains("Cancelled"),
+            "expected cancelled tool result, got: {result}"
+        );
+    }
 }
