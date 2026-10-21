@@ -167,6 +167,26 @@ Validation: `model` non-empty → `Agent::set_model` (live, no restart); `portal
 Before write: copy current file to `config.toml.bak`. Response:
 `200 {"updated":["model","portalPort"], "restartRequired":["portalPort"], "applied":{"model":"<new>"}}`
 
+
+### GET /api/settings — MCP projection (ADR-0041)
+`masked.mcpServers` is an array of:
+`{"name","kind":"preset"|"custom"|"stdio","preset"?,"enabled","url"?,"authConfigured","headerNames","connected","privacyAccepted"?,"privacyAcceptedAt"?,"configOwned"}`.
+Never includes secret values. `kind=preset` for reserved `exa` / `jina`. `configOwned` is true when a hand-written preset row diverges from the pinned URL (portal will not overwrite).
+
+### GET /api/settings/mcp/presets
+→ `200 {"presets":[{ "id","label","kind","url","auth","tools",… }]}` — static Exa + Jina catalog.
+
+### PUT /api/settings/mcp/{name}
+Upsert Custom or update a preset. Body (camelCase, all optional except Custom `url` on create):
+`{"name","url","enabled","bearer","headers","privacyAccepted","clearApiKey"}`.
+Plaintext `bearer` / credential `headers` are sealed into SecretStore as `secret:NAME`; `env:NAME` refs are stored as-is. Exa rejects Bearer (use `headers["x-api-key"]`). Response `200 {"server":{…projection…}}`.
+
+### DELETE /api/settings/mcp/{name}
+Custom only. Presets → `400 preset_delete_forbidden`.
+
+### POST /api/settings/mcp/{name}/enable · `/disable`
+Persist `enabled` and hot-connect / disconnect that server only (no process restart). Exa first enable requires `{"privacyAccepted":true}` when consent is unset (`400 privacy_required`). Config-owned Exa → `400 config_owned`.
+
 ### GET /api/soul · PUT /api/soul
 Markdown files, whitelisted names only: `SOUL.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, and `system` (ADR 0011 R7 — the system-prompt file).
 GET → `200 {"name","content","mtime"}`; PUT body `{"name","content"}` → backup `*.bak` then write; fires the `soul_updated` notification so the agent re-reads identity files.

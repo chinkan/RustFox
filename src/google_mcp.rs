@@ -249,6 +249,8 @@ pub fn runtime_config(access_token: &str) -> Result<McpServerConfig> {
         env: HashMap::new(),
         url: Some(MCP_URL.to_string()),
         auth_token: Some(access_token.to_string()),
+        headers: HashMap::new(),
+        privacy_accepted_at: None,
         refresh_token: None,
         token_expires_at: None,
         token_endpoint: None,

@@ -401,6 +401,10 @@ impl<'a> AgenticLoop<'a> {
                     let tool_fut = async {
                         if tc.function.name.starts_with("mcp_") {
                             self.mcp.call_tool(&tc.function.name, &args).await
+                        } else if tc.function.name == "web_search"
+                            && !self.mcp.is_connected(crate::mcp_presets::EXA_NAME)
+                        {
+                            Ok(crate::mcp_presets::WEB_SEARCH_STUB_RESULT.to_string())
                         } else {
                             let ctx = (self.make_tool_ctx)(user_id, chat_id);
                             self.tools.execute(&tc.function.name, args, ctx).await

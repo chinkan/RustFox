@@ -2179,6 +2179,10 @@ impl Agent {
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut all = self.tool_registry.all_definitions();
         all.extend(self.mcp.tool_definitions());
+        // ADR-0023 §7 / ADR-0041: stub `web_search` while Exa is not connected.
+        if !self.mcp.is_connected(crate::mcp_presets::EXA_NAME) {
+            all.push(crate::mcp_presets::web_search_stub_definition());
+        }
         crate::llm::dedupe_tool_definitions_keep_first(all)
     }
 

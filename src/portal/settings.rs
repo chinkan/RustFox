@@ -91,7 +91,12 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "openrouterApiKey": mask_secret(&cfg.openrouter.api_key),
             "providers": masked_providers,
             "embeddingApiKey": cfg.embedding.as_ref().map(|e| mask_secret(&e.api_key)),
-            "mcpServers": cfg.mcp_servers.iter().map(|m| json!({ "name": m.name })).collect::<Vec<_>>(),
+            "mcpServers": crate::portal::mcp::list_projected(&state).unwrap_or_else(|_| {
+                cfg.mcp_servers
+                    .iter()
+                    .map(|m| crate::portal::mcp::project_server(m, state.agent.mcp_is_connected(&m.name)))
+                    .collect()
+            }),
         },
         "sandbox": sandbox_info,
         "restartRequired": ["portalPort", "portalEnabled", "portalBind", "portalToken"],
@@ -117,7 +122,7 @@ async fn write_config_with_backup(path: &Path, new_content: &str) -> Result<(), 
 }
 
 /// Read → parse TOML document as a generic table (lossless-ish for our use).
-async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
+pub(super) async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(PortalError::internal)?;
