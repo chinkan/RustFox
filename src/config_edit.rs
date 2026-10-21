@@ -88,6 +88,11 @@ pub const EDITABLE_KEYS: &[EditableKey] = &[
         description: "Portal chat identity in memory",
         restart_required: true,
     },
+    EditableKey {
+        key: "scheduler.run_timeout_secs",
+        description: "Scheduled agent run wall-clock timeout (seconds; 0=default 900, min 60)",
+        restart_required: true,
+    },
 ];
 
 /// Read-only display keys (TL: sandbox path = display only).
@@ -313,6 +318,10 @@ pub fn format_show(cfg: &Config) -> String {
     lines.push(format!("- `portal.port` = `{}`", cfg.portal.port));
     lines.push(format!("- `portal.bind` = `{}`", cfg.portal.bind));
     lines.push(format!("- `portal.user_name` = `{}`", cfg.portal.user_name));
+    lines.push(format!(
+        "- `scheduler.run_timeout_secs` = `{}`",
+        cfg.scheduler.run_timeout_secs
+    ));
 
     if !cfg.mcp_servers.is_empty() {
         lines.push(String::new());
@@ -539,6 +548,10 @@ pub fn validate_config_str(content: &str) -> Result<()> {
     config
         .normalize_bots()
         .context("bots / telegram validation failed")?;
+    config
+        .scheduler
+        .normalize()
+        .context("scheduler validation failed")?;
     Ok(())
 }
 
@@ -647,6 +660,17 @@ fn apply_key_to_doc(doc: &mut toml::Value, key: &str, raw_value: &str) -> Result
             }
             ensure_table(doc, "portal")
                 .insert("user_name".into(), toml::Value::String(name.to_string()));
+        }
+        "scheduler.run_timeout_secs" => {
+            // Same floor as SchedulerConfig::normalize (ADR-0024): 0 = default, else >= 60.
+            let n: u64 = raw_value.trim().parse().context(
+                "scheduler.run_timeout_secs must be an integer (>= 60, or 0 for default)",
+            )?;
+            if n != 0 && n < 60 {
+                bail!("scheduler.run_timeout_secs must be 0 (use default) or >= 60; got {n}");
+            }
+            ensure_table(doc, "scheduler")
+                .insert("run_timeout_secs".into(), toml::Value::Integer(n as i64));
         }
         other => bail!("internal: unhandled allowlisted key `{other}`"),
     }
@@ -867,12 +891,101 @@ args = ["mcp-server-git"]
             "portal.port",
             "memory.query_rewriter_enabled",
             "mcp.git.enabled",
+            "scheduler.run_timeout_secs",
         ] {
             assert!(
                 matches!(classify_key(key), KeyAccess::Editable { .. }),
                 "expected editable: {key}"
             );
         }
+    }
+
+    #[test]
+    fn scheduler_run_timeout_secs_is_editable_with_restart() {
+        assert_eq!(
+            classify_key("scheduler.run_timeout_secs"),
+            KeyAccess::Editable {
+                restart_required: true
+            }
+        );
+        assert!(
+            EDITABLE_KEYS
+                .iter()
+                .any(|k| k.key == "scheduler.run_timeout_secs" && k.restart_required),
+            "must appear on EDITABLE_KEYS with restart_required"
+        );
+        let map = slash_map_markdown();
+        assert!(
+            map.contains("`scheduler.run_timeout_secs`"),
+            "/config keys must list the key: {map}"
+        );
+    }
+
+    #[test]
+    fn deny_reason_distinguishes_secret_vs_allowlist_miss() {
+        match classify_key("openrouter.api_key") {
+            KeyAccess::Denied(reason) => {
+                assert!(
+                    reason.contains("API keys") || reason.contains("tokens"),
+                    "secret deny must mention tokens/API keys, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("allowlist"),
+                    "secret deny must not use allowlist wording: {reason}"
+                );
+            }
+            other => panic!("expected Denied for openrouter.api_key, got {other:?}"),
+        }
+        match classify_key("agent.not_a_real_knob") {
+            KeyAccess::Denied(reason) => {
+                assert!(
+                    reason.contains("allowlist"),
+                    "unknown key must use allowlist wording, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("API keys") && !reason.contains("secrets"),
+                    "unknown key must not sound like a secret deny: {reason}"
+                );
+            }
+            other => panic!("expected Denied for unknown key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_scheduler_run_timeout_secs_persists_and_enforces_floor() {
+        let dir = tempdir().unwrap();
+        let path = write_cfg(&dir, &minimal_toml());
+
+        let result = apply_config_edit(&path, "scheduler.run_timeout_secs", "120").unwrap();
+        assert!(result.restart_required);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("run_timeout_secs") && content.contains("120"),
+            "must persist 120: {content}"
+        );
+
+        // 0 is allowed (means default at load / normalize).
+        apply_config_edit(&path, "scheduler.run_timeout_secs", "0").unwrap();
+        let content0 = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content0.contains("run_timeout_secs") && content0.contains('0'),
+            "must persist 0: {content0}"
+        );
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = format!(
+            "{:#}",
+            apply_config_edit(&path, "scheduler.run_timeout_secs", "30").unwrap_err()
+        );
+        assert!(
+            err.contains("run_timeout_secs") && err.contains("60"),
+            "below-floor must fail with floor message: {err}"
+        );
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&path).unwrap(),
+            "failed floor write must not modify config"
+        );
     }
 
     #[test]
@@ -920,10 +1033,12 @@ args = ["mcp-server-git"]
 
     #[test]
     fn unknown_key_is_denied() {
-        assert!(matches!(
-            classify_key("agent.not_a_real_knob"),
-            KeyAccess::Denied(_)
-        ));
+        match classify_key("agent.not_a_real_knob") {
+            KeyAccess::Denied(reason) => {
+                assert!(reason.contains("allowlist"), "got: {reason}");
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
     }
 
     #[test]

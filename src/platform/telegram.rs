@@ -1002,17 +1002,14 @@ async fn handle_config_command(
 
             // Never log raw value if the key looks secret (defense in depth).
             let key_norm = crate::config_edit::normalize_key(key);
-            if matches!(
-                crate::config_edit::classify_key(&key_norm),
-                crate::config_edit::KeyAccess::Denied(_)
-            ) {
-                tracing::warn!(key = %key_norm, "Telegram /config set denied");
+            if let crate::config_edit::KeyAccess::Denied(reason) =
+                crate::config_edit::classify_key(&key_norm)
+            {
+                tracing::warn!(key = %key_norm, reason, "Telegram /config set denied");
                 return send_markdown_message(
                     &bot,
                     chat_id,
-                    &format!(
-                        "⛔ Denied `{key_norm}`. Secrets and dangerous keys cannot be set via Telegram."
-                    ),
+                    &format!("⛔ Denied `{key_norm}`: {reason}"),
                     msg_format,
                 )
                 .await;
@@ -3523,6 +3520,33 @@ mod tests {
         assert_eq!(
             classify_attachment_kind("application/zip", Some("archive.zip")),
             AttachmentKind::Other
+        );
+    }
+
+    #[test]
+    fn test_config_set_deny_surfaces_classify_key_reason() {
+        // Regression #254: allowlist misses must not get the generic "Secrets…" copy.
+        let source = include_str!("telegram.rs");
+        // Split needle so this assertion text does not false-positive via include_str.
+        let bad = format!(
+            "{}{}",
+            "Secrets and dangerous keys cannot be set ", "via Telegram."
+        );
+        let production = source
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            !production.contains(&bad),
+            "/config set deny must not use the generic secrets string"
+        );
+        assert!(
+            source.contains("⛔ Denied `{key_norm}`: {reason}"),
+            "/config set deny must surface classify_key reason"
         );
     }
 
