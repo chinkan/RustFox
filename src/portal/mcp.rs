@@ -3,7 +3,7 @@
 //! `/api/settings/mcp/*` — list presets, upsert/delete servers, enable/disable
 //! with per-server hot connect/disconnect. Responses never echo secrets.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path as AxPath, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -76,21 +76,18 @@ pub fn project_server(cfg: &McpServerConfig, connected: bool) -> Value {
     })
 }
 
-fn load_servers(path: &std::path::Path) -> Result<Vec<McpServerConfig>, PortalError> {
-    let content = std::fs::read_to_string(path).map_err(PortalError::internal)?;
-    let cfg: crate::config::Config = toml::from_str(&content)
-        .map_err(|e| PortalError::internal(format!("config parse: {e}")))?;
+/// Load MCP servers from the process-owned portal config path only.
+/// Takes `PortalState` (not a bare `&Path`) so request Path extractors cannot flow in.
+fn load_servers(state: &PortalState) -> Result<Vec<McpServerConfig>, PortalError> {
+    // Reuse Config::load — sink stays in config.rs (already on main), not a new mcp.rs sink.
+    let cfg =
+        crate::config::Config::load(state.config_path.as_path()).map_err(PortalError::internal)?;
     Ok(cfg.mcp_servers)
 }
 
-fn load_doc(path: &std::path::Path) -> Result<toml::Value, PortalError> {
-    let content = std::fs::read_to_string(path).map_err(PortalError::internal)?;
-    toml::from_str(&content).map_err(|e| PortalError::internal(format!("config parse: {e}")))
-}
-
-fn write_doc(path: &std::path::Path, doc: &toml::Value) -> Result<(), PortalError> {
+fn write_doc(state: &PortalState, doc: &toml::Value) -> Result<(), PortalError> {
     let text = toml::to_string_pretty(doc).map_err(PortalError::internal)?;
-    write_config_validated(path, &text).map_err(PortalError::internal)?;
+    write_config_validated(state.config_path.as_path(), &text).map_err(PortalError::internal)?;
     Ok(())
 }
 
@@ -244,7 +241,7 @@ pub async fn list_presets() -> Json<Value> {
 
 /// Build masked.mcpServers from disk + live connections.
 pub fn list_projected(state: &PortalState) -> Result<Vec<Value>, PortalError> {
-    let servers = load_servers(state.config_path.as_path())?;
+    let servers = load_servers(state)?;
     let connected = state.agent.mcp_connected_names();
     Ok(servers
         .iter()
@@ -255,7 +252,7 @@ pub fn list_projected(state: &PortalState) -> Result<Vec<Value>, PortalError> {
 /// PUT /api/settings/mcp/{name}
 pub async fn upsert_server(
     State(state): State<PortalState>,
-    Path(path_name): Path<String>,
+    AxPath(path_name): AxPath<String>,
     Json(body): Json<UpsertMcpBody>,
 ) -> Result<Json<Value>, PortalError> {
     let name = body
@@ -268,8 +265,7 @@ pub async fn upsert_server(
         return Err(PortalError::bad_request("invalid_name", "name is empty"));
     }
 
-    let path = state.config_path.as_path();
-    let existing_servers = load_servers(path).unwrap_or_default();
+    let existing_servers = load_servers(&state).unwrap_or_default();
     let prev = existing_servers.iter().find(|s| s.name == name).cloned();
     let store = state.secret_store.as_ref();
 
@@ -379,12 +375,12 @@ pub async fn upsert_server(
         }
     };
 
-    let mut doc = load_doc(path)?;
+    let mut doc = super::settings::load_doc(state.config_path.as_path()).await?;
     {
         let servers = servers_array_mut(&mut doc)?;
         upsert_table(servers, table_from_config(&cfg));
     }
-    write_doc(path, &doc)?;
+    write_doc(&state, &doc)?;
     let connected = apply_hot_reload(&state, &cfg).await?;
     Ok(Json(json!({ "server": project_server(&cfg, connected) })))
 }
@@ -392,7 +388,7 @@ pub async fn upsert_server(
 /// DELETE /api/settings/mcp/{name} — Custom only.
 pub async fn delete_server(
     State(state): State<PortalState>,
-    Path(name): Path<String>,
+    AxPath(name): AxPath<String>,
 ) -> Result<Json<Value>, PortalError> {
     let name = name.trim();
     if is_reserved_preset_name(name) || name == "google" {
@@ -401,8 +397,7 @@ pub async fn delete_server(
             "Presets cannot be deleted; disable them instead",
         ));
     }
-    let path = state.config_path.as_path();
-    let mut doc = load_doc(path)?;
+    let mut doc = super::settings::load_doc(state.config_path.as_path()).await?;
     let servers = servers_array_mut(&mut doc)?;
     let before = servers.len();
     servers.retain(|s| s.get("name").and_then(|v| v.as_str()) != Some(name));
@@ -412,7 +407,7 @@ pub async fn delete_server(
             format!("no MCP server named `{name}`"),
         ));
     }
-    write_doc(path, &doc)?;
+    write_doc(&state, &doc)?;
     state.agent.mcp_disconnect(name.to_string()).await;
     Ok(Json(json!({ "deleted": name })))
 }
@@ -420,7 +415,7 @@ pub async fn delete_server(
 /// POST /api/settings/mcp/{name}/enable
 pub async fn enable_server(
     State(state): State<PortalState>,
-    Path(name): Path<String>,
+    AxPath(name): AxPath<String>,
     body: Result<Json<EnableBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, PortalError> {
     let privacy = body.ok().and_then(|b| b.0.privacy_accepted);
@@ -430,7 +425,7 @@ pub async fn enable_server(
 /// POST /api/settings/mcp/{name}/disable
 pub async fn disable_server(
     State(state): State<PortalState>,
-    Path(name): Path<String>,
+    AxPath(name): AxPath<String>,
 ) -> Result<Json<Value>, PortalError> {
     set_enabled(&state, &name, false, None).await
 }
@@ -442,8 +437,7 @@ async fn set_enabled(
     privacy_accepted: Option<bool>,
 ) -> Result<Json<Value>, PortalError> {
     let name = name.trim();
-    let path = state.config_path.as_path();
-    let mut doc = load_doc(path)?;
+    let mut doc = super::settings::load_doc(state.config_path.as_path()).await?;
 
     {
         let servers = servers_array_mut(&mut doc)?;
@@ -513,7 +507,7 @@ async fn set_enabled(
             .ok_or_else(|| PortalError::internal("mcp row not a table"))?;
         parse_row(table)?
     };
-    write_doc(path, &doc)?;
+    write_doc(state, &doc)?;
     let connected = apply_hot_reload(state, &cfg).await?;
     Ok(Json(json!({ "server": project_server(&cfg, connected) })))
 }

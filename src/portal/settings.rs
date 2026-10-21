@@ -122,7 +122,7 @@ async fn write_config_with_backup(path: &Path, new_content: &str) -> Result<(), 
 }
 
 /// Read → parse TOML document as a generic table (lossless-ish for our use).
-async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
+pub(super) async fn load_doc(path: &Path) -> Result<toml::Value, PortalError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(PortalError::internal)?;
