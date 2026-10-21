@@ -1147,47 +1147,19 @@ async fn main() -> Result<()> {
                     }
                 };
                 for row in due {
-                    let task = match store.get_by_id(&row.task_id).await {
-                        Ok(Some(t)) => t,
-                        Ok(None) => {
-                            let _ = queue.mark_abandoned(&row.id).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Rerun watchdog task lookup failed: {e:#}");
-                            continue;
-                        }
-                    };
-                    // Only fire tasks still live & un-soft-deleted (ADR-0013).
-                    if task.status != "active" || task.deleted_at.is_some() {
-                        tracing::info!(
-                            "Rerun {} skipped: task {} is {} — abandoning",
-                            row.id,
-                            row.task_id,
-                            task.status
-                        );
-                        let _ = queue.mark_abandoned(&row.id).await;
-                        continue;
-                    }
-                    // P0 #1: claim *before* send so a crash mid-dispatch cannot
-                    // leave attempts=0 (auto re-fire) and so due()'s attempts=0
-                    // filter excludes this row while it is in-flight.
-                    if let Err(e) = queue.mark_dispatched(&row.id).await {
-                        tracing::warn!("Rerun bump-attempts failed for {}: {e:#}", row.id);
-                        continue;
-                    }
-                    let owning = {
+                    // ADR-0013 / ADR-0040: shared claim+dispatch (also used by
+                    // human Retry sync kick). Clone bots so RwLockReadGuard is
+                    // not held across await.
+                    let bots = {
                         let guard = bots_for_watch.read().unwrap_or_else(|err| err.into_inner());
-                        rustfox::agent::Agent::build_rerun_request(
-                            &tx,
-                            &guard,
-                            store.clone(),
-                            &task,
-                            &row.id,
-                        )
+                        guard.clone()
                     };
-                    if let Err(e) = owning {
-                        tracing::warn!("Rerun dispatch failed for {}: {e:#}", row.id);
+                    if let Err(e) = rustfox::agent::Agent::claim_and_dispatch_rerun(
+                        &queue, &store, &tx, &bots, &row,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Rerun watchdog dispatch failed for {}: {e:#}", row.id);
                     }
                 }
                 // 2. Age out unanswered awaiting_user rows (one-line DM each).

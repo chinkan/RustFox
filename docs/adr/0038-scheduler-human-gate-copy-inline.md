@@ -171,3 +171,13 @@ checkpoint) is explicitly out.
 - ADR-0013 — dead-letter queue, two-strike, full replay, human-gate.
 - ADR-0024 — wall-clock timeout → human-gate once (no auto re-fire).
 - #240 — tracking issue (stays open through impl).
+
+## Cross-reference (#246 / ADR-0040)
+
+**Amended by ADR-0040 (Accepted):** human Retry must set eligibility to
+**now** and **sync claim+dispatch** the same watchdog path for that one
+row after successful Retried (inline callback and `/retry <id>`). This
+ADR’s copy + inline UX stay; “run it once more” is implemented as
+immediate full replay, not a 30m/`enqueue` congestion delay. Cancel does
+not kick. Hourly auto sweep and auto enqueue +30m remain ADR-0013.
+

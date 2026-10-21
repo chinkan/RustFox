@@ -351,10 +351,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first, GateOutcome::Retried);
+        // ADR-0040: apply_gate_action Retry makes the row due immediately
+        // (kick is wired in Telegram handlers / Agent::kick_human_retry).
+        let due = q.due().await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, id);
         let second = apply_gate_action(&q, &store, "bot-a", &action)
             .await
             .unwrap();
         assert_eq!(second, GateOutcome::AlreadyDone);
+    }
+
+    #[tokio::test]
+    async fn apply_cancel_does_not_make_row_due() {
+        let (q, store, id) = queue_and_store().await;
+        let action = GateAction::Cancel(id.clone());
+        assert_eq!(
+            apply_gate_action(&q, &store, "bot-a", &action)
+                .await
+                .unwrap(),
+            GateOutcome::Cancelled
+        );
+        assert!(
+            q.due().await.unwrap().is_empty(),
+            "cancel must not kick / must not leave a due queued row"
+        );
     }
 
     #[tokio::test]

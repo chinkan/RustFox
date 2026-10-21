@@ -2680,6 +2680,28 @@ async fn handle_human_gate_callback(
             return Ok(());
         }
     };
+    // ADR-0040: after successful Retried, sync claim+dispatch (watchdog path).
+    // Kick failure must not change UI — eligibility is already now (Q7).
+    if outcome == crate::scheduler::human_gate::GateOutcome::Retried {
+        let bots = {
+            let guard = agent
+                .telegram_bots
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            guard.clone()
+        };
+        if let Err(e) = crate::agent::Agent::kick_human_retry(
+            &queue,
+            &agent.task_store,
+            &agent.job_tx,
+            &bots,
+            action.queue_id(),
+        )
+        .await
+        {
+            warn!(error = %e, queue_id = %action.queue_id(), "human-gate retry kick failed");
+        }
+    }
     let label = outcome.as_str();
     bot.answer_callback_query(callback_id.clone())
         .text(label)
@@ -2725,6 +2747,27 @@ async fn handle_human_gate_slash(
             return Ok(());
         }
     };
+    // ADR-0040: `/retry <id>` shares apply_gate_action → same sync kick.
+    if outcome == crate::scheduler::human_gate::GateOutcome::Retried {
+        let bots = {
+            let guard = agent
+                .telegram_bots
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            guard.clone()
+        };
+        if let Err(e) = crate::agent::Agent::kick_human_retry(
+            &queue,
+            &agent.task_store,
+            &agent.job_tx,
+            &bots,
+            action.queue_id(),
+        )
+        .await
+        {
+            warn!(error = %e, queue_id = %action.queue_id(), "human-gate slash retry kick failed");
+        }
+    }
     bot.send_message(chat_id, outcome.as_str()).await?;
     Ok(())
 }

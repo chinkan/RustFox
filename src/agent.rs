@@ -1681,6 +1681,62 @@ impl Agent {
         Ok(())
     }
 
+    /// Claim one queued re-run then dispatch (ADR-0013 watchdog path;
+    /// ADR-0040 human Retry sync kick). Same order as the hourly sweep:
+    /// load task → abandon if missing/inactive → `mark_dispatched` →
+    /// [`Self::build_rerun_request`].
+    pub async fn claim_and_dispatch_rerun(
+        queue: &crate::scheduler::reruns::RerunQueue,
+        store: &ScheduledTaskStore,
+        job_tx: &tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+        telegram_bots: &std::collections::HashMap<String, Arc<Bot>>,
+        row: &crate::scheduler::reruns::PendingRerun,
+    ) -> Result<()> {
+        let task = match store.get_by_id(&row.task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                let _ = queue.mark_abandoned(&row.id).await;
+                anyhow::bail!("rerun {}: task {} missing — abandoned", row.id, row.task_id);
+            }
+            Err(e) => {
+                return Err(e).context("rerun task lookup failed");
+            }
+        };
+        if task.status != "active" || task.deleted_at.is_some() {
+            tracing::info!(
+                "Rerun {} skipped: task {} is {} — abandoning",
+                row.id,
+                row.task_id,
+                task.status
+            );
+            let _ = queue.mark_abandoned(&row.id).await;
+            return Ok(());
+        }
+        // P0 #1 / ADR-0040 Q7: claim *before* send.
+        queue
+            .mark_dispatched(&row.id)
+            .await
+            .with_context(|| format!("rerun bump-attempts failed for {}", row.id))?;
+        Self::build_rerun_request(job_tx, telegram_bots, store.clone(), &task, &row.id)
+            .with_context(|| format!("rerun dispatch failed for {}", row.id))?;
+        Ok(())
+    }
+
+    /// ADR-0040: after human Retry set eligibility to now, sync-kick this
+    /// one row through the same claim+dispatch path as the watchdog.
+    pub async fn kick_human_retry(
+        queue: &crate::scheduler::reruns::RerunQueue,
+        store: &ScheduledTaskStore,
+        job_tx: &tokio::sync::mpsc::UnboundedSender<ScheduledJobRequest>,
+        telegram_bots: &std::collections::HashMap<String, Arc<Bot>>,
+        queue_id: &str,
+    ) -> Result<()> {
+        let Some(row) = queue.get(queue_id).await? else {
+            anyhow::bail!("human retry kick: queue row {queue_id} missing");
+        };
+        Self::claim_and_dispatch_rerun(queue, store, job_tx, telegram_bots, &row).await
+    }
+
     /// Arm (schedule) a task with the live JobScheduler and persist the job
     /// id back onto the DB row. One-shot triggers that already passed return
     /// Err (caller decides: restore marks them `completed`, portal 400s).
@@ -3653,6 +3709,73 @@ mod tests {
     /// The two-strike policy hinges on this: a max-iterations run is recorded
     /// as a human-gated row, never an auto-fire one. Guard the distinction at
     /// the type level so a future refactor can't quietly swap them.
+    /// ADR-0040: human Retry kick claims (mark_dispatched) then sends on
+    /// job_tx — same path as the watchdog, no Telegram network.
+    #[tokio::test]
+    async fn human_retry_kick_claims_and_enqueues_job() {
+        use crate::scheduler::reminders::ScheduledTaskStore;
+        use crate::scheduler::reruns::RerunQueue;
+        use rusqlite::Connection;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let conn: Arc<Mutex<Connection>> =
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock().await;
+            c.execute_batch(
+                "CREATE TABLE pending_reruns (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, original_run_id TEXT NOT NULL,
+                    fail_reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL, next_eligible_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE TABLE scheduled_tasks (
+                    id TEXT PRIMARY KEY, scheduler_job_id TEXT, user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL, platform TEXT NOT NULL, trigger_type TEXT NOT NULL,
+                    trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
+                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC'
+                );",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO scheduled_tasks
+                 (id, user_id, chat_id, platform, trigger_type, trigger_value, prompt, description, bot_id)
+                 VALUES ('t1', '42', '100', 'telegram', 'one_shot', '2026-01-01T00:00:00Z', 'do it', 'desc', 'bot-a')",
+                [],
+            )
+            .unwrap();
+        }
+        let queue = RerunQueue::new(Arc::clone(&conn));
+        let store = ScheduledTaskStore::new(Arc::clone(&conn));
+        let id = queue
+            .enqueue_manual("t1", "run-1", "run timeout")
+            .await
+            .unwrap();
+        assert!(queue.retry(&id).await.unwrap());
+        assert_eq!(queue.due().await.unwrap().len(), 1);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let bots: HashMap<String, Arc<teloxide::Bot>> = HashMap::new();
+        Agent::kick_human_retry(&queue, &store, &tx, &bots, &id)
+            .await
+            .unwrap();
+
+        let row = queue.get(&id).await.unwrap().unwrap();
+        assert_eq!(row.attempts, 1, "claim bumps attempts before send");
+        assert!(
+            queue.due().await.unwrap().is_empty(),
+            "claimed row must leave due()"
+        );
+        let req = rx.try_recv().expect("job dispatched on channel");
+        assert_eq!(req.rerun_id.as_deref(), Some(id.as_str()));
+        assert_eq!(req.task_id, "t1");
+    }
+
     #[tokio::test]
     async fn manual_enqueue_is_awaiting_user_and_never_due() {
         use crate::scheduler::reruns::{RerunQueue, RerunState};
