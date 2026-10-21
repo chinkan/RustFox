@@ -165,278 +165,43 @@
     border-top: 1px solid #2d3748;
   }
   .advanced-section.collapsed > .advanced-body { display: none; }
-  /* MCP tools */
-  .mcp-category { margin-bottom: 1.5rem; }
-  .mcp-category h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.75rem; margin-top: 0; }
-  .mcp-tool {
+  /* Exa consent group */
+  fieldset.field {
     border: 1px solid #2d3748;
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.5rem;
-    cursor: pointer;
-    transition: border-color 0.2s;
+    border-radius: 10px;
+    padding: 0.85rem 1rem 1rem;
+    min-inline-size: 0;
   }
-  .mcp-tool:hover { border-color: #4a5568; }
-  .mcp-tool.selected { border-color: #f6851b; background: #1e2432; }
-  .mcp-tool-header { display: flex; align-items: center; gap: 0.75rem; }
-  .mcp-tool-header input[type=checkbox] { accent-color: #f6851b; width: 16px; height: 16px; flex-shrink: 0; cursor: pointer; }
-  .mcp-tool-name { font-weight: 600; font-size: 0.9rem; }
-  .mcp-tool-desc { font-size: 0.8rem; color: #718096; margin-left: 1.75rem; margin-top: 0.2rem; }
-  .mcp-tool-cmd { font-size: 0.75rem; color: #4a5568; font-family: monospace; margin-left: 1.75rem; margin-top: 0.15rem; }
-  .mcp-env-fields { margin-left: 1.75rem; margin-top: 0.75rem; display: none; }
-  .mcp-env-fields.visible { display: block; }
-  .mcp-env-fields .env-row { margin-bottom: 0.5rem; }
-  .mcp-env-label { font-size: 0.75rem; color: #718096; margin-bottom: 0.2rem; }
-  .mcp-env-fields input { font-family: monospace; font-size: 0.82rem; }
-  /* MCP prereqs box */
-  .mcp-prereqs {
-    background: #131825;
-    border: 1px solid #2d3748;
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 1.5rem;
-    font-size: 0.82rem;
-    color: #718096;
-    line-height: 1.7;
-  }
-  .mcp-prereqs strong { color: #cbd5e0; }
-  .mcp-prereqs a { color: #f6851b; text-decoration: none; }
-  .mcp-prereqs a:hover { text-decoration: underline; }
-  /* Per-tool docs link */
-  .mcp-tool-link {
-    margin-left: auto;
-    font-size: 0.72rem;
-    color: #4a5568;
-    text-decoration: none;
-    flex-shrink: 0;
-    padding: 0.1rem 0.3rem;
-  }
-  .mcp-tool-link:hover { color: #f6851b; }
-  /* Per-tool setup guide */
-  .mcp-setup-guide {
-    margin-left: 1.75rem;
-    margin-top: 0.6rem;
-    background: #131825;
-    border: 1px solid #2d3748;
-    border-radius: 6px;
-    padding: 0.55rem 0.75rem;
-    font-size: 0.78rem;
-    color: #718096;
-    line-height: 1.75;
-  }
-  .mcp-setup-guide strong { color: #cbd5e0; }
-  .mcp-setup-guide a { color: #f6851b; text-decoration: none; }
-  .mcp-setup-guide a:hover { text-decoration: underline; }
-  /* Find more footer */
-  .mcp-more {
-    margin-top: 1.25rem;
-    font-size: 0.8rem;
-    color: #718096;
-    text-align: center;
-  }
-  .mcp-more a { color: #f6851b; text-decoration: none; }
-  .mcp-more a:hover { text-decoration: underline; }
-  /* OAuth guide button */
-  .btn-guide {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    margin-left: 1.75rem;
-    margin-top: 0.55rem;
-    padding: 0.3rem 0.75rem;
-    border-radius: 6px;
-    border: 1px solid #f6851b;
-    background: transparent;
-    color: #f6851b;
-    font-size: 0.78rem;
+  fieldset.field > legend {
+    font-size: 0.75rem;
     font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-  }
-  .btn-guide:hover { background: #f6851b; color: #fff; opacity: 1; }
-  /* OAuth connect button + row */
-  .oauth-connect-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-left: 1.75rem;
-    margin-top: 0.55rem;
-    flex-wrap: wrap;
-  }
-  .btn-oauth-connect {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.4rem 1rem;
-    border-radius: 6px;
-    border: none;
-    background: #2b6cb0;
-    color: #fff;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s, opacity 0.15s;
-  }
-  .btn-oauth-connect:hover { background: #2c5282; }
-  .btn-oauth-connect:disabled { opacity: 0.55; cursor: not-allowed; }
-  .oauth-connect-status {
-    font-size: 0.82rem;
-    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     color: #718096;
+    padding: 0 0.35rem;
   }
-  /* Modal overlay */
-  .modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.72);
-    z-index: 1000;
-    align-items: center;
-    justify-content: center;
-    padding: 1.5rem;
-  }
-  .modal-overlay.open { display: flex; }
-  .modal-box {
-    background: #1a1f2e;
-    border: 1px solid #2d3748;
-    border-radius: 16px;
-    width: 100%;
-    max-width: 560px;
-    max-height: 90vh;
-    overflow-y: auto;
-    padding: 2rem;
-    position: relative;
-  }
-  .modal-close {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    background: none;
-    border: none;
-    color: #718096;
-    font-size: 1.25rem;
-    cursor: pointer;
-    line-height: 1;
-    padding: 0.2rem 0.4rem;
-    border-radius: 4px;
-    transition: color 0.15s;
-  }
-  .modal-close:hover { color: #e2e8f0; opacity: 1; }
-  .modal-box h3 {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #e2e8f0;
-    margin-bottom: 0.3rem;
-    margin-top: 0;
-  }
-  .modal-subtitle {
-    font-size: 0.8rem;
-    color: #718096;
-    margin-bottom: 1.5rem;
-    line-height: 1.5;
-  }
-  /* OAuth step list */
-  .oauth-steps { list-style: none; counter-reset: oauth-counter; }
-  .oauth-step {
-    counter-increment: oauth-counter;
-    display: flex;
-    gap: 0.875rem;
-    margin-bottom: 1.25rem;
-  }
-  .oauth-step:last-child { margin-bottom: 0; }
-  .oauth-step-num {
-    flex-shrink: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    border-radius: 50%;
-    background: #f6851b;
-    color: #fff;
-    font-weight: 700;
-    font-size: 0.8rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-top: 0.05rem;
-  }
-  .oauth-step-body { flex: 1; }
-  .oauth-step-title {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: #e2e8f0;
-    margin-bottom: 0.3rem;
-  }
-  .oauth-step-desc {
-    font-size: 0.8rem;
-    color: #a0aec0;
-    line-height: 1.65;
-  }
-  .oauth-step-desc a {
-    color: #f6851b;
-    text-decoration: none;
-    font-weight: 600;
-  }
-  .oauth-step-desc a:hover { text-decoration: underline; }
-  .scope-list {
-    margin: 0.4rem 0 0 0;
-    padding: 0.5rem 0.75rem;
-    background: #0f1117;
-    border: 1px solid #2d3748;
-    border-radius: 6px;
-    list-style: none;
-  }
-  .scope-list li {
-    font-family: monospace;
-    font-size: 0.73rem;
-    color: #68d391;
-    padding: 0.1rem 0;
-    line-height: 1.7;
-  }
-  .oauth-warning {
-    margin-top: 1.25rem;
-    padding: 0.6rem 0.875rem;
-    background: #2d1a0a;
-    border: 1px solid #744210;
-    border-radius: 8px;
-    font-size: 0.78rem;
-    color: #fbd38d;
-    line-height: 1.6;
-  }
-  .custom-mcp-section { margin-top: 1.75rem; border-top: 1px solid #2d3748; padding-top: 1.25rem; }
-  .custom-mcp-section h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.75rem; }
-  .custom-card {
-    border: 1px solid #2d3748;
-    border-radius: 8px;
-    padding: 0.65rem 1rem;
-    margin-bottom: 0.5rem;
+  .consent-label {
     display: flex;
     align-items: flex-start;
-    gap: 0.75rem;
+    gap: 0.55rem;
+    cursor: pointer;
   }
-  .custom-card-body { flex: 1; min-width: 0; }
-  .custom-card-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.2rem; }
-  .custom-card-cmd { font-size: 0.75rem; color: #4a5568; font-family: monospace; }
-  .custom-card-env { font-size: 0.72rem; color: #718096; margin-top: 0.15rem; }
-  .btn-remove { background: none; border: none; cursor: pointer; color: #718096; font-size: 1rem; padding: 0; line-height: 1; flex-shrink: 0; }
-  .btn-remove:hover { color: #fc8181; opacity: 1; }
-  .custom-add-form {
-    border: 1px dashed #2d3748;
-    border-radius: 8px;
-    padding: 1rem;
-    margin-top: 0.75rem;
+  .consent-label input { margin-top: 0.15rem; flex-shrink: 0; }
+  p.hint {
+    color: #718096;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    margin-bottom: 0.75rem;
   }
-  .custom-add-form h4 { font-size: 0.85rem; font-weight: 600; color: #cbd5e0; margin-bottom: 0.75rem; }
-  .cmd-row { display: flex; gap: 0.5rem; }
-  .cmd-row select {
-    background: #0f1117;
-    border: 1px solid #2d3748;
-    border-radius: 8px;
-    color: #e2e8f0;
-    padding: 0.6rem 0.5rem;
-    font-size: 0.9rem;
-    min-width: 80px;
+  /* Gray while consent is missing; red only after Enable without consent. */
+  .error-msg.consent-hint { display: block; color: #718096; }
+  fieldset.field .btn-primary { margin-top: 0.85rem; }
+  button:focus-visible,
+  input[type="checkbox"]:focus-visible,
+  input[type="radio"]:focus-visible {
+    outline: 2px solid #f6851b;
+    outline-offset: 2px;
   }
-  .env-add-row { display: flex; gap: 0.5rem; margin-bottom: 0.4rem; }
-  .env-add-row input { flex: 1; }
   /* Config preview */
   pre {
     background: #0f1117;
@@ -487,7 +252,6 @@
   </div>
 </div>
 
-<!-- OAuth Setup Modal -->
 <script>
 const state = {
   provider: 'openrouter',
@@ -530,6 +294,7 @@ function showStep(n) {
     btnNext.textContent = 'Save config.toml';
   } else if (n === 2) {
     btnNext.textContent = 'Skip →';
+    syncExaConsent();
   } else {
     btnNext.textContent = 'Continue →';
   }
@@ -553,13 +318,41 @@ function nextStep() {
   showStep(currentStep + 1);
 }
 
+function syncExaConsent() {
+  const consent = document.getElementById('f-exa-privacy');
+  const enable = document.getElementById('btn-exa-enable');
+  const err = document.getElementById('exa-privacy-error');
+  const accepted = !!(consent && consent.checked);
+  if (enable) enable.disabled = !accepted;
+  if (err) {
+    if (accepted) {
+      err.classList.remove('consent-hint', 'visible');
+    } else if (!err.classList.contains('visible')) {
+      err.classList.add('consent-hint');
+    }
+  }
+  if (accepted && consent) consent.removeAttribute('aria-invalid');
+}
+
 function enableExaAndContinue() {
   const consent = document.getElementById('f-exa-privacy');
   if (!consent || !consent.checked) {
     const err = document.getElementById('exa-privacy-error');
-    if (err) err.classList.add('visible');
+    if (err) {
+      err.classList.remove('consent-hint');
+      err.classList.add('visible');
+    }
+    const enable = document.getElementById('btn-exa-enable');
+    if (enable) enable.disabled = true;
+    if (consent) {
+      consent.setAttribute('aria-invalid', 'true');
+      consent.focus();
+    }
     return;
   }
+  consent.removeAttribute('aria-invalid');
+  const err = document.getElementById('exa-privacy-error');
+  if (err) err.classList.remove('consent-hint', 'visible');
   state.exa_privacy_accepted = true;
   state.exa_enable = true;
   collectStep();
@@ -949,17 +742,18 @@ function buildSteps() {
 <div class="step" id="step-2">
   <div id="step-exa">
   <h2>🔍 Web search (optional)</h2>
-  <p class="subtitle">Turn on Exa web search (keyless). Skip to leave it off. Same for OpenRouter and Ollama. No API key here — add one later in Settings if you want more quota.</p>
-  <p class="hint" style="margin-bottom:0.75rem">Search queries and fetched page content are sent to Exa.</p>
-  <div class="field">
-    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">
-      <input type="checkbox" id="f-exa-privacy" onchange="document.getElementById('exa-privacy-error')?.classList.remove('visible')">
+  <p class="subtitle">Optional and skippable. Skip leaves web search off. Exa is keyless here — there is no API key field. OpenRouter and Ollama use this same page. A key can be added later in Settings if you want more quota.</p>
+  <fieldset class="field" id="exa-consent-group">
+    <legend>Privacy consent</legend>
+    <p class="hint" id="exa-privacy-note">Search queries and fetched page content are sent to Exa.</p>
+    <label class="consent-label" for="f-exa-privacy">
+      <input type="checkbox" id="f-exa-privacy" aria-describedby="exa-privacy-note exa-privacy-error" onchange="syncExaConsent()">
       <span>I accept Exa’s privacy terms for web search</span>
     </label>
-    <div class="error-msg" id="exa-privacy-error">Accept privacy terms before enabling.</div>
-  </div>
-  <button type="button" class="btn-primary" style="margin-top:0.75rem" onclick="enableExaAndContinue()">Enable web search</button>
-  <p class="hint" style="margin-top:0.75rem">Or press Skip below to continue without Exa.</p>
+    <div class="error-msg consent-hint" id="exa-privacy-error" role="status">Accept privacy terms before the first enable.</div>
+    <button type="button" class="btn-primary" id="btn-exa-enable" disabled aria-describedby="exa-privacy-error" onclick="enableExaAndContinue()">Enable web search</button>
+  </fieldset>
+  <p class="hint">Skip below continues without Exa.</p>
   </div>
 </div>
 <div class="step" id="step-3">
