@@ -20,6 +20,7 @@ pub mod log_file;
 pub mod loop_detector;
 pub mod loop_runner;
 pub mod mcp;
+pub mod mcp_presets;
 pub mod memory;
 pub mod memory_tools;
 pub mod peer_invoke;

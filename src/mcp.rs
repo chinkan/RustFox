@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use http::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, ContentBlock, Tool as McpTool},
     service::RunningService,
@@ -18,6 +19,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::McpServerConfig;
 use crate::llm::{FunctionDefinition, ToolDefinition};
+use crate::mcp_presets::{
+    is_exa_quota_error, parse_env_ref, url_may_contain_credential, EXA_NAME, EXA_SOFT_429_RESULT,
+};
 
 // ── OAuth token refresh ────────────────────────────────────────────────────────
 
@@ -289,8 +293,27 @@ impl McpManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Bearer for an HTTP MCP server. `secret:NAME` is resolved from SecretStore
-    /// and never logged. Plaintext tokens (older configs) pass through.
+    /// Resolve `secret:NAME`, `env:NAME`, or plaintext. Never logs the value.
+    fn resolve_credential_ref(&self, raw: &str, field: &str) -> Result<String> {
+        let raw = raw.trim();
+        if let Some(name) = crate::secret_store::parse_secret_ref(raw) {
+            let bridge = self.secret_bridge.as_ref().with_context(|| {
+                format!("{field} is a secret:NAME ref but no SecretStore is attached")
+            })?;
+            match bridge.store().get(name)? {
+                Some(value) => Ok(value.expose().to_string()),
+                None => anyhow::bail!("secret `{name}` not found in SecretStore"),
+            }
+        } else if let Some(name) = parse_env_ref(raw) {
+            std::env::var(name)
+                .with_context(|| format!("environment variable `{name}` not set ({field})"))
+        } else {
+            Ok(raw.to_string())
+        }
+    }
+
+    /// Bearer for an HTTP MCP server. `secret:NAME` / `env:NAME` resolved;
+    /// plaintext (legacy) passes through. Never logged.
     fn resolve_bearer(&self, config: &McpServerConfig) -> Result<Option<String>> {
         let Some(raw) = config
             .auth_token
@@ -300,22 +323,40 @@ impl McpManager {
         else {
             return Ok(None);
         };
-        if let Some(name) = crate::secret_store::parse_secret_ref(raw) {
-            let bridge = self
-                .secret_bridge
-                .as_ref()
-                .context("MCP auth_token is a secret:NAME ref but no SecretStore is attached")?;
-            match bridge.store().get(name)? {
-                Some(value) => Ok(Some(value.expose().to_string())),
-                None => anyhow::bail!("secret `{name}` not found in SecretStore"),
+        Ok(Some(self.resolve_credential_ref(raw, "MCP auth_token")?))
+    }
+
+    /// Resolve `config.headers` into rmcp custom_headers. Logs header *names* only.
+    fn resolve_custom_headers(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<HashMap<HeaderName, HeaderValue>> {
+        let mut out = HashMap::new();
+        for (name, raw) in &config.headers {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
             }
-        } else {
-            Ok(Some(raw.to_string()))
+            let value = self.resolve_credential_ref(raw, &format!("MCP header `{name}`"))?;
+            if value.is_empty() {
+                continue;
+            }
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("invalid HTTP header name `{name}`"))?;
+            let header_value = HeaderValue::from_str(&value)
+                .map_err(|_| anyhow::anyhow!("invalid HTTP header value for `{name}`"))?;
+            info!("HTTP MCP server '{}': {name} set", config.name);
+            out.insert(header_name, header_value);
         }
+        Ok(out)
     }
 
     /// Connect to an MCP server — dispatches to HTTP or stdio based on config.
+    /// Exa without privacy consent is refused (ADR-0023 / ADR-0041).
     pub async fn connect(&self, config: &McpServerConfig) -> Result<()> {
+        if config.name == EXA_NAME && config.privacy_accepted_at.is_none() {
+            anyhow::bail!("Exa MCP requires privacy consent (privacy_accepted_at) before connect");
+        }
         if config.url.is_some() {
             self.connect_http(config).await
         } else {
@@ -330,7 +371,14 @@ impl McpManager {
             .as_deref()
             .context("HTTP MCP server config missing 'url'")?;
 
-        info!("Connecting to HTTP MCP server '{}': {}", config.name, url);
+        if url_may_contain_credential(url) {
+            info!(
+                "Connecting to HTTP MCP server '{}' (URL omitted from logs: may contain a credential)",
+                config.name
+            );
+        } else {
+            info!("Connecting to HTTP MCP server '{}': {}", config.name, url);
+        }
 
         let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
 
@@ -340,15 +388,20 @@ impl McpManager {
         // remote servers (e.g. Notion) reject with 401 invalid_token.
         match self.resolve_bearer(config)? {
             Some(token) => {
+                info!("HTTP MCP server '{}': Authorization set", config.name);
                 transport_config = transport_config.auth_header(token);
             }
             None => {
                 tracing::debug!(
-                    "HTTP MCP server '{}' has no auth_token configured; \
-                     requests will be sent without an Authorization header",
+                    "HTTP MCP server '{}' has no auth_token configured;                      requests will be sent without an Authorization header",
                     config.name
                 );
             }
+        }
+
+        let custom = self.resolve_custom_headers(config)?;
+        if !custom.is_empty() {
+            transport_config = transport_config.custom_headers(custom);
         }
 
         let transport = StreamableHttpClientTransport::from_config(transport_config);
@@ -535,12 +588,25 @@ impl McpManager {
             if let Some(args) = arguments.as_object().cloned() {
                 call_params = call_params.with_arguments(args);
             }
-            let result = peer.call_tool(call_params).await.with_context(|| {
-                format!(
-                    "Failed to call MCP tool '{}' on server '{}'",
-                    tool_name, server_name
-                )
-            })?;
+            let result = match peer.call_tool(call_params).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_text = format!("{e:#}");
+                    if server_name == EXA_NAME && is_exa_quota_error(&err_text) {
+                        warn!(
+                            "Exa MCP tool '{}' hit quota/rate limit; returning soft result",
+                            tool_name
+                        );
+                        return Ok(EXA_SOFT_429_RESULT.to_string());
+                    }
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Failed to call MCP tool '{}' on server '{}'",
+                            tool_name, server_name
+                        )
+                    });
+                }
+            };
 
             // Extract text content from the result
             let text_parts: Vec<String> = result
@@ -552,10 +618,19 @@ impl McpManager {
                 })
                 .collect();
 
-            if text_parts.is_empty() {
-                return Ok(self.redact_tool_text(&format!("{:?}", result.content)));
+            let joined = if text_parts.is_empty() {
+                format!("{:?}", result.content)
+            } else {
+                text_parts.join("\n")
+            };
+            if server_name == EXA_NAME && is_exa_quota_error(&joined) {
+                warn!(
+                    "Exa MCP tool '{}' returned quota/rate-limit payload; soft result",
+                    tool_name
+                );
+                return Ok(EXA_SOFT_429_RESULT.to_string());
             }
-            return Ok(self.redact_tool_text(&text_parts.join("\n")));
+            return Ok(self.redact_tool_text(&joined));
         }
 
         anyhow::bail!("MCP tool not found: {}", prefixed_name)
@@ -564,6 +639,33 @@ impl McpManager {
     /// Check if a tool name belongs to an MCP server
     pub fn is_mcp_tool(&self, name: &str) -> bool {
         name.starts_with("mcp_")
+    }
+
+    /// Whether a named server is currently connected.
+    pub fn is_connected(&self, name: &str) -> bool {
+        self.lock_connections().contains_key(name)
+    }
+
+    /// Names of connected servers (sorted).
+    pub fn connected_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.lock_connections().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Drop one server connection and its tools without a process restart
+    /// (ADR-0041 hot reload / ADR-0023 per-server disconnect).
+    /// Returns `true` when a live connection was removed.
+    pub async fn disconnect(&self, name: &str) -> bool {
+        let removed = self.lock_connections().remove(name);
+        let Some(connection) = removed else {
+            return false;
+        };
+        info!("Disconnecting MCP server '{}'", name);
+        if let Err(e) = connection.client.cancel().await {
+            error!("Error disconnecting MCP server '{}': {}", name, e);
+        }
+        true
     }
 
     /// Shutdown all MCP connections
@@ -594,6 +696,8 @@ mod tests {
             env: HashMap::new(),
             url: Some("https://example.com/mcp".to_string()),
             auth_token: Some("tok".to_string()),
+            headers: HashMap::new(),
+            privacy_accepted_at: None,
             refresh_token: Some("rt".to_string()),
             token_expires_at: None,
             token_endpoint: Some("https://example.com/token".to_string()),
@@ -893,5 +997,69 @@ args = ["mcp-server-git"]
             !path.with_extension("toml.bak").exists(),
             "missing server must not create .bak"
         );
+    }
+
+    #[test]
+    fn resolve_bearer_reads_env_ref() {
+        let mgr = McpManager::new();
+        std::env::set_var("RUSTFOX_TEST_MCP_BEARER", "env-bearer-value");
+        let mut cfg = base_config();
+        cfg.auth_token = Some("env:RUSTFOX_TEST_MCP_BEARER".into());
+        let got = mgr.resolve_bearer(&cfg).unwrap().unwrap();
+        assert_eq!(got, "env-bearer-value");
+        std::env::remove_var("RUSTFOX_TEST_MCP_BEARER");
+    }
+
+    #[test]
+    fn resolve_custom_headers_includes_non_bearer() {
+        let mgr = McpManager::new();
+        let mut cfg = base_config();
+        cfg.auth_token = None;
+        cfg.headers
+            .insert("x-api-key".into(), "header-secret-xyz".into());
+        cfg.headers.insert("X-Custom".into(), "custom-val".into());
+        let headers = mgr.resolve_custom_headers(&cfg).unwrap();
+        assert!(headers.contains_key(&HeaderName::from_static("x-api-key")));
+        assert!(headers.contains_key(&HeaderName::from_static("x-custom")));
+        let v = headers
+            .get(&HeaderName::from_static("x-api-key"))
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(v, "header-secret-xyz");
+    }
+
+    #[test]
+    fn resolve_bearer_secret_ref_needs_bridge() {
+        let mgr = McpManager::new();
+        let mut cfg = base_config();
+        cfg.auth_token = Some("secret:mcp.test.token".into());
+        let err = mgr.resolve_bearer(&cfg).unwrap_err().to_string();
+        assert!(err.contains("SecretStore"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn disconnect_missing_is_false() {
+        let mgr = McpManager::new();
+        assert!(!mgr.disconnect("missing").await);
+        assert!(!mgr.is_connected("missing"));
+    }
+
+    #[test]
+    fn soft_429_helper_used_for_exa() {
+        assert!(is_exa_quota_error("status 429 from upstream"));
+        assert!(EXA_SOFT_429_RESULT.contains("not available"));
+    }
+
+    #[test]
+    fn connect_exa_without_consent_errors() {
+        let mgr = McpManager::new();
+        let mut cfg = base_config();
+        cfg.name = "exa".into();
+        cfg.privacy_accepted_at = None;
+        let err = futures::executor::block_on(mgr.connect(&cfg))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("privacy consent"), "{err}");
     }
 }

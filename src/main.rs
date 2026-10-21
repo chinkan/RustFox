@@ -760,6 +760,26 @@ async fn main() -> Result<()> {
         warn!("  Bot-token migrate skipped (no durable SecretStore backend)");
     }
 
+    // ADR-0041: seal plaintext MCP auth_token / credential headers → secret:NAME.
+    if secret_backend.is_some() {
+        match rustfox::mcp_presets::migrate_plaintext_mcp_credentials(
+            &config_path,
+            secret_bridge.store().as_ref(),
+        ) {
+            Ok(n) if n > 0 => {
+                info!(
+                    "  Migrated {n} plaintext MCP credential(s) into SecretStore (config scrubbed)"
+                );
+                config = Config::load(&config_path)
+                    .context("reload config after MCP credential migrate")?;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("  MCP credential SecretStore migrate skipped: {e:#}");
+            }
+        }
+    }
+
     // ADR 0016: resolve `secret:openrouter.api_key` before providers are built.
     rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
 

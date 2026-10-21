@@ -387,14 +387,25 @@ pub struct McpServerConfig {
     pub env: std::collections::HashMap<String, String>,
     /// URL for HTTP-based MCP servers using the Streamable HTTP transport.
     /// Required for HTTP servers; omit for stdio servers.
-    /// The API key may be embedded as a query parameter (e.g. `?exaApiKey=KEY`)
-    /// or provided separately via `auth_token`.
+    /// Do not put credentials in the URL (they would be logged). Use
+    /// `auth_token` / `headers` with `secret:NAME` or `env:NAME` (ADR-0041).
     #[serde(default)]
     pub url: Option<String>,
     /// Bearer token sent in the `Authorization` header for HTTP servers.
     /// Used with `url`; ignored for stdio servers.
+    /// Prefer `secret:NAME` (SecretStore) or `env:NAME` (process env); plaintext
+    /// is migrate-and-scrubbed on load (ADR-0041).
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Extra HTTP headers for Streamable HTTP connect (ADR-0041).
+    /// Values that are credentials use `secret:NAME` / `env:NAME`.
+    /// Exa's `x-api-key` lives here on the Exa preset (never Bearer).
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Exa privacy consent timestamp (Unix seconds). Unset ⇒ Exa must not connect
+    /// (ADR-0023 / ADR-0041). Ignored for non-Exa servers.
+    #[serde(default)]
+    pub privacy_accepted_at: Option<i64>,
     /// OAuth 2.0 refresh token for long-lived connections.
     /// When set, the bot will automatically exchange this for a new `auth_token`
     /// before the current one expires and persist the updated token to `config.toml`.
@@ -1538,6 +1549,32 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.mcp_servers[0].command.as_deref(), Some("uvx"));
         assert!(cfg.mcp_servers[0].url.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_headers_and_privacy() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+            [[mcp_servers]]
+            name = "exa"
+            url = "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa"
+            privacy_accepted_at = 1730000000
+            headers = { x-api-key = "secret:exa.mcp.api_key" }
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let s = &cfg.mcp_servers[0];
+        assert_eq!(s.privacy_accepted_at, Some(1730000000));
+        assert_eq!(
+            s.headers.get("x-api-key").map(String::as_str),
+            Some("secret:exa.mcp.api_key")
+        );
+        assert!(s.auth_token.is_none());
     }
 
     #[test]

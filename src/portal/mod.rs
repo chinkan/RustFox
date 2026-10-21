@@ -11,6 +11,7 @@ pub mod data;
 pub mod error;
 pub mod google;
 pub mod install;
+pub mod mcp;
 pub mod secrets;
 pub mod settings;
 pub mod static_serve;
@@ -76,6 +77,26 @@ pub trait AgentOps: Send + Sync {
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
         let _ = config;
         Box::pin(async { Ok(()) })
+    }
+    /// Connect one MCP server (hot reload). Default no-op for test fakes.
+    fn mcp_connect(
+        &self,
+        config: crate::config::McpServerConfig,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let _ = config;
+        Box::pin(async { Ok(()) })
+    }
+    /// Disconnect one MCP server by name. Default no-op.
+    fn mcp_disconnect(&self, name: String) -> futures::future::BoxFuture<'_, bool> {
+        let _ = name;
+        Box::pin(async { false })
+    }
+    fn mcp_is_connected(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+    fn mcp_connected_names(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -178,6 +199,21 @@ impl AgentOps for Agent {
         config: crate::config::McpServerConfig,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async move { self.mcp.connect(&config).await })
+    }
+    fn mcp_connect(
+        &self,
+        config: crate::config::McpServerConfig,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move { self.mcp.connect(&config).await })
+    }
+    fn mcp_disconnect(&self, name: String) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move { self.mcp.disconnect(&name).await })
+    }
+    fn mcp_is_connected(&self, name: &str) -> bool {
+        self.mcp.is_connected(name)
+    }
+    fn mcp_connected_names(&self) -> Vec<String> {
+        self.mcp.connected_names()
     }
 }
 
@@ -409,6 +445,19 @@ pub fn router(state: PortalState) -> Router {
         .route(
             "/settings/self-upgrade",
             axum::routing::post(settings::self_upgrade),
+        )
+        .route("/settings/mcp/presets", get(mcp::list_presets))
+        .route(
+            "/settings/mcp/{name}",
+            axum::routing::put(mcp::upsert_server).delete(mcp::delete_server),
+        )
+        .route(
+            "/settings/mcp/{name}/enable",
+            axum::routing::post(mcp::enable_server),
+        )
+        .route(
+            "/settings/mcp/{name}/disable",
+            axum::routing::post(mcp::disable_server),
         )
         .route("/soul", get(settings::get_soul))
         .route("/soul", axum::routing::put(settings::put_soul))
