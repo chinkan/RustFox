@@ -32,6 +32,17 @@ impl CancelRegistry {
         }
     }
 
+    /// Cancel every registered in-flight tool (e.g. execute_command).
+    /// Used on /stop and scheduler run-timeout so children die promptly.
+    pub async fn cancel_all(&self) -> usize {
+        let mut map = self.inner.lock().await;
+        let n = map.len();
+        for (_id, tx) in map.drain() {
+            let _ = tx.send(());
+        }
+        n
+    }
+
     pub async fn unregister(&self, id: &str) {
         let mut map = self.inner.lock().await;
         map.remove(id);
@@ -79,5 +90,18 @@ mod tests {
         reg.register("cmd_1".to_string(), tx).await;
         assert!(reg.cancel("cmd_1").await);
         assert!(!reg.cancel("cmd_1").await);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_all_fires_every_channel() {
+        let reg = CancelRegistry::new();
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
+        reg.register("a".into(), tx1).await;
+        reg.register("b".into(), tx2).await;
+        assert_eq!(reg.cancel_all().await, 2);
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_ok());
+        assert_eq!(reg.cancel_all().await, 0);
     }
 }

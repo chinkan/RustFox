@@ -830,11 +830,16 @@ impl Agent {
 
     /// Cancel processing for a bot+user session.
     ///
-    /// Cancels the agent-loop [`CancellationToken`] (if any) **and** any
+    /// Cancels the agent-loop [`CancellationToken`] (if any), every registered
+    /// in-flight tool cancel channel (e.g. `execute_command`), **and** any
     /// cancellable supervisor tasks for the same session key. Returns true if
-    /// either the loop token or at least one supervisor task was cancelled.
+    /// the loop token, at least one tool, or a supervisor task was cancelled.
     pub async fn cancel_processing(&self, bot_id: &str, user_id: &str) -> bool {
         let key = session_key(bot_id, user_id);
+        // Kill in-flight execute_command (and peers) before / with the loop
+        // token so a wall-clock timeout's ~2s wait can observe Cancelled and
+        // save an ADR-0039 transcript checkpoint (#250).
+        let tools_n = self.cancel_registry.cancel_all().await;
         let loop_cancelled = {
             let mut map = self.cancel_token_registry.lock().await;
             if let Some(token) = map.remove(&key) {
@@ -845,7 +850,7 @@ impl Agent {
             }
         };
         let sup_n = self.cancel_supervisor_session(bot_id, user_id).await;
-        loop_cancelled || sup_n > 0
+        loop_cancelled || tools_n > 0 || sup_n > 0
     }
 
     /// Check if a bot+user session has active processing.

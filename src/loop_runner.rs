@@ -14,6 +14,26 @@ use crate::platform::sender::PlatformSender;
 use crate::platform::tool_notifier::ToolEvent;
 use crate::tool_registry::{ToolContext, ToolRegistry};
 
+/// Await `fut`, but return `Err(())` immediately when `cancel` fires.
+/// Leaves the tool future dropped (dangling tool call stays in the transcript
+/// for ADR-0039 checkpoint). Used so wall-clock timeout's ~2s wait can land
+/// `LoopOutcome::Cancelled` even when stuck in a long tool (#250).
+async fn await_tool_or_cancel<T>(
+    cancel: Option<&CancellationToken>,
+    fut: impl Future<Output = T>,
+) -> Result<T, ()> {
+    match cancel {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(()),
+                result = fut => Ok(result),
+            }
+        }
+        None => Ok(fut.await),
+    }
+}
+
 pub type ToolHandlerFn = Box<
     dyn Fn(
             &str,
@@ -349,7 +369,18 @@ impl<'a> AgenticLoop<'a> {
                     // Check special tool handler first (for invoke_agent/spawn_agents)
                     if let Some(ref handler) = self.special_tool_handler {
                         let fut = (handler)(&tc.function.name, &args, user_id, chat_id);
-                        if let Some(result) = fut.await {
+                        let special = match await_tool_or_cancel(self.cancel.as_ref(), fut).await {
+                            Ok(v) => v,
+                            Err(()) => {
+                                self.finish_child(
+                                    tool_run,
+                                    None,
+                                    Some("cancelled during tool".into()),
+                                );
+                                return Ok(LoopOutcome::Cancelled { iterations });
+                            }
+                        };
+                        if let Some(result) = special {
                             // Peer cycle/depth/self-invoke must abort the turn so
                             // Telegram clears Working and surfaces an error reply
                             // (soft tool results left the UI stuck on hung LLM retries).
@@ -367,11 +398,21 @@ impl<'a> AgenticLoop<'a> {
                         }
                     }
 
-                    let executed = if tc.function.name.starts_with("mcp_") {
-                        self.mcp.call_tool(&tc.function.name, &args).await
-                    } else {
-                        let ctx = (self.make_tool_ctx)(user_id, chat_id);
-                        self.tools.execute(&tc.function.name, args, ctx).await
+                    let tool_fut = async {
+                        if tc.function.name.starts_with("mcp_") {
+                            self.mcp.call_tool(&tc.function.name, &args).await
+                        } else {
+                            let ctx = (self.make_tool_ctx)(user_id, chat_id);
+                            self.tools.execute(&tc.function.name, args, ctx).await
+                        }
+                    };
+                    let executed = match await_tool_or_cancel(self.cancel.as_ref(), tool_fut).await
+                    {
+                        Ok(v) => v,
+                        Err(()) => {
+                            self.finish_child(tool_run, None, Some("cancelled during tool".into()));
+                            return Ok(LoopOutcome::Cancelled { iterations });
+                        }
                     };
                     match executed {
                         Ok(result) => {
@@ -470,5 +511,239 @@ impl MessageContainer {
             MessageContainer::Conversation(cm) => cm.messages().to_vec(),
             MessageContainer::Plain(msgs) => msgs.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cancel_registry::CancelRegistry;
+    use crate::config::ProviderType;
+    use crate::llm::{ChatMessage, LlmClient, MessageContent};
+    use crate::mcp::McpManager;
+    use crate::platform::sender::{MessageFormat, PlatformMessageId, PlatformSender};
+    use crate::provider::{OpenRouterProvider, ProviderConfig, ProviderRegistry};
+    use crate::scheduler::checkpoint::TranscriptCheckpoint;
+    use crate::tool_registry::ToolRegistry;
+    use async_trait::async_trait;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::RwLock;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct NopSender;
+
+    #[async_trait]
+    impl PlatformSender for NopSender {
+        async fn send_message(
+            &self,
+            _chat_id: &str,
+            _text: &str,
+            _format: MessageFormat,
+        ) -> anyhow::Result<PlatformMessageId> {
+            Ok("0:1".into())
+        }
+        async fn send_file(
+            &self,
+            _chat_id: &str,
+            _path: &Path,
+            _caption: Option<&str>,
+        ) -> anyhow::Result<PlatformMessageId> {
+            Ok("0:1".into())
+        }
+        async fn show_cancel_button(
+            &self,
+            _chat_id: &str,
+            _text: &str,
+            _cancel_id: &str,
+        ) -> anyhow::Result<PlatformMessageId> {
+            Ok("0:1".into())
+        }
+        async fn edit_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &PlatformMessageId,
+            _text: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &PlatformMessageId,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn notify_shutdown(&self, _chat_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_loop_config() -> LoopConfig {
+        LoopConfig {
+            max_iterations: 4,
+            empty_response_retry_limit: 2,
+            context_window: 8_000,
+            loop_detection_enabled: false,
+            loop_detection_threshold: 3,
+            interactive_loop_callback: false,
+            allowed_tools: None,
+            langsmith_project: None,
+            model: Some("p1/m1".into()),
+            tool_event_tx: None,
+            stream_token_tx: None,
+            recovery_nudge: None,
+        }
+    }
+
+    fn test_llm(uri: String) -> LlmClient {
+        let cfg = ProviderConfig {
+            name: "p1".into(),
+            provider_type: ProviderType::OpenRouter,
+            base_url: uri,
+            api_key: Some("k".into()),
+            default_model: "m1".into(),
+            supports_vision: false,
+            max_tokens: 64,
+            discover_models: false,
+            context_window: 8_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+        };
+        let provider: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(cfg));
+        let mut providers = std::collections::HashMap::new();
+        providers.insert("p1".into(), provider);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".into()));
+        LlmClient::with_request_timeout_secs(reg, 30)
+    }
+
+    /// #250: cancel while a long tool is in flight must return Cancelled
+    /// quickly with a transcript that can form a checkpoint (dangling tool id).
+    #[tokio::test]
+    async fn cancel_during_inflight_tool_yields_cancelled_transcript() {
+        let server = MockServer::start().await;
+        let tool_body = r#"{
+          "choices":[{
+            "message":{
+              "role":"assistant",
+              "content":"",
+              "tool_calls":[{
+                "id":"call_sleep",
+                "type":"function",
+                "function":{"name":"slow_tool","arguments":"{}"}
+              }]
+            },
+            "finish_reason":"tool_calls"
+          }]
+        }"#;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(tool_body))
+            .mount(&server)
+            .await;
+
+        let llm = test_llm(server.uri());
+        let tools = ToolRegistry::new();
+        let mcp = McpManager::new();
+        let config = test_loop_config();
+        let cancel = CancellationToken::new();
+        let sender = NopSender;
+
+        // Simulate stuck execute_command sleep: does NOT poll cancel itself
+        // (the pre-#250 bug). Loop must interrupt via await_tool_or_cancel.
+        let special: ToolHandlerFn = Box::new(move |name, _args, _uid, _cid| {
+            let name = name.to_string();
+            Box::pin(async move {
+                if name != "slow_tool" {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Some("done".into())
+            })
+        });
+
+        let agentic = AgenticLoop::new(
+            &llm,
+            &tools,
+            &mcp,
+            &config,
+            Some(cancel.clone()),
+            None,
+            None,
+            &sender,
+            Box::new(|_u, _c| crate::tool_registry::ToolContext {
+                sandbox_dir: std::env::temp_dir(),
+                home_dir: None,
+                sender: Arc::new(NopSender),
+                cancel_registry: Arc::new(CancelRegistry::new()),
+                user_id: "u".into(),
+                chat_id: "1".into(),
+                bot_id: "default".into(),
+                tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+            }),
+            Some(special),
+        );
+
+        let mut messages = MessageContainer::Plain(vec![ChatMessage {
+            role: "user".into(),
+            content: Some(MessageContent::from_text("run sleep")),
+            tool_calls: None,
+            tool_call_id: None,
+        }]);
+
+        let started = Instant::now();
+        let cancel_later = cancel.clone();
+        let run_task = async {
+            // Let the LLM return and the slow tool start, then cancel (mirrors
+            // scheduler timeout → cancel_processing → ~2s wait).
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel_later.cancel();
+            });
+            agentic.run(&mut messages, "u", "1").await
+        };
+        let outcome = tokio::time::timeout(Duration::from_secs(2), run_task)
+            .await
+            .expect("Cancelled must return within 2s (scheduler timeout wait)")
+            .expect("loop must not error");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not wait for the 60s tool"
+        );
+        match outcome {
+            LoopOutcome::Cancelled { iterations } => {
+                assert!(iterations >= 1, "LLM round must have completed");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+
+        let snap = messages.messages_snapshot();
+        let cp = TranscriptCheckpoint::from_messages(snap, 1);
+        assert!(
+            cp.dangling_tool_ids.contains(&"call_sleep".to_string()),
+            "in-flight tool must be dangling so timeout gate can checkpoint: {:?}",
+            cp.dangling_tool_ids
+        );
+        let cont = cp.messages_for_continue();
+        assert!(
+            crate::scheduler::checkpoint::find_dangling_tool_ids(&cont).is_empty(),
+            "continue synthesis must close dangling ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_tool_or_cancel_prefers_cancel() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            42
+        };
+        let result = await_tool_or_cancel(Some(&token), slow).await;
+        assert_eq!(result, Err(()));
     }
 }
