@@ -193,6 +193,7 @@ async fn repeated_identical_tool_calls_stop_after_recoveries() {
         tool_event_tx: None,
         stream_token_tx: None,
         recovery_nudge: None,
+        session_key: None,
     };
     let sender = NullSender;
     let loop_runner = AgenticLoop::new(

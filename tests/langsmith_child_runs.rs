@@ -214,6 +214,7 @@ fn loop_config(allowed: Option<Vec<String>>, project: Option<String>) -> LoopCon
         tool_event_tx: None,
         stream_token_tx: None,
         recovery_nudge: None,
+        session_key: None,
     }
 }
 

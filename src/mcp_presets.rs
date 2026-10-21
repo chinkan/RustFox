@@ -187,35 +187,42 @@ pub fn persist_exa_enabled(config_path: &Path, privacy_accepted: bool) -> Result
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let existing_privacy = servers.iter().find_map(|s| {
-        if s.get("name").and_then(|v| v.as_str()) == Some(EXA_NAME) {
-            s.get("privacy_accepted_at").and_then(|v| v.as_integer())
-        } else {
-            None
-        }
+    let existing_idx = servers
+        .iter()
+        .position(|s| s.get("name").and_then(|v| v.as_str()) == Some(EXA_NAME));
+    let existing_privacy = existing_idx.and_then(|i| {
+        servers[i]
+            .get("privacy_accepted_at")
+            .and_then(|v| v.as_integer())
     });
     let privacy_ts = existing_privacy.or(Some(now));
-    let cfg = exa_preset_config(true, privacy_ts);
-    let table = toml::Value::Table(exa_server_toml_table(&cfg));
-    if let Some(i) = servers
-        .iter()
-        .position(|s| s.get("name").and_then(|v| v.as_str()) == Some(EXA_NAME))
-    {
+    let mut cfg = exa_preset_config(true, privacy_ts);
+
+    if let Some(i) = existing_idx {
         // Preserve config-owned rows' extra fields? ADR: portal refuses config_owned.
-        // For Telegram enable, overwrite pin fields but keep headers if present.
-        if let Some(toml::Value::Table(prev)) = servers.get(i).cloned() {
-            if prev.get("command").is_some()
-                || prev
-                    .get("url")
-                    .and_then(|u| u.as_str())
-                    .is_some_and(|u| u.trim() != EXA_URL)
-            {
-                bail!("Exa is configured in config.toml; enable via Settings instead");
+        // For Telegram enable, overwrite pin fields but keep headers if present
+        // (mirror portal MCP upsert: Settings x-api-key secret refs must survive).
+        let prev = servers[i]
+            .as_table()
+            .context("Exa mcp_servers row is not a table")?;
+        if prev.get("command").is_some()
+            || prev
+                .get("url")
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| u.trim() != EXA_URL)
+        {
+            bail!("Exa is configured in config.toml; enable via Settings instead");
+        }
+        if let Some(toml::Value::Table(headers)) = prev.get("headers") {
+            for (k, v) in headers {
+                if let Some(s) = v.as_str() {
+                    cfg.headers.insert(k.clone(), s.to_string());
+                }
             }
         }
-        servers[i] = table;
+        servers[i] = toml::Value::Table(exa_server_toml_table(&cfg));
     } else {
-        servers.push(table);
+        servers.push(toml::Value::Table(exa_server_toml_table(&cfg)));
     }
 
     let new_content = toml::to_string_pretty(&doc).context("serialize config with Exa")?;
@@ -544,6 +551,64 @@ headers = { x-api-key = "exa-plain-key" }
         exa_offer_mark_declined(&key);
         assert!(exa_offer_was_declined(&key));
         assert!(!exa_offer_should_send(&key));
+    }
+
+    #[test]
+    fn persist_exa_enabled_preserves_existing_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let secret_ref = format!("secret:{EXA_API_KEY_SECRET}");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[telegram]
+bot_token = "123:ABC"
+allowed_user_ids = [1]
+[openrouter]
+api_key = "sk-test"
+[sandbox]
+allowed_directory = "/tmp"
+
+[[mcp_servers]]
+name = "exa"
+url = "{EXA_URL}"
+enabled = false
+headers = {{ "{EXA_HEADER_API_KEY}" = "{secret_ref}" }}
+"#
+            ),
+        )
+        .unwrap();
+
+        let cfg = persist_exa_enabled(&path, true).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(
+            cfg.headers.get(EXA_HEADER_API_KEY).map(String::as_str),
+            Some(secret_ref.as_str()),
+            "returned config must keep prior x-api-key secret ref"
+        );
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(&secret_ref),
+            "written config.toml must still contain the secret ref: {after}"
+        );
+        assert!(
+            after.contains(EXA_HEADER_API_KEY),
+            "written config.toml must still contain headers.{EXA_HEADER_API_KEY}"
+        );
+        let doc: toml::Value = toml::from_str(&after).unwrap();
+        let servers = doc.get("mcp_servers").and_then(|v| v.as_array()).unwrap();
+        let exa = servers
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some(EXA_NAME))
+            .unwrap();
+        assert_eq!(exa.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        let header_val = exa
+            .get("headers")
+            .and_then(|h| h.get(EXA_HEADER_API_KEY))
+            .and_then(|v| v.as_str());
+        assert_eq!(header_val, Some(secret_ref.as_str()));
     }
 
     #[test]

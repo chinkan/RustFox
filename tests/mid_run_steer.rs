@@ -201,6 +201,7 @@ fn cfg(max_iterations: u32) -> LoopConfig {
         tool_event_tx: None,
         stream_token_tx: None,
         recovery_nudge: None,
+        session_key: None,
     }
 }
 
