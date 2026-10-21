@@ -25,6 +25,9 @@ import type {
   SandboxSwitchResult,
   SelfUpgradeChoice,
   SelfUpgradeResult,
+  McpPresetsResponse,
+  McpUpsertBody,
+  McpServerMutationResult,
   Skill,
   SkillEntry,
   SoulFile,
@@ -189,6 +192,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ choice }),
       signal: AbortSignal.timeout(30 * 60 * 1000),
+    }),
+  // ── MCP settings (ADR-0041) ───────────────────────────────────────────────
+  getMcpPresets: () => get<McpPresetsResponse>('/settings/mcp/presets'),
+  putMcpServer: (name: string, body: McpUpsertBody) =>
+    request<McpServerMutationResult>(`/settings/mcp/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteMcpServer: (name: string) =>
+    request<{ deleted: string }>(`/settings/mcp/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+  enableMcpServer: (name: string, body?: { privacyAccepted?: boolean }) =>
+    request<McpServerMutationResult>(`/settings/mcp/${encodeURIComponent(name)}/enable`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
+  disableMcpServer: (name: string) =>
+    request<McpServerMutationResult>(`/settings/mcp/${encodeURIComponent(name)}/disable`, {
+      method: 'POST',
+      body: '{}',
     }),
   getSoul: (name: SoulName) => get<SoulFile>(`/soul?name=${encodeURIComponent(name)}`),
   putSoul: (name: SoulName, content: string) =>

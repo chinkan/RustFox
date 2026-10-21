@@ -415,12 +415,64 @@ export interface ProviderInfo {
   apiKeyMasked: string | null
 }
 
+/** ADR-0041 — masked MCP server projection (no secret values). */
+export type McpServerKind = 'preset' | 'custom' | 'stdio'
+
+export interface McpServerMasked {
+  name: string
+  kind: McpServerKind
+  /** Preset id when kind=preset (exa / jina). */
+  preset?: string | null
+  enabled: boolean
+  url?: string | null
+  authConfigured: boolean
+  headerNames: string[]
+  connected: boolean
+  privacyAccepted?: boolean | null
+  privacyAcceptedAt?: number | null
+  /** Hand-written preset row diverges from pinned URL — portal read-only. */
+  configOwned: boolean
+}
+
+/** Static catalog entry from GET /api/settings/mcp/presets. */
+export interface McpPreset {
+  id: string
+  label: string
+  kind: string
+  url: string
+  auth: string
+  authHeader?: string
+  tools: string[]
+  keylessDefault?: boolean
+  requiresPrivacyConsent?: boolean
+  description?: string
+}
+
+export interface McpPresetsResponse {
+  presets: McpPreset[]
+}
+
+/** PUT /api/settings/mcp/{name} body (all optional except Custom url on create). */
+export interface McpUpsertBody {
+  name?: string
+  url?: string
+  enabled?: boolean
+  bearer?: string
+  headers?: Record<string, string>
+  privacyAccepted?: boolean
+  clearApiKey?: boolean
+}
+
+export interface McpServerMutationResult {
+  server: McpServerMasked
+}
+
 export interface SettingsMasked {
   telegramBotToken: string
   openrouterApiKey: string
   providers: ProviderInfo[]
   embeddingApiKey?: string | null
-  mcpServers: Array<{ name: string }>
+  mcpServers: McpServerMasked[]
 }
 
 /** ADR 0011 R7 — system-prompt provenance projection. */
