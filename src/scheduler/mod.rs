@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod history;
 pub mod human_gate;
 pub mod reminders;

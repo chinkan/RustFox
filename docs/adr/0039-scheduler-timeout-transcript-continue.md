@@ -1,6 +1,6 @@
 # ADR-0039: Scheduler timeout transcript continue (Slice B)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0013 (dead-letter / human-gate / full replay default), ADR-0024 (scheduler run timeout → human-gate once)

@@ -67,9 +67,16 @@ async fn run_one_scheduled_job(
     }
 
     // ADR-0024: wall-clock timeout around the scheduled agent call.
+    // ADR-0039: pass continue_from when Retry loaded a timeout checkpoint.
     let timeout_secs = agent.config.scheduler_run_timeout_secs();
-    let mut run_fut =
-        Box::pin(agent.process_message_outcome(&req.incoming, None, None, ToolUiMode::Minimal));
+    let continue_from = req.continue_from.clone();
+    let mut run_fut = Box::pin(agent.process_message_outcome(
+        &req.incoming,
+        None,
+        None,
+        ToolUiMode::Minimal,
+        continue_from,
+    ));
     let processed = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         &mut run_fut,
@@ -87,7 +94,19 @@ async fn run_one_scheduled_job(
             let _ = agent
                 .cancel_processing(&req.incoming.bot_id, &req.incoming.user_id)
                 .await;
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut run_fut).await;
+            let cancelled_outcome =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut run_fut).await {
+                    Ok(Ok(outcome)) => Some(outcome),
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            "Scheduled task {} error after timeout cancel: {e:#}",
+                            req.task_id
+                        );
+                        None
+                    }
+                    Err(_) => None,
+                };
+            let transcript = cancelled_outcome.and_then(|o| o.transcript);
 
             let reason = rustfox::scheduler::reminders::RUN_TIMEOUT_ERROR;
             if let Err(e) = req
@@ -117,11 +136,19 @@ async fn run_one_scheduled_job(
             }
 
             // ADR-0013 human-gate once — hang may have side effects; no auto re-fire.
+            // ADR-0039: persist transcript checkpoint on this timeout gate only.
+            let checkpoints =
+                rustfox::scheduler::checkpoint::CheckpointStore::new(agent.memory.connection());
             let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
             match &req.rerun_id {
                 Some(rid) => {
                     if let Err(e) = queue_for_runner.mark_awaiting_user(rid, reason).await {
                         tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+                    }
+                    if let Some(ref snap) = transcript {
+                        if let Err(e) = checkpoints.save(rid, Some(&run_id), snap).await {
+                            tracing::warn!("Failed to save timeout checkpoint for {rid}: {e:#}");
+                        }
                     }
                     if let Some(cv) = chat_id_opt {
                         let ask = rustfox::scheduler::human_gate::format_human_gate_message(
@@ -147,6 +174,13 @@ async fn run_one_scheduled_job(
                             "Run timeout on task {} → human-gated queue row {qid}",
                             req.task_id
                         );
+                        if let Some(ref snap) = transcript {
+                            if let Err(e) = checkpoints.save(&qid, Some(&run_id), snap).await {
+                                tracing::warn!(
+                                    "Failed to save timeout checkpoint for {qid}: {e:#}"
+                                );
+                            }
+                        }
                         if let Some(cv) = chat_id_opt {
                             let note = rustfox::scheduler::human_gate::format_human_gate_message(
                                 rustfox::scheduler::human_gate::HumanGateKind::FirstRunTimeout,
@@ -540,7 +574,7 @@ fn spawn_bare_user_turns(
                 schedule_id: None,
             };
             let stop = match agent
-                .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal)
+                .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None)
                 .await
             {
                 Ok(outcome) => Some(outcome.stop),

@@ -2566,6 +2566,7 @@ async fn run_telegram_user_turn(
             tool_event_tx,
             Some(stream_token_tx),
             turn_ui_mode,
+            None,
         )
         .await
     {

@@ -62,7 +62,11 @@ pub enum LoopOutcome {
         text: String,
         iterations: u32,
     },
-    Cancelled,
+    /// Cancelled before/at iteration boundary. `iterations` is completed LLM
+    /// rounds so far (0 if cancelled before the first completion).
+    Cancelled {
+        iterations: u32,
+    },
     MaxIterations,
 }
 
@@ -197,7 +201,9 @@ impl<'a> AgenticLoop<'a> {
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
                 if cancel.is_cancelled() {
-                    return Ok(LoopOutcome::Cancelled);
+                    return Ok(LoopOutcome::Cancelled {
+                        iterations: iteration,
+                    });
                 }
             }
             // Drain point A: messages that arrived during the last step.
@@ -455,6 +461,14 @@ impl MessageContainer {
         match self {
             MessageContainer::Conversation(cm) => cm.add_tool_result(msg),
             MessageContainer::Plain(msgs) => msgs.push(msg),
+        }
+    }
+
+    /// Snapshot current messages (ADR-0039 timeout checkpoint).
+    pub fn messages_snapshot(&self) -> Vec<ChatMessage> {
+        match self {
+            MessageContainer::Conversation(cm) => cm.messages().to_vec(),
+            MessageContainer::Plain(msgs) => msgs.clone(),
         }
     }
 }
