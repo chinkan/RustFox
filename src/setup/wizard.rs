@@ -499,6 +499,11 @@ struct ThinRequest {
     bot_token: String,
     #[serde(default)]
     system_prompt: String,
+    /// ADR-0042: optional Exa enable (requires privacy accepted).
+    #[serde(default)]
+    exa_enable: bool,
+    #[serde(default)]
+    exa_privacy_accepted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -511,6 +516,7 @@ struct ThinResponse {
 
 fn thin_answers(body: &ThinRequest) -> Result<super::thin::ThinAnswers> {
     let (sandbox_mode, _msg, _ux) = crate::sandbox::choose_wizard_sandbox_mode();
+    let exa_enable = body.exa_enable && body.exa_privacy_accepted;
     Ok(super::thin::ThinAnswers {
         provider: super::thin::ThinProvider::parse(&body.provider)?,
         openrouter_api_key: body.openrouter_api_key.clone(),
@@ -519,6 +525,8 @@ fn thin_answers(body: &ThinRequest) -> Result<super::thin::ThinAnswers> {
         bot_token: body.bot_token.clone(),
         system_prompt: body.system_prompt.clone(),
         sandbox_mode,
+        exa_enable,
+        exa_privacy_accepted: body.exa_privacy_accepted,
     })
 }
 
@@ -1320,6 +1328,9 @@ async fn run_cli(config_dir: &Path) -> Result<()> {
         bot_token: tg_token,
         system_prompt: sentence,
         sandbox_mode,
+        // Thin CLI: no MCP/Exa ask (ADR-0042).
+        exa_enable: false,
+        exa_privacy_accepted: false,
     })?;
 
     let config_path = config_dir.join("config.toml");

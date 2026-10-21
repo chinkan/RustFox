@@ -2810,6 +2810,73 @@ async fn handle_loop_callback(
     Ok(())
 }
 
+/// ADR-0023 §7: Enable / No thanks on the web_search stub offer.
+async fn handle_exa_offer_callback(
+    bot: Bot,
+    agent: Arc<Agent>,
+    bot_id: String,
+    callback_id: teloxide::types::CallbackQueryId,
+    msg: Option<teloxide::types::Message>,
+    data: &str,
+    q: &CallbackQuery,
+) -> ResponseResult<()> {
+    let user_id = q.from.id.to_string();
+    let key = crate::agent::session_key(&bot_id, &user_id);
+    if data == crate::mcp_presets::EXA_CB_DECLINE {
+        crate::mcp_presets::exa_offer_mark_declined(&key);
+        bot.answer_callback_query(callback_id)
+            .text("OK — web search stays off")
+            .await
+            .ok();
+        if let Some(m) = msg {
+            bot.edit_message_text(
+                m.chat.id,
+                m.id,
+                "Web search left off. You can enable Exa later in portal Settings.",
+            )
+            .reply_markup(crate::scheduler::human_gate::empty_keyboard())
+            .await
+            .ok();
+        }
+        return Ok(());
+    }
+
+    // Enable: tap = consent (offer note already stated terms).
+    match agent.enable_exa_web_search(true).await {
+        Ok(()) => {
+            bot.answer_callback_query(callback_id)
+                .text("Web search enabled")
+                .await
+                .ok();
+            if let Some(m) = msg {
+                bot.edit_message_text(
+                    m.chat.id,
+                    m.id,
+                    "✅ Exa web search enabled. It takes effect from the next turn.",
+                )
+                .reply_markup(InlineKeyboardMarkup::new(
+                    Vec::<Vec<InlineKeyboardButton>>::new(),
+                ))
+                .await
+                .ok();
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "exa enable from telegram offer failed");
+            bot.answer_callback_query(callback_id)
+                .text("Could not enable web search")
+                .await
+                .ok();
+            if let Some(m) = msg {
+                let reply =
+                    format!("Can't enable Exa right now: {e:#}. Try portal Settings → Exa.");
+                bot.edit_message_text(m.chat.id, m.id, reply).await.ok();
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Handle callback queries from inline keyboard buttons (e.g. model selection).
 async fn handle_model_callback(
     bot: Bot,
@@ -2836,6 +2903,11 @@ async fn handle_model_callback(
     // ADR-0038: scheduler human-gate Retry/Cancel inline buttons.
     if let Some(action) = crate::scheduler::human_gate::parse_rerun_callback(&data) {
         return handle_human_gate_callback(bot, agent, bot_id, callback_id, msg, action).await;
+    }
+
+    // ADR-0023 §7 / ADR-0042: Exa stub offer Enable / No thanks.
+    if data == crate::mcp_presets::EXA_CB_ENABLE || data == crate::mcp_presets::EXA_CB_DECLINE {
+        return handle_exa_offer_callback(bot, agent, bot_id, callback_id, msg, &data, &q).await;
     }
 
     if let Some(provider_name) = data.strip_prefix("provider_select:") {
@@ -3109,6 +3181,24 @@ impl PlatformSender for TelegramAdapter {
         let chat_id = parse_chat_id(chat_id_str)?;
         self.bot
             .send_message(chat_id, "⚠️ Bot is shutting down...")
+            .await?;
+        Ok(())
+    }
+
+    async fn offer_exa_web_search(&self, chat_id_str: &str, conversation_key: &str) -> Result<()> {
+        if !crate::mcp_presets::exa_offer_should_send(conversation_key) {
+            return Ok(());
+        }
+        crate::mcp_presets::exa_offer_mark_offered(conversation_key);
+        let chat_id = parse_chat_id(chat_id_str)?;
+        let keyboard = InlineKeyboardMarkup::new([[
+            InlineKeyboardButton::callback("Enable web search", crate::mcp_presets::EXA_CB_ENABLE),
+            InlineKeyboardButton::callback("No thanks", crate::mcp_presets::EXA_CB_DECLINE),
+        ]]);
+        let text = "Web search is available via Exa. Search queries and fetched page content are sent to Exa. Tapping Enable agrees to Exa's privacy terms.";
+        self.bot
+            .send_message(chat_id, text)
+            .reply_markup(keyboard)
             .await?;
         Ok(())
     }

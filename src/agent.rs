@@ -714,6 +714,24 @@ impl Agent {
         Ok(())
     }
 
+    /// ADR-0023 §7 / ADR-0042: enable Exa from Telegram stub offer (consent via tap).
+    /// Persists the same `[[mcp_servers]]` row as Settings, then hot-connects.
+    pub async fn enable_exa_web_search(&self, privacy_accepted: bool) -> anyhow::Result<()> {
+        let path = self.config_path.clone();
+        let cfg = tokio::task::spawn_blocking(move || {
+            crate::mcp_presets::persist_exa_enabled(&path, privacy_accepted)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("exa persist task join error: {e}"))??;
+        // Hot-enable like Settings (effect from next turn).
+        let _ = self.mcp.disconnect(crate::mcp_presets::EXA_NAME).await;
+        self.mcp
+            .connect(&cfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("Can't reach Exa for now: {e}"))?;
+        Ok(())
+    }
+
     /// Current live fallback chain snapshot (ADR-0037 list).
     pub fn fallback_chain_list(&self) -> Vec<String> {
         self.llm.fallback_chain_snapshot()
@@ -1294,6 +1312,7 @@ impl Agent {
             model: Some(primary_model),
             tool_event_tx,
             stream_token_tx,
+            session_key: Some(crate::agent::session_key(bot_id, user_id)),
             recovery_nudge: None,
         };
 
@@ -1706,6 +1725,7 @@ impl Agent {
             model: Some(primary_model),
             tool_event_tx,
             stream_token_tx,
+            session_key: Some(crate::agent::session_key(bot_id, user_id)),
             recovery_nudge: None,
         };
 
@@ -2811,6 +2831,10 @@ impl Agent {
                 model: Some(model.to_string()),
                 tool_event_tx: None,
                 stream_token_tx: None,
+                session_key: Some(crate::agent::session_key(
+                    &delivery.bot_id,
+                    &delivery.user_id,
+                )),
                 recovery_nudge: None,
             };
 
