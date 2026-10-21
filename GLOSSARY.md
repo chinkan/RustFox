@@ -42,7 +42,7 @@ A `scheduled_task_runs` row left `status=running` after the process died or a ru
 _Avoid_: stuck run, orphan status
 
 **Built-in MCP**:
-An MCP connection that ships with RustFox: endpoint fixed in code, turned on after setup by one tap (portal, or Telegram for Exa), one connection for the whole instance, credential (if any) in SecretStore. Never asked in the setup wizard. Today: Google (#119) and Exa web search (ADR-0023).
+An MCP connection that ships with RustFox: endpoint fixed in code, turned on after setup by one tap (portal, or Telegram for Exa), one connection for the whole instance, credential (if any) in SecretStore. Exa may be offered as an optional skippable one-tap (keyless + consent) in the web setup wizard (ADR-0042); that is not a full MCP form. Google is unchanged and is not asked in the wizard. Credential still SecretStore / Settings. Today: Google (#119) and Exa web search (ADR-0023 / ADR-0042).
 _Avoid_: preset MCP, default MCP server
 
 **Keyless Exa**:

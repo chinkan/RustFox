@@ -3,14 +3,17 @@
 - **Status:** Accepted (Product GO 2026-10-06). **Amended by ADR-0041** — Exa
   converges into presets + Custom HTTP MCP. Tools pin, consent, `web_search` stub,
   and soft 429 stay on the Exa preset. Where Decision 2 storage or the single-built-in
-  scope disagrees with ADR-0041, ADR-0041 wins.
+  scope disagrees with ADR-0041, ADR-0041 wins. **Also amended by ADR-0042** — web
+  setup wizard may offer optional skippable Exa (keyless + consent); pin/consent/stub/soft
+  429 stand.
 - **Date:** 2026-10-06
 - **Issue:** none yet. Tracked in the Notion task "Setup: one-tap built-in MCP"; a GitHub
   issue will be opened for the implementation.
 - **Branch:** `docs/adr-0023-exa-web-search` (decision); implementation in a follow-up PR
 - **Related:** #119 (Google MCP one-tap, the built-in connector precedent), ADR-0004 / ADR-0007
   (portal bind, `/portal` command), ADR-0016 (API keys in SecretStore), ADR-0020 (mid-run
-  queue; implementation of this ADR waits for it), ADR-0041 / #172 (amends this ADR)
+  queue; implementation of this ADR waits for it), ADR-0041 / #172 (amends this ADR),
+  ADR-0042 / #256 (wizard optional Exa)
 - **Source:** Exa MCP reference, <https://docs.exa.ai/reference/exa-mcp>
 
 ## Context
@@ -53,10 +56,14 @@ Facts in the current code that shape the decision:
 ### 1. Scope
 
 - v1 adds **one** built-in MCP: **Exa web search**. Google (#119) is not changed.
-- The setup wizard **never asks about MCP**. It stays at its current four fields.
-- Exa is **off by default** for every install, on every provider path. The Ollama setup path
-  is not changed.
-- Users turn it on after setup, by a **portal tap** or a **Telegram button** (Decision 6).
+- The setup wizard **never asks about a full MCP form**. **Amended by ADR-0042:** the
+  **web** setup wizard may show an **optional, skippable Exa-only** page after the core
+  fields (keyless + one-time consent; default off; Skip leaves Exa off). Thin CLI setup
+  still never asks about MCP. Custom, Jina, and Google stay out of the wizard.
+- Exa is **off by default** for every install, on every provider path. The Ollama web setup
+  path gets the same optional Exa page (consent still required; ADR-0042).
+- Users turn it on in the wizard (optional), after setup by a **portal tap**, or by a
+  **Telegram button** (Decision 6).
 
 ### 2. Connection
 
@@ -220,18 +227,23 @@ Facts in the current code that shape the decision:
 5. **Storage for `enabled` / `privacy_accepted_at`.** Config section vs SQLite. **Left to
    implementation.**
 
-## Cross-reference (#172 / ADR-0041)
+## Cross-reference (#172 / ADR-0041; #256 / ADR-0042)
 
 **Amended by ADR-0041 (Accepted):** Exa converges into presets + Custom. This
 ADR’s tools pin, privacy consent, `web_search` stub, and soft 429 stay on the
 Exa preset. The preset is stored as `[[mcp_servers]]` plus secret refs, which
 replaces Decision 2’s “not a user-editable row / config built only in code”
-for the preset-managed server. The form is portal Settings. There is still no
-wizard MCP step and no Telegram full form. Implementation is #172 and starts
-after #240 Slice B.
+for the preset-managed server. The form is portal Settings. There is no
+Telegram full form. Settings path #172 / ADR-0041 has shipped.
+
+**Also amended by ADR-0042 (Accepted):** the web setup wizard may offer an
+optional skippable Exa-only page (keyless + consent). Pin, consent, stub, and
+soft 429 stand. Thin CLI still never asks about MCP. Custom/Jina/Google stay
+out of the wizard. Tracking: #256 (docs Refs; later impl Closes).
 
 ## Follow-ups
 
-- Implementation is #172 under ADR-0041, after #240 Slice B.
+- Settings MCP implementation (#172 under ADR-0041) shipped.
+- Wizard optional Exa: #256 / ADR-0042 (docs first; later one impl PR for UI + persist + stub).
 - Rewrite the Exa example in `config.example.toml`; update `docs/portal-api.md` and the user
-  guide in that implementation PR.
+  guide in the relevant implementation PR if still needed.
