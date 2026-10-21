@@ -1,10 +1,10 @@
 # ADR-0041: Portal MCP presets and Custom HTTP form
 
-- **Status:** Accepted
+- **Status:** Accepted. **Amended by ADR-0042** (wizard Exa-only exception).
 - **Date:** 2026-10-21
 - **Amends:** ADR-0023 (one-tap Exa). Exa tools pin, consent, `web_search` stub, and soft 429 stay on the Exa preset. Preset storage and the Custom entry point follow this ADR.
 - **Depends on:** ADR-0016 (secrets as `secret:NAME` in SecretStore), ADR-0004 / ADR-0006 (portal Settings)
-- **Related:** #172 (tracking; impl PR Closes), #240 Slice B (impl starts after that slice), #119 (Google MCP unchanged)
+- **Related:** #172 (tracking; impl PR Closes), #240 Slice B (impl starts after that slice), #119 (Google MCP unchanged), ADR-0042 / #256 (wizard optional Exa)
 - **Issue:** #172
 
 ## Context
@@ -15,7 +15,7 @@ ADR-0023 already requires an Exa `x-api-key` header, a tools pin, portal key ent
 
 - **Q1** presets + Custom, Exa included
 - **Q2** Exa tools pin, consent, stub, and soft 429 stay on the Exa preset
-- **Q3** portal Settings only; no wizard MCP step
+- **Q3** portal Settings only; no wizard MCP step (**amended by ADR-0042:** optional Exa-only keyless+consent page in the web wizard; Custom/Jina/Google stay out)
 - **Q4** no Telegram full form
 - **Q5** secrets never in chat
 - **Q6** Custom fields: name, HTTP URL, Bearer, header map
@@ -32,7 +32,7 @@ Facts in the current code:
 2. `resolve_bearer` already resolves `secret:NAME` (ADR-0016). A plaintext `auth_token` is still sent as-is. `env:NAME` is not resolved on the HTTP auth path.
 3. `connect_http` logs the URL at `info`. A secret in the URL would be logged.
 4. `McpManager` can `connect`, `connect_all`, and `shutdown`. It cannot drop one server at runtime (ADR-0023). `mcp.<name>.enabled` still tells the operator a restart is required.
-5. The setup wizard does not ask about MCP (ADR-0023). Portal Settings is the credential surface (ADR-0006).
+5. The setup wizard does not ask about MCP (ADR-0023), except the optional Exa-only page in ADR-0042. Portal Settings is the credential surface (ADR-0006).
 
 Jina’s hosted server is Streamable HTTP at `https://mcp.jina.ai/v1`, with `Authorization: Bearer`. Tool registration is filtered with the `include_tools` query parameter before the client sees the list (`search_web`, `read_url`, and others). Source: <https://github.com/jina-ai/MCP>.
 
@@ -58,7 +58,9 @@ Jina and Custom do not gain the stub, the consent record, or the soft-429 copy.
 
 ### 3. Portal Settings only (Q3 A)
 
-The form lives on portal **Settings**. The setup wizard grows no MCP step.
+The form lives on portal **Settings**. Settings stays the full MCP form (presets + Custom).
+
+**Amended by ADR-0042:** the web setup wizard may offer an **optional, skippable Exa-only** page (keyless + one-time consent). Custom, Jina, and Google stay out of the wizard. There is still no full MCP form in the wizard.
 
 ### 4. Telegram is not a form (Q4 / Q5 A)
 
@@ -140,7 +142,7 @@ This ADR amends ADR-0023. The implementation PR **Closes #172**. That work start
 
 ## Non-goals
 
-- A wizard MCP step.
+- A full MCP form (name, URL, Bearer, header map) or Jina / Custom / Google in the setup wizard. ADR-0042 allows an optional Exa-only keyless+consent page in the web wizard; that exception is not a Non-goal.
 - A Telegram form for name, URL, Bearer, or headers.
 - Changing Google MCP (#119).
 - Stdio server launch changes.
@@ -161,5 +163,6 @@ This ADR amends ADR-0023. The implementation PR **Closes #172**. That work start
 
 - ADR-0023 — Exa pin, consent, stub, soft 429, `x-api-key`. Amended here for storage and for presets + Custom.
 - ADR-0016 — `secret:NAME` and SecretStore.
+- ADR-0042 / #256 — optional skippable Exa one-tap in the web setup wizard (Exa-only exception to §3 / Non-goals).
 - #172 — tracking. The implementation PR Closes it, after #240 Slice B.
 - #119 — Google MCP, unchanged.
