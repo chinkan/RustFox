@@ -812,6 +812,11 @@ function PresetCard({
           </button>
         ) : null}
       </div>
+      {busy ? (
+        <div className="hint" role="status" style={{ marginTop: 8 }}>
+          {t('settings.saving')}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1008,8 +1013,8 @@ function CustomMcpCard({
         />
         <span className="hint">{t('settings.mcpBearerHint')}</span>
       </div>
-      <div className="field">
-        <label>{t('settings.mcpHeaders')}</label>
+      <fieldset className="field">
+        <legend>{t('settings.mcpHeaders')}</legend>
         {headers.map((h, i) => (
           <div key={i} className="row" style={{ gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
             <input
@@ -1049,20 +1054,40 @@ function CustomMcpCard({
             </button>
           </div>
         ))}
-        <button
-          type="button"
-          className="sm"
-          disabled={busy}
-          onClick={() => setHeaders([...headers, { key: '', value: '' }])}
-        >
-          {t('settings.mcpAddHeader')}
-        </button>
-      </div>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="sm"
+            disabled={busy}
+            onClick={() => setHeaders([...headers, { key: '', value: '' }])}
+          >
+            {t('settings.mcpAddHeader')}
+          </button>
+          {editing &&
+          (servers.find((s) => s.name === editing)?.headerNames?.length ?? 0) > 0 ? (
+            <button
+              type="button"
+              className="sm"
+              disabled={busy}
+              onClick={() =>
+                void run(() => api.putMcpServer(editing, { headers: {} }))
+              }
+            >
+              {t('settings.mcpClearHeaders')}
+            </button>
+          ) : null}
+        </div>
+      </fieldset>
       <div className="row" style={{ gap: 8 }}>
         <button type="button" className="primary" disabled={busy} onClick={save}>
           {busy ? t('settings.saving') : t('settings.mcpSave')}
         </button>
       </div>
+      {busy ? (
+        <div className="hint" role="status" style={{ marginTop: 8 }}>
+          {t('settings.saving')}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -224,6 +224,7 @@
     "mcpHeaderValue": "Value (write-only)",
     "mcpAddHeader": "Add header",
     "mcpRemoveHeader": "Remove",
+    "mcpClearHeaders": "Clear headers",
     "mcpSave": "Save",
     "mcpDelete": "Delete",
     "mcpDeleteConfirm": "Delete custom MCP server “{{name}}”?",

@@ -583,9 +583,21 @@ input::placeholder {
   margin-bottom: 15px;
 }
 
-.field label {
+fieldset.field {
+  border: none;
+  margin: 0 0 15px;
+  padding: 0;
+  min-width: 0;
+}
+
+.field label,
+.field legend {
   font-size: 12px;
   color: var(--text-dim);
+}
+
+.field legend {
+  padding: 0;
 }
 
 .field input,

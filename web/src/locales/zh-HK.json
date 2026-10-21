@@ -224,6 +224,7 @@
     "mcpHeaderValue": "值（只寫）",
     "mcpAddHeader": "加 header",
     "mcpRemoveHeader": "移除",
+    "mcpClearHeaders": "清除 headers",
     "mcpSave": "儲存",
     "mcpDelete": "刪除",
     "mcpDeleteConfirm": "刪除自訂 MCP「{{name}}」？",
