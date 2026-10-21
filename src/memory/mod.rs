@@ -258,6 +258,16 @@ impl MemoryStore {
             CREATE INDEX IF NOT EXISTS idx_pending_reruns_task
                 ON pending_reruns(task_id, state);
 
+            -- ADR-0039: timeout transcript continue checkpoints (queue id keyed).
+            CREATE TABLE IF NOT EXISTS scheduler_transcript_checkpoints (
+                queue_id       TEXT PRIMARY KEY,
+                run_id         TEXT,
+                messages_json  TEXT NOT NULL,
+                iteration      INTEGER NOT NULL,
+                dangling_json  TEXT NOT NULL,
+                created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             -- Supervisor: tasks
             CREATE TABLE IF NOT EXISTS sup_tasks (
                 id              TEXT PRIMARY KEY,

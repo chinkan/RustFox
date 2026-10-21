@@ -74,6 +74,10 @@ impl RerunQueue {
         Self { conn }
     }
 
+    pub fn connection(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
+    }
+
     /// Enqueue a dead run for later auto re-fire. Any live row for the same
     /// task is superseded first (latest definition wins — prompts are edited
     /// via portal/tools between strikes). Returns the new row id.

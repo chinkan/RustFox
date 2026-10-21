@@ -281,6 +281,10 @@ impl ScheduledTaskStore {
         Self { conn }
     }
 
+    pub fn connection(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
+    }
+
     /// See [`adopt_default_schedules`].
     pub async fn adopt_default_schedules(
         &self,

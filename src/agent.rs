@@ -81,6 +81,9 @@ pub struct ScheduledJobRequest {
     /// Telegram bot that owns this run. `None` means do not send an approval
     /// or result on some other bot.
     pub owning_telegram_bot: Option<Arc<Bot>>,
+    /// ADR-0039: when Retry found a timeout transcript checkpoint, continue
+    /// from it instead of full-replaying the scheduled prompt.
+    pub continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
 }
 
 /// Why an agent run stopped short of a clean final answer.
@@ -107,6 +110,9 @@ pub enum RunStop {
 pub struct RunOutcome {
     pub text: String,
     pub stop: RunStop,
+    /// ADR-0039: present on Cancelled scheduled runs so the timeout gate can
+    /// persist a transcript checkpoint. Unused for chat /stop.
+    pub transcript: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
 }
 
 impl RunOutcome {
@@ -1032,7 +1038,7 @@ impl Agent {
         tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
         Ok(self
-            .process_message_outcome(incoming, tool_event_tx, stream_token_tx, tool_ui_mode)
+            .process_message_outcome(incoming, tool_event_tx, stream_token_tx, tool_ui_mode, None)
             .await?
             .text)
     }
@@ -1048,7 +1054,19 @@ impl Agent {
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
+        continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
     ) -> Result<RunOutcome> {
+        if let Some(cp) = continue_from {
+            return self
+                .process_continue_from_checkpoint(
+                    incoming,
+                    cp,
+                    tool_event_tx,
+                    stream_token_tx,
+                    tool_ui_mode,
+                )
+                .await;
+        }
         let platform = &incoming.platform;
         let bot_id = crate::platform::normalize_bot_id(&incoming.bot_id);
         let user_id = &incoming.user_id;
@@ -1489,15 +1507,12 @@ impl Agent {
                 })
             }));
         }
+        let mut container = crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr));
         let outcome = agentic
-            .run(
-                &mut crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr)),
-                user_id,
-                &incoming.chat_id,
-            )
+            .run(&mut container, user_id, &incoming.chat_id)
             .await;
 
-        let (text, stop) = match outcome {
+        let (text, stop, transcript) = match outcome {
             Ok(crate::loop_runner::LoopOutcome::FinalResponse {
                 text: final_content,
                 iterations,
@@ -1511,9 +1526,9 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
-                (final_content, RunStop::FinalResponse)
+                (final_content, RunStop::FinalResponse, None)
             }
-            Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
+            Ok(crate::loop_runner::LoopOutcome::Cancelled { iterations }) => {
                 info!(
                     user_id = %user_id,
                     "Processing cancelled by user — returning partial result"
@@ -1524,7 +1539,23 @@ impl Agent {
                     error: Some("Cancelled by user".to_string()),
                     end_time: Self::now_iso8601_static(),
                 });
-                ("Processing was cancelled.".to_string(), RunStop::Cancelled)
+                // ADR-0039: snapshot transcript on scheduled cancel so the
+                // timeout human-gate can persist a continue checkpoint.
+                let transcript = if incoming.schedule_id.is_some() {
+                    let messages = container.messages_snapshot();
+                    Some(
+                        crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
+                            messages, iterations,
+                        ),
+                    )
+                } else {
+                    None
+                };
+                (
+                    "Processing was cancelled.".to_string(),
+                    RunStop::Cancelled,
+                    transcript,
+                )
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
                 warn!(
@@ -1544,6 +1575,7 @@ impl Agent {
                 (
                     "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
                     RunStop::MaxIterations,
+                    None,
                 )
             }
             Err(e) => {
@@ -1575,7 +1607,237 @@ impl Agent {
                 .await?;
         }
 
-        Ok(RunOutcome { text, stop })
+        Ok(RunOutcome {
+            text,
+            stop,
+            transcript,
+        })
+    }
+
+    /// ADR-0039: resume a scheduled run from a timeout transcript checkpoint.
+    /// Restores messages (with interrupted stubs for dangling tools), then
+    /// runs the agent loop with the remaining iteration budget.
+    async fn process_continue_from_checkpoint(
+        &self,
+        incoming: &IncomingMessage,
+        checkpoint: crate::scheduler::checkpoint::TranscriptCheckpoint,
+        tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
+        stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        tool_ui_mode: crate::tool_registry::ToolUiMode,
+    ) -> Result<RunOutcome> {
+        let bot_id = crate::platform::normalize_bot_id(&incoming.bot_id);
+        let user_id = &incoming.user_id;
+        let used = checkpoint.iteration;
+        let messages = checkpoint.messages_for_continue();
+        let remaining = self.config.max_iterations().saturating_sub(used).max(1);
+
+        let cancel_token = self.register_cancel_token(bot_id, user_id).await;
+        let turn_sender = self.sender_for_bot(bot_id).await;
+        let make_ctx = {
+            let sandbox_dir = self.config.sandbox.allowed_directory.clone();
+            let home_dir = self.config.resolved_home.clone();
+            let sender = Arc::clone(&turn_sender);
+            let cancel_registry = self.cancel_registry.clone();
+            let mode = tool_ui_mode;
+            let turn_bot = bot_id.to_string();
+            move |uid: &str, cid: &str| ToolContext {
+                sandbox_dir: sandbox_dir.clone(),
+                home_dir: home_dir.clone(),
+                sender: sender.clone(),
+                cancel_registry: cancel_registry.clone(),
+                user_id: uid.to_string(),
+                chat_id: cid.to_string(),
+                bot_id: turn_bot.clone(),
+                tool_ui_mode: mode,
+            }
+        };
+
+        let bot_cfg = crate::persona_prompt::bot_for_prompt(&self.config, bot_id);
+        let (loop_model, loop_tools) = {
+            let agents = self.agents.read().await;
+            let persona_skill = agents.get(bot_cfg.persona.trim());
+            let persona_model = persona_skill.and_then(|s| s.model.clone());
+            let persona_tools = persona_skill.map(|s| s.tools.clone()).unwrap_or_default();
+            crate::peer_invoke::resolve_bot_loop_overrides(
+                bot_cfg,
+                persona_model.as_deref(),
+                &persona_tools,
+            )
+        };
+        let current_model = self.current_model.read().await.clone();
+        let context_window = self.registry.effective_context_window(&current_model);
+        let primary_model = resolve_primary_loop_model(loop_model.as_deref(), &current_model);
+        let ld = self.config.loop_detection_config();
+        let ls_project = self
+            .config
+            .langsmith
+            .as_ref()
+            .map(|l| l.project.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let chain_run_id = uuid::Uuid::new_v4().to_string();
+        self.langsmith.start_run(crate::langsmith::RunParams {
+            id: chain_run_id.clone(),
+            name: "rustfox_request_continue".to_string(),
+            run_type: crate::langsmith::RunType::Chain,
+            parent_run_id: None,
+            inputs: serde_json::json!({
+                "continue": true,
+                "prior_iterations": used,
+            }),
+            session_name: ls_project.clone(),
+            start_time: Self::now_iso8601_static(),
+        });
+
+        let loop_config = crate::loop_runner::LoopConfig {
+            max_iterations: remaining,
+            empty_response_retry_limit: self.config.empty_response_retry_limit(),
+            context_window,
+            loop_detection_enabled: ld.enabled,
+            loop_detection_threshold: ld.threshold,
+            interactive_loop_callback: true,
+            allowed_tools: loop_tools,
+            langsmith_project: Some(ls_project),
+            model: Some(primary_model),
+            tool_event_tx,
+            stream_token_tx,
+            recovery_nudge: None,
+        };
+
+        // Continue path does not peer-invoke special tools beyond the registry;
+        // scheduled continue is the same tool surface as a fresh scheduled turn.
+        let parent_tools_for_children = loop_config.allowed_tools.clone();
+        let root_stack = vec![bot_id.to_string()];
+        let turn_trace = crate::loop_runner::TurnTrace {
+            chain_run_id: chain_run_id.clone(),
+            project: loop_config
+                .langsmith_project
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        };
+        let special_handler = {
+            let self_weak = self.self_weak.clone();
+            let parent_stack = root_stack.clone();
+            let turn_trace = turn_trace.clone();
+            let parent_tools = parent_tools_for_children;
+            move |name: &str, args: &Value, user_id: &str, chat_id: &str| {
+                let name_owned = name.to_string();
+                let args_owned = args.clone();
+                let self_weak = self_weak.clone();
+                let parent_stack = parent_stack.clone();
+                let user_id = user_id.to_string();
+                let chat_id = chat_id.to_string();
+                let turn_trace = turn_trace.clone();
+                let parent_tools = parent_tools.clone();
+                Box::pin(async move {
+                    match name_owned.as_str() {
+                        "invoke_agent" => {
+                            let agent = match self_weak.upgrade() {
+                                Some(a) => a,
+                                None => return Some("Agent is shutting down".to_string()),
+                            };
+                            Some(
+                                agent
+                                    .handle_invoke_agent_tool(
+                                        &args_owned,
+                                        parent_stack,
+                                        &user_id,
+                                        &chat_id,
+                                        Some(turn_trace.clone()),
+                                        parent_tools,
+                                    )
+                                    .await,
+                            )
+                        }
+                        _ => None,
+                    }
+                }) as Pin<Box<dyn Future<Output = Option<String>> + Send + 'static>>
+            }
+        };
+
+        let agentic = crate::loop_runner::AgenticLoop::new(
+            &self.llm,
+            &self.tool_registry,
+            &self.mcp,
+            &loop_config,
+            Some(cancel_token),
+            Some(chain_run_id.clone()),
+            Some(&self.langsmith),
+            turn_sender.as_ref() as &dyn PlatformSender,
+            Box::new(make_ctx),
+            Some(Box::new(special_handler)),
+        );
+        let mut container = crate::loop_runner::MessageContainer::Plain(messages);
+        let outcome = agentic
+            .run(&mut container, user_id, &incoming.chat_id)
+            .await;
+
+        let (text, stop, transcript) = match outcome {
+            Ok(crate::loop_runner::LoopOutcome::FinalResponse {
+                text: final_content,
+                iterations,
+            }) => {
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: Some(serde_json::json!({
+                        "response": final_content,
+                        "iterations": used.saturating_add(iterations),
+                    })),
+                    error: None,
+                    end_time: Self::now_iso8601_static(),
+                });
+                (final_content, RunStop::FinalResponse, None)
+            }
+            Ok(crate::loop_runner::LoopOutcome::Cancelled { iterations }) => {
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some("Cancelled during continue".to_string()),
+                    end_time: Self::now_iso8601_static(),
+                });
+                let messages = container.messages_snapshot();
+                let transcript = Some(
+                    crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
+                        messages,
+                        used.saturating_add(iterations),
+                    ),
+                );
+                (
+                    "Processing was cancelled.".to_string(),
+                    RunStop::Cancelled,
+                    transcript,
+                )
+            }
+            Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some("max iterations on continue".to_string()),
+                    end_time: Self::now_iso8601_static(),
+                });
+                (
+                    "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
+                    RunStop::MaxIterations,
+                    None,
+                )
+            }
+            Err(e) => {
+                self.langsmith.end_run(crate::langsmith::EndRunParams {
+                    id: chain_run_id,
+                    outputs: None,
+                    error: Some(format!("{:#}", e)),
+                    end_time: Self::now_iso8601_static(),
+                });
+                self.clear_cancel_token(bot_id, user_id).await;
+                return Err(e);
+            }
+        };
+        self.clear_cancel_token(bot_id, user_id).await;
+        Ok(RunOutcome {
+            text,
+            stop,
+            transcript,
+        })
     }
 
     /// Conversation a schedule run reads: the owning bot's chat with the user
@@ -1645,6 +1907,7 @@ impl Agent {
                     is_recurring: recurring,
                     task_store: store,
                     rerun_id: None,
+                    continue_from: None,
                 };
                 if let Err(e) = tx.send(req) {
                     tracing::error!("Failed to dispatch scheduled job: {}", e);
@@ -1665,6 +1928,7 @@ impl Agent {
         store: ScheduledTaskStore,
         task: &ScheduledTask,
         rerun_id: &str,
+        continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
     ) -> Result<()> {
         let incoming = Self::scheduled_incoming(task);
         let owning_telegram_bot =
@@ -1676,6 +1940,7 @@ impl Agent {
             task_store: store,
             task_id: task.id.clone(),
             rerun_id: Some(rerun_id.to_string()),
+            continue_from,
         };
         job_tx.send(req).context("Failed to dispatch rerun")?;
         Ok(())
@@ -1712,13 +1977,41 @@ impl Agent {
             let _ = queue.mark_abandoned(&row.id).await;
             return Ok(());
         }
+        // ADR-0039: load checkpoint if present → continue; else full replay.
+        // Clear only after successful dispatch so a failed kick can still continue.
+        let checkpoints = crate::scheduler::checkpoint::CheckpointStore::new(queue.connection());
+        let continue_from = match checkpoints.get(&row.id).await {
+            Ok(cp) => cp,
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    queue_id = %row.id,
+                    "failed to load transcript checkpoint — falling back to full replay"
+                );
+                None
+            }
+        };
         // P0 #1 / ADR-0040 Q7: claim *before* send.
         queue
             .mark_dispatched(&row.id)
             .await
             .with_context(|| format!("rerun bump-attempts failed for {}", row.id))?;
-        Self::build_rerun_request(job_tx, telegram_bots, store.clone(), &task, &row.id)
-            .with_context(|| format!("rerun dispatch failed for {}", row.id))?;
+        Self::build_rerun_request(
+            job_tx,
+            telegram_bots,
+            store.clone(),
+            &task,
+            &row.id,
+            continue_from,
+        )
+        .with_context(|| format!("rerun dispatch failed for {}", row.id))?;
+        if let Err(e) = checkpoints.clear(&row.id).await {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                queue_id = %row.id,
+                "failed to clear transcript checkpoint after dispatch"
+            );
+        }
         Ok(())
     }
 
@@ -2536,7 +2829,7 @@ impl Agent {
 
             match outcome {
                 Ok(crate::loop_runner::LoopOutcome::FinalResponse { text, .. }) => text,
-                Ok(crate::loop_runner::LoopOutcome::Cancelled) => {
+                Ok(crate::loop_runner::LoopOutcome::Cancelled { .. }) => {
                     format!("Subagent '{}' cancelled by user.", label)
                 }
                 Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
@@ -3685,6 +3978,7 @@ mod tests {
         let stalled = RunOutcome {
             text: "I've reached the maximum number of tool call iterations.".to_string(),
             stop: RunStop::MaxIterations,
+            transcript: None,
         };
         assert!(
             stalled.is_max_iterations(),
@@ -3698,6 +3992,7 @@ mod tests {
             let o = RunOutcome {
                 text: "x".to_string(),
                 stop,
+                transcript: None,
             };
             assert!(
                 !o.is_max_iterations(),
@@ -3774,6 +4069,91 @@ mod tests {
         let req = rx.try_recv().expect("job dispatched on channel");
         assert_eq!(req.rerun_id.as_deref(), Some(id.as_str()));
         assert_eq!(req.task_id, "t1");
+        assert!(
+            req.continue_from.is_none(),
+            "no checkpoint → ADR-0013 full replay"
+        );
+    }
+
+    /// ADR-0039: when a timeout checkpoint exists, kick takes it and attaches
+    /// continue_from (sync kick still claims + dispatches).
+    #[tokio::test]
+    async fn human_retry_kick_continues_when_checkpoint_present() {
+        use crate::llm::{ChatMessage, MessageContent};
+        use crate::scheduler::checkpoint::{CheckpointStore, TranscriptCheckpoint};
+        use crate::scheduler::reminders::ScheduledTaskStore;
+        use crate::scheduler::reruns::RerunQueue;
+        use rusqlite::Connection;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let conn: Arc<Mutex<Connection>> =
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock().await;
+            c.execute_batch(
+                "CREATE TABLE pending_reruns (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, original_run_id TEXT NOT NULL,
+                    fail_reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL, next_eligible_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE TABLE scheduled_tasks (
+                    id TEXT PRIMARY KEY, scheduler_job_id TEXT, user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL, platform TEXT NOT NULL, trigger_type TEXT NOT NULL,
+                    trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
+                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC'
+                );",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO scheduled_tasks
+                 (id, user_id, chat_id, platform, trigger_type, trigger_value, prompt, description, bot_id)
+                 VALUES ('t1', '42', '100', 'telegram', 'one_shot', '2026-01-01T00:00:00Z', 'do it', 'desc', 'bot-a')",
+                [],
+            )
+            .unwrap();
+        }
+        let queue = RerunQueue::new(Arc::clone(&conn));
+        let store = ScheduledTaskStore::new(Arc::clone(&conn));
+        let id = queue
+            .enqueue_manual("t1", "run-1", "run timeout")
+            .await
+            .unwrap();
+        let cps = CheckpointStore::new(Arc::clone(&conn));
+        let snap = TranscriptCheckpoint {
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Some(MessageContent::Text("partial".into())),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            iteration: 4,
+            dangling_tool_ids: vec![],
+        };
+        cps.save(&id, Some("run-1"), &snap).await.unwrap();
+        assert!(queue.retry(&id).await.unwrap());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let bots: HashMap<String, Arc<teloxide::Bot>> = HashMap::new();
+        Agent::kick_human_retry(&queue, &store, &tx, &bots, &id)
+            .await
+            .unwrap();
+
+        let req = rx.try_recv().expect("job dispatched");
+        let cp = req
+            .continue_from
+            .expect("checkpoint must attach for continue");
+        assert_eq!(cp.iteration, 4);
+        assert_eq!(cp.messages.len(), 1);
+        assert!(
+            cps.get(&id).await.unwrap().is_none(),
+            "kick must clear checkpoint after successful dispatch"
+        );
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 //! Scheduler human-gate Telegram copy + inline Retry/Cancel (ADR-0038 Slice A).
 //!
-//! Copy skeleton and operator UX only — queue semantics stay ADR-0013
-//! (`RerunQueue::retry` / `cancel` = full replay). Slice B transcript continue
-//! is out.
+//! Copy skeleton and operator UX. Retry/Cancel still call `RerunQueue` APIs;
+//! ADR-0039 continue-vs-replay is decided at kick time from a checkpoint row.
+//! Cancel clears any timeout transcript checkpoint for that queue id.
 
 use super::reruns::RerunQueue;
 use crate::scheduler::reminders::ScheduledTaskStore;
@@ -204,6 +204,10 @@ pub async fn apply_gate_action(
         }
         GateAction::Cancel(_) => {
             if queue.cancel(id).await? {
+                // ADR-0039: abandon must not leave a stale continue checkpoint.
+                let checkpoints =
+                    crate::scheduler::checkpoint::CheckpointStore::new(queue.connection());
+                let _ = checkpoints.clear(id).await;
                 Ok(GateOutcome::Cancelled)
             } else {
                 Ok(GateOutcome::AlreadyDone)
@@ -375,6 +379,30 @@ mod tests {
         assert!(
             q.due().await.unwrap().is_empty(),
             "cancel must not kick / must not leave a due queued row"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_cancel_clears_transcript_checkpoint() {
+        let (q, store, id) = queue_and_store().await;
+        let cps = crate::scheduler::checkpoint::CheckpointStore::new(q.connection());
+        let snap = crate::scheduler::checkpoint::TranscriptCheckpoint {
+            messages: vec![],
+            iteration: 1,
+            dangling_tool_ids: vec![],
+        };
+        cps.save(&id, Some("run-1"), &snap).await.unwrap();
+        assert!(cps.get(&id).await.unwrap().is_some());
+        let action = GateAction::Cancel(id.clone());
+        assert_eq!(
+            apply_gate_action(&q, &store, "bot-a", &action)
+                .await
+                .unwrap(),
+            GateOutcome::Cancelled
+        );
+        assert!(
+            cps.get(&id).await.unwrap().is_none(),
+            "cancel must clear checkpoint so Retry cannot silently continue"
         );
     }
 
