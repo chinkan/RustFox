@@ -98,6 +98,50 @@ describe('RBAC guard', () => {
     expect(await screen.findByText(/Secrets/i)).toBeTruthy()
     // Masked secret projection renders; raw values never cross the boundary.
     expect(await screen.findByText('123…456')).toBeTruthy()
+    // ADR-0043: detect-only card sits with Settings. Not an Active control.
+    const heading = await screen.findByRole('heading', { name: 'OpenCode' })
+    const section = heading.parentElement
+    expect(await screen.findByText('ready')).toBeTruthy()
+    expect(screen.getByText('2 models')).toBeTruthy()
+    expect(section?.querySelector('input, select, textarea')).toBeNull()
+    expect(section?.querySelector('button')?.textContent).toBe('Refresh')
+    expect(screen.queryByRole('radio')).toBeNull()
+  })
+
+  it('shows OpenCode absent with the probe message and hides the model count', async () => {
+    await signIn()
+    renderAt('/settings', makeContext({
+      getOpenCodeStatus: async () => ({
+        state: 'absent',
+        model_count: 0,
+        models: [],
+        message: 'opencode binary not found',
+      }),
+    }))
+    const heading = await screen.findByRole('heading', { name: 'OpenCode' })
+    expect(await screen.findByText('absent')).toBeTruthy()
+    expect(screen.getByText('opencode binary not found')).toBeTruthy()
+    expect(screen.queryByText('0 models')).toBeNull()
+    expect(heading.parentElement?.querySelector('input, select, textarea')).toBeNull()
+    expect(screen.queryAllByRole('option').some((o) => /opencode/i.test(o.textContent ?? ''))).toBe(false)
+  })
+
+  it('shows OpenCode no-credentials without a provider control', async () => {
+    await signIn()
+    renderAt('/settings', makeContext({
+      getOpenCodeStatus: async () => ({
+        state: 'no_creds',
+        model_count: 0,
+        models: [],
+        message: 'opencode present but no usable credentials',
+      }),
+    }))
+    const heading = await screen.findByRole('heading', { name: 'OpenCode' })
+    expect(await screen.findByText('no credentials')).toBeTruthy()
+    expect(screen.getByText('opencode present but no usable credentials')).toBeTruthy()
+    expect(screen.queryByText('0 models')).toBeNull()
+    expect(heading.parentElement?.querySelector('input, select, textarea')).toBeNull()
+    expect(screen.queryByRole('radio', { name: /opencode/i })).toBeNull()
   })
 
   it('sidebar hides Settings for a non-admin session', async () => {

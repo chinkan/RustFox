@@ -74,6 +74,12 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     googleStatus: async () => ({ offered: false }),
     startGoogle: async () => ({ offered: false }),
     setGoogleClientId: async () => ({ offered: true }),
+    getOpenCodeStatus: async () => ({
+      state: 'ready' as const,
+      model_count: 2,
+      models: ['opencode/a', 'opencode-go/b'],
+      message: null,
+    }),
     getSettings: async () => ({
       editable: {
         model: 'anthropic/claude-opus-4.8',
