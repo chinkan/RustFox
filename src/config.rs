@@ -314,6 +314,9 @@ pub enum ProviderType {
     OpenAICompatible,
     #[serde(rename = "ollama")]
     Ollama,
+    /// Detect-only in Phase 1 (ADR-0043). Not Active / not chat.
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -328,6 +331,8 @@ pub struct ProviderSection {
     pub name: String,
     #[serde(rename = "type")]
     pub provider_type: ProviderType,
+    /// Unused for `opencode` (CLI probe); required for HTTP providers.
+    #[serde(default)]
     pub base_url: String,
     pub api_key: Option<String>,
     #[serde(default = "default_model")]
@@ -1230,6 +1235,15 @@ impl Config {
                 }
             }
         };
+
+        // ADR-0043 Phase 1: OpenCode is detect-only — never boot Active.
+        if let Some(section) = providers.iter().find(|p| p.name == default) {
+            if section.provider_type == ProviderType::OpenCode {
+                anyhow::bail!(
+                    "default_provider = \"{default}\" is OpenCode, which is detect-only (ADR-0043 Phase 1). Choose openrouter or ollama as Active."
+                );
+            }
+        }
 
         let fallback = self.fallback.chain.clone();
         Ok((providers, default, fallback))
@@ -2401,6 +2415,34 @@ mod tests {
         // Do not double-apply legacy allowlist onto bots
         assert_eq!(cfg.telegram.bot_token, "bots-tok");
         assert_eq!(cfg.telegram.allowed_user_ids, vec![1]);
+    }
+
+    #[test]
+    fn build_providers_rejects_opencode_as_default() {
+        let toml = r#"
+[openrouter]
+api_key = "sk-test"
+model = "openai/gpt-4o"
+
+[[provider]]
+name = "opencode"
+type = "opencode"
+model = "opencode/glm"
+
+[[bots]]
+id = "main"
+bot_token = "1:abc"
+allowed_user_ids = [1]
+
+[general]
+default_provider = "opencode"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let err = cfg.build_providers().unwrap_err().to_string();
+        assert!(
+            err.contains("OpenCode") && err.contains("detect-only"),
+            "{err}"
+        );
     }
 
     #[test]

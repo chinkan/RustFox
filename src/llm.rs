@@ -394,7 +394,7 @@ pub fn is_tool_weak_provider(config: &crate::provider::ProviderConfig) -> bool {
     match config.provider_type {
         ProviderType::Ollama => true,
         ProviderType::OpenAICompatible => is_ollama_openai_compat_endpoint(config),
-        ProviderType::OpenRouter => false,
+        ProviderType::OpenRouter | ProviderType::OpenCode => false,
     }
 }
 

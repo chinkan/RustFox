@@ -134,6 +134,13 @@ pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
     if err.downcast_ref::<LlmPreHttpError>().is_some() {
         return false;
     }
+    // ADR-0043: detect-only miss must not silent-hop via [fallback] chain.
+    if err
+        .downcast_ref::<crate::opencode::OpenCodeDetectOnlyError>()
+        .is_some()
+    {
+        return false;
+    }
     if let Some(http) = err.downcast_ref::<LlmHttpError>() {
         return !http.is_auth_hard_exclusion();
     }
@@ -494,12 +501,27 @@ impl ProviderRegistry {
     }
 
     /// Resolve a model string to (provider, stripped_model).
-    /// Never fails — unknown prefixes fall through to default provider.
+    ///
+    /// Longest-prefix match on registered provider names (ADR-0043): among
+    /// names `N` where `model == N` is false and `model` starts with `N/`,
+    /// pick the longest `N`. Unknown prefixes fall through to the default
+    /// provider (unchanged). Never fails.
     pub fn resolve_model<'a>(&'a self, model: &'a str) -> (&'a dyn Provider, &'a str) {
-        if let Some((prefix, rest)) = model.split_once('/') {
-            if let Some(provider) = self.providers.get(prefix) {
-                return (provider.as_ref(), rest);
+        let mut best: Option<(&str, &str)> = None;
+        for name in self.providers.keys() {
+            let Some(rest) = model
+                .strip_prefix(name.as_str())
+                .and_then(|s| s.strip_prefix('/'))
+            else {
+                continue;
+            };
+            match best {
+                Some((prev, _)) if name.len() <= prev.len() => {}
+                _ => best = Some((name.as_str(), rest)),
             }
+        }
+        if let Some((name, rest)) = best {
+            return (self.providers[name].as_ref(), rest);
         }
         // Fall through to default provider with full string
         let default = &self.providers[&self.default_provider];
@@ -569,8 +591,20 @@ pub fn build_registry(
             ProviderType::OpenRouter => Arc::new(OpenRouterProvider::new(cfg)),
             ProviderType::OpenAICompatible => Arc::new(OpenAICompatibleProvider::new(cfg)),
             ProviderType::Ollama => Arc::new(OllamaProvider::new(cfg)),
+            ProviderType::OpenCode => Arc::new(OpenCodeProvider::new(cfg)),
         };
-        providers.insert(section.name.clone(), provider);
+        providers.insert(section.name.clone(), provider.clone());
+        // Catalog ids are double-segmented (`opencode-go/kimi-k3`). Alias so
+        // longest-prefix resolve does not silent-hop to the default provider.
+        if section.provider_type == ProviderType::OpenCode {
+            for alias in ["opencode", "opencode-go"] {
+                if alias != section.name.as_str() {
+                    providers
+                        .entry(alias.to_string())
+                        .or_insert_with(|| provider.clone());
+                }
+            }
+        }
     }
 
     if providers.is_empty() {
@@ -580,6 +614,15 @@ pub fn build_registry(
     if !providers.contains_key(default_name) {
         anyhow::bail!(
             "Default provider '{}' not found in configured providers",
+            default_name
+        );
+    }
+    if providers
+        .get(default_name)
+        .is_some_and(|p| p.config().provider_type == ProviderType::OpenCode)
+    {
+        anyhow::bail!(
+            "Default provider '{}' is OpenCode (ADR-0043 Phase 1 detect-only); choose openrouter or ollama as Active",
             default_name
         );
     }
@@ -935,8 +978,62 @@ impl Provider for OllamaProvider {
     }
 }
 
+// === OpenCodeProvider (ADR-0043 Phase 1 detect-only) ===
+
+pub struct OpenCodeProvider {
+    config: ProviderConfig,
+}
+
+impl OpenCodeProvider {
+    pub fn new(config: ProviderConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait]
+impl Provider for OpenCodeProvider {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn default_model(&self) -> &str {
+        &self.config.default_model
+    }
+    fn supports_vision(&self) -> bool {
+        self.config.supports_vision
+    }
+    fn config(&self) -> &ProviderConfig {
+        &self.config
+    }
+
+    async fn chat_completion(
+        &self,
+        _client: &reqwest::Client,
+        _messages: &[ChatMessage],
+        _tools: &[ToolDefinition],
+        _model: &str,
+        _max_tokens: u32,
+    ) -> Result<ChatCompletion> {
+        Err(anyhow::Error::from(
+            crate::opencode::OpenCodeDetectOnlyError::chat(),
+        ))
+    }
+
+    async fn list_models(&self, _client: &reqwest::Client) -> Result<Vec<String>> {
+        let status = crate::opencode::detect_async().await;
+        if status.state != crate::opencode::STATE_READY {
+            anyhow::bail!(
+                "OpenCode models unavailable (state={}): {}",
+                status.state,
+                status.message.unwrap_or_default()
+            );
+        }
+        Ok(status.models)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::config::ProviderSection;
 
@@ -1045,6 +1142,85 @@ mod tests {
         let (provider, model) = reg.resolve_model("beta/llama3.1:8b");
         assert_eq!(provider.name(), "beta");
         assert_eq!(model, "llama3.1:8b");
+    }
+
+    /// ADR-0043: longest-prefix so `opencode-go/kimi-k3` hits OpenCode, not default.
+    #[test]
+    fn resolve_model_longest_prefix_opencode_go_does_not_silent_hop() {
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            make_section(
+                "opencode",
+                ProviderType::OpenCode,
+                "",
+                "opencode-go/kimi-k3",
+            ),
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("opencode-go/kimi-k3");
+        assert_eq!(
+            provider.config().provider_type,
+            ProviderType::OpenCode,
+            "must resolve to OpenCode, not silent-hop to openrouter"
+        );
+        assert_eq!(model, "kimi-k3");
+        // Nested catalog id under the rustfox provider prefix.
+        let (provider2, model2) = reg.resolve_model("opencode/opencode-go/kimi-k3");
+        assert_eq!(provider2.config().provider_type, ProviderType::OpenCode);
+        assert_eq!(model2, "opencode-go/kimi-k3");
+        // Longer alias wins over shorter when both registered.
+        let (provider3, model3) = reg.resolve_model("opencode/glm-5.3-flash-free");
+        assert_eq!(provider3.config().provider_type, ProviderType::OpenCode);
+        assert_eq!(model3, "glm-5.3-flash-free");
+    }
+
+    #[test]
+    fn build_registry_rejects_opencode_as_default() {
+        let sections = vec![make_section(
+            "opencode",
+            ProviderType::OpenCode,
+            "",
+            "opencode/glm",
+        )];
+        let err = build_registry(&sections, "opencode", 3, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("detect-only") || err.to_string().contains("OpenCode"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_chat_returns_detect_only_typed_error() {
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            make_section("opencode", ProviderType::OpenCode, "", "opencode/glm"),
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, _) = reg.resolve_model("opencode/glm");
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], "glm", 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::opencode::OpenCodeDetectOnlyError>();
+        assert!(
+            typed.is_some(),
+            "expected OpenCodeDetectOnlyError, got {err:#}"
+        );
+        assert!(
+            !should_walk_fallback(&err),
+            "must not silent-hop via fallback"
+        );
     }
 
     #[test]
@@ -1545,6 +1721,9 @@ mod tests {
             LlmPreHttpError {
                 message: "missing OpenRouter API key".into(),
             }
+        )));
+        assert!(!should_walk_fallback(&anyhow::Error::from(
+            crate::opencode::OpenCodeDetectOnlyError::chat()
         )));
         assert!(should_walk_fallback(&anyhow::anyhow!(
             "Failed to send request"
