@@ -476,11 +476,52 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Longest-prefix aliases for OpenCode catalog ids (ADR-0043 Phase 1).
+/// Reserved even when no `[[provider]] type=opencode` section exists (#262).
+const OPENCODE_MODEL_ALIASES: &[&str] = &["opencode", "opencode-go"];
+
+/// Strip a reserved OpenCode alias prefix (`opencode/` or `opencode-go/`).
+/// Longest alias wins. Returns the remainder after `alias/`.
+fn strip_opencode_alias(model: &str) -> Option<&str> {
+    let mut best: Option<(&str, &str)> = None;
+    for alias in OPENCODE_MODEL_ALIASES {
+        let Some(rest) = model.strip_prefix(alias).and_then(|s| s.strip_prefix('/')) else {
+            continue;
+        };
+        match best {
+            Some((prev, _)) if alias.len() <= prev.len() => {}
+            _ => best = Some((*alias, rest)),
+        }
+    }
+    best.map(|(_, rest)| rest)
+}
+
+fn opencode_detect_only_stub() -> Arc<dyn Provider> {
+    Arc::new(OpenCodeProvider::new(ProviderConfig {
+        name: "opencode".to_string(),
+        provider_type: ProviderType::OpenCode,
+        base_url: String::new(),
+        api_key: None,
+        default_model: String::new(),
+        supports_vision: false,
+        max_tokens: 1024,
+        discover_models: false,
+        context_window: 128_000,
+        context_window_cache: Arc::new(RwLock::new(None)),
+        parse_retry_limit: 0,
+        rate_limit_retry_limit: 0,
+    }))
+}
+
 /// Holds the set of providers available to the agent and the default provider
 /// name used when a model string does not carry an explicit `provider/` prefix.
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn Provider>>,
     default_provider: String,
+    /// Detect-only stub for reserved `opencode*` aliases when no
+    /// `[[provider]] type=opencode` is registered (ADR-0043 §6 / #262).
+    /// Not listed in [`Self::provider_names`].
+    opencode_detect_only: Option<Arc<dyn Provider>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -488,6 +529,7 @@ impl std::fmt::Debug for ProviderRegistry {
         f.debug_struct("ProviderRegistry")
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .field("default_provider", &self.default_provider)
+            .field("opencode_detect_only", &self.opencode_detect_only.is_some())
             .finish()
     }
 }
@@ -497,6 +539,7 @@ impl ProviderRegistry {
         Self {
             providers,
             default_provider,
+            opencode_detect_only: None,
         }
     }
 
@@ -504,8 +547,11 @@ impl ProviderRegistry {
     ///
     /// Longest-prefix match on registered provider names (ADR-0043): among
     /// names `N` where `model == N` is false and `model` starts with `N/`,
-    /// pick the longest `N`. Unknown prefixes fall through to the default
-    /// provider (unchanged). Never fails.
+    /// pick the longest `N`. Reserved OpenCode aliases (`opencode`,
+    /// `opencode-go`) resolve to the detect-only stub even when no
+    /// `[[provider]] type=opencode` section exists (#262) — never silent-hop
+    /// to the default provider. Other unknown prefixes fall through to the
+    /// default provider (unchanged). Never fails.
     pub fn resolve_model<'a>(&'a self, model: &'a str) -> (&'a dyn Provider, &'a str) {
         let mut best: Option<(&str, &str)> = None;
         for name in self.providers.keys() {
@@ -522,6 +568,13 @@ impl ProviderRegistry {
         }
         if let Some((name, rest)) = best {
             return (self.providers[name].as_ref(), rest);
+        }
+        // ADR-0043 §6 / #262: reserved OpenCode aliases — typed detect-only,
+        // even when no type=opencode section is registered.
+        if let Some(stub) = &self.opencode_detect_only {
+            if let Some(rest) = strip_opencode_alias(model) {
+                return (stub.as_ref(), rest);
+            }
         }
         // Fall through to default provider with full string
         let default = &self.providers[&self.default_provider];
@@ -597,10 +650,10 @@ pub fn build_registry(
         // Catalog ids are double-segmented (`opencode-go/kimi-k3`). Alias so
         // longest-prefix resolve does not silent-hop to the default provider.
         if section.provider_type == ProviderType::OpenCode {
-            for alias in ["opencode", "opencode-go"] {
-                if alias != section.name.as_str() {
+            for alias in OPENCODE_MODEL_ALIASES {
+                if *alias != section.name.as_str() {
                     providers
-                        .entry(alias.to_string())
+                        .entry((*alias).to_string())
                         .or_insert_with(|| provider.clone());
                 }
             }
@@ -627,7 +680,22 @@ pub fn build_registry(
         );
     }
 
-    Ok(ProviderRegistry::new(providers, default_name.to_string()))
+    // #262: when no type=opencode section exists, keep a resolve-only stub so
+    // reserved aliases cannot silent-hop to the default provider.
+    let opencode_detect_only = if providers
+        .values()
+        .any(|p| p.config().provider_type == ProviderType::OpenCode)
+    {
+        None
+    } else {
+        Some(opencode_detect_only_stub())
+    };
+
+    Ok(ProviderRegistry {
+        providers,
+        default_provider: default_name.to_string(),
+        opencode_detect_only,
+    })
 }
 
 // === OpenRouterProvider ===
@@ -1207,6 +1275,73 @@ mod tests {
         ];
         let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
         let (provider, _) = reg.resolve_model("opencode/glm");
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], "glm", 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::opencode::OpenCodeDetectOnlyError>();
+        assert!(
+            typed.is_some(),
+            "expected OpenCodeDetectOnlyError, got {err:#}"
+        );
+        assert!(
+            !should_walk_fallback(&err),
+            "must not silent-hop via fallback"
+        );
+    }
+
+    /// #262 soft repro: no `[[provider]] type=opencode` + `opencode/…` must
+    /// resolve to detect-only, not silent-hop to the default provider.
+    #[test]
+    fn resolve_model_unregistered_opencode_does_not_silent_hop() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        // Stub is resolve-only — must not appear in provider_names / get_provider.
+        assert!(
+            reg.get_provider("opencode").is_none(),
+            "detect-only stub must not pollute registered provider list"
+        );
+        assert!(!reg
+            .provider_names()
+            .iter()
+            .any(|n| n == "opencode" || n == "opencode-go"));
+
+        let (provider, model) = reg.resolve_model("opencode/glm-5.3-flash-free");
+        assert_eq!(
+            provider.config().provider_type,
+            ProviderType::OpenCode,
+            "must not silent-hop to openrouter"
+        );
+        assert_eq!(model, "glm-5.3-flash-free");
+
+        let (provider2, model2) = reg.resolve_model("opencode-go/kimi-k3");
+        assert_eq!(provider2.config().provider_type, ProviderType::OpenCode);
+        assert_eq!(model2, "kimi-k3");
+
+        // Non-OpenCode unknown prefix still falls through to default.
+        let (provider3, model3) = reg.resolve_model("moonshotai/kimi-k2.5");
+        assert_eq!(provider3.name(), "openrouter");
+        assert_eq!(model3, "moonshotai/kimi-k2.5");
+    }
+
+    /// #262: Active / chat path with unregistered OpenCode id → typed error.
+    #[tokio::test]
+    async fn unregistered_opencode_chat_returns_detect_only_typed_error() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, _) = reg.resolve_model("opencode/glm");
+        assert_eq!(provider.config().provider_type, ProviderType::OpenCode);
         let client = reqwest::Client::new();
         let err = provider
             .chat_completion(&client, &[], &[], "glm", 16)
