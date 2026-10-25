@@ -15,6 +15,7 @@ import type {
   MeResponse,
   MemoryEntry,
   MemoryKind,
+  OpenCodeStatus,
   QuarantineResult,
   ReloadResult,
   ScheduledTask,
@@ -161,6 +162,8 @@ export const api = {
 
   // ── settings & soul ─────────────────────────────────────────────────────
   getSettings: () => get<Settings>('/settings'),
+  /** Detect-only OpenCode probe (ADR-0043). Session-gated here. Not Active. */
+  getOpenCodeStatus: () => get<OpenCodeStatus>('/opencode/status'),
   /** Whether the Google button is shown. No client id in the body. */
   googleStatus: () => get<{ offered: boolean }>('/connectors/google'),
   /** One tap. Hidden when no client id is baked or saved. Not a wizard step. */

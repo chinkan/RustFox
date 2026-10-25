@@ -524,6 +524,20 @@ export interface SelfUpgradeResult {
   log: string
 }
 
+/**
+ * GET /api/opencode/status (ADR-0043 Phase 1).
+ * Snake_case on the wire — same JSON as the public wizard route. Detect-only:
+ * not an Active provider and not a chat route.
+ */
+export type OpenCodeState = 'absent' | 'no_creds' | 'ready'
+
+export interface OpenCodeStatus {
+  state: OpenCodeState
+  model_count: number
+  models: string[]
+  message: string | null
+}
+
 
 export interface Settings {
   editable: SettingsEditable

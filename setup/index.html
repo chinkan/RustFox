@@ -232,6 +232,19 @@
   .summary-list .summary-val.muted { color: #4a5568; font-style: italic; }
   .summary-section { margin-bottom: 1.25rem; }
   .summary-section h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 0.4rem; margin-top: 0; }
+  /* ADR-0043: read-only OpenCode strip. Not a provider control. */
+  .status-strip {
+    margin: 0.35rem 0 1.1rem;
+    padding: 0.55rem 0.75rem;
+    border-radius: 8px;
+    background: #131825;
+    border: 1px solid #2d3748;
+    font-size: 0.82rem;
+    color: #a0aec0;
+    line-height: 1.45;
+  }
+  .status-strip.ready { color: #68d391; border-color: #276749; }
+  .status-strip.warn { color: #f6ad55; border-color: #975a16; }
 </style>
 </head>
 <body>
@@ -303,6 +316,7 @@ function showStep(n) {
     renderSummary();
     renderPreview();
   }
+  if (n === 1) loadOpenCodeStatus();
 }
 
 function prevStep() { if (currentStep > 1) showStep(currentStep - 1); }
@@ -434,6 +448,39 @@ function maskSecret(s) {
 function useOpenRouter() {
   document.getElementById('f-provider-openrouter').checked = true;
   onProviderChange();
+}
+
+// ADR-0043 Phase 1: probe only. Never sets provider and never adds a radio.
+function opencodeStatusText(data) {
+  const state = data && data.state;
+  const message = data && typeof data.message === 'string' ? data.message.trim() : '';
+  const withMessage = (line) => (message ? line + ' — ' + message : line);
+  if (state === 'ready') {
+    const n = Number(data.model_count);
+    const count = Number.isFinite(n) && n >= 0 ? n : 0;
+    return 'OpenCode: ready — ' + count + ' models';
+  }
+  if (state === 'no_creds') return withMessage('OpenCode: installed, no credentials');
+  if (state === 'absent') return withMessage('OpenCode: not installed');
+  return 'OpenCode: status unavailable';
+}
+
+async function loadOpenCodeStatus() {
+  const el = document.getElementById('opencode-status');
+  if (!el) return;
+  el.className = 'status-strip';
+  el.textContent = 'OpenCode: checking…';
+  try {
+    const res = await fetch('/api/opencode/status');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    el.textContent = opencodeStatusText(data);
+    if (data && data.state === 'ready') el.classList.add('ready');
+    else if (data && data.state === 'no_creds') el.classList.add('warn');
+  } catch (_) {
+    el.textContent = 'OpenCode: status unavailable';
+    el.classList.add('warn');
+  }
 }
 
 async function onProviderChange() {
@@ -693,6 +740,7 @@ function buildSteps() {
       <span>Ollama <span class="hint">— local option</span></span>
     </label>
   </div>
+  <p id="opencode-status" class="status-strip" role="status">OpenCode: checking…</p>
   <div id="openrouter-fields">
     <div class="field">
       <label>OpenRouter API Key <span class="hint">— <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:#f6851b;text-decoration:none">openrouter.ai/keys</a></span></label>

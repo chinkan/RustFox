@@ -49,6 +49,12 @@ fn mask_secret(secret: &str) -> String {
     format!("{head}…{tail}")
 }
 
+/// GET /api/opencode/status — same JSON as wizard (session-gated here).
+pub async fn opencode_status() -> Json<Value> {
+    let status = crate::opencode::detect_async().await;
+    Json(status.to_json())
+}
+
 /// GET /api/settings — whitelisted, typed projection with masked secrets.
 pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value>, PortalError> {
     let cfg = state.agent.config();

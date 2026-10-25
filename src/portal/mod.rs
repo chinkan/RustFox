@@ -423,6 +423,7 @@ pub fn router(state: PortalState) -> Router {
         .route("/tasks/{id}/enable", post(tasks_admin::task_enable))
         .route("/tasks/{id}/disable", post(tasks_admin::task_disable))
         .route("/stats", get(data::stats))
+        .route("/opencode/status", get(settings::opencode_status))
         .route("/settings", get(settings::get_settings))
         .route(
             "/connectors/google",

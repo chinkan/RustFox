@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod mcp_presets;
 pub mod memory;
 pub mod memory_tools;
+pub mod opencode;
 pub mod peer_invoke;
 pub mod persona_prompt;
 pub mod platform;

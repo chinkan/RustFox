@@ -798,10 +798,16 @@ impl Agent {
 
         // Validate: resolve succeeds for any string
         let (provider, actual_model) = self.registry.resolve_model(model_id);
+        // ADR-0043 Phase 1: OpenCode must not become Active.
+        if provider.config().provider_type == crate::config::ProviderType::OpenCode {
+            return Err(anyhow::Error::from(
+                crate::opencode::OpenCodeDetectOnlyError::active(),
+            ));
+        }
         if let Some((prefix, _)) = model_id.split_once('/') {
             if self.registry.get_provider(prefix).is_none() {
                 tracing::warn!(
-                    "Model '{}': prefix '{}' does not match any known provider                      (falling through to default '{}')",
+                    "Model '{}': prefix '{}' does not match any known provider (falling through to default '{}')",
                     model_id,
                     prefix,
                     self.registry.default_provider_name()

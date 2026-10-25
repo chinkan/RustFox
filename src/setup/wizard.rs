@@ -372,6 +372,7 @@ async fn run_web(config_dir: &Path) -> Result<()> {
         .route("/api/thin-preview", post(thin_preview))
         .route("/api/thin-save", post(thin_save))
         .route("/api/ollama/local", get(ollama_local))
+        .route("/api/opencode/status", get(opencode_status))
         .route("/api/ollama/library", get(ollama_library))
         .route("/api/ollama/pull", post(ollama_pull))
         .route("/api/openrouter/models", get(openrouter_models))
@@ -570,6 +571,12 @@ async fn ollama_local(State(st): State<WizardState>) -> Json<serde_json::Value> 
         "models": detect.models,
         "message": detect.message,
     }))
+}
+
+/// GET /api/opencode/status — public, same posture as `/api/ollama/local` (ADR-0043).
+async fn opencode_status() -> Json<serde_json::Value> {
+    let status = crate::opencode::detect_async().await;
+    Json(status.to_json())
 }
 
 #[derive(Debug, Deserialize)]

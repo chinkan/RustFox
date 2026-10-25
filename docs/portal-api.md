@@ -156,6 +156,11 @@ Disarm live job + `status → paused` → `200 {"ok":true,"id","enabled":false,"
 ### GET /api/stats
 → `200 {"model","providers":["name",…],"messageCount":n,"conversationCount":n,"activeTasks":n,"skills":n,"portalEnabled":true}`
 
+### GET /api/opencode/status (ADR-0043 Phase 1)
+Session-gated on portal (wizard exposes the same path publicly as `/api/opencode/status`). Snake_case JSON:
+`{"state":"absent"|"no_creds"|"ready","model_count":n,"models":[…],"message":null|string}`.
+`absent` = binary missing; `no_creds` = present but no usable credentials; `ready` = creds OK + `opencode models --pure` list. Always includes `model_count` (0 when not ready) and `models` (empty when not ready). Detect-only — not Active / not chat.
+
 ## Settings (ADR 0006 — whitelisted projection, never raw TOML)
 
 ### GET /api/settings
