@@ -526,6 +526,20 @@ fn strip_opencode_alias(model: &str) -> Option<&str> {
     best.map(|(_, rest)| rest)
 }
 
+/// Match reserved xAI Active ids: exact `xai` (#273) or `xai/<model>` (ADR-0044).
+///
+/// Returns `Some("")` for bare `xai` (caller substitutes the provider default
+/// model). Returns `Some(rest)` after `xai/`. Case rules match existing
+/// prefix stubs (exact ASCII equality on [`crate::xai::MODEL_ALIAS`]).
+fn strip_xai_alias(model: &str) -> Option<&str> {
+    if model == crate::xai::MODEL_ALIAS {
+        return Some("");
+    }
+    model
+        .strip_prefix(crate::xai::MODEL_ALIAS)
+        .and_then(|s| s.strip_prefix('/'))
+}
+
 fn opencode_detect_only_stub() -> Arc<dyn Provider> {
     Arc::new(OpenCodeProvider::new(ProviderConfig {
         name: "opencode".to_string(),
@@ -571,8 +585,8 @@ pub struct ProviderRegistry {
     /// `[[provider]] type=opencode` is registered (ADR-0043 §6 / #262).
     /// Not listed in [`Self::provider_names`].
     opencode_detect_only: Option<Arc<dyn Provider>>,
-    /// Misconfigured stub for reserved `xai/` when no `type=xai` section
-    /// is registered (ADR-0044 §9). Not listed in [`Self::provider_names`].
+    /// Misconfigured stub for reserved `xai` / `xai/` when no `type=xai`
+    /// section is registered (ADR-0044 §9 / #273). Not listed in [`Self::provider_names`].
     xai_stub: Option<Arc<dyn Provider>>,
 }
 
@@ -604,8 +618,10 @@ impl ProviderRegistry {
     /// pick the longest `N`. Reserved OpenCode aliases (`opencode`,
     /// `opencode-go`) resolve to the detect-only stub even when no
     /// `[[provider]] type=opencode` section exists (#262) — never silent-hop
-    /// to the default provider. Other unknown prefixes fall through to the
-    /// default provider (unchanged). Never fails.
+    /// to the default provider. Reserved xAI ids (`xai`, `xai/…`) likewise
+    /// resolve to the xAI provider or misconfigured stub (#273 / ADR-0044 §9).
+    /// Other unknown prefixes fall through to the default provider
+    /// (unchanged). Never fails.
     pub fn resolve_model<'a>(&'a self, model: &'a str) -> (&'a dyn Provider, &'a str) {
         let mut best: Option<(&str, &str)> = None;
         for name in self.providers.keys() {
@@ -630,13 +646,24 @@ impl ProviderRegistry {
                 return (stub.as_ref(), rest);
             }
         }
-        // ADR-0044 §9: reserved `xai/` — typed misconfigured error, no silent hop.
-        if let Some(stub) = &self.xai_stub {
-            if let Some(rest) = model
-                .strip_prefix(crate::xai::MODEL_ALIAS)
-                .and_then(|s| s.strip_prefix('/'))
-            {
-                return (stub.as_ref(), rest);
+        // ADR-0044 §9 / #273: reserved bare `xai` and `xai/<model>` — typed
+        // misconfigured error, never silent-hop to the default provider.
+        if let Some(rest) = strip_xai_alias(model) {
+            if let Some(p) = self.providers.get(crate::xai::MODEL_ALIAS) {
+                let model_id = if rest.is_empty() {
+                    p.default_model()
+                } else {
+                    rest
+                };
+                return (p.as_ref(), model_id);
+            }
+            if let Some(stub) = &self.xai_stub {
+                let model_id = if rest.is_empty() {
+                    stub.default_model()
+                } else {
+                    rest
+                };
+                return (stub.as_ref(), model_id);
             }
         }
         // Fall through to default provider with full string
@@ -796,7 +823,8 @@ pub fn build_registry(
         Some(opencode_detect_only_stub())
     };
 
-    // ADR-0044 §9: when no type=xai section, stub `xai/` so it cannot silent-hop.
+    // ADR-0044 §9 / #273: when no type=xai section, stub bare `xai` and `xai/`
+    // so they cannot silent-hop.
     let xai_stub = if providers
         .values()
         .any(|p| p.config().provider_type == ProviderType::Xai)
@@ -2408,5 +2436,109 @@ mod tests {
             .get(crate::opencode::SESSION_HEADER)
             .expect("x-opencode-session on chat request");
         assert_eq!(hdr.to_str().unwrap(), stamped.as_str());
+    }
+
+    /// #273 soft repro: bare Active id `xai` (no `/model`) must hit the xAI
+    /// stub, not silent-hop to the default / OpenRouter alias.
+    #[test]
+    fn resolve_model_unregistered_bare_xai_does_not_silent_hop() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        assert!(
+            reg.get_provider("xai").is_none(),
+            "xAI stub must not pollute registered provider list"
+        );
+        assert!(!reg.provider_names().iter().any(|n| n == "xai"));
+
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(
+            provider.config().provider_type,
+            ProviderType::Xai,
+            "bare xai must not silent-hop to openrouter"
+        );
+        assert_eq!(
+            model,
+            crate::xai::DEFAULT_MODEL,
+            "bare xai uses provider default model id"
+        );
+
+        // Prefixed form still works (unchanged ADR-0044).
+        let (provider2, model2) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider2.config().provider_type, ProviderType::Xai);
+        assert_eq!(model2, "grok-4.7");
+
+        // Unrelated bare / unknown prefix still falls through to default.
+        let (provider3, model3) = reg.resolve_model("moonshotai/kimi-k2.5");
+        assert_eq!(provider3.name(), "openrouter");
+        assert_eq!(model3, "moonshotai/kimi-k2.5");
+    }
+
+    /// #273: Active / chat path with bare unregistered `xai` → typed error,
+    /// no fallback walk (mirrors #262 bare-alias chat test).
+    #[tokio::test]
+    async fn unregistered_bare_xai_chat_returns_typed_error() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(model, crate::xai::DEFAULT_MODEL);
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], model, 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::xai::XaiMisconfiguredError>();
+        assert!(
+            typed.is_some(),
+            "expected XaiMisconfiguredError, got {err:#}"
+        );
+        assert!(
+            !should_walk_fallback(&err),
+            "must not silent-hop via fallback"
+        );
+    }
+
+    /// #273: registered-but-misconfigured `type=xai` + bare `xai` must still
+    /// resolve to Xai (not OpenRouter), so Active validate / chat typed-reject.
+    #[test]
+    fn resolve_model_registered_bare_xai_does_not_silent_hop() {
+        let mut xai = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            "grok-4.7",
+        );
+        xai.api_key = None;
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            xai,
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(provider.name(), "xai");
+        assert_eq!(model, "grok-4.7");
+        assert!(
+            !crate::xai::peer_configured(
+                &provider.config().base_url,
+                provider.config().api_key.as_deref()
+            ),
+            "fixture must stay misconfigured so Active validate rejects"
+        );
     }
 }
