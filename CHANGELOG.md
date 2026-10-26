@@ -29,6 +29,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Anti cold-intro on Active final reply (ADR-0043 / #277):** when SQLite history already has ≥1 prior user/assistant turn, Continuity SoT stays `messages[]` (no conversation-id "fix"); light continuity prompt on ConversationManager load + structural guard on shared `AgenticLoop` FinalResponse (all Active peers). Narrow matcher (greeting + help-offer + ≥2 menu lines; prefer false-negatives). Reject + regenerate once; if still cold → short clarify rewrite (no capability menu). Leave-Go / MissingSessionID / `x-opencode-session` unchanged; #194/#202 park. Closes #277.
+
 - **Inbound during scheduled run is not a steer (#275):** `TurnGate::submit` returns `Deferred` (not `Accepted`) while `TurnKind::Scheduled` owns the key; Telegram skips the 👀 mid-run reaction. Drain still no-ops; pending start as a **user** turn after `finish`. Steer remains main-interactive only; schedule stays a separate context. Closes #275.
 
 - **OpenCode Go Active `x-opencode-session` (#271):** Go OpenAI-compat chat + models list send a process-stable `x-opencode-session` (and `User-Agent: RustFox/<version>`). `MissingSessionID` is not leave-Go (leave remains 402 or 429+GoUsageLimitError/Policy). Amends ADR-0043. Refs soft #267/#269. Closes #271.

@@ -219,6 +219,10 @@ impl<'a> AgenticLoop<'a> {
         );
         let mut loop_recovery_count = 0u32;
         const MAX_LOOP_RECOVERIES: u32 = 2;
+        // ADR-0043 / #277: anti cold-intro on shared Active final-reply path.
+        let has_prior_continuity =
+            crate::cold_intro::has_prior_continuity(&messages.messages_snapshot());
+        let mut cold_intro_regen_used = false;
 
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
@@ -466,6 +470,41 @@ impl<'a> AgenticLoop<'a> {
                     }
                     continue;
                 }
+
+                // ADR-0043 / #277 structural guard (all Active peers): with prior
+                // continuity, reject a capability cold-intro once; if still cold
+                // after regenerate, rewrite to a short clarify (no menu).
+                let mut text = text;
+                if has_prior_continuity && crate::cold_intro::is_capability_cold_intro(&text) {
+                    if !cold_intro_regen_used {
+                        cold_intro_regen_used = true;
+                        tracing::warn!(
+                            "Anti cold-intro: rejecting capability menu final reply; regenerating once"
+                        );
+                        messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(MessageContent::Text(text)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        messages.push_user(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(MessageContent::from_text(
+                                crate::cold_intro::COLD_INTRO_REGEN_NUDGE.to_string(),
+                            )),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        continue;
+                    }
+                    tracing::warn!(
+                        "Anti cold-intro: regenerate still cold-intro; rewriting to clarify"
+                    );
+                    text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
+                }
+
                 if let Some(ref tx) = self.config.stream_token_tx {
                     let _ = LlmClient::stream_text(text.clone(), tx.clone()).await;
                 }
