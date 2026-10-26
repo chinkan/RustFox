@@ -128,7 +128,8 @@ fn system(t: &str) -> ChatMessage {
 }
 
 fn cantonese_cold_intro() -> String {
-    "嗨 Fox 喺度 👋 有咩想做？我可以幫你：\n\
+    // Live FN shape (tip 29e4461 / #280 W1): greeting + ≥2 menu, no help-offer.
+    "嗨 Fox 喺度 👋 有咩想做？\n\
      - 📰 出帖 (Threads / 廣東話)、fetch 新聞\n\
      - 📁 Obsidian vault 筆記整理、inbox sweep、每日筆記\n\
      - 💰 財務：信用卡月結單 parse、記帳、Google Sheet 同步"
@@ -136,7 +137,8 @@ fn cantonese_cold_intro() -> String {
 }
 
 fn english_cold_intro() -> String {
-    "Hello! I'm Fox. I can help you with:\n\
+    // W1: greeting + ≥2 menu, help-offer not required (#280).
+    "Hello! I'm Fox. What would you like to do?\n\
      - Fetching news and posting to Threads\n\
      - Organizing your Obsidian vault\n\
      - Coding and debugging in the sandbox"
