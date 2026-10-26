@@ -1,12 +1,12 @@
 # ADR-0043: OpenCode detect-only (Phase 1) and peer Active direction
 
-- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header; #277 / #279 ship continuity SoT + anti cold-intro; #280 amends anti cold-intro matcher widen)
+- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header; #277 / #279 ship continuity SoT + anti cold-intro; #280 / #282 ship matcher widen W1 ∪ W2; #283 amends W2 cold-intro phrase widen)
 - **Date:** 2026-10-24
 - **Amends / supersedes:** prior Direction **C** (delegate) on this same ADR (commit `9bdceb1` / filename `0043-opencode-detect-and-delegate.md`). Product HOLD + grill R3 parks C; target is peer Active + RustFox tools.
 - **Target release:** post-v1.0.7 / TBD (v1.0.7 tag is Kan-owned; this ADR does not ship a tag)
 - **Depends on:** ADR-0025 (sandbox confinement — required for any peer Active / tool-loop ship that runs OpenCode-side work under confinement)
-- **Related:** #259 (Phase 1 detect-only), #267 (D Active peer), #271 / #272 (`x-opencode-session`), #277 / #279 (continuity SoT + anti cold-intro shipped), #280 (matcher widen; this docs PR Refs; later impl PR Closes), ADR-0033 (Active vs provider model), ADR-0035 (`default_provider` / Active persist)
-- **Issue:** #259 (Phase 1); #277 / #279 (anti cold-intro shipped); #280 (matcher widen amend)
+- **Related:** #259 (Phase 1 detect-only), #267 (D Active peer), #271 / #272 (`x-opencode-session`), #277 / #279 (continuity SoT + anti cold-intro shipped), #280 / #282 (matcher widen W1 ∪ W2 shipped), #283 (W2+ phrase widen; this docs PR Refs; later impl PR Closes), ADR-0033 (Active vs provider model), ADR-0035 (`default_provider` / Active persist)
+- **Issue:** #259 (Phase 1); #277 / #279 (anti cold-intro shipped); #280 / #282 (matcher widen shipped); #283 (W2 phrase widen amend)
 
 ## Context
 
@@ -41,7 +41,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 ## Decision — Continuity and anti cold-intro (#277)
 
-Product locks for Active-peer continuity (grill / tip `d50eae8`). Amend in place; Phase 1 Decision above and leave-Go / MissingSessionID (#271) are unchanged. Docs PR #278 **Refs #277**; impl #279 **Closes #277**. Matcher shape further amended by #280 below.
+Product locks for Active-peer continuity (grill / tip `d50eae8`). Amend in place; Phase 1 Decision above and leave-Go / MissingSessionID (#271) are unchanged. Docs PR #278 **Refs #277**; impl #279 **Closes #277**. Matcher shape further amended by #280 / #283 below.
 
 1. **Continuity source of truth:** RustFox **SQLite → `messages[]`** via shared `ConversationManager` (OpenRouter parity). Applies to **all Active peers** (not OpenCode-only). Continuity is not derived from `x-opencode-session`.
 
@@ -49,13 +49,13 @@ Product locks for Active-peer continuity (grill / tip `d50eae8`). Amend in place
 
 3. **Anti cold-intro (MUST):** when continuity already has **≥1 prior user or assistant** turn (excluding pure system / summary markers), the final user-visible reply **must not** be a capability cold-intro (greeting + capability menu / “I can help you”-style, including the known Cantonese Fox intro pattern).
 
-4. **Mechanism:** light prompt when history is non-empty, plus a **structural final-reply guard** on the **shared Active final-reply path** (all Active peers, not OpenCode-only). Prefer false-negatives over false-positives that kill normal short replies. On match → reject and **regenerate once**; if still cold-intro → short “continue prior thread / please clarify” sentence — **no** capability menu. Matcher shape = **W1 ∪ W2** per #280 (below); the #277-era help-offer AND is superseded.
+4. **Mechanism:** light prompt when history is non-empty, plus a **structural final-reply guard** on the **shared Active final-reply path** (all Active peers, not OpenCode-only). Prefer false-negatives over false-positives that kill normal short replies. On match → reject and **regenerate once**; if still cold-intro → short “continue prior thread / please clarify” sentence — **no** capability menu. Matcher shape = **W1 ∪ W2** per #280 / #283 (below); the #277-era help-offer AND is superseded.
 
 5. **Unchanged / parked:** Leave-Go and MissingSessionID rules unchanged (#271). #194 / #202 stay parked. **No release tag** in this docs PR or the follow-on impl PR without owner.
 
 ## Decision — Anti cold-intro matcher widen (#280)
 
-Product locks after live false-negative on tip `29e4461` (grill / #280). Amend in place; #277 continuity SoT, mechanism shape (light prompt + shared Active final-reply guard; regen once; else clarify, no menu), and leave-Go / MissingSessionID (#271) are unchanged. This docs PR **Refs #280**; a later **implementation** PR **Closes #280**.
+Product locks after live false-negative on tip `29e4461` (grill / #280). Amend in place; #277 continuity SoT, mechanism shape (light prompt + shared Active final-reply guard; regen once; else clarify, no menu), and leave-Go / MissingSessionID (#271) are unchanged. Docs PR #281 **Refs #280**; impl #282 **Closes #280**. W2 phrase set further amended by #283 below.
 
 1. **Matcher = W1 ∪ W2** when prior continuity has ≥1 user/assistant turn (excluding pure system / summary markers):
    - **W1:** greeting + ≥2 menu lines — help-offer (“I can help you” / 「我可以幫你」) is **no longer required**.
@@ -68,6 +68,24 @@ Product locks after live false-negative on tip `29e4461` (grill / #280). Amend i
 4. **Mechanism unchanged:** light prompt when history is non-empty + **structural final-reply guard** on the **shared Active final-reply path** (all Active peers). On match → reject and **regenerate once**; if still cold-intro → short clarify rewrite — **no** capability menu. Soft #279 proved the reject→regen→clarify path when the matcher hits; the tip `29e4461` live miss is matcher coverage.
 
 5. **Parked (explicit):** Leave-Go, MissingSessionID, per-conversation `x-opencode-session` persist-across-restart, mid-tool draft persist, long-turn focus loss, #194 / #202, and any release tag — out of this amend’s MUST.
+
+## Decision — Anti cold-intro matcher W2+ phrase widen (#283)
+
+Product locks after live false-negative on tip `9f58afb` (grill / #283). Amend in place; #277 continuity SoT, #280 W1 ∪ W2 matcher shape (except the W2 phrase set), mechanism (light prompt + shared Active final-reply guard; regen once; else clarify, no menu), and leave-Go / MissingSessionID (#271) are unchanged. Soft #282 @ `9f58afb`: **ACCEPT** claimed W1 ∪ W2; **HOLD** vs this live FN class. This docs PR **Refs #283**; a later **implementation** PR **Closes #283**.
+
+1. **Live FN class @ tip `9f58afb`:** Cantonese lost-content claim + capability menu (e.g. 「我好似收唔到你今次嘅內容 — 只見到系統 context…」+ multi-option menu) does **not** hit current W1 (no greeting signal) or the tip W2 CJK list (斷 context / 見唔到 / 睇唔到先前 / 冇咗 context / …). Soft prove on match still ends on English `COLD_INTRO_CLARIFY_REWRITE` (single clarify sentence, no menu). Therefore this is a **new matcher coverage gap**, not a successful clarify path and not Continuity SoT failure.
+
+2. **W2+ phrase widen (matcher-only):**
+   - **P1 CJK:** `收唔到`、`收唔到你今次`、`只見到系統 context`、`只見到系統`、`今次嘅內容`、`冇見到`（≠ `見唔到`）。
+   - **E1 EN:** `didn't get your`、`only see system context`、`only seeing system`.
+   - **M1 / C1:** new phrase **+ ≥2 menu lines** → reject; phrase alone ≠ reject (avoid killing normal lost-content replies without a capability menu).
+   - **F1:** still prefer false-negatives over false-positives; do **not** loosen greeting or menu-line definitions; **W1 unchanged**.
+
+3. **Soft Continuity SoT unchanged:** SQLite → `messages[]` via `ConversationManager` (all Active peers). Continuity is not derived from `x-opencode-session`.
+
+4. **Mechanism unchanged:** light prompt when history is non-empty + **structural final-reply guard** on the **shared Active final-reply path** (all Active peers). On match → reject and **regenerate once**; if still cold-intro → short clarify rewrite — **no** capability menu.
+
+5. **Out of scope / park (explicit):** `agent.max_iterations`, OpenCode `context_window` / prepare compaction, history inject, session persist, Leave-Go, MissingSessionID, mid-tool draft persist, long-turn focus loss, #194 / #202, and any release tag — out of this amend’s MUST. Soft QA/QA2 only after later impl gates; never the operator main Telegram identity / home config.
 
 ## Direction
 
@@ -116,6 +134,7 @@ Product locks after live false-negative on tip `29e4461` (grill / #280). Amend i
 - Implementation code, glossary edits, or a release tag in this docs change.
 - **#277 docs slice:** not a conversation-id / history-miss bugfix (continuity SoT is already SQLite → `messages[]`); no leave-Go / MissingSessionID change; no release tag; per-conversation `x-opencode-session` persist-across-restart is a follow-up, not a MUST of that amend.
 - **#280 docs slice:** tip `29e4461` live FN = matcher coverage gap (not a clarify-rewrite or continuity-miss failure); soft #279 reject→regen→clarify path remains valid when the matcher hits; no leave-Go / MissingSessionID / per-conversation `x-opencode-session` persist / mid-tool draft persist / long-turn focus loss; no release tag; #194 / #202 stay parked. No Rust, tests, or CHANGELOG in this docs PR.
+- **#283 docs slice:** tip `9f58afb` live FN = W2 phrase coverage gap (Cantonese lost-content + menu; not English `COLD_INTRO_CLARIFY_REWRITE`); Soft #282 ACCEPT claimed W1 ∪ W2 / HOLD vs this class; no `max_iterations` / `context_window` / compaction / history inject / session persist / Leave-Go / MissingSessionID / mid-tool draft / long-turn focus; no release tag; #194 / #202 stay parked. No Rust, tests, or CHANGELOG in this docs PR.
 
 ## Consequences
 
@@ -123,7 +142,7 @@ Product locks after live false-negative on tip `29e4461` (grill / #280). Amend i
 - Product avoids a false “provider peer” that would drop RustFox tools via a tool-less shim (A never default; B opposed as peer).
 - **D is locked** to OpenCode Go cloud OpenAI-compat (`https://opencode.ai/inference/go` + `/openai/v1/chat/completions`); local serve/run ≠ D. Do not ship Active peer until Product re-gate; HOLD. F interim has no technical blocker. Open items (Go tools smoke, quota status, HK Privacy) do not block Phase 1 docs.
 - After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271 / #272); MissingSessionID/400 is not leave-Go. The session header is opaque Go API state, not the transcript (#277).
-- Continuity for **all Active peers** is SQLite → `messages[]` via `ConversationManager` (OpenRouter parity). Anti cold-intro: with ≥1 prior user/assistant turn in continuity, the final reply must not be a capability cold-intro; mechanism = light prompt + structural final-reply guard (regenerate once; else short clarify, no menu) on the shared Active path (#277 / #279). Matcher = **W1 ∪ W2** (#280): greeting + ≥2 menu (help-offer not required) **or** lost-context signal + ≥2 menu; prefer FN (F1); lost-context alone ≠ reject (C1). Tip `29e4461` live FN was matcher coverage; soft #279 path still valid on hit. Leave-Go / MissingSessionID / per-conversation session persist / mid-tool draft / long-turn focus / #194 / #202 / tag remain parked.
+- Continuity for **all Active peers** is SQLite → `messages[]` via `ConversationManager` (OpenRouter parity). Anti cold-intro: with ≥1 prior user/assistant turn in continuity, the final reply must not be a capability cold-intro; mechanism = light prompt + structural final-reply guard (regenerate once; else short clarify, no menu) on the shared Active path (#277 / #279). Matcher = **W1 ∪ W2** (#280 / #282 / #283): greeting + ≥2 menu (help-offer not required) **or** lost-context signal + ≥2 menu; W2 phrase set widened under #283 (P1 CJK incl. `冇見到` ≠ `見唔到`; E1 EN); prefer FN (F1); lost-context alone ≠ reject (C1); W1 unchanged. Tip `9f58afb` live FN = W2 phrase coverage (not clarify rewrite / Continuity SoT). Soft #282 ACCEPT claimed W1 ∪ W2; HOLD vs that class. Leave-Go / MissingSessionID / per-conversation session persist / mid-tool draft / long-turn / max_iterations / context_window / #194 / #202 / tag remain parked.
 - Active / `default_provider` semantics from ADR-0033 / ADR-0035 stay unchanged for openrouter and ollama until peer Active is validated and implemented.
 - Later Phase 1 impl must include longest-prefix `resolve_model` regression coverage and typed detect-only errors (no silent hop).
 - Prior Direction C text in this ADR is superseded; filename renamed to `0043-opencode-detect-and-peer.md` to match.
@@ -137,5 +156,6 @@ Product locks after live false-negative on tip `29e4461` (grill / #280). Amend i
 - #267 — Direction D Active peer (Go OpenAI-compat). Soft Active follow-ups #269 / #271.
 - #271 / #272 — Go Active must send stable `x-opencode-session`; MissingSessionID ≠ leave-Go; process-stable mint stands.
 - #277 / #279 — Continuity SoT (SQLite → `messages[]`) + anti cold-intro MUST for all Active peers (docs #278 Refs; impl #279 Closes). Per-conversation session persist = follow-up.
-- #280 — Anti cold-intro matcher widen (W1 ∪ W2; F1; C1); this docs PR Refs; later impl Closes. Tip `29e4461` live FN = coverage gap.
+- #280 / #282 — Anti cold-intro matcher widen (W1 ∪ W2; F1; C1) shipped (docs #281 Refs; impl #282 Closes). Tip `29e4461` live FN was coverage gap.
+- #283 — W2+ phrase widen (P1 CJK incl. `冇見到`; E1 EN; M1/C1; F1; W1 unchanged); this docs PR Refs; later impl Closes. Tip `9f58afb` live FN = phrase coverage gap.
 - #194 / #202 — parked; out of scope.
