@@ -56,7 +56,7 @@ fn is_continuity_turn(m: &ChatMessage) -> bool {
 /// Capability cold-intro matcher (ADR-0043 / #280): **W1 ∪ W2**.
 ///
 /// - **W1:** greeting + ≥2 menu lines (help-offer no longer required)
-/// - **W2:** explicit lost-context / cannot-see-prior + ≥2 menu lines
+/// - **W2:** explicit lost-context / cannot-see-prior (+ #283 P1/E1) + ≥2 menu lines
 ///
 /// Prefer false-negatives (F1): greeting and menu-line definitions are
 /// unchanged from #277. Lost-context alone without ≥2 menu does not match (C1).
@@ -118,13 +118,14 @@ fn has_greeting_signal(text: &str) -> bool {
     false
 }
 
-/// Explicit lost-context / cannot-see-prior language (locale-aware). Prefer FN:
-/// keep the phrase list tight so normal “I can’t see file X” without a menu
+/// Explicit lost-context / cannot-see-prior language (locale-aware; #280 / #283).
+/// Prefer FN: keep the list tight so normal “I can’t see file X” without a menu
 /// never reaches this path alone (C1 still requires ≥2 menu at the caller).
+/// W2+ (#283): P1 CJK (`收唔到` / `只見到系統…` / `冇見到` ≠ `見唔到`) + E1 EN.
 fn has_lost_context_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
 
-    // Cantonese / CJK lost-prior / broken-context.
+    // Cantonese / CJK lost-prior / broken-context (+ #283 P1 lost-content).
     if text.contains("斷 context")
         || text.contains("斷咗 context")
         || text.contains("context 斷")
@@ -139,6 +140,12 @@ fn has_lost_context_signal(text: &str) -> bool {
         || text.contains("丟失上下文")
         || text.contains("看不到之前")
         || text.contains("看不到先前")
+        || text.contains("收唔到")
+        || text.contains("收唔到你今次")
+        || text.contains("只見到系統 context")
+        || text.contains("只見到系統")
+        || text.contains("今次嘅內容")
+        || text.contains("冇見到")
     {
         return true;
     }
@@ -170,6 +177,10 @@ fn has_lost_context_signal(text: &str) -> bool {
         "don't remember our context",
         "do not remember our conversation",
         "do not remember the conversation",
+        // #283 E1
+        "didn't get your",
+        "only see system context",
+        "only seeing system",
     ];
     ENGLISH.iter().any(|o| lower.contains(o))
 }
@@ -350,6 +361,53 @@ mod tests {
         assert!(!is_capability_cold_intro("Hi"));
         assert!(!is_capability_cold_intro("Hi\n- yes"));
         assert!(!is_capability_cold_intro("- yes\n- no"));
+        // #283: 冇見到 alone (no menu) must stay FN / C1
+        assert!(!is_capability_cold_intro("對唔住，我冇見到你今次嘅訊息。"));
+    }
+
+    /// Live FN @ tip `9f58afb` / #283: lost-content CJK (no greeting) + ≥2 menu → W2.
+    #[test]
+    fn w2_lost_content_phrase_plus_menu_p1() {
+        let live = "我好似收唔到你今次嘅內容 — 只見到系統 context。不如揀返：\n\
+                    - 📰 出帖 / fetch 新聞\n\
+                    - 📁 Obsidian vault 整理\n\
+                    - 💻 寫 code / debug";
+        assert!(is_capability_cold_intro(live));
+        assert!(!live.contains('嗨'));
+        assert!(!live.contains("你好"));
+
+        let mou = "對唔住，我冇見到你今次嘅訊息。可以揀：\n\
+                   - 📰 出帖 / fetch 新聞\n\
+                   - 📁 Obsidian vault 整理";
+        assert!(is_capability_cold_intro(mou));
+    }
+
+    #[test]
+    fn w2_english_e1_lost_content_plus_menu() {
+        let cold = "Sorry — I didn't get your last message, I only see system context. Pick one:\n\
+                    - Fetching news and posting to Threads\n\
+                    - Organizing your Obsidian vault\n\
+                    - Coding and debugging in the sandbox";
+        assert!(is_capability_cold_intro(cold));
+
+        let seeing = "Hmm, I'm only seeing system prompts right now. Options:\n\
+                      - Fetching news and posting to Threads\n\
+                      - Organizing your Obsidian vault";
+        assert!(is_capability_cold_intro(seeing));
+    }
+
+    #[test]
+    fn c1_new_lost_content_phrases_alone_do_not_match() {
+        assert!(!is_capability_cold_intro(
+            "我好似收唔到你今次嘅內容 — 只見到系統 context，可唔可以再講一次？"
+        ));
+        assert!(!is_capability_cold_intro("對唔住，我冇見到你今次嘅訊息。"));
+        assert!(!is_capability_cold_intro(
+            "Sorry, I didn't get your last message — I only see system context."
+        ));
+        assert!(!is_capability_cold_intro(
+            "I'm only seeing system prompts right now."
+        ));
     }
 
     #[test]
