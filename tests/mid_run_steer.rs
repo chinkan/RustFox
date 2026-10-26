@@ -103,6 +103,7 @@ fn text(t: &str) -> ChatMessage {
         content: Some(MessageContent::from_text(t.to_string())),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -126,6 +127,7 @@ fn tool_step() -> ChatMessage {
             },
         }]),
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 

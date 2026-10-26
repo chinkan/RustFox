@@ -116,6 +116,7 @@ impl AgentOps for PreviewAgent {
                             content: Some(MessageContent::Text(incoming.text.clone())),
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content: None,
                         },
                     )
                     .await;
@@ -151,6 +152,7 @@ impl AgentOps for PreviewAgent {
                             content: Some(MessageContent::Text(reply.clone())),
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content: None,
                         },
                     )
                     .await;
@@ -287,6 +289,7 @@ user_name = "web"
                     content: Some(MessageContent::Text(content.into())),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
             )
             .await?;

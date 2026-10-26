@@ -92,12 +92,14 @@ impl Provider for ScriptLlm {
                 content: Some(rustfox::llm::MessageContent::from_text(text)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             Step::Tools(calls) => ChatMessage {
                 role: "assistant".into(),
                 content: None,
                 tool_calls: Some(calls),
                 tool_call_id: None,
+                reasoning_content: None,
             },
         };
         Ok(ChatCompletion {
@@ -323,6 +325,7 @@ fn user_messages() -> MessageContainer {
         content: Some(rustfox::llm::MessageContent::from_text("hi")),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }])
 }
 

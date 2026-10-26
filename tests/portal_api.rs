@@ -1561,6 +1561,7 @@ async fn memory_browse_lists_conversations_and_splits_fact_knowledge() {
                 content: Some(MessageContent::from_text("pong browse message")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         )
         .await

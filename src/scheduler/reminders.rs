@@ -1178,6 +1178,7 @@ mod tests {
                     content: Some(crate::llm::MessageContent::from_text("researcher-result")),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
             )
             .await

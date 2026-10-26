@@ -295,6 +295,7 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
         content: Some(MessageContent::Text(content)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -441,6 +442,7 @@ pub fn collapse_context(messages: &[ChatMessage], context_window: usize) -> Vec<
                                 )),
                                 tool_calls: None,
                                 tool_call_id: None,
+                                reasoning_content: None,
                             });
                             inserted_boundary = true;
                         }
@@ -462,6 +464,7 @@ pub fn collapse_context(messages: &[ChatMessage], context_window: usize) -> Vec<
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         if result.is_empty() {
             result.push(boundary_msg);
@@ -557,6 +560,7 @@ pub fn prepare_messages_for_llm(messages: &[ChatMessage], context_window: usize)
                         )),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                 }
                 hard_cap_messages.extend(after_tier2.iter().skip(tail_start).cloned());
@@ -633,6 +637,7 @@ pub fn build_compact_summary_prompt() -> ChatMessage {
         content: Some(MessageContent::Text(prompt_text)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -646,6 +651,7 @@ pub fn build_compact_boundary_marker(original_count: usize, compacted_count: usi
         ))),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -662,6 +668,7 @@ mod tests {
                 content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
@@ -675,12 +682,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("result".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
             },
         ];
 
@@ -696,12 +705,14 @@ mod tests {
                 content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("result".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
             },
         ];
 
@@ -722,6 +733,7 @@ mod tests {
             content: Some(MessageContent::Text("Hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
 
         let nudge = recovery_nudge_for(&messages);
@@ -742,6 +754,7 @@ mod tests {
                 content: Some(MessageContent::Text(format!("message {}", i))),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             })
             .collect();
 
@@ -760,12 +773,14 @@ mod tests {
             content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::Text("hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         let old_args = "x".repeat(500);
@@ -781,12 +796,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("y".repeat(800))),
             tool_calls: None,
             tool_call_id: Some("call_1".to_string()),
+            reasoning_content: None,
         });
 
         messages.push(ChatMessage {
@@ -801,12 +818,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("recent result".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_2".to_string()),
+            reasoning_content: None,
         });
 
         messages.push(ChatMessage {
@@ -821,12 +840,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("latest result".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_3".to_string()),
+            reasoning_content: None,
         });
 
         let result = observation_mask(&messages, ctx);
@@ -860,12 +881,14 @@ mod tests {
             content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::Text("user msg".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         for i in 0..4 {
@@ -881,12 +904,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("y".repeat(800))),
                 tool_calls: None,
                 tool_call_id: Some(format!("c{}", i)),
+                reasoning_content: None,
             });
         }
 
@@ -895,6 +920,7 @@ mod tests {
             content: Some(MessageContent::Text("done".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         let result = collapse_context(&messages, ctx);
@@ -926,6 +952,7 @@ mod tests {
             content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         // Group 1
         messages.push(ChatMessage {
@@ -940,12 +967,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("r1".to_string())),
             tool_calls: None,
             tool_call_id: Some("c1".to_string()),
+            reasoning_content: None,
         });
         // Group 2
         messages.push(ChatMessage {
@@ -960,12 +989,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("r2".to_string())),
             tool_calls: None,
             tool_call_id: Some("c2".to_string()),
+            reasoning_content: None,
         });
 
         let groups = find_tool_groups(&messages);
@@ -985,12 +1016,14 @@ mod tests {
             content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::Text("do things".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         for i in 0..6 {
             messages.push(ChatMessage {
@@ -1005,12 +1038,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("y".repeat(8000))),
                 tool_calls: None,
                 tool_call_id: Some(format!("c{}", i)),
+                reasoning_content: None,
             });
         }
         for i in 6..8 {
@@ -1026,12 +1061,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("preserved".to_string())),
                 tool_calls: None,
                 tool_call_id: Some(format!("c{}", i)),
+                reasoning_content: None,
             });
         }
 
@@ -1064,12 +1101,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             msgs.push(ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::Text("y".repeat(60_000))),
                 tool_calls: None,
                 tool_call_id: Some(format!("c{i}")),
+                reasoning_content: None,
             });
         }
         msgs.push(chat_msg("user", "request last"));
@@ -1119,6 +1158,7 @@ mod tests {
             content: Some(MessageContent::Text(text.to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -1135,6 +1175,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -1144,6 +1185,7 @@ mod tests {
             content: Some(MessageContent::Text("result payload".to_string())),
             tool_calls: None,
             tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
         }
     }
 
@@ -1268,6 +1310,7 @@ mod tests {
                 content: Some(MessageContent::Text(text.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }
         }
 
@@ -1296,6 +1339,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         }];
         assert_eq!(
             estimate_tokens(&with_tool),

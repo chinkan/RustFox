@@ -291,6 +291,7 @@ impl<'a> AgenticLoop<'a> {
                         content: Some(MessageContent::from_text(nudge.clone())),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     };
                     messages.push_user(nudge_msg);
                 }
@@ -328,6 +329,7 @@ impl<'a> AgenticLoop<'a> {
                         content: Some(MessageContent::Text(text.clone())),
                         tool_calls: Some(tool_calls.clone()),
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     let nudge_text = format!(
                         "Error: You have called {} {} times with the same arguments.                          The result has not changed. Try a different approach or answer the user now.",
@@ -345,6 +347,7 @@ impl<'a> AgenticLoop<'a> {
                     content: Some(MessageContent::Text(text.clone())),
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
 
                 for tc in &tool_calls {
@@ -456,6 +459,7 @@ impl<'a> AgenticLoop<'a> {
                         content: Some(MessageContent::Text(text)),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     for msg in drained {
                         messages.push_user(msg);
@@ -510,6 +514,7 @@ impl MessageContainer {
             content: Some(MessageContent::Text(result)),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            reasoning_content: None,
         };
         match self {
             MessageContainer::Conversation(cm) => cm.add_tool_result(msg),
@@ -705,6 +710,7 @@ mod tests {
             content: Some(MessageContent::from_text("run sleep")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]);
 
         let started = Instant::now();

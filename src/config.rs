@@ -314,7 +314,8 @@ pub enum ProviderType {
     OpenAICompatible,
     #[serde(rename = "ollama")]
     Ollama,
-    /// Detect-only in Phase 1 (ADR-0043). Not Active / not chat.
+    /// OpenCode Go Active peer when base_url + api_key set (ADR-0043 / #267);
+    /// otherwise detect-only (typed error, no silent hop).
     #[serde(rename = "opencode")]
     OpenCode,
 }
@@ -1236,11 +1237,13 @@ impl Config {
             }
         };
 
-        // ADR-0043 Phase 1: OpenCode is detect-only — never boot Active.
+        // ADR-0043 / #267: OpenCode as Active only when Go peer path is configured.
         if let Some(section) = providers.iter().find(|p| p.name == default) {
-            if section.provider_type == ProviderType::OpenCode {
+            if section.provider_type == ProviderType::OpenCode
+                && !crate::opencode::peer_configured(&section.base_url, section.api_key.as_deref())
+            {
                 anyhow::bail!(
-                    "default_provider = \"{default}\" is OpenCode, which is detect-only (ADR-0043 Phase 1). Choose openrouter or ollama as Active."
+                    "default_provider = \"{default}\" is OpenCode without peer path (ADR-0043). Set base_url + api_key for Go Active, or choose openrouter/ollama."
                 );
             }
         }
@@ -2418,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn build_providers_rejects_opencode_as_default() {
+    fn build_providers_rejects_opencode_as_default_without_peer() {
         let toml = r#"
 [openrouter]
 api_key = "sk-test"
@@ -2440,9 +2443,41 @@ default_provider = "opencode"
         let cfg: Config = toml::from_str(toml).unwrap();
         let err = cfg.build_providers().unwrap_err().to_string();
         assert!(
-            err.contains("OpenCode") && err.contains("detect-only"),
+            err.contains("OpenCode")
+                && (err.contains("peer") || err.contains("detect-only") || err.contains("api_key")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn build_providers_allows_opencode_as_default_with_peer() {
+        let toml = r#"
+[openrouter]
+api_key = "sk-test"
+model = "deepseek/deepseek-chat"
+
+[[provider]]
+name = "opencode"
+type = "opencode"
+base_url = "https://opencode.ai/inference/go/openai/v1"
+api_key = "sk-go"
+model = "deepseek-v4.1-flash"
+
+[[bots]]
+id = "main"
+bot_token = "1:abc"
+allowed_user_ids = [1]
+
+[general]
+default_provider = "opencode"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, default, _) = cfg.build_providers().unwrap();
+        assert_eq!(default, "opencode");
+        let oc = providers.iter().find(|p| p.name == "opencode").unwrap();
+        assert_eq!(oc.provider_type, ProviderType::OpenCode);
+        assert!(!oc.base_url.is_empty());
+        assert_eq!(oc.api_key.as_deref(), Some("sk-go"));
     }
 
     #[test]
