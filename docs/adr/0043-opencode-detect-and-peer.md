@@ -1,12 +1,12 @@
 # ADR-0043: OpenCode detect-only (Phase 1) and peer Active direction
 
-- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header)
+- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header; #277 amends continuity SoT + anti cold-intro)
 - **Date:** 2026-10-24
 - **Amends / supersedes:** prior Direction **C** (delegate) on this same ADR (commit `9bdceb1` / filename `0043-opencode-detect-and-delegate.md`). Product HOLD + grill R3 parks C; target is peer Active + RustFox tools.
 - **Target release:** post-v1.0.7 / TBD (v1.0.7 tag is Kan-owned; this ADR does not ship a tag)
 - **Depends on:** ADR-0025 (sandbox confinement — required for any peer Active / tool-loop ship that runs OpenCode-side work under confinement)
-- **Related:** #259 (tracking; this docs PR Refs; later Phase 1 impl PR Closes), ADR-0033 (Active vs provider model), ADR-0035 (`default_provider` / Active persist)
-- **Issue:** #259
+- **Related:** #259 (Phase 1 detect-only), #267 (D Active peer), #271 / #272 (`x-opencode-session`), #277 (continuity SoT + anti cold-intro; this docs PR Refs; later impl PR Closes), ADR-0033 (Active vs provider model), ADR-0035 (`default_provider` / Active persist)
+- **Issue:** #259 (Phase 1); #277 (anti cold-intro amend)
 
 ## Context
 
@@ -39,6 +39,20 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 8. **Sequencing:** this docs PR **Refs #259**. A later **Phase 1 implementation** PR lands only after this ADR is merged and the usual **four gates** pass; that impl PR **Closes #259** for the detect-only slice (or a follow-up issue if Product splits). **No release tag** in this docs PR or in the Phase 1 impl PR. Do **not** open peer Active / Phase 3 implementation from this PR until Product **re-gate** after this D lock. Product **HOLD** until re-gate (no merge/squash of this docs PR by Dev without four gates + re-gate).
 
+## Decision — Continuity and anti cold-intro (#277)
+
+Product locks for Active-peer continuity (grill / tip `d50eae8`). Amend in place; Phase 1 Decision above and leave-Go / MissingSessionID (#271) are unchanged. This docs PR **Refs #277**; a later **implementation** PR **Closes #277**.
+
+1. **Continuity source of truth:** RustFox **SQLite → `messages[]`** via shared `ConversationManager` (OpenRouter parity). Applies to **all Active peers** (not OpenCode-only). Continuity is not derived from `x-opencode-session`.
+
+2. **`x-opencode-session` role:** Go opaque API requirement only; **not** the transcript. #272 process-stable behavior stands. Per-conversation `(platform, bot_id, user_id)` persist-across-restart remains an **explicit follow-up** (out of this slice’s MUST).
+
+3. **Anti cold-intro (MUST):** when continuity already has **≥1 prior user or assistant** turn (excluding pure system / summary markers), the final user-visible reply **must not** be a capability cold-intro (greeting + capability menu / “I can help you”-style, including the known Cantonese Fox intro pattern).
+
+4. **Mechanism:** light prompt when history is non-empty, plus a **structural final-reply guard** on the **shared Active final-reply path** (all Active peers, not OpenCode-only). Narrow matcher (prefer false-negatives over false-positives that kill normal short replies): greeting + capability list / “I can help you”-style menus; locale-aware. On match → reject and **regenerate once**; if still cold-intro → short “continue prior thread / please clarify” sentence — **no** capability menu.
+
+5. **Unchanged / parked:** Leave-Go and MissingSessionID rules unchanged (#271). #194 / #202 stay parked. **No release tag** in this docs PR or the follow-on impl PR without owner.
+
 ## Direction
 
 **Direction = peer Active + RustFox tools.** Target: OpenCode Go DeepSeek as Active with the full RustFox tool loop. Direction **C** (delegate / peer_invoke-like) is **parked / not the goal**.
@@ -47,7 +61,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 1. **Peer Active target:** OpenCode Go DeepSeek becomes a peer of `openrouter` / `ollama` for Active selection and chat, with RustFox owning the tool loop. Implementation follows this **peer path**, **not** a Phase 1-shaped “detect then somehow chat” shortcut, and **not** parked Direction C.
 
-2. **Chat path — D locked (preferred):** **D = OpenCode Go cloud.** Completion surface: `https://opencode.ai/inference/go` with OpenAI-compatible `/openai/v1/chat/completions`. RustFox owns the tool loop against this completion surface (single-turn completion + tools). This is the authoritative peer Active chat path. **Every Go OpenAI-compat request** (chat completions and models list) **MUST** send a stable `x-opencode-session` header (#271); prefer a non-generic `User-Agent` (e.g. `RustFox/<version>`).
+2. **Chat path — D locked (preferred):** **D = OpenCode Go cloud.** Completion surface: `https://opencode.ai/inference/go` with OpenAI-compatible `/openai/v1/chat/completions`. RustFox owns the tool loop against this completion surface (single-turn completion + tools). This is the authoritative peer Active chat path. **Every Go OpenAI-compat request** (chat completions and models list) **MUST** send a stable `x-opencode-session` header (#271 / #272); prefer a non-generic `User-Agent` (e.g. `RustFox/<version>`). That header is a **Go opaque API requirement**, **not** the conversation transcript store (#277). Process-stable mint (#272) stands. **Per-conversation** session keyed by `(platform, bot_id, user_id)` persist-across-restart is an **explicit follow-up**, **not** a MUST of the #277 docs slice.
 
 3. **Local `opencode serve` / `opencode run` are NOT D:** Those entry points use OpenCode’s own agent loop / tools. Do **not** treat local serve/run as the peer Active chat path.
 
@@ -84,13 +98,15 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 - Silent fallback / hop to the default provider when OpenCode is hit while detect-only or peer-not-implemented.
 - #194 / #202.
 - Implementation code, glossary edits, or a release tag in this docs change.
+- **#277 docs slice:** not a conversation-id / history-miss bugfix (continuity SoT is already SQLite → `messages[]`); no leave-Go / MissingSessionID change; no release tag; per-conversation `x-opencode-session` persist-across-restart is a follow-up, not a MUST of this amend.
 
 ## Consequences
 
 - Operators can see whether OpenCode is absent, missing creds, or ready with N models, without RustFox routing chat through it yet (Phase 1).
 - Product avoids a false “provider peer” that would drop RustFox tools via a tool-less shim (A never default; B opposed as peer).
 - **D is locked** to OpenCode Go cloud OpenAI-compat (`https://opencode.ai/inference/go` + `/openai/v1/chat/completions`); local serve/run ≠ D. Do not ship Active peer until Product re-gate; HOLD. F interim has no technical blocker. Open items (Go tools smoke, quota status, HK Privacy) do not block Phase 1 docs.
-- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271); MissingSessionID/400 is not leave-Go.
+- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271 / #272); MissingSessionID/400 is not leave-Go. The session header is opaque Go API state, not the transcript (#277).
+- Continuity for **all Active peers** is SQLite → `messages[]` via `ConversationManager` (OpenRouter parity). Anti cold-intro: with ≥1 prior user/assistant turn in continuity, the final reply must not be a capability cold-intro; mechanism = light prompt + structural final-reply guard (narrow matcher; regenerate once; else short clarify, no menu) on the shared Active path (#277). Per-conversation session persist-across-restart remains follow-up.
 - Active / `default_provider` semantics from ADR-0033 / ADR-0035 stay unchanged for openrouter and ollama until peer Active is validated and implemented.
 - Later Phase 1 impl must include longest-prefix `resolve_model` regression coverage and typed detect-only errors (no silent hop).
 - Prior Direction C text in this ADR is superseded; filename renamed to `0043-opencode-detect-and-peer.md` to match.
@@ -102,5 +118,6 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 - ADR-0035 — `default_provider` / Active persist; OpenCode not a peer there in Phase 1.
 - #259 — tracking. This PR Refs; later Phase 1 impl closes the detect-only slice (or a Product-split follow-up).
 - #267 — Direction D Active peer (Go OpenAI-compat). Soft Active follow-ups #269 / #271.
-- #271 — Go Active must send stable `x-opencode-session`; MissingSessionID ≠ leave-Go.
+- #271 / #272 — Go Active must send stable `x-opencode-session`; MissingSessionID ≠ leave-Go; process-stable mint stands.
+- #277 — Continuity SoT (SQLite → `messages[]`) + anti cold-intro MUST for all Active peers; this docs PR Refs; later impl Closes. Per-conversation session persist = follow-up.
 - #194 / #202 — parked; out of scope.
