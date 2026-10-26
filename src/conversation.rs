@@ -84,10 +84,18 @@ impl ConversationManager {
             offset
         );
 
+        // ADR-0043 / #277: light continuity prompt when SQLite history already
+        // has ≥1 prior user/assistant turn (excludes pure system/summary).
+        let continuity_note = if crate::cold_intro::has_continuity_turns(&raw) {
+            crate::cold_intro::CONTINUITY_LIGHT_PROMPT
+        } else {
+            ""
+        };
+
         let system_msg = ChatMessage {
             role: "system".to_string(),
             content: Some(MessageContent::Text(format!(
-                "{system_prompt}{context_prompt}"
+                "{system_prompt}{context_prompt}{continuity_note}"
             ))),
             tool_calls: None,
             tool_call_id: None,
@@ -1219,6 +1227,96 @@ allowed_directory = "."
         let mut out = Vec::new();
         doc.save_to(&mut out).expect("write pdf");
         out
+    }
+
+    #[tokio::test]
+    async fn continuity_light_prompt_appended_when_history_has_turns() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cid = store
+            .get_or_create_conversation_with_claim(
+                "telegram",
+                crate::platform::DEFAULT_BOT_ID,
+                "cont_light",
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "user".into(),
+                    content: Some(MessageContent::from_text("prior")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(MessageContent::from_text("ack")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let cm = ConversationManager::new(
+            &store,
+            "telegram",
+            crate::platform::DEFAULT_BOT_ID,
+            "cont_light",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let sys = cm.messages()[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        assert!(
+            sys.contains(crate::cold_intro::CONTINUITY_LIGHT_PROMPT.trim()),
+            "system prompt should carry continuity light prompt: {sys}"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuity_light_prompt_absent_on_empty_history() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cm = ConversationManager::new(
+            &store,
+            "telegram",
+            crate::platform::DEFAULT_BOT_ID,
+            "cont_empty",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let sys = cm.messages()[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        assert!(
+            !sys.contains("Continuity note:"),
+            "empty history must not inject continuity note: {sys}"
+        );
     }
 
     #[tokio::test]
