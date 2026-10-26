@@ -1522,8 +1522,10 @@ impl Agent {
             }
         };
 
-        // ADR-0020: attach steer drain only for live chat turns in Steer mode.
-        // Scheduled runs and /mode queue leave pending for finish() instead.
+        // ADR-0020 / #275: attach steer drain only for live chat turns in Steer
+        // mode. Scheduled runs never get a steer source (schedule_id is Some);
+        // TurnGate::drain also no-ops while Scheduled. /mode queue leaves
+        // pending for finish() instead.
         let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,

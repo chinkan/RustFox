@@ -2199,6 +2199,7 @@ pub async fn handle_message(
             send_markdown_message(&bot, msg.chat.id, QUEUE_FULL_TEXT, msg_format).await
         }
         Submit::Accepted => {
+            // Mid-run behind a **user** turn: 👀 steer/queue ack (ADR-0020 Q7).
             if let Err(e) = bot
                 .set_message_reaction(msg.chat.id, msg.id)
                 .reaction([ReactionType::Emoji {
@@ -2208,6 +2209,12 @@ pub async fn handle_message(
             {
                 warn!(error = %e, "setMessageReaction(👀) failed; enqueue still accepted");
             }
+            Ok(())
+        }
+        Submit::Deferred => {
+            // #275: behind a **scheduled** turn — not a steer. Do not react 👀
+            // (that UX means mid-run steer of the busy session). Message stays
+            // pending and starts as a user turn after the schedule finishes.
             Ok(())
         }
         Submit::Start(inputs) => {

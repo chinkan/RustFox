@@ -1,9 +1,11 @@
 //! ADR-0020: one gate per conversation key (`session_key(bot_id, user_id)`).
 //!
-//! At most one turn runs per key. Messages that arrive while a turn is active
-//! wait in a FIFO (cap [`QUEUE_CAP`]); they steer the running user turn at its
-//! next step, or start the next turn when it ends. Nothing is dropped silently:
-//! every message is started, queued, or refused. In-memory only (v1).
+//! At most one turn runs per key. Messages that arrive while a **user** turn is
+//! active wait in a FIFO (cap [`QUEUE_CAP`]); they steer that turn at its next
+//! step (or start the next turn when it ends). Messages that arrive while a
+//! **scheduled** turn is active are deferred until the schedule finishes — they
+//! are never steers for that run (#275). Nothing is dropped silently: every
+//! message is started, accepted, deferred, or refused. In-memory only (v1).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -62,8 +64,11 @@ pub enum Submit {
     /// The key was idle: a user turn is now active. Run it with these inputs
     /// (any leftover queue first, then the new message — arrival order).
     Start(Vec<QueuedInput>),
-    /// Queued behind the active turn (👀).
+    /// Queued behind an active **user** turn (👀 mid-run steer / queue UX).
     Accepted,
+    /// Queued behind an active **scheduled** turn. Not a steer: schedule is a
+    /// separate context (#275). Held until `finish` starts a user turn.
+    Deferred,
     /// Queue full: not stored (Q4 refusal). The input is handed back.
     Full(QueuedInput),
 }
@@ -107,6 +112,10 @@ impl TurnGate {
     }
 
     /// A user message arrives (non-command, preprocessed).
+    ///
+    /// Behind a **user** turn → [`Submit::Accepted`] (steer/queue UX).
+    /// Behind a **scheduled** turn → [`Submit::Deferred`] (held for after;
+    /// never a steer for that schedule — #275 / product lock).
     pub async fn submit(&self, key: &str, input: QueuedInput) -> Submit {
         let mut keys = self.keys.lock().await;
         let st = keys.entry(key.to_string()).or_default();
@@ -121,7 +130,12 @@ impl TurnGate {
             return Submit::Full(input);
         }
         st.pending.push_back(input);
-        Submit::Accepted
+        // active is Some (idle path returned above).
+        if st.active == Some(TurnKind::Scheduled) {
+            Submit::Deferred
+        } else {
+            Submit::Accepted
+        }
     }
 
     /// ADR-0020 Decision 8: claim the key for a scheduled run.
@@ -217,6 +231,11 @@ impl TurnGate {
             .await
             .get(key)
             .is_some_and(|s| s.active.is_some())
+    }
+
+    /// Which turn owns the key, if any (`None` = idle).
+    pub async fn active_kind(&self, key: &str) -> Option<TurnKind> {
+        self.keys.lock().await.get(key).and_then(|s| s.active)
     }
 
     pub async fn pending_len(&self, key: &str) -> usize {
@@ -507,7 +526,9 @@ mod tests {
     async fn user_message_during_scheduled_is_not_drained() {
         let g = TurnGate::new();
         g.begin_scheduled("k").await;
-        assert!(matches!(g.submit("k", input("hi")).await, Submit::Accepted));
+        assert_eq!(g.active_kind("k").await, Some(TurnKind::Scheduled));
+        // #275: not Accepted (steer UX) — Deferred behind the schedule context.
+        assert!(matches!(g.submit("k", input("hi")).await, Submit::Deferred));
         assert!(
             g.drain("k").await.is_empty(),
             "scheduled turns have no steer drain"
@@ -517,6 +538,52 @@ mod tests {
             Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["hi"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Product lock (#275): inbound during a scheduled run is never a steer for
+    /// that run. Accepted (👀) is reserved for mid-run behind a **user** turn.
+    #[tokio::test]
+    async fn inbound_during_scheduled_is_deferred_not_accepted_steer() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        for t in ["a", "b", "c"] {
+            assert!(
+                matches!(g.submit("k", input(t)).await, Submit::Deferred),
+                "expected Deferred for {t}"
+            );
+        }
+        assert!(g.drain("k").await.is_empty(), "must not steer the schedule");
+        assert_eq!(g.pending_len("k").await, 3);
+        // Same messages behind a user turn would be Accepted (steer/queue UX).
+        let g2 = TurnGate::new();
+        assert!(matches!(
+            g2.submit("u", input("start")).await,
+            Submit::Start(_)
+        ));
+        assert!(matches!(
+            g2.submit("u", input("mid")).await,
+            Submit::Accepted
+        ));
+        assert_eq!(texts(&g2.drain("u").await), ["mid"]);
+    }
+
+    /// Cap refusal still applies while Scheduled; refused item is not stored.
+    #[tokio::test]
+    async fn deferred_behind_schedule_still_respects_queue_cap() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        for i in 0..QUEUE_CAP {
+            assert!(matches!(
+                g.submit("k", input(&i.to_string())).await,
+                Submit::Deferred
+            ));
+        }
+        match g.submit("k", input("overflow")).await {
+            Submit::Full(back) => assert_eq!(back.text, "overflow"),
+            other => panic!("expected Full, got {other:?}"),
+        }
+        assert_eq!(g.pending_len("k").await, QUEUE_CAP);
+        assert!(g.drain("k").await.is_empty());
     }
 
     #[tokio::test]

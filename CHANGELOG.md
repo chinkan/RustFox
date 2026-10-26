@@ -29,6 +29,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Inbound during scheduled run is not a steer (#275):** `TurnGate::submit` returns `Deferred` (not `Accepted`) while `TurnKind::Scheduled` owns the key; Telegram skips the 👀 mid-run reaction. Drain still no-ops; pending start as a **user** turn after `finish`. Steer remains main-interactive only; schedule stays a separate context. Closes #275.
+
 - **OpenCode Go Active `x-opencode-session` (#271):** Go OpenAI-compat chat + models list send a process-stable `x-opencode-session` (and `User-Agent: RustFox/<version>`). `MissingSessionID` is not leave-Go (leave remains 402 or 429+GoUsageLimitError/Policy). Amends ADR-0043. Refs soft #267/#269. Closes #271.
 - **Timeout gate checkpoint when tool stuck (#250):** on wall-clock timeout / cancel, interrupt in-flight tools (loop races cancel; `cancel_all` kills `execute_command`) so a Cancelled transcript returns within the ~2s wait and `scheduler_transcript_checkpoints` is written without manual seed. Seeded Retry-continue / full replay / Cancel-clears / ADR-0040 sync kick unchanged. Refs #240, #248, ADR-0039.
 - **Human Retry eligible now + sync dispatch (ADR-0040, #246):** `RerunQueue::retry` sets `next_eligible_at = now` (not +30m); after successful Retried, inline callback and `/retry <id>` sync claim+dispatch the same watchdog path (`mark_dispatched` → `build_rerun_request`). Cancel does not kick. Auto enqueue 30m + hourly sweep unchanged. Kick fail → UI still Retried + warn. Target **v1.0.7+**.
