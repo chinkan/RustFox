@@ -47,6 +47,7 @@ impl ScriptLlm {
                 context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                 parse_retry_limit: 0,
                 rate_limit_retry_limit: 0,
+                extra_headers: vec![],
             },
             steps: Mutex::new(VecDeque::from(steps)),
         });

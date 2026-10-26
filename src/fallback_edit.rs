@@ -129,6 +129,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         }
     }
 

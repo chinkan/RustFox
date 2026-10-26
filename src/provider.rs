@@ -36,6 +36,9 @@ pub struct ProviderConfig {
     /// transient upstream failure). Honours `Retry-After` when present.
     /// Defaults to 3; set to 0 to disable (fail fast, pre-429-retry behaviour).
     pub rate_limit_retry_limit: u32,
+    /// Extra HTTP headers on chat (and OpenCode Go models list). Used for
+    /// OpenCode Go `x-opencode-session` (#271); empty for other providers.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl From<&ProviderSection> for ProviderConfig {
@@ -53,6 +56,7 @@ impl From<&ProviderSection> for ProviderConfig {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,      // overwritten by build_registry
             rate_limit_retry_limit: 0, // overwritten by build_registry
+            extra_headers: vec![],
         }
     }
 }
@@ -328,6 +332,9 @@ async fn chat_completion_with_retry(
         if let Some(key) = api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
+        for (name, value) in &config.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
 
         let response = match req.send().await {
             Ok(r) => r,
@@ -533,6 +540,7 @@ fn opencode_detect_only_stub() -> Arc<dyn Provider> {
         context_window_cache: Arc::new(RwLock::new(None)),
         parse_retry_limit: 0,
         rate_limit_retry_limit: 0,
+        extra_headers: vec![],
     }))
 }
 
@@ -550,6 +558,7 @@ fn xai_misconfigured_stub() -> Arc<dyn Provider> {
         context_window_cache: Arc::new(RwLock::new(None)),
         parse_retry_limit: 0,
         rate_limit_retry_limit: 0,
+        extra_headers: vec![],
     }))
 }
 
@@ -1233,9 +1242,30 @@ pub struct OpenCodeProvider {
 }
 
 impl OpenCodeProvider {
-    pub fn new(config: ProviderConfig) -> Self {
+    pub fn new(mut config: ProviderConfig) -> Self {
         let inner = if crate::opencode::peer_configured(&config.base_url, config.api_key.as_deref())
         {
+            // #271: stable x-opencode-session for the process lifetime of this peer.
+            if !config
+                .extra_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(crate::opencode::SESSION_HEADER))
+            {
+                config.extra_headers.push((
+                    crate::opencode::SESSION_HEADER.to_string(),
+                    crate::opencode::mint_session_id(),
+                ));
+            }
+            if !config
+                .extra_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            {
+                config.extra_headers.push((
+                    "User-Agent".to_string(),
+                    format!("RustFox/{}", env!("CARGO_PKG_VERSION")),
+                ));
+            }
             Some(OpenAICompatibleProvider::new(config.clone()))
         } else {
             None
@@ -1287,6 +1317,9 @@ impl Provider for OpenCodeProvider {
             let mut req = client.get(&url);
             if let Some(ref key) = self.config.api_key {
                 req = req.header("Authorization", format!("Bearer {}", key));
+            }
+            for (name, value) in &self.config.extra_headers {
+                req = req.header(name.as_str(), value.as_str());
             }
             let response = req
                 .send()
@@ -1708,6 +1741,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: parse_limit,
             rate_limit_retry_limit: rate_limit,
+            extra_headers: vec![],
         }
     }
 
@@ -1978,6 +2012,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -1998,6 +2033,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -2018,6 +2054,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -2145,6 +2182,12 @@ mod tests {
             429,
             "rate limited, retry shortly"
         )));
+        // #271: MissingSessionID body is not a leave-Go signal (header fix, not hop).
+        // HTTP 400 still walks under ADR-0019 for non-OpenCode leave rules; leave-Go
+        // itself remains 402 / 429+GoUsageLimitError/Policy only.
+        assert!(!crate::opencode::is_go_leave_signal(
+            r#"{"error":{"type":"MissingSessionID"}}"#
+        ));
         // other providers: plain 429 still walks (ADR-0019)
         assert!(should_walk_fallback(&anyhow::Error::from(LlmHttpError {
             provider: "openrouter".into(),
@@ -2305,5 +2348,65 @@ mod tests {
             "expected typed error, got {err:#}"
         );
         assert!(!should_walk_fallback(&err));
+    }
+
+    #[tokio::test]
+    async fn opencode_peer_chat_sends_stable_session_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(ok_body()))
+            .mount(&server)
+            .await;
+
+        let cfg = ProviderConfig {
+            name: "opencode".to_string(),
+            provider_type: ProviderType::OpenCode,
+            base_url: server.uri(),
+            api_key: Some("k".to_string()),
+            default_model: "deepseek-v4.1-flash".to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 128_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+            extra_headers: vec![],
+        };
+        let provider = OpenCodeProvider::new(cfg);
+        assert!(provider.is_peer());
+        let stamped = provider
+            .config()
+            .extra_headers
+            .iter()
+            .find(|(k, _)| k == crate::opencode::SESSION_HEADER)
+            .map(|(_, v)| v.clone());
+        let stamped = stamped.expect("peer must stamp x-opencode-session");
+        assert!(
+            stamped.starts_with("rustfox-") && stamped.len() > "rustfox-".len(),
+            "{stamped}"
+        );
+
+        let client = reqwest::Client::new();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text("hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        provider
+            .chat_completion(&client, &messages, &[], "deepseek-v4.1-flash", 10)
+            .await
+            .expect("chat should succeed");
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let hdr = requests[0]
+            .headers
+            .get(crate::opencode::SESSION_HEADER)
+            .expect("x-opencode-session on chat request");
+        assert_eq!(hdr.to_str().unwrap(), stamped.as_str());
     }
 }

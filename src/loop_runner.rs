@@ -630,6 +630,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let provider: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(cfg));
         let mut providers = std::collections::HashMap::new();

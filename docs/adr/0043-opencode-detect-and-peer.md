@@ -1,6 +1,6 @@
 # ADR-0043: OpenCode detect-only (Phase 1) and peer Active direction
 
-- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D)
+- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header)
 - **Date:** 2026-10-24
 - **Amends / supersedes:** prior Direction **C** (delegate) on this same ADR (commit `9bdceb1` / filename `0043-opencode-detect-and-delegate.md`). Product HOLD + grill R3 parks C; target is peer Active + RustFox tools.
 - **Target release:** post-v1.0.7 / TBD (v1.0.7 tag is Kan-owned; this ADR does not ship a tag)
@@ -47,7 +47,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 1. **Peer Active target:** OpenCode Go DeepSeek becomes a peer of `openrouter` / `ollama` for Active selection and chat, with RustFox owning the tool loop. Implementation follows this **peer path**, **not** a Phase 1-shaped “detect then somehow chat” shortcut, and **not** parked Direction C.
 
-2. **Chat path — D locked (preferred):** **D = OpenCode Go cloud.** Completion surface: `https://opencode.ai/inference/go` with OpenAI-compatible `/openai/v1/chat/completions`. RustFox owns the tool loop against this completion surface (single-turn completion + tools). This is the authoritative peer Active chat path.
+2. **Chat path — D locked (preferred):** **D = OpenCode Go cloud.** Completion surface: `https://opencode.ai/inference/go` with OpenAI-compatible `/openai/v1/chat/completions`. RustFox owns the tool loop against this completion surface (single-turn completion + tools). This is the authoritative peer Active chat path. **Every Go OpenAI-compat request** (chat completions and models list) **MUST** send a stable `x-opencode-session` header (#271); prefer a non-generic `User-Agent` (e.g. `RustFox/<version>`).
 
 3. **Local `opencode serve` / `opencode run` are NOT D:** Those entry points use OpenCode’s own agent loop / tools. Do **not** treat local serve/run as the peer Active chat path.
 
@@ -57,7 +57,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 6. **A never default:** A tool-less prompt / subprocess shim (**A**) is **never** the default path and **must not** ship as the default. If any experimental A path exists for research, it stays non-default and out of normal Active/chat selection.
 
-7. **Fallback (leave-Go; peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; leave-Go → fall back to **OpenRouter DeepSeek** when the Go response is **HTTP 402** (balance/credits) **OR** **HTTP 429** whose body indicates Go usage-limit / policy budget (`GoUsageLimitError`, `go_usage_limit`, or Policy+budget). Do **not** auto-fallback on a plain short 429 (rate-limit / retry). This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6).
+7. **Fallback (leave-Go; peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; leave-Go → fall back to **OpenRouter DeepSeek** when the Go response is **HTTP 402** (balance/credits) **OR** **HTTP 429** whose body indicates Go usage-limit / policy budget (`GoUsageLimitError`, `go_usage_limit`, or Policy+budget). Do **not** auto-fallback on a plain short 429 (rate-limit / retry). **`MissingSessionID` / HTTP 400 is NOT leave-Go** — fix the session header (#271); leave remains 402 or 429+GoUsageLimitError/Policy only. This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6).
 
 8. **Sandbox (ADR-0025):** Any ship that runs OpenCode-side work under confinement **MUST** meet ADR-0025 (or equivalent). If that cannot be met for the chosen chat path, do not ship that path.
 
@@ -90,7 +90,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 - Operators can see whether OpenCode is absent, missing creds, or ready with N models, without RustFox routing chat through it yet (Phase 1).
 - Product avoids a false “provider peer” that would drop RustFox tools via a tool-less shim (A never default; B opposed as peer).
 - **D is locked** to OpenCode Go cloud OpenAI-compat (`https://opencode.ai/inference/go` + `/openai/v1/chat/completions`); local serve/run ≠ D. Do not ship Active peer until Product re-gate; HOLD. F interim has no technical blocker. Open items (Go tools smoke, quota status, HK Privacy) do not block Phase 1 docs.
-- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave.
+- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271); MissingSessionID/400 is not leave-Go.
 - Active / `default_provider` semantics from ADR-0033 / ADR-0035 stay unchanged for openrouter and ollama until peer Active is validated and implemented.
 - Later Phase 1 impl must include longest-prefix `resolve_model` regression coverage and typed detect-only errors (no silent hop).
 - Prior Direction C text in this ADR is superseded; filename renamed to `0043-opencode-detect-and-peer.md` to match.
@@ -101,4 +101,6 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 - ADR-0033 — Active vs provider model; OpenCode stays out of Active in Phase 1; peer Active is Direction (D locked to Go cloud; ship waits re-gate).
 - ADR-0035 — `default_provider` / Active persist; OpenCode not a peer there in Phase 1.
 - #259 — tracking. This PR Refs; later Phase 1 impl closes the detect-only slice (or a Product-split follow-up).
+- #267 — Direction D Active peer (Go OpenAI-compat). Soft Active follow-ups #269 / #271.
+- #271 — Go Active must send stable `x-opencode-session`; MissingSessionID ≠ leave-Go.
 - #194 / #202 — parked; out of scope.
