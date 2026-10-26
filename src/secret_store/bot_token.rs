@@ -1,7 +1,9 @@
-//! Bot Telegram tokens and the `[openrouter].api_key` (ADR 0016) in [`SecretStore`].
+//! Bot Telegram tokens, `[openrouter].api_key` (ADR 0016), and `type=xai`
+//! provider keys (ADR-0044) in [`SecretStore`].
 //!
-//! Config holds `secret:NAME` (typically `secret:bot.<id>.token`, or
-//! `secret:openrouter.api_key`) — never the plaintext after bind/migrate.
+//! Config holds `secret:NAME` (typically `secret:bot.<id>.token`,
+//! `secret:openrouter.api_key`, or `secret:xai.api_key`) — never the plaintext
+//! after bind/migrate.
 //! Runtime resolves via the store.
 //! One-time startup migration moves legacy plaintext into the store and scrubs
 //! `config.toml` (bak via [`crate::config_edit::write_config_validated`]).
@@ -25,6 +27,9 @@ pub fn bot_token_secret_ref(bot_id: &str) -> String {
 
 /// Vault name for `[openrouter].api_key` (ADR 0016).
 pub const OPENROUTER_API_KEY_SECRET: &str = "openrouter.api_key";
+
+/// Vault name for `[[provider]] type=xai` api_key (ADR-0044 / ADR-0016 spirit).
+pub const XAI_API_KEY_SECRET: &str = crate::xai::API_KEY_SECRET;
 
 /// Whether `value` is a `secret:NAME` reference.
 pub fn is_secret_ref(value: &str) -> bool {
@@ -78,6 +83,32 @@ pub fn resolve_openrouter_api_key(cfg: &mut Config, bridge: &super::SecretBridge
     Ok(())
 }
 
+/// Resolve `secret:…` refs on `[[provider]] type=xai` `api_key` fields (ADR-0044).
+/// Call after [`resolve_openrouter_api_key`] and before [`Config::build_providers`].
+/// Plaintext / empty / missing keys are left as-is.
+pub fn resolve_xai_api_keys(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
+    for section in &mut cfg.provider {
+        if section.provider_type != crate::config::ProviderType::Xai {
+            continue;
+        }
+        let Some(raw) = section.api_key.as_deref() else {
+            continue;
+        };
+        let Some(name) = parse_secret_ref(raw) else {
+            continue;
+        };
+        validate_name(name)?;
+        let value = bridge.get(name)?.with_context(|| {
+            format!(
+                "secret `{name}` not found in SecretStore ([[provider]] name={pname} type=xai api_key)",
+                pname = section.name
+            )
+        })?;
+        section.api_key = Some(value.expose().to_string());
+    }
+    Ok(())
+}
+
 /// Persist `plaintext` under `name` (read back via `set_verified`) and return `secret:<name>`.
 pub fn store_secret(store: &dyn SecretStore, name: &str, plaintext: &str) -> Result<String> {
     validate_name(name)?;
@@ -103,8 +134,9 @@ pub fn store_bot_token(store: &dyn SecretStore, bot_id: &str, plaintext: &str) -
 /// `[telegram]`-shaped).
 ///
 /// Also seals a non-empty plaintext `[openrouter].api_key` as
-/// `secret:openrouter.api_key` (ADR 0016). `[embedding]` and `[[provider]]`
-/// keys are deliberately left alone.
+/// `secret:openrouter.api_key` (ADR 0016), and plaintext `type=xai`
+/// `[[provider]].api_key` as `secret:xai.api_key` (ADR-0044). Other
+/// `[embedding]` / `[[provider]]` keys stay as they are.
 ///
 /// Returns `(sealed_toml, credentials_stored_or_scrubbed)`.
 pub fn seal_plaintext_bot_tokens_in_config(
@@ -180,6 +212,35 @@ pub fn seal_plaintext_bot_tokens_in_config(
             or.insert("api_key".into(), toml::Value::String(secret_ref));
             changed += 1;
         }
+    }
+
+    // ADR-0044: seal plaintext type=xai [[provider]] api_key → secret:xai.api_key.
+    if let Some(arr) = table.get("provider").and_then(|v| v.as_array()).cloned() {
+        let mut new_arr = Vec::with_capacity(arr.len());
+        for mut prov_val in arr {
+            if let Some(prov) = prov_val.as_table_mut() {
+                let ptype = prov
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if ptype == "xai" {
+                    let key = prov
+                        .get("api_key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !key.is_empty() && !is_secret_ref(&key) {
+                        let secret_ref = store_secret(store, XAI_API_KEY_SECRET, &key)?;
+                        prov.insert("api_key".into(), toml::Value::String(secret_ref));
+                        changed += 1;
+                    }
+                }
+            }
+            new_arr.push(prov_val);
+        }
+        table.insert("provider".into(), toml::Value::Array(new_arr));
     }
 
     if changed == 0 {
@@ -443,6 +504,61 @@ model = "m"
         assert_eq!(
             cfg.openrouter.api_key, "sk-test",
             "plaintext passes through"
+        );
+    }
+
+    #[test]
+    fn resolve_xai_secret_ref_on_provider() {
+        use crate::secret_store::{PendingSecretRegistry, SecretBridge};
+        use std::sync::Arc;
+
+        let store = Arc::new(FakeSecretStore::new());
+        store_secret(store.as_ref(), XAI_API_KEY_SECRET, "sk-xai-live").unwrap();
+        let bridge = SecretBridge::new(store.clone(), Arc::new(PendingSecretRegistry::default()));
+        let toml = r#"
+[telegram]
+bot_token = "1:abc"
+allowed_user_ids = [1]
+[openrouter]
+api_key = "sk-or"
+model = "m"
+[[provider]]
+name = "xai"
+type = "xai"
+api_key = "secret:xai.api_key"
+model = "grok-4.7"
+"#;
+        let mut cfg: Config = toml::from_str(toml).unwrap();
+        resolve_xai_api_keys(&mut cfg, &bridge).unwrap();
+        let xai = cfg.provider.iter().find(|p| p.name == "xai").unwrap();
+        assert_eq!(xai.api_key.as_deref(), Some("sk-xai-live"));
+    }
+
+    #[test]
+    fn seal_xai_provider_key() {
+        let store = FakeSecretStore::new();
+        let toml = r#"
+[telegram]
+bot_token = "111111111:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+allowed_user_ids = [1]
+[openrouter]
+api_key = ""
+model = "m"
+[[provider]]
+name = "xai"
+type = "xai"
+api_key = "sk-xai-plain"
+model = "grok-4.7"
+"#;
+        let (sealed, n) = seal_plaintext_bot_tokens_in_config(toml, &store).unwrap();
+        assert!(n >= 1, "expected seal count >= 1, got {n}");
+        assert!(
+            sealed.contains(r#"api_key = "secret:xai.api_key""#),
+            "{sealed}"
+        );
+        assert_eq!(
+            store.get(XAI_API_KEY_SECRET).unwrap().unwrap().expose(),
+            "sk-xai-plain"
         );
     }
 }

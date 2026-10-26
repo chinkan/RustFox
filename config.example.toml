@@ -120,6 +120,22 @@ Be concise and helpful."""
 # # [fallback]
 # # chain = ["openrouter/deepseek/deepseek-chat"]
 
+# xAI Active peer (ADR-0044 / #266).
+# Direct OpenAI-compat Chat Completions at https://api.x.ai/v1 (Bearer).
+# Not an OpenRouter alias. No Responses API in this cut.
+# Credentials: SecretStore + Settings/config (wizard does not force-ask).
+# Misconfigured (missing key) → typed error; no silent hop to another provider.
+# Default fallback chain is unchanged — add xai/… yourself if you want it.
+# [[provider]]
+# name = "xai"
+# type = "xai"
+# base_url = "https://api.x.ai/v1"
+# api_key = "secret:xai.api_key"   # or pasted key (sealed on migrate)
+# model = "grok-4.7"
+# max_tokens = 8192
+# discover_models = true
+# # default_provider = "xai"  # under [general] when ready
+
 # ── Fallback Chain (optional) ──────────────────────────────────────────
 # When the primary model fails, RustFox tries each fallback in order.
 # Each entry is a full provider-prefixed model string.

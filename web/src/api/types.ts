@@ -470,6 +470,8 @@ export interface McpServerMutationResult {
 export interface SettingsMasked {
   telegramBotToken: string
   openrouterApiKey: string
+  /** ADR-0044 — masked xAI key when a type=xai provider exists (else placeholder). */
+  xaiApiKey?: string
   providers: ProviderInfo[]
   embeddingApiKey?: string | null
   mcpServers: McpServerMasked[]

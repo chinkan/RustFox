@@ -288,6 +288,9 @@ function SettingsPage() {
             <div className="card">
               <SecretRow k={t('settings.telegramBotToken')} v={masked?.telegramBotToken ?? ''} />
               <SecretRow k={t('settings.openrouterApiKey')} v={masked?.openrouterApiKey ?? ''} />
+              {masked?.xaiApiKey ? (
+                <SecretRow k={t('settings.xaiApiKey')} v={masked.xaiApiKey} />
+              ) : null}
               {masked?.embeddingApiKey ? (
                 <SecretRow k="Embedding API key" v={masked.embeddingApiKey} />
               ) : null}

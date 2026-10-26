@@ -95,6 +95,16 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
         "masked": {
             "telegramBotToken": mask_secret(&cfg.telegram.bot_token),
             "openrouterApiKey": mask_secret(&cfg.openrouter.api_key),
+            "xaiApiKey": cfg
+                .provider
+                .iter()
+                .find(|p| p.provider_type == crate::config::ProviderType::Xai)
+                .map(|p| {
+                    p.api_key
+                        .as_deref()
+                        .map(mask_secret)
+                        .unwrap_or_else(|| "••••".to_string())
+                }),
             "providers": masked_providers,
             "embeddingApiKey": cfg.embedding.as_ref().map(|e| mask_secret(&e.api_key)),
             "mcpServers": crate::portal::mcp::list_projected(&state).unwrap_or_else(|_| {

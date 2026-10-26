@@ -318,6 +318,9 @@ pub enum ProviderType {
     /// otherwise detect-only (typed error, no silent hop).
     #[serde(rename = "opencode")]
     OpenCode,
+    /// xAI Active peer (ADR-0044 / #266): direct `https://api.x.ai/v1` OpenAI-compat.
+    #[serde(rename = "xai")]
+    Xai,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -1237,6 +1240,18 @@ impl Config {
             }
         };
 
+        // ADR-0044: fill xAI defaults before Active / peer checks.
+        for section in &mut providers {
+            if section.provider_type == ProviderType::Xai {
+                if section.base_url.trim().is_empty() {
+                    section.base_url = crate::xai::DEFAULT_BASE.to_string();
+                }
+                if section.model.trim().is_empty() {
+                    section.model = crate::xai::DEFAULT_MODEL.to_string();
+                }
+            }
+        }
+
         // ADR-0043 / #267: OpenCode as Active only when Go peer path is configured.
         if let Some(section) = providers.iter().find(|p| p.name == default) {
             if section.provider_type == ProviderType::OpenCode
@@ -1244,6 +1259,14 @@ impl Config {
             {
                 anyhow::bail!(
                     "default_provider = \"{default}\" is OpenCode without peer path (ADR-0043). Set base_url + api_key for Go Active, or choose openrouter/ollama."
+                );
+            }
+            // ADR-0044: xAI as Active only when peer path is configured.
+            if section.provider_type == ProviderType::Xai
+                && !crate::xai::peer_configured(&section.base_url, section.api_key.as_deref())
+            {
+                anyhow::bail!(
+                    "default_provider = \"{default}\" is xAI without api_key/base_url (ADR-0044). Set credentials or choose another Active."
                 );
             }
         }
@@ -2478,6 +2501,66 @@ default_provider = "opencode"
         assert_eq!(oc.provider_type, ProviderType::OpenCode);
         assert!(!oc.base_url.is_empty());
         assert_eq!(oc.api_key.as_deref(), Some("sk-go"));
+    }
+
+    #[test]
+    fn build_providers_rejects_xai_as_default_without_key() {
+        let toml = r#"
+[openrouter]
+api_key = "sk-test"
+model = "deepseek/deepseek-chat"
+
+[[provider]]
+name = "xai"
+type = "xai"
+api_key = ""
+model = "grok-4.7"
+
+[[bots]]
+id = "main"
+bot_token = "1:abc"
+allowed_user_ids = [1]
+
+[general]
+default_provider = "xai"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let err = cfg.build_providers().unwrap_err().to_string();
+        assert!(
+            err.contains("xAI") && (err.contains("api_key") || err.contains("base_url")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_providers_allows_xai_as_default_when_configured() {
+        let toml = r#"
+[openrouter]
+api_key = "sk-test"
+model = "deepseek/deepseek-chat"
+
+[[provider]]
+name = "xai"
+type = "xai"
+api_key = "sk-xai-test"
+model = "grok-4.7"
+
+[[bots]]
+id = "main"
+bot_token = "1:abc"
+allowed_user_ids = [1]
+
+[general]
+default_provider = "xai"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, default, _) = cfg.build_providers().unwrap();
+        assert_eq!(default, "xai");
+        let xai = providers.iter().find(|p| p.name == "xai").unwrap();
+        assert_eq!(xai.provider_type, ProviderType::Xai);
+        assert_eq!(xai.base_url, crate::xai::DEFAULT_BASE);
+        assert_eq!(xai.model, "grok-4.7");
+        assert_eq!(xai.api_key.as_deref(), Some("sk-xai-test"));
     }
 
     #[test]
