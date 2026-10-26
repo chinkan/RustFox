@@ -92,6 +92,12 @@ pub enum LoopOutcome {
     MaxIterations,
 }
 
+/// ADR-0045 (B) / #231 empty-progress clarify: user-visible FinalResponse when
+/// loop_detection sees N consecutive empty-progress iterations. Do **not**
+/// mention MCP or duplicate-tool internals.
+pub const EMPTY_PROGRESS_CLARIFY: &str =
+    "I wasn't making progress on that. Could you clarify what you'd like me to do next?";
+
 #[allow(dead_code)]
 #[allow(clippy::type_complexity)]
 pub struct AgenticLoop<'a> {
@@ -219,6 +225,9 @@ impl<'a> AgenticLoop<'a> {
         );
         let mut loop_recovery_count = 0u32;
         const MAX_LOOP_RECOVERIES: u32 = 2;
+        // ADR-0045 (B): consecutive empty-progress / no-FinalResponse streak.
+        // Reuses agent.loop_detection.threshold (default 3) when enabled.
+        let mut empty_progress_streak = 0usize;
         // ADR-0043 / #277: anti cold-intro on shared Active final-reply path.
         let has_prior_continuity =
             crate::cold_intro::has_prior_continuity(&messages.messages_snapshot());
@@ -288,7 +297,6 @@ impl<'a> AgenticLoop<'a> {
             iterations = iteration + 1;
 
             if text.is_empty() && tool_calls.is_empty() {
-                empty_count += 1;
                 if let Some(ref nudge) = self.config.recovery_nudge {
                     let nudge_msg = ChatMessage {
                         role: "user".to_string(),
@@ -299,6 +307,25 @@ impl<'a> AgenticLoop<'a> {
                     };
                     messages.push_user(nudge_msg);
                 }
+                // ADR-0045 (B): when loop_detection is enabled, N consecutive
+                // empty-progress iterations → clarify FinalResponse (no silent
+                // burn / no MCP-duplicate internals in user copy).
+                if self.config.loop_detection_enabled {
+                    empty_progress_streak += 1;
+                    if empty_progress_streak >= self.config.loop_detection_threshold {
+                        tracing::warn!(
+                            streak = empty_progress_streak,
+                            threshold = self.config.loop_detection_threshold,
+                            "Empty-progress loop detected — forcing clarify FinalResponse"
+                        );
+                        return Ok(LoopOutcome::FinalResponse {
+                            text: EMPTY_PROGRESS_CLARIFY.to_string(),
+                            iterations,
+                        });
+                    }
+                    continue;
+                }
+                empty_count += 1;
                 if empty_count >= self.config.empty_response_retry_limit {
                     return Ok(LoopOutcome::FinalResponse {
                         text: "I'm having trouble processing that. Please try again.".to_string(),
@@ -307,6 +334,9 @@ impl<'a> AgenticLoop<'a> {
                 }
                 continue;
             }
+
+            // Non-empty progress resets the empty-progress streak.
+            empty_progress_streak = 0;
 
             if !tool_calls.is_empty() {
                 loop_detector.record(&tool_calls, iteration as usize);

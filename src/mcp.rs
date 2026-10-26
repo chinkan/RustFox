@@ -239,6 +239,28 @@ pub async fn refresh_expiring_tokens(
     refreshed
 }
 
+/// ADR-0045 (A): at MCP register time, keep the first tool with each `name`
+/// and skip later duplicates. Applies to all MCP servers (not Threads-only).
+pub(crate) fn dedupe_mcp_tools_keep_first(tools: Vec<McpTool>) -> Vec<McpTool> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let name = tool.name.to_string();
+        if seen.insert(name.clone()) {
+            out.push(tool);
+        } else {
+            warn!(
+                tool_name = %name,
+                kept = "first",
+                "Skipping duplicate MCP tool name at register time; keeping first occurrence"
+            );
+        }
+    }
+    out
+}
+
 /// Represents a connected MCP server with its tools
 pub struct McpConnection {
     pub name: String,
@@ -477,6 +499,19 @@ impl McpManager {
             .await
             .with_context(|| format!("Failed to list tools from MCP server: {}", config.name))?;
 
+        // ADR-0045 (A): register-time first-wins on tool.name before the schema
+        // is stored (send-time dedupe in llm.rs remains belt only).
+        let listed = tools.len();
+        let tools = dedupe_mcp_tools_keep_first(tools);
+        if tools.len() != listed {
+            warn!(
+                server = %config.name,
+                listed,
+                kept = tools.len(),
+                "MCP register-time dedupe dropped duplicate tool names"
+            );
+        }
+
         info!(
             "MCP server '{}' provides {} tools",
             config.name,
@@ -520,7 +555,9 @@ impl McpManager {
         self.lock_connections().len()
     }
 
-    /// Get all MCP tools as OpenRouter-compatible tool definitions
+    /// Get all MCP tools as OpenRouter-compatible tool definitions.
+    /// Dedupes by exact `function.name` keep-first (ADR-0045) so the MCP
+    /// schema view holds one entry per name even if a server double-reported.
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = Vec::new();
 
@@ -542,7 +579,7 @@ impl McpManager {
             }
         }
 
-        definitions
+        crate::llm::dedupe_tool_definitions_keep_first(definitions)
     }
 
     /// Find which MCP server owns a tool and call it
@@ -1061,5 +1098,61 @@ args = ["mcp-server-git"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("privacy consent"), "{err}");
+    }
+    #[test]
+    fn dedupe_mcp_tools_keep_first_skips_later_duplicates() {
+        use rmcp::model::Tool;
+        use std::sync::Arc;
+
+        let empty_schema = Arc::new(serde_json::Map::new());
+        let tools = vec![
+            Tool::new("schedule_post", "first", empty_schema.clone()),
+            Tool::new("other", "only-other", empty_schema.clone()),
+            Tool::new("schedule_post", "second-duplicate", empty_schema.clone()),
+            Tool::new("schedule_post", "third-duplicate", empty_schema),
+        ];
+        let deduped = dedupe_mcp_tools_keep_first(tools);
+        let names: Vec<&str> = deduped.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, vec!["schedule_post", "other"]);
+        assert_eq!(
+            deduped[0].description.as_deref(),
+            Some("first"),
+            "first occurrence must win"
+        );
+    }
+
+    #[test]
+    fn tool_definitions_register_same_prefixed_name_once() {
+        // Simulate a connection.tools list that somehow still has duplicate
+        // names: tool_definitions must emit one mcp_{server}_{name} entry.
+        use rmcp::model::Tool;
+        use std::sync::Arc;
+
+        let empty_schema = Arc::new(serde_json::Map::new());
+        let raw = vec![
+            Tool::new("schedule_post", "first", empty_schema.clone()),
+            Tool::new("schedule_post", "dup", empty_schema),
+        ];
+        let kept = dedupe_mcp_tools_keep_first(raw);
+        assert_eq!(kept.len(), 1);
+        let defs: Vec<ToolDefinition> = kept
+            .iter()
+            .map(|tool| ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: format!("mcp_threads_{}", tool.name),
+                    description: tool
+                        .description
+                        .as_deref()
+                        .unwrap_or("MCP tool")
+                        .to_string(),
+                    parameters: tool.schema_as_json_value(),
+                },
+            })
+            .collect();
+        let defs = crate::llm::dedupe_tool_definitions_keep_first(defs);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].function.name, "mcp_threads_schedule_post");
+        assert_eq!(defs[0].function.description, "first");
     }
 }

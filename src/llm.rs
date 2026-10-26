@@ -116,8 +116,9 @@ pub struct FunctionDefinition {
 }
 
 /// Deduplicate tool definitions by exact `function.name`, keeping the **first**
-/// occurrence (ADR-0019 slice ② / Wafer `duplicate_tool_name`). Later duplicates
-/// are dropped; do not rename tools or change MCP prefix rules.
+/// occurrence (ADR-0019 slice ② / Wafer `duplicate_tool_name`; ADR-0045 send-time
+/// belt — register-time first-wins is the root fix). Later duplicates are dropped;
+/// do not rename tools or change MCP prefix rules.
 pub fn dedupe_tool_definitions_keep_first(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     use std::collections::HashSet;
 

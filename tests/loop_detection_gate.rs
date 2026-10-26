@@ -253,3 +253,94 @@ async fn repeated_identical_tool_calls_stop_after_recoveries() {
     );
     assert!(n_llm < 40, "LLM rounds must be bounded; llm={n_llm}");
 }
+
+/// ADR-0045 (B): N consecutive empty-progress iterations with loop_detection
+/// enabled → clarify FinalResponse (bounded llm_call; no silent empty).
+#[tokio::test]
+async fn empty_progress_streak_forces_clarify_final_response() {
+    // threshold=3 → clarify on 3rd consecutive empty (no tool calls / no text).
+    // Script more empties than threshold so unbounded llm_call would be visible.
+    let empty = ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    };
+    let steps: Vec<_> = (0..12).map(|_| empty.clone()).collect();
+    let calls = Arc::new(Mutex::new(0usize));
+    let llm = client(steps, calls.clone());
+    let tools = ToolRegistry::new();
+    let mcp = McpManager::new();
+    let cfg = LoopConfig {
+        max_iterations: 40,
+        // High so empty_response_retry_limit does not preempt ADR-0045 (B).
+        empty_response_retry_limit: 100,
+        context_window: 4096,
+        loop_detection_enabled: true,
+        loop_detection_threshold: 3,
+        interactive_loop_callback: false,
+        allowed_tools: None,
+        langsmith_project: None,
+        model: None,
+        tool_event_tx: None,
+        stream_token_tx: None,
+        recovery_nudge: None,
+        session_key: None,
+    };
+    let sender = NullSender;
+    let loop_runner = AgenticLoop::new(
+        &llm,
+        &tools,
+        &mcp,
+        &cfg,
+        None,
+        None,
+        None,
+        &sender,
+        Box::new(|uid, cid| ToolContext {
+            sandbox_dir: std::path::PathBuf::from("/tmp"),
+            home_dir: None,
+            sender: Arc::new(NullSender),
+            cancel_registry: Arc::new(rustfox::cancel_registry::CancelRegistry::new()),
+            user_id: uid.into(),
+            chat_id: cid.into(),
+            bot_id: "main".into(),
+            tool_ui_mode: ToolUiMode::Silent,
+        }),
+        None,
+    );
+    let mut msgs = MessageContainer::Plain(vec![ChatMessage {
+        role: "user".into(),
+        content: Some(MessageContent::from_text("resume")),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }]);
+    let outcome = loop_runner
+        .run(&mut msgs, "u", "c")
+        .await
+        .expect("loop should return Ok");
+    match outcome {
+        LoopOutcome::FinalResponse { text, iterations } => {
+            assert!(
+                text.contains("clarify") || text.contains("progress"),
+                "expected empty-progress clarify FinalResponse, got: {text}"
+            );
+            assert!(
+                !text.to_lowercase().contains("mcp") && !text.to_lowercase().contains("duplicate"),
+                "clarify must not mention MCP/duplicate internals: {text}"
+            );
+            assert_eq!(
+                iterations, 3,
+                "must stop at loop_detection.threshold; got {iterations}"
+            );
+        }
+        other => panic!("expected FinalResponse clarify, got {other:?}"),
+    }
+    let n_llm = *calls.lock().unwrap();
+    assert!(
+        n_llm <= 3,
+        "llm_call must be bounded by threshold; llm={n_llm}"
+    );
+}

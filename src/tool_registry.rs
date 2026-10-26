@@ -95,12 +95,14 @@ impl ToolRegistry {
         self.handlers.push(handler);
     }
 
+    /// Collect definitions from all handlers, keeping the **first** `function.name`
+    /// only (ADR-0045 register-time first-wins). Later duplicates are skipped.
     pub fn all_definitions(&self) -> Vec<ToolDefinition> {
         let mut all = Vec::new();
         for handler in &self.handlers {
             all.extend(handler.define());
         }
-        all
+        crate::llm::dedupe_tool_definitions_keep_first(all)
     }
 
     pub async fn execute(&self, name: &str, args: Value, ctx: ToolContext) -> ToolResult {
@@ -186,6 +188,51 @@ mod tests {
         let result = reg.execute("unknown", json!({}), ctx).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown tool"));
+    }
+
+    /// ADR-0045 (A): register the same `function.name` twice → one entry in registry schema.
+    struct DupHandler {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    #[async_trait]
+    impl ToolHandler for DupHandler {
+        fn define(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: self.name.to_string(),
+                    description: self.description.to_string(),
+                    parameters: json!({ "type": "object", "properties": {} }),
+                },
+            }]
+        }
+
+        async fn execute(&self, name: &str, _args: Value, _ctx: ToolContext) -> ToolResult {
+            Ok(format!("executed {name}"))
+        }
+    }
+
+    #[test]
+    fn register_same_name_twice_keeps_first_in_schema() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DupHandler {
+            name: "shared_tool",
+            description: "first-wins",
+        }));
+        reg.register(Box::new(DupHandler {
+            name: "shared_tool",
+            description: "second-skipped",
+        }));
+        reg.register(Box::new(DupHandler {
+            name: "other_tool",
+            description: "unique",
+        }));
+        let defs = reg.all_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert_eq!(names, vec!["shared_tool", "other_tool"]);
+        assert_eq!(defs[0].function.description, "first-wins");
     }
 
     struct TestSender;
