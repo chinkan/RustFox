@@ -26,6 +26,7 @@ fn failing_llm() -> LlmClient {
         context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
         parse_retry_limit: 0,
         rate_limit_retry_limit: 0,
+        extra_headers: vec![],
     };
     let provider: Arc<dyn rustfox::provider::Provider> = Arc::new(OpenRouterProvider::new(config));
     let mut providers = HashMap::new();
@@ -183,6 +184,7 @@ impl StubSummaryProvider {
                 context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                 parse_retry_limit: 0,
                 rate_limit_retry_limit: 0,
+                extra_headers: vec![],
             },
             reply: reply.into(),
         }

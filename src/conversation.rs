@@ -463,6 +463,7 @@ mod tests {
             context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let provider: Arc<dyn crate::provider::Provider> =
             Arc::new(OpenRouterProvider::new(config));
@@ -497,6 +498,7 @@ mod tests {
                     context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                     parse_retry_limit: 0,
                     rate_limit_retry_limit: 0,
+                    extra_headers: vec![],
                 },
                 reply: reply.into(),
                 calls: std::sync::atomic::AtomicUsize::new(0),

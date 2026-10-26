@@ -26,6 +26,14 @@ pub const GO_MODELS_URL: &str = "https://opencode.ai/inference/go/v1/models";
 /// Default Active model id on Go (smoke PASS with tools).
 pub const GO_DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 
+/// Required on every Go OpenAI-compat request (docs + soft Active #271).
+pub const SESSION_HEADER: &str = "x-opencode-session";
+
+/// Process-stable enough: one id per `OpenCodeProvider::new` (peer).
+pub fn mint_session_id() -> String {
+    format!("rustfox-{}", uuid::Uuid::new_v4())
+}
+
 /// True when a `type=opencode` provider section is wired for Active peer chat
 /// (Bearer + base URL). Empty key / URL → detect-only stub behavior.
 pub fn peer_configured(base_url: &str, api_key: Option<&str>) -> bool {
@@ -361,6 +369,18 @@ mod tests {
         assert!(is_go_leave_signal("Policy budget exceeded for Go"));
         assert!(!is_go_leave_signal("rate limit, try again shortly"));
         assert!(!is_go_leave_signal(""));
+        // #271: MissingSessionID is NOT leave-Go (fix the header; do not hop).
+        assert!(!is_go_leave_signal(
+            r#"{"error":{"type":"MissingSessionID","message":"x-opencode-session required"}}"#
+        ));
+        assert!(!is_go_leave_signal("MissingSessionID"));
+    }
+
+    #[test]
+    fn mint_session_id_is_rustfox_prefixed_nonempty() {
+        let id = mint_session_id();
+        assert!(id.starts_with("rustfox-"), "{id}");
+        assert!(id.len() > "rustfox-".len());
     }
 
     #[test]
