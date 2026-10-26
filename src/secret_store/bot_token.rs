@@ -551,10 +551,10 @@ api_key = "sk-xai-plain"
 model = "grok-4.7"
 "#;
         let (sealed, n) = seal_plaintext_bot_tokens_in_config(toml, &store).unwrap();
-        assert!(n >= 1, "expected seal count >= 1, got {n}");
+        assert!(n >= 1, "expected seal count >= 1");
         assert!(
             sealed.contains(r#"api_key = "secret:xai.api_key""#),
-            "{sealed}"
+            "sealed toml missing secret:xai.api_key ref"
         );
         assert_eq!(
             store.get(XAI_API_KEY_SECRET).unwrap().unwrap().expose(),
