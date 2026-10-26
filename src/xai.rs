@@ -10,8 +10,9 @@ pub const DEFAULT_BASE: &str = "https://api.x.ai/v1";
 /// Default Active model id (ADR-0044 lock).
 pub const DEFAULT_MODEL: &str = "grok-4.7";
 
-/// Reserved resolve alias so `xai/…` never silent-hops to the default provider
-/// when no `[[provider]] type=xai` section is registered.
+/// Reserved resolve alias so bare `xai` and `xai/…` never silent-hop to the
+/// default provider when no `[[provider]] type=xai` section is registered
+/// (ADR-0044 §9 / #273).
 pub const MODEL_ALIAS: &str = "xai";
 
 /// Canonical SecretStore name for the xAI API key (ADR-0016 spirit).
