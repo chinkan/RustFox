@@ -29,6 +29,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Register-time tool name dedupe + empty-progress clarify (ADR-0045, #286):** at tool/MCP register time keep the first `function.name` only (all tools, not Threads-only); `llm.rs` send-time drop remains belt. When `agent.loop_detection` is enabled, N=`threshold` (default 3) consecutive empty-progress iterations force a clarify FinalResponse (no MCP/duplicate internals; no silent empty / unbounded `llm_call`). Closes #286.
+
 - **Anti cold-intro W2+ phrase widen (ADR-0043 / #283):** widen lost-context matcher phrases — P1 CJK (`收唔到` / `收唔到你今次` / `只見到系統 context` / `只見到系統` / `今次嘅內容` / `冇見到` ≠ `見唔到`) and E1 EN (`didn't get your` / `only see system context` / `only seeing system`). W1 ∪ W2 structure, M1 (≥2 menu), C1 (phrase alone ≠ reject), and F1 unchanged. Tip `9f58afb` live FN was W2 phrase coverage (docs ADR already on main via #284). Closes #283.
 
 - **Anti cold-intro matcher widen (ADR-0043 / #280):** when prior continuity applies, matcher is **W1 ∪ W2** — greeting + ≥2 menu lines (help-offer no longer required) **or** explicit lost-context / cannot-see-prior (locale-aware) + ≥2 menu lines. Prefer FN (F1); lost-context alone ≠ reject (C1). Mechanism unchanged (light prompt + shared Active guard; regen once; else clarify, no menu). Tip `29e4461` live FN was matcher coverage. Closes #280.
