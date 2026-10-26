@@ -102,6 +102,24 @@ Be concise and helpful."""
 # base_url = "http://localhost:1234/v1"
 # model = "qwen2.5-7b-instruct"
 
+# OpenCode Go Active peer (ADR-0043 Direction D / #267).
+# Chat: OpenAI-compat at …/openai/v1/chat/completions (Bearer).
+# Models list: …/go/v1/models (not under /openai/v1).
+# Leave-Go: HTTP 402 or 429+GoUsageLimitError/Policy → OpenRouter DeepSeek.
+# Without base_url + api_key, OpenCode stays detect-only (typed error, no silent hop).
+# [[provider]]
+# name = "opencode"
+# type = "opencode"
+# base_url = "https://opencode.ai/inference/go/openai/v1"
+# api_key = "secret:opencode.api_key"   # or OPENCODE_API_KEY / pasted key
+# model = "deepseek-v4.1-flash"
+# max_tokens = 8192
+# discover_models = true
+# # default_provider = "opencode"  # under [general] when ready
+# # Suggested fallback after leave-Go:
+# # [fallback]
+# # chain = ["openrouter/deepseek/deepseek-chat"]
+
 # ── Fallback Chain (optional) ──────────────────────────────────────────
 # When the primary model fails, RustFox tries each fallback in order.
 # Each entry is a full provider-prefixed model string.

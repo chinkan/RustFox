@@ -82,6 +82,7 @@ pub fn synthesize_interrupted_results(messages: &mut Vec<ChatMessage>, dangling:
             content: Some(MessageContent::Text(INTERRUPTED_TOOL_RESULT.to_string())),
             tool_calls: None,
             tool_call_id: Some(id.clone()),
+            reasoning_content: None,
         });
     }
 }
@@ -224,12 +225,14 @@ mod tests {
                 content: Some(MessageContent::Text("hi".into())),
                 tool_calls: Some(vec![tool_call("a"), tool_call("b")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".into(),
                 content: Some(MessageContent::Text("ok".into())),
                 tool_calls: None,
                 tool_call_id: Some("a".into()),
+                reasoning_content: None,
             },
         ];
         let dangling = find_dangling_tool_ids(&msgs);
@@ -260,6 +263,7 @@ mod tests {
                 content: Some(MessageContent::Text("p".into())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             iteration: 2,
             dangling_tool_ids: vec!["d1".into()],

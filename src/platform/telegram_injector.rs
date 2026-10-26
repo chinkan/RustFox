@@ -394,6 +394,7 @@ impl Provider for FixtureLlm {
                 content: Some(MessageContent::from_text(self.reply.clone())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             finish_reason: Some("stop".into()),
             model: model.to_string(),

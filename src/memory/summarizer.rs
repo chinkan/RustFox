@@ -49,12 +49,14 @@ pub async fn summarize_conversation(
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         },
         ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::from_text(summarization_prompt)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         },
     ];
 
@@ -74,6 +76,7 @@ pub async fn summarize_conversation(
         ))),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     };
     store.save_message(conversation_id, &summary_msg).await?;
 
@@ -125,6 +128,7 @@ mod tests {
             content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 

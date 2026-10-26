@@ -1,6 +1,6 @@
 # ADR-0043: OpenCode detect-only (Phase 1) and peer Active direction
 
-- **Status:** Accepted (Direction: D locked to OpenCode Go cloud OpenAI-compat; do not ship Active peer until Product re-gate; Phase 1 detect-only unchanged)
+- **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D)
 - **Date:** 2026-10-24
 - **Amends / supersedes:** prior Direction **C** (delegate) on this same ADR (commit `9bdceb1` / filename `0043-opencode-detect-and-delegate.md`). Product HOLD + grill R3 parks C; target is peer Active + RustFox tools.
 - **Target release:** post-v1.0.7 / TBD (v1.0.7 tag is Kan-owned; this ADR does not ship a tag)
@@ -27,13 +27,13 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 2. **Three UI states:** Settings and the setup wizard show exactly three OpenCode states: **absent** (binary not found), **no-creds** (present but no usable credentials), **ready+N** (present, creds OK, N models from `opencode models`).
 
-3. **Not selectable / not for chat:** In Phase 1, OpenCode **must not** be selectable as the active provider and **must not** be used for chat. Status and list only. Peer Active is Direction only until Product re-gate after D lock (D = Go cloud; F interim has no technical blocker).
+3. **Detect-only when peer not configured:** Without Go `base_url` + `api_key`, OpenCode stays detect-only (status/list; typed error on chat/Active; no silent hop). With peer configured (#267), OpenCode Go DeepSeek is selectable as Active like other peers (D = Go cloud OpenAI-compat).
 
 4. **Model id matching:** Resolve model ids with **longest-prefix match**. The later Phase 1 implementation PR **must** add a `resolve_model` regression test covering that rule (name the requirement in the impl PR; this docs change does not write the test).
 
 5. **`--pure` always:** Phase 1 probes **always** force `--pure`. Any later OpenCode invoke / probe paths that call the binary also always force `--pure`.
 
-6. **Typed error, no silent hop:** If chat or Active selection hits OpenCode while it is still detect-only (or while peer Active is not yet implemented / not yet validated), return a **typed error** (`detect-only` / `peer not implemented` / equivalent). **Forbid** silent fallback or hop to the default provider from that detect-only miss. (The Direction **fallback** chain — Active OpenCode Go DeepSeek → quota/402 → OpenRouter DeepSeek — is a separate, explicit peer-path behavior after Active peer ships; it is not a silent hop from detect-only.)
+6. **Typed error, no silent hop:** If chat or Active selection hits OpenCode while the peer path is not configured (detect-only), return a **typed error** (`detect-only` / `peer not configured` / equivalent). **Forbid** silent fallback or hop to the default provider from that miss. (The Direction **leave-Go** chain — Active OpenCode Go DeepSeek → 402 or 429+GoUsageLimitError/Policy → OpenRouter DeepSeek — is a separate, explicit peer-path behavior; it is not a silent hop from detect-only.)
 
 7. **Parked issues:** #194 / #202 stay parked; this work does not touch them.
 
@@ -43,7 +43,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 **Direction = peer Active + RustFox tools.** Target: OpenCode Go DeepSeek as Active with the full RustFox tool loop. Direction **C** (delegate / peer_invoke-like) is **parked / not the goal**.
 
-**D is locked** (Researcher D-spike + Product TL). Do **not** ship Active peer until Product **re-gate**. Phase 1 detect-only is unchanged by this lock.
+**D is locked** (Researcher D-spike + Product TL). Active peer ships under #267 (four gates). Phase 1 detect-only remains when the peer path is not configured.
 
 1. **Peer Active target:** OpenCode Go DeepSeek becomes a peer of `openrouter` / `ollama` for Active selection and chat, with RustFox owning the tool loop. Implementation follows this **peer path**, **not** a Phase 1-shaped “detect then somehow chat” shortcut, and **not** parked Direction C.
 
@@ -57,7 +57,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 6. **A never default:** A tool-less prompt / subprocess shim (**A**) is **never** the default path and **must not** ship as the default. If any experimental A path exists for research, it stays non-default and out of normal Active/chat selection.
 
-7. **Fallback (write into ADR; impl follows peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; on **quota / 402** → fall back to **OpenRouter DeepSeek**. This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6). Implementation of this fallback follows the peer path, **not** Phase 1.
+7. **Fallback (leave-Go; peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; leave-Go → fall back to **OpenRouter DeepSeek** when the Go response is **HTTP 402** (balance/credits) **OR** **HTTP 429** whose body indicates Go usage-limit / policy budget (`GoUsageLimitError`, `go_usage_limit`, or Policy+budget). Do **not** auto-fallback on a plain short 429 (rate-limit / retry). This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6).
 
 8. **Sandbox (ADR-0025):** Any ship that runs OpenCode-side work under confinement **MUST** meet ADR-0025 (or equivalent). If that cannot be met for the chosen chat path, do not ship that path.
 
@@ -67,16 +67,17 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 
 11. **C parked:** Direction C (delegate / peer_invoke-like, interactive-only, scheduler disables delegate) from the prior revision of this ADR is **parked**. Do not implement C as the goal. Do not reopen C from this PR.
 
-12. **Open items (not blocking Phase 1 docs):** Leave for follow-up; do not block this ADR or Phase 1 detect-only:
-    - Go live tools smoke (tool loop against Go `/openai/v1/chat/completions`).
-    - Quota HTTP status (confirm 402 / equivalent for peer-path fallback).
+12. **Open items:** Leave for follow-up:
+    - Go live tools smoke: PASS (`deepseek-v4.1-flash` tool_calls) per #267 research.
+    - Leave-Go triggers locked: 402 **or** 429+GoUsageLimitError/Policy (not plain short 429).
     - HK Privacy if relevant to Go cloud traffic.
 
 ## Non-goals
 
-- Making OpenCode selectable as Active or usable for chat in Phase 1.
-- Shipping peer Active / D / F / fallback in this docs change or in the Phase 1 impl PR (D is direction-locked only; ship waits re-gate).
+- Treating local `opencode serve` / `opencode run` as the Active chat path.
+- Silent hop from detect-only / peer-not-configured errors into the default provider.
 - Shipping Direction **C** (delegate) — parked; not the goal.
+- xAI peer (#266 / #268) — parallel track; not this ADR.
 - Shipping Option **B** (MCP bridge / inverted loop) as the peer Active path.
 - Shipping Option **A** (tool-less shim) as the default path.
 - Phase 3 picker parity beyond the peer Active direction lock.
@@ -89,7 +90,7 @@ Product locks (Phase 1) are authoritative for the first implementable slice afte
 - Operators can see whether OpenCode is absent, missing creds, or ready with N models, without RustFox routing chat through it yet (Phase 1).
 - Product avoids a false “provider peer” that would drop RustFox tools via a tool-less shim (A never default; B opposed as peer).
 - **D is locked** to OpenCode Go cloud OpenAI-compat (`https://opencode.ai/inference/go` + `/openai/v1/chat/completions`); local serve/run ≠ D. Do not ship Active peer until Product re-gate; HOLD. F interim has no technical blocker. Open items (Go tools smoke, quota status, HK Privacy) do not block Phase 1 docs.
-- After D ships (post re-gate), quota/402 on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1).
+- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave.
 - Active / `default_provider` semantics from ADR-0033 / ADR-0035 stay unchanged for openrouter and ollama until peer Active is validated and implemented.
 - Later Phase 1 impl must include longest-prefix `resolve_model` regression coverage and typed detect-only errors (no silent hop).
 - Prior Direction C text in this ADR is superseded; filename renamed to `0043-opencode-detect-and-peer.md` to match.

@@ -134,7 +134,7 @@ pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
     if err.downcast_ref::<LlmPreHttpError>().is_some() {
         return false;
     }
-    // ADR-0043: detect-only miss must not silent-hop via [fallback] chain.
+    // ADR-0043: detect-only / peer-not-configured must not silent-hop.
     if err
         .downcast_ref::<crate::opencode::OpenCodeDetectOnlyError>()
         .is_some()
@@ -142,10 +142,26 @@ pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
         return false;
     }
     if let Some(http) = err.downcast_ref::<LlmHttpError>() {
-        return !http.is_auth_hard_exclusion();
+        if http.is_auth_hard_exclusion() {
+            return false;
+        }
+        // Leave-Go (#267 / ADR-0043 §7): OpenCode plain short 429 stays put;
+        // 402 and 429+GoUsageLimitError/Policy walk to OpenRouter DeepSeek.
+        if is_opencode_http_provider(&http.provider)
+            && http.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            && !crate::opencode::is_go_leave_signal(&http.body)
+        {
+            return false;
+        }
+        return true;
     }
     // Network / timeout / DNS / JSON-or-body parse / missing-choices exhaustion.
     true
+}
+
+/// Provider names that mean OpenCode Go peer (registered name or reserved aliases).
+fn is_opencode_http_provider(name: &str) -> bool {
+    name == "opencode" || OPENCODE_MODEL_ALIASES.contains(&name)
 }
 
 /// Documented OpenRouter `error_type` values that mean upstream transient
@@ -476,7 +492,7 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Longest-prefix aliases for OpenCode catalog ids (ADR-0043 Phase 1).
+/// Longest-prefix aliases for OpenCode catalog ids (ADR-0043).
 /// Reserved even when no `[[provider]] type=opencode` section exists (#262).
 const OPENCODE_MODEL_ALIASES: &[&str] = &["opencode", "opencode-go"];
 
@@ -640,6 +656,16 @@ pub fn build_registry(
         let mut cfg: ProviderConfig = ProviderConfig::from(section);
         cfg.parse_retry_limit = parse_retry_limit;
         cfg.rate_limit_retry_limit = rate_limit_retry_limit;
+        // OpenCode peer (#267): empty base_url + api_key → Go OpenAI-compat default.
+        if section.provider_type == ProviderType::OpenCode
+            && cfg.base_url.trim().is_empty()
+            && cfg.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+        {
+            cfg.base_url = crate::opencode::GO_OPENAI_BASE.to_string();
+        }
+        if section.provider_type == ProviderType::OpenCode && cfg.default_model.trim().is_empty() {
+            cfg.default_model = crate::opencode::GO_DEFAULT_MODEL.to_string();
+        }
         let provider: Arc<dyn Provider> = match section.provider_type {
             ProviderType::OpenRouter => Arc::new(OpenRouterProvider::new(cfg)),
             ProviderType::OpenAICompatible => Arc::new(OpenAICompatibleProvider::new(cfg)),
@@ -670,14 +696,18 @@ pub fn build_registry(
             default_name
         );
     }
-    if providers
-        .get(default_name)
-        .is_some_and(|p| p.config().provider_type == ProviderType::OpenCode)
-    {
-        anyhow::bail!(
-            "Default provider '{}' is OpenCode (ADR-0043 Phase 1 detect-only); choose openrouter or ollama as Active",
-            default_name
-        );
+    if let Some(p) = providers.get(default_name) {
+        if p.config().provider_type == ProviderType::OpenCode
+            && !crate::opencode::peer_configured(
+                &p.config().base_url,
+                p.config().api_key.as_deref(),
+            )
+        {
+            anyhow::bail!(
+                "Default provider '{}' is OpenCode without peer path (ADR-0043); set base_url + api_key for Go Active, or choose openrouter/ollama",
+                default_name
+            );
+        }
     }
 
     // #262: when no type=opencode section exists, keep a resolve-only stub so
@@ -1046,15 +1076,27 @@ impl Provider for OllamaProvider {
     }
 }
 
-// === OpenCodeProvider (ADR-0043 Phase 1 detect-only) ===
+// === OpenCodeProvider (ADR-0043: detect-only stub OR Go Active peer #267) ===
 
 pub struct OpenCodeProvider {
     config: ProviderConfig,
+    /// Set when peer path is configured; reuses OpenAI-compat chat.
+    inner: Option<OpenAICompatibleProvider>,
 }
 
 impl OpenCodeProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self { config }
+        let inner = if crate::opencode::peer_configured(&config.base_url, config.api_key.as_deref())
+        {
+            Some(OpenAICompatibleProvider::new(config.clone()))
+        } else {
+            None
+        };
+        Self { config, inner }
+    }
+
+    pub fn is_peer(&self) -> bool {
+        self.inner.is_some()
     }
 }
 
@@ -1075,18 +1117,49 @@ impl Provider for OpenCodeProvider {
 
     async fn chat_completion(
         &self,
-        _client: &reqwest::Client,
-        _messages: &[ChatMessage],
-        _tools: &[ToolDefinition],
-        _model: &str,
-        _max_tokens: u32,
+        client: &reqwest::Client,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+        max_tokens: u32,
     ) -> Result<ChatCompletion> {
-        Err(anyhow::Error::from(
-            crate::opencode::OpenCodeDetectOnlyError::chat(),
-        ))
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::opencode::OpenCodeDetectOnlyError::chat(),
+            ));
+        };
+        inner
+            .chat_completion(client, messages, tools, model, max_tokens)
+            .await
     }
 
-    async fn list_models(&self, _client: &reqwest::Client) -> Result<Vec<String>> {
+    async fn list_models(&self, client: &reqwest::Client) -> Result<Vec<String>> {
+        if let Some(_inner) = &self.inner {
+            let url = crate::opencode::go_models_url(&self.config.base_url);
+            let mut req = client.get(&url);
+            if let Some(ref key) = self.config.api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+            let response = req
+                .send()
+                .await
+                .context("Failed to fetch models from OpenCode Go")?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                anyhow::bail!("OpenCode Go models API error ({}): {}", status, body);
+            }
+            let list: serde_json::Value = response.json().await?;
+            let models = list["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(models);
+        }
         let status = crate::opencode::detect_async().await;
         if status.state != crate::opencode::STATE_READY {
             anyhow::bail!(
@@ -1248,22 +1321,48 @@ mod tests {
     }
 
     #[test]
-    fn build_registry_rejects_opencode_as_default() {
-        let sections = vec![make_section(
-            "opencode",
-            ProviderType::OpenCode,
-            "",
-            "opencode/glm",
-        )];
+    fn build_registry_rejects_opencode_as_default_without_peer() {
+        let mut section = make_section("opencode", ProviderType::OpenCode, "", "opencode/glm");
+        section.api_key = None; // no peer path
+        let sections = vec![section];
         let err = build_registry(&sections, "opencode", 3, 0).unwrap_err();
         assert!(
-            err.to_string().contains("detect-only") || err.to_string().contains("OpenCode"),
+            err.to_string().contains("OpenCode")
+                && (err.to_string().contains("peer")
+                    || err.to_string().contains("detect-only")
+                    || err.to_string().contains("api_key")),
             "{err}"
         );
     }
 
+    #[test]
+    fn build_registry_allows_opencode_as_default_when_peer_configured() {
+        let mut section = make_section(
+            "opencode",
+            ProviderType::OpenCode,
+            crate::opencode::GO_OPENAI_BASE,
+            crate::opencode::GO_DEFAULT_MODEL,
+        );
+        section.api_key = Some("sk-go-test".into());
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-chat",
+            ),
+            section,
+        ];
+        let reg = build_registry(&sections, "opencode", 3, 0).unwrap();
+        assert_eq!(reg.default_provider_name(), "opencode");
+        let p = reg.get_provider("opencode").unwrap();
+        assert!(p.config().api_key.as_ref().is_some_and(|k| !k.is_empty()));
+    }
+
     #[tokio::test]
-    async fn opencode_chat_returns_detect_only_typed_error() {
+    async fn opencode_chat_returns_detect_only_when_peer_not_configured() {
+        let mut oc = make_section("opencode", ProviderType::OpenCode, "", "opencode/glm");
+        oc.api_key = None;
         let sections = vec![
             make_section(
                 "openrouter",
@@ -1271,7 +1370,7 @@ mod tests {
                 "https://openrouter.ai/api/v1",
                 "moonshotai/kimi-k2.6",
             ),
-            make_section("opencode", ProviderType::OpenCode, "", "opencode/glm"),
+            oc,
         ];
         let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
         let (provider, _) = reg.resolve_model("opencode/glm");
@@ -1472,6 +1571,7 @@ mod tests {
                 content: Some(MessageContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             tools: None,
             max_tokens: 10,
@@ -1866,6 +1966,61 @@ mod tests {
         assert!(should_walk_fallback(&anyhow::anyhow!(
             "Failed to parse JSON response"
         )));
+    }
+
+    #[test]
+    fn leave_go_fallback_triggers() {
+        let mk = |status: u16, body: &str| {
+            anyhow::Error::from(LlmHttpError {
+                provider: "opencode".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                body: body.into(),
+            })
+        };
+        // 402 credits → leave
+        assert!(should_walk_fallback(&mk(
+            402,
+            r#"{"error":"Payment Required"}"#
+        )));
+        // 429 + GoUsageLimitError → leave
+        assert!(should_walk_fallback(&mk(
+            429,
+            r#"{"error":{"type":"GoUsageLimitError","message":"quota"}}"#
+        )));
+        // 429 + Policy budget → leave
+        assert!(should_walk_fallback(&mk(429, "Policy budget exceeded")));
+        // plain short 429 → do NOT leave
+        assert!(!should_walk_fallback(&mk(
+            429,
+            "rate limited, retry shortly"
+        )));
+        // other providers: plain 429 still walks (ADR-0019)
+        assert!(should_walk_fallback(&anyhow::Error::from(LlmHttpError {
+            provider: "openrouter".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limited".into(),
+        })));
+    }
+
+    #[test]
+    fn reasoning_content_round_trips_on_chat_message() {
+        let raw = r#"{
+            "role": "assistant",
+            "content": "pong",
+            "reasoning_content": "thinking…"
+        }"#;
+        let msg: ChatMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(msg.content.as_ref().unwrap().as_text(), "pong");
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking…"));
+        let back = serde_json::to_value(&msg).unwrap();
+        assert_eq!(back["reasoning_content"], "thinking…");
+        assert_eq!(back["content"], "pong");
+        // Absent field stays absent on serialize
+        let bare: ChatMessage =
+            serde_json::from_str(r#"{"role":"assistant","content":"hi"}"#).unwrap();
+        assert!(bare.reasoning_content.is_none());
+        let bare_v = serde_json::to_value(&bare).unwrap();
+        assert!(bare_v.get("reasoning_content").is_none());
     }
 
     #[test]

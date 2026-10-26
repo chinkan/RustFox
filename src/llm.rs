@@ -74,6 +74,9 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// DeepSeek / OpenCode Go thinking; echo when present (ADR-0043 / #267).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -473,6 +476,7 @@ pub fn rewrite_messages_for_tool_weak(messages: &[ChatMessage]) -> Vec<ChatMessa
         content: Some(MessageContent::from_text(body)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     debug_assert!(
         has_plain_user_turn(&out),
@@ -1267,6 +1271,7 @@ mod tests {
             content: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(is_empty_assistant_response(&message));
     }
@@ -1278,6 +1283,7 @@ mod tests {
             content: Some(MessageContent::Text("  \n\t  ".to_string())),
             tool_calls: Some(vec![]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(is_empty_assistant_response(&message));
     }
@@ -1296,6 +1302,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(!is_empty_assistant_response(&message));
     }
@@ -1307,6 +1314,7 @@ mod tests {
             content: Some(MessageContent::Text("Done".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(!is_empty_assistant_response(&message));
     }
@@ -1445,6 +1453,7 @@ mod tests {
             content: Some(MessageContent::from_text("hi".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]
     }
 
@@ -1833,6 +1842,7 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
@@ -1846,12 +1856,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::from_text("tool-out")),
                 tool_calls: None,
                 tool_call_id: Some("c1".into()),
+                reasoning_content: None,
             },
         ]
     }
@@ -1865,6 +1877,7 @@ mod tests {
                 content: Some(MessageContent::from_text("list files")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         );
         m
@@ -2069,12 +2082,14 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::from_text("HK weather please")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]
     }
@@ -2230,6 +2245,7 @@ mod tests {
             content: Some(MessageContent::from_text("   ")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         assert!(!has_plain_user_turn(&msgs));
     }

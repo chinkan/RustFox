@@ -42,6 +42,7 @@ fn msg(role: &str, text: &str) -> ChatMessage {
         content: Some(MessageContent::from_text(text.to_string())),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -71,6 +72,7 @@ async fn compaction_never_loses_user_request() {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         history.push(ChatMessage {
             role: "tool".to_string(),
@@ -80,6 +82,7 @@ async fn compaction_never_loses_user_request() {
             ))),
             tool_calls: None,
             tool_call_id: Some(format!("call_{i}")),
+            reasoning_content: None,
         });
     }
     for m in &history {
@@ -227,6 +230,7 @@ impl rustfox::provider::Provider for StubSummaryProvider {
                 content: Some(MessageContent::from_text(self.reply.clone())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             finish_reason: Some("stop".to_string()),
             model: model.to_string(),
@@ -279,6 +283,7 @@ async fn over_watermark_compacts_and_keeps_skills_soul_system() {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         cmgr.add_tool_result(ChatMessage {
             role: "tool".to_string(),
@@ -288,6 +293,7 @@ async fn over_watermark_compacts_and_keeps_skills_soul_system() {
             ))),
             tool_calls: None,
             tool_call_id: Some(format!("call_{i}")),
+            reasoning_content: None,
         });
     }
     cmgr.add_user_turn(msg("user", "UNIQUE_KEYWORD_B follow-up"));

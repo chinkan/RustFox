@@ -77,6 +77,7 @@ impl Provider for ScriptLlm {
                 content: Some(MessageContent::from_text("fallback-text")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         Ok(ChatCompletion {
             message,
@@ -102,6 +103,7 @@ fn same_tool_step(id: &str) -> ChatMessage {
             },
         }]),
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -222,6 +224,7 @@ async fn repeated_identical_tool_calls_stop_after_recoveries() {
         content: Some(MessageContent::from_text("spin")),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }]);
     let outcome = loop_runner
         .run(&mut msgs, "u", "c")

@@ -1,8 +1,9 @@
-//! OpenCode detect-only (ADR-0043 Phase 1 / #259).
+//! OpenCode detect + Active peer (ADR-0043 / #259 Phase 1, #267 Direction D).
 //!
-//! Probes the `opencode` CLI with `--pure` always forced. Surfaces three
-//! states for wizard/portal status. Chat and Active selection return a typed
-//! error — never a silent hop to the default provider.
+//! Detect probes the `opencode` CLI with `--pure` always forced (wizard/portal
+//! status). Active peer chat uses OpenCode Go cloud OpenAI-compat — never local
+//! `opencode serve` / `opencode run`. When the peer path is not configured,
+//! chat / Active return a typed detect-only error (no silent hop).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,7 +15,44 @@ pub const STATE_ABSENT: &str = "absent";
 pub const STATE_NO_CREDS: &str = "no_creds";
 pub const STATE_READY: &str = "ready";
 
-/// Typed Phase 1 refusal: chat or Active hit OpenCode while detect-only.
+/// OpenCode Go cloud OpenAI-compat base (ADR-0043 Direction D / #267).
+/// Chat: `{GO_OPENAI_BASE}/chat/completions`. Models list lives at
+/// [`GO_MODELS_URL`] (not under `/openai/v1`).
+pub const GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v1";
+
+/// Go native models list (smoke: `/openai/v1/models` is 404).
+pub const GO_MODELS_URL: &str = "https://opencode.ai/inference/go/v1/models";
+
+/// Default Active model id on Go (smoke PASS with tools).
+pub const GO_DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
+
+/// True when a `type=opencode` provider section is wired for Active peer chat
+/// (Bearer + base URL). Empty key / URL → detect-only stub behavior.
+pub fn peer_configured(base_url: &str, api_key: Option<&str>) -> bool {
+    !base_url.trim().is_empty() && api_key.is_some_and(|k| !k.trim().is_empty())
+}
+
+/// Leave-Go body signal: 429 that should walk fallback (ADR-0043 §7 amend).
+/// Plain short 429 is **not** leave-Go.
+pub fn is_go_leave_signal(body: &str) -> bool {
+    if body.contains("GoUsageLimitError") {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("go_usage_limit") || (lower.contains("policy") && lower.contains("budget"))
+}
+
+/// Resolve Go `/v1/models` from an OpenAI-compat base URL.
+pub fn go_models_url(openai_base: &str) -> String {
+    let base = openai_base.trim_end_matches('/');
+    if let Some(root) = base.strip_suffix("/openai/v1") {
+        format!("{root}/v1/models")
+    } else {
+        format!("{base}/models")
+    }
+}
+
+/// Typed refusal: chat or Active hit OpenCode while detect-only / peer not configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenCodeDetectOnlyError {
     /// `chat_completion` / LLM path.
@@ -37,11 +75,11 @@ impl std::fmt::Display for OpenCodeDetectOnlyError {
         match self {
             Self::Chat => write!(
                 f,
-                "OpenCode is detect-only (ADR-0043 Phase 1); chat is not available"
+                "OpenCode peer path not configured (ADR-0043); chat is not available"
             ),
             Self::Active => write!(
                 f,
-                "OpenCode cannot be Active (ADR-0043 Phase 1 detect-only)"
+                "OpenCode cannot be Active until peer path is configured (ADR-0043)"
             ),
         }
     }
@@ -299,12 +337,39 @@ mod tests {
     }
 
     #[test]
-    fn detect_only_error_display_mentions_phase1() {
+    fn detect_only_error_display_mentions_peer() {
         let chat = OpenCodeDetectOnlyError::chat().to_string();
-        assert!(chat.contains("detect-only"));
+        assert!(chat.contains("peer") || chat.contains("not configured"));
         assert!(chat.contains("chat"));
         let active = OpenCodeDetectOnlyError::active().to_string();
         assert!(active.contains("Active") || active.contains("active"));
+    }
+
+    #[test]
+    fn peer_configured_requires_url_and_key() {
+        assert!(!peer_configured("", Some("sk")));
+        assert!(!peer_configured(GO_OPENAI_BASE, None));
+        assert!(!peer_configured(GO_OPENAI_BASE, Some("")));
+        assert!(peer_configured(GO_OPENAI_BASE, Some("sk-test")));
+    }
+
+    #[test]
+    fn go_leave_signal_matches_usage_limit_and_policy_budget() {
+        assert!(is_go_leave_signal(
+            r#"{"error":{"type":"GoUsageLimitError"}}"#
+        ));
+        assert!(is_go_leave_signal("Policy budget exceeded for Go"));
+        assert!(!is_go_leave_signal("rate limit, try again shortly"));
+        assert!(!is_go_leave_signal(""));
+    }
+
+    #[test]
+    fn go_models_url_strips_openai_v1() {
+        assert_eq!(go_models_url(GO_OPENAI_BASE), GO_MODELS_URL);
+        assert_eq!(
+            go_models_url("https://example.com/v1"),
+            "https://example.com/v1/models"
+        );
     }
 
     #[test]
