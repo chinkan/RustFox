@@ -141,6 +141,13 @@ pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
     {
         return false;
     }
+    // ADR-0044: misconfigured xAI must not silent-hop to another provider type.
+    if err
+        .downcast_ref::<crate::xai::XaiMisconfiguredError>()
+        .is_some()
+    {
+        return false;
+    }
     if let Some(http) = err.downcast_ref::<LlmHttpError>() {
         if http.is_auth_hard_exclusion() {
             return false;
@@ -529,6 +536,23 @@ fn opencode_detect_only_stub() -> Arc<dyn Provider> {
     }))
 }
 
+fn xai_misconfigured_stub() -> Arc<dyn Provider> {
+    Arc::new(XaiProvider::new(ProviderConfig {
+        name: crate::xai::MODEL_ALIAS.to_string(),
+        provider_type: ProviderType::Xai,
+        base_url: crate::xai::DEFAULT_BASE.to_string(),
+        api_key: None,
+        default_model: crate::xai::DEFAULT_MODEL.to_string(),
+        supports_vision: false,
+        max_tokens: 8192,
+        discover_models: true,
+        context_window: 128_000,
+        context_window_cache: Arc::new(RwLock::new(None)),
+        parse_retry_limit: 0,
+        rate_limit_retry_limit: 0,
+    }))
+}
+
 /// Holds the set of providers available to the agent and the default provider
 /// name used when a model string does not carry an explicit `provider/` prefix.
 pub struct ProviderRegistry {
@@ -538,6 +562,9 @@ pub struct ProviderRegistry {
     /// `[[provider]] type=opencode` is registered (ADR-0043 §6 / #262).
     /// Not listed in [`Self::provider_names`].
     opencode_detect_only: Option<Arc<dyn Provider>>,
+    /// Misconfigured stub for reserved `xai/` when no `type=xai` section
+    /// is registered (ADR-0044 §9). Not listed in [`Self::provider_names`].
+    xai_stub: Option<Arc<dyn Provider>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -546,6 +573,7 @@ impl std::fmt::Debug for ProviderRegistry {
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .field("default_provider", &self.default_provider)
             .field("opencode_detect_only", &self.opencode_detect_only.is_some())
+            .field("xai_stub", &self.xai_stub.is_some())
             .finish()
     }
 }
@@ -556,6 +584,7 @@ impl ProviderRegistry {
             providers,
             default_provider,
             opencode_detect_only: None,
+            xai_stub: None,
         }
     }
 
@@ -589,6 +618,15 @@ impl ProviderRegistry {
         // even when no type=opencode section is registered.
         if let Some(stub) = &self.opencode_detect_only {
             if let Some(rest) = strip_opencode_alias(model) {
+                return (stub.as_ref(), rest);
+            }
+        }
+        // ADR-0044 §9: reserved `xai/` — typed misconfigured error, no silent hop.
+        if let Some(stub) = &self.xai_stub {
+            if let Some(rest) = model
+                .strip_prefix(crate::xai::MODEL_ALIAS)
+                .and_then(|s| s.strip_prefix('/'))
+            {
                 return (stub.as_ref(), rest);
             }
         }
@@ -666,11 +704,21 @@ pub fn build_registry(
         if section.provider_type == ProviderType::OpenCode && cfg.default_model.trim().is_empty() {
             cfg.default_model = crate::opencode::GO_DEFAULT_MODEL.to_string();
         }
+        // ADR-0044: empty base_url / model → xAI defaults when type=xai.
+        if section.provider_type == ProviderType::Xai {
+            if cfg.base_url.trim().is_empty() {
+                cfg.base_url = crate::xai::DEFAULT_BASE.to_string();
+            }
+            if cfg.default_model.trim().is_empty() {
+                cfg.default_model = crate::xai::DEFAULT_MODEL.to_string();
+            }
+        }
         let provider: Arc<dyn Provider> = match section.provider_type {
             ProviderType::OpenRouter => Arc::new(OpenRouterProvider::new(cfg)),
             ProviderType::OpenAICompatible => Arc::new(OpenAICompatibleProvider::new(cfg)),
             ProviderType::Ollama => Arc::new(OllamaProvider::new(cfg)),
             ProviderType::OpenCode => Arc::new(OpenCodeProvider::new(cfg)),
+            ProviderType::Xai => Arc::new(XaiProvider::new(cfg)),
         };
         providers.insert(section.name.clone(), provider.clone());
         // Catalog ids are double-segmented (`opencode-go/kimi-k3`). Alias so
@@ -683,6 +731,14 @@ pub fn build_registry(
                         .or_insert_with(|| provider.clone());
                 }
             }
+        }
+        // ADR-0044: also alias `xai/` when the section uses a different name.
+        if section.provider_type == ProviderType::Xai
+            && section.name.as_str() != crate::xai::MODEL_ALIAS
+        {
+            providers
+                .entry(crate::xai::MODEL_ALIAS.to_string())
+                .or_insert_with(|| provider.clone());
         }
     }
 
@@ -709,6 +765,16 @@ pub fn build_registry(
             );
         }
     }
+    if let Some(p) = providers.get(default_name) {
+        if p.config().provider_type == ProviderType::Xai
+            && !crate::xai::peer_configured(&p.config().base_url, p.config().api_key.as_deref())
+        {
+            anyhow::bail!(
+                "Default provider '{}' is xAI without api_key/base_url (ADR-0044); set credentials or choose another Active",
+                default_name
+            );
+        }
+    }
 
     // #262: when no type=opencode section exists, keep a resolve-only stub so
     // reserved aliases cannot silent-hop to the default provider.
@@ -721,10 +787,21 @@ pub fn build_registry(
         Some(opencode_detect_only_stub())
     };
 
+    // ADR-0044 §9: when no type=xai section, stub `xai/` so it cannot silent-hop.
+    let xai_stub = if providers
+        .values()
+        .any(|p| p.config().provider_type == ProviderType::Xai)
+    {
+        None
+    } else {
+        Some(xai_misconfigured_stub())
+    };
+
     Ok(ProviderRegistry {
         providers,
         default_provider: default_name.to_string(),
         opencode_detect_only,
+        xai_stub,
     })
 }
 
@@ -1073,6 +1150,77 @@ impl Provider for OllamaProvider {
             })
             .unwrap_or_default();
         Ok(models)
+    }
+}
+
+// === XaiProvider (ADR-0044 / #266 Active peer) ===
+
+pub struct XaiProvider {
+    config: ProviderConfig,
+    /// Set when peer path is configured; reuses OpenAI-compat chat.
+    inner: Option<OpenAICompatibleProvider>,
+}
+
+impl XaiProvider {
+    pub fn new(config: ProviderConfig) -> Self {
+        let inner = if crate::xai::peer_configured(&config.base_url, config.api_key.as_deref()) {
+            Some(OpenAICompatibleProvider::new(config.clone()))
+        } else {
+            None
+        };
+        Self { config, inner }
+    }
+
+    pub fn is_peer(&self) -> bool {
+        self.inner.is_some()
+    }
+}
+
+#[async_trait]
+impl Provider for XaiProvider {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn default_model(&self) -> &str {
+        &self.config.default_model
+    }
+    fn supports_vision(&self) -> bool {
+        self.config.supports_vision
+    }
+    fn config(&self) -> &ProviderConfig {
+        &self.config
+    }
+
+    async fn chat_completion(
+        &self,
+        client: &reqwest::Client,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+        max_tokens: u32,
+    ) -> Result<ChatCompletion> {
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::chat(),
+            ));
+        };
+        inner
+            .chat_completion(client, messages, tools, model, max_tokens)
+            .await
+    }
+
+    async fn list_models(&self, client: &reqwest::Client) -> Result<Vec<String>> {
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::chat(),
+            ));
+        };
+        inner.list_models(client).await
+    }
+
+    async fn fetch_context_window(&self, client: &reqwest::Client, model: &str) -> Option<usize> {
+        let inner = self.inner.as_ref()?;
+        inner.fetch_context_window(client, model).await
     }
 }
 
@@ -1960,6 +2108,9 @@ mod tests {
         assert!(!should_walk_fallback(&anyhow::Error::from(
             crate::opencode::OpenCodeDetectOnlyError::chat()
         )));
+        assert!(!should_walk_fallback(&anyhow::Error::from(
+            crate::xai::XaiMisconfiguredError::chat()
+        )));
         assert!(should_walk_fallback(&anyhow::anyhow!(
             "Failed to send request"
         )));
@@ -2046,5 +2197,113 @@ mod tests {
         };
         assert!(!e402.is_auth_hard_exclusion());
         assert!(!e402.is_transient()); // still not same-model retryable
+    }
+
+    #[test]
+    fn build_registry_allows_xai_as_default_when_configured() {
+        let mut section = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            crate::xai::DEFAULT_MODEL,
+        );
+        section.api_key = Some("sk-xai-test".into());
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-chat",
+            ),
+            section,
+        ];
+        let reg = build_registry(&sections, "xai", 3, 0).unwrap();
+        assert_eq!(reg.default_provider_name(), "xai");
+        let p = reg.get_provider("xai").unwrap();
+        assert_eq!(p.config().provider_type, ProviderType::Xai);
+        assert_eq!(p.default_model(), "grok-4.7");
+        assert!(p.config().api_key.as_ref().is_some_and(|k| !k.is_empty()));
+    }
+
+    #[test]
+    fn build_registry_rejects_xai_as_default_without_key() {
+        let mut section = make_section("xai", ProviderType::Xai, "", "grok-4.7");
+        section.api_key = None;
+        let err = build_registry(&[section], "xai", 3, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("xAI") && (err.contains("api_key") || err.contains("base_url")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn xai_defaults_filled_when_empty() {
+        let mut section = make_section("xai", ProviderType::Xai, "", "");
+        section.api_key = Some("sk".into());
+        let reg = build_registry(&[section], "xai", 3, 0).unwrap();
+        let p = reg.get_provider("xai").unwrap();
+        assert_eq!(p.config().base_url, crate::xai::DEFAULT_BASE);
+        assert_eq!(p.default_model(), "grok-4.7");
+    }
+
+    #[tokio::test]
+    async fn xai_chat_returns_typed_error_when_not_configured() {
+        let mut xai = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            "grok-4.7",
+        );
+        xai.api_key = None;
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            xai,
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, _) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], "grok-4.7", 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::xai::XaiMisconfiguredError>();
+        assert!(
+            typed.is_some(),
+            "expected XaiMisconfiguredError, got {err:#}"
+        );
+        assert!(!should_walk_fallback(&err));
+    }
+
+    #[tokio::test]
+    async fn unregistered_xai_alias_no_silent_hop() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(model, "grok-4.7");
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], model, 16)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::xai::XaiMisconfiguredError>()
+                .is_some(),
+            "expected typed error, got {err:#}"
+        );
+        assert!(!should_walk_fallback(&err));
     }
 }

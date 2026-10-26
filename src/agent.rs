@@ -809,6 +809,17 @@ impl Agent {
                 crate::opencode::OpenCodeDetectOnlyError::active(),
             ));
         }
+        // ADR-0044: xAI Active only when peer path is configured.
+        if provider.config().provider_type == crate::config::ProviderType::Xai
+            && !crate::xai::peer_configured(
+                &provider.config().base_url,
+                provider.config().api_key.as_deref(),
+            )
+        {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::active(),
+            ));
+        }
         if let Some((prefix, _)) = model_id.split_once('/') {
             if self.registry.get_provider(prefix).is_none() {
                 tracing::warn!(

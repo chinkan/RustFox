@@ -160,6 +160,7 @@
     "maskedTitle": "密鑰（唯讀）",
     "telegramBotToken": "Telegram Bot Token",
     "openrouterApiKey": "OpenRouter API Key",
+    "xaiApiKey": "xAI API Key",
     "providers": "Providers",
     "opencodeTitle": "OpenCode",
     "opencodeAbsent": "未安裝",

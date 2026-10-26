@@ -782,6 +782,8 @@ async fn main() -> Result<()> {
 
     // ADR 0016: resolve `secret:openrouter.api_key` before providers are built.
     rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
+    // ADR-0044: resolve `secret:xai.api_key` on type=xai [[provider]] rows.
+    rustfox::secret_store::resolve_xai_api_keys(&mut config, &secret_bridge)?;
 
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config
