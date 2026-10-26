@@ -379,7 +379,10 @@ mod tests {
     #[test]
     fn mint_session_id_is_rustfox_prefixed_nonempty() {
         let id = mint_session_id();
-        assert!(id.starts_with("rustfox-"), "{id}");
+        assert!(
+            id.starts_with("rustfox-"),
+            "minted session id missing rustfox- prefix"
+        );
         assert!(id.len() > "rustfox-".len());
     }
 
