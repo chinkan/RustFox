@@ -61,10 +61,14 @@ export interface Agent {
   name: string
   model: string
   status: AgentStatus
-  /** ISO8601 or null (subagents never report activity yet). */
+  /** ISO8601 or null when the seat has no live activity. */
   lastActive: string | null
   /** "telegram+web" for the main agent, "subagent" for definitions. */
   platform: string
+  /** ADR-0050: seat can receive a live run signal (main is_processing / seat←run). */
+  live_signal: boolean
+  /** ADR-0050: inverse of live_signal — UI must not fake busy. */
+  definition_only: boolean
 }
 
 export interface Skill {

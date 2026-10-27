@@ -24,6 +24,7 @@ use rustfox::portal::{
     AgentOps, PortalState, SkillInfo,
 };
 use rustfox::scheduler::reminders::{ScheduledTask, ScheduledTaskStore};
+use rustfox::seat_run::SeatRunSignal;
 use rustfox::tool_registry::ToolUiMode;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,9 @@ struct FakeAgent {
     counters: FakeCounters,
     busy: Arc<AtomicBool>,
     model: Mutex<String>,
+    seat_run: SeatRunSignal,
+    /// Agent names that intentionally lack live-signal capability (definition-only).
+    definition_only: Mutex<Vec<String>>,
 }
 
 impl FakeAgent {
@@ -58,6 +62,8 @@ impl FakeAgent {
             counters: FakeCounters::default(),
             busy: Arc::new(AtomicBool::new(false)),
             model: Mutex::new("fake-model".into()),
+            seat_run: SeatRunSignal::new(),
+            definition_only: Mutex::new(Vec::new()),
         }
     }
 }
@@ -69,6 +75,17 @@ impl AgentOps for FakeAgent {
     fn is_processing(&self, _user_id: &str) -> BoxFuture<'_, bool> {
         let busy = self.busy.clone();
         Box::pin(async move { busy.load(Ordering::SeqCst) })
+    }
+    fn is_seat_running(&self, agent_name: &str) -> bool {
+        self.seat_run.is_running(agent_name)
+    }
+    fn seat_has_live_signal(&self, agent_name: &str) -> bool {
+        !self
+            .definition_only
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n == agent_name)
     }
     fn set_model(&self, model_id: String) -> BoxFuture<'_, anyhow::Result<()>> {
         self.counters.set_model_calls.fetch_add(1, Ordering::SeqCst);
@@ -1423,6 +1440,98 @@ async fn task_enable_unknown_id_404() {
     );
     let res = f.app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn agents_list_main_is_processing_marks_running() {
+    let f = fixture(with_token_token()).await;
+    f.fake.busy.store(true, Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/agents"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    let main = rows.iter().find(|r| r["id"] == "main").unwrap();
+    assert_eq!(main["status"], "running");
+    assert_eq!(main["live_signal"], true);
+    assert_eq!(main["definition_only"], false);
+    let sub = rows.iter().find(|r| r["name"] == "fake-agent").unwrap();
+    assert_eq!(sub["status"], "idle");
+    assert_eq!(sub["live_signal"], true);
+    assert_eq!(sub["definition_only"], false);
+}
+
+#[tokio::test]
+async fn agents_list_seat_run_tag_marks_named_seat_running_then_clears() {
+    let f = fixture(with_token_token()).await;
+    {
+        let _g = f.fake.seat_run.enter("fake-agent");
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(get("/api/agents"), TEST_TOKEN))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        let rows = body.as_array().unwrap();
+        let main = rows.iter().find(|r| r["id"] == "main").unwrap();
+        assert_eq!(main["status"], "idle", "untagged main must not fake busy");
+        let sub = rows.iter().find(|r| r["name"] == "fake-agent").unwrap();
+        assert_eq!(sub["status"], "running");
+        assert_eq!(sub["live_signal"], true);
+        assert_eq!(sub["definition_only"], false);
+        assert!(sub["lastActive"].as_str().is_some());
+    }
+    // Guard dropped → clear.
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/agents"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(res).await;
+    let sub = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "fake-agent")
+        .unwrap();
+    assert_eq!(sub["status"], "idle");
+    assert!(sub["lastActive"].is_null());
+}
+
+#[tokio::test]
+async fn agents_list_definition_only_never_fakes_busy() {
+    let f = fixture(with_token_token()).await;
+    f.fake
+        .definition_only
+        .lock()
+        .unwrap()
+        .push("fake-agent".into());
+    // Even if a stale tag were present, definition-only seats stay idle.
+    let _g = f.fake.seat_run.enter("fake-agent");
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/agents"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let sub = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "fake-agent")
+        .unwrap();
+    assert_eq!(sub["status"], "idle");
+    assert_eq!(sub["live_signal"], false);
+    assert_eq!(sub["definition_only"], true);
 }
 
 #[tokio::test]

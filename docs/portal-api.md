@@ -48,7 +48,7 @@ One generation per portal user at a time; concurrent `POST` → `409 chat_in_pro
 ## Agents (runtime status)
 
 ### GET /api/agents
-→ `200 [{"id":"main","name":"RustFox","model":"<current model>","status":"idle|running","lastActive":"<ISO8601|null>","subagents":n}]` — status from `is_processing("web"|"telegram")`; `subagents` = count of loaded agent definitions.
+→ `200 [{"id":"main"|"agent:<name>","name","model","status":"idle|running|error","lastActive":"<ISO8601|null>","platform":"telegram+web"|"subagent","live_signal":bool,"definition_only":bool}]` — ADR-0050 honesty: main `running` iff web/Telegram `is_processing`; a definition seat `running` iff an in-flight `invoke_agent` / tagged `spawn_agents` name is held in the seat←run flag. `live_signal=false` ⇒ `definition_only=true` and status stays `idle` (never invent busy). Pixel office UI is separate.
 
 ### GET /api/agents/skills
 → `200 [{"name","description","path","instruction":true|false}]` from the live `SkillRegistry`.

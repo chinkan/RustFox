@@ -196,6 +196,8 @@ pub struct Agent {
     pub supervisor: Arc<tokio::sync::RwLock<Option<Arc<crate::supervisor::Supervisor>>>>,
     /// Effective default schedule timezone (ADR-0022).
     pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
+    /// ADR-0050 / #309: in-flight invoke_agent / spawn_agents names for seat←run.
+    pub seat_run: crate::seat_run::SeatRunSignal,
 }
 
 /// A task parsed from the spawn_agents tool arguments, after validation.
@@ -205,6 +207,19 @@ struct AdHocTask {
     prompt: String,
     model: Option<String>,
     tools: Option<Vec<String>>,
+    /// Optional seat←run tag (`agent` / `name` on the task object). Ad-hoc
+    /// spawn still runs with `skill_name = None`; the tag only lights a seat.
+    seat_name: Option<String>,
+}
+
+/// Optional seat name from spawn_agents task/args (`agent` or `name`).
+fn spawn_seat_name(v: &Value) -> Option<String> {
+    v["agent"]
+        .as_str()
+        .or_else(|| v["name"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Build the unified `# Available Agents` section from line sources
@@ -383,6 +398,7 @@ impl Agent {
             )),
             supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             schedule_tz,
+            seat_run: crate::seat_run::SeatRunSignal::new(),
         }
     }
 
@@ -1420,6 +1436,7 @@ impl Agent {
                                                 .filter_map(|v| v.as_str().map(str::to_string))
                                                 .collect()
                                         }),
+                                        seat_name: spawn_seat_name(task),
                                     });
                                 }
                                 parsed
@@ -1443,6 +1460,7 @@ impl Agent {
                                             .filter_map(|v| v.as_str().map(str::to_string))
                                             .collect()
                                     }),
+                                    seat_name: spawn_seat_name(&args_owned),
                                 }]
                             };
                             // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
@@ -1470,6 +1488,7 @@ impl Agent {
                                     let p = task.prompt.clone();
                                     let m = task.model.clone();
                                     let t = task.tools.clone();
+                                    let seat = task.seat_name.clone();
                                     let a = agent.clone();
                                     let user_id = user_id.clone();
                                     let chat_id = chat_id.clone();
@@ -1483,6 +1502,8 @@ impl Agent {
                                         let delivery = crate::peer_invoke::tool_delivery_for_invoke(
                                             caller, None, &user_id, &chat_id,
                                         );
+                                        // ADR-0050: optional agent/name tags a seat for ad-hoc spawn.
+                                        let _seat = seat.as_deref().map(|n| a.seat_run.enter(n));
                                         a.run_subagent(
                                             None,
                                             &sp,
@@ -2361,6 +2382,10 @@ impl Agent {
         trace: Option<crate::loop_runner::TurnTrace>,
         parent_tools: Option<Vec<String>>,
     ) -> String {
+        // ADR-0050 seat←run: named invoke_agent (and named skill/agent packs)
+        // light the matching Portal seat until this call returns/cancels.
+        let _seat_run = skill_name.map(|n| self.seat_run.enter(n));
+
         // --- Ad-hoc mode (no predefined skill/agent) ---
         if skill_name.is_none() {
             // ADR-0033: no override → Active (`current_model`), not `[openrouter].model`.
@@ -2714,6 +2739,7 @@ impl Agent {
                                                     .filter_map(|v| v.as_str().map(str::to_string))
                                                     .collect()
                                             }),
+                                            seat_name: spawn_seat_name(task),
                                         });
                                     }
                                     parsed
@@ -2739,6 +2765,7 @@ impl Agent {
                                                 .filter_map(|v| v.as_str().map(str::to_string))
                                                 .collect()
                                         }),
+                                        seat_name: spawn_seat_name(&args_owned),
                                     }]
                                 };
                                 // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
@@ -2769,6 +2796,7 @@ impl Agent {
                                         let p = task.prompt.clone();
                                         let m = task.model.clone();
                                         let t = task.tools.clone();
+                                        let seat = task.seat_name.clone();
                                         let a = agent.clone();
                                         let user_id = user_id.clone();
                                         let chat_id = chat_id.clone();
@@ -2783,6 +2811,9 @@ impl Agent {
                                                 crate::peer_invoke::tool_delivery_for_invoke(
                                                     caller, None, &user_id, &chat_id,
                                                 );
+                                            // ADR-0050: optional agent/name tags a seat for ad-hoc spawn.
+                                            let _seat =
+                                                seat.as_deref().map(|n| a.seat_run.enter(n));
                                             a.run_subagent(
                                                 None,
                                                 &sp,

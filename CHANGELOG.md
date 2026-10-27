@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Portal seat←run signal / API honesty (#309, ADR-0050 Decision 8 Dev slice):** `GET /api/agents` marks main `running` from `is_processing` and definition seats `running` only when an in-flight `invoke_agent` / tagged `spawn_agents` name is held in a lightweight in-process refcount flag (cleared on completion/cancel). Rows carry `live_signal` + `definition_only` so clients never fake busy. Pixel office UI is a follow-up. Soft = unit/portal API; no Telegram Soft; does not block v1.0.8 Soft/tag. Refs #309.
+
 ### Fixed
 - **OpenCode / OpenAI-compat DSML strip+recover (#307):** when DeepSeek DSML (or Kimi) tool markup lands in `content` with empty `tool_calls`, recover into `tool_calls` or strip closers-only / residual tags so FinalResponse never posts raw DSML to Telegram. Mirrors OpenRouter kimi parse on the Active OpenCode Go path. Soft = unit fixtures only; no TG Soft; no tag. Closes #307.
 

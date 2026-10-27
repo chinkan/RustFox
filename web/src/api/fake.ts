@@ -7,11 +7,11 @@ import type { Api } from './client'
 
 export function fakeApi(over: Partial<Api> = {}): Api {
   const agents = [
-    { id: 'main', name: 'rustfox', model: 'anthropic/claude-opus-4.8', status: 'idle' as const, lastActive: null, platform: 'telegram+web' },
-    { id: 'agent:verifier', name: 'verifier', model: 'openai/gpt-5.5', status: 'running' as const, lastActive: null, platform: 'subagent' },
-    { id: 'agent:exp-executor', name: 'exp-executor', model: 'local/qwen3.6', status: 'running' as const, lastActive: null, platform: 'subagent' },
-    { id: 'agent:exp-explorer', name: 'exp-explorer', model: 'anthropic/claude-opus-4.8', status: 'idle' as const, lastActive: null, platform: 'subagent' },
-    { id: 'agent:thread-writer-hk', name: 'thread-writer-hk', model: 'anthropic/claude-sonnet-4.8', status: 'error' as const, lastActive: null, platform: 'subagent' },
+    { id: 'main', name: 'rustfox', model: 'anthropic/claude-opus-4.8', status: 'idle' as const, lastActive: null, platform: 'telegram+web', live_signal: true, definition_only: false },
+    { id: 'agent:verifier', name: 'verifier', model: 'openai/gpt-5.5', status: 'running' as const, lastActive: null, platform: 'subagent', live_signal: true, definition_only: false },
+    { id: 'agent:exp-executor', name: 'exp-executor', model: 'local/qwen3.6', status: 'running' as const, lastActive: null, platform: 'subagent', live_signal: true, definition_only: false },
+    { id: 'agent:exp-explorer', name: 'exp-explorer', model: 'anthropic/claude-opus-4.8', status: 'idle' as const, lastActive: null, platform: 'subagent', live_signal: true, definition_only: false },
+    { id: 'agent:thread-writer-hk', name: 'thread-writer-hk', model: 'anthropic/claude-sonnet-4.8', status: 'error' as const, lastActive: null, platform: 'subagent', live_signal: true, definition_only: false },
   ]
   return {
     login: async () => ({ username: 'web', role: 'admin' }),

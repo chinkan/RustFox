@@ -22,6 +22,11 @@ fn truncate_chars(s: &str, max: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// GET /api/agents — the main agent plus loaded subagent definitions.
+///
+/// ADR-0050 / #309 honesty: main is `running` iff web/Telegram `is_processing`;
+/// a definition seat is `running` iff an in-flight invoke/spawn is tagged to
+/// that agent name. Rows always carry `live_signal` / `definition_only` so
+/// clients never fake busy without a signal.
 pub async fn agents(
     State(state): State<PortalState>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
@@ -36,28 +41,37 @@ pub async fn agents(
     }
 
     let mut out = Vec::new();
-    let status = if web_active || telegram_active {
-        "running"
-    } else {
-        "idle"
-    };
+    // Main always has live-signal capability via is_processing.
+    let (main_status, main_definition_only) =
+        crate::seat_run::seat_status(true, web_active || telegram_active);
     out.push(json!({
         "id": "main",
         "name": "rustfox",
         "model": model,
-        "status": status,
+        "status": main_status,
         "lastActive": chrono::Utc::now().to_rfc3339(),
         "platform": "telegram+web",
+        "live_signal": true,
+        "definition_only": main_definition_only,
     }));
 
     for skill in state.agent.agent_entries().await {
+        let live_signal = state.agent.seat_has_live_signal(&skill.name);
+        let flagged = live_signal && state.agent.is_seat_running(&skill.name);
+        let (status, definition_only) = crate::seat_run::seat_status(live_signal, flagged);
         out.push(json!({
             "id": format!("agent:{}", skill.name),
             "name": skill.name,
             "model": skill.model.clone().unwrap_or_else(|| model.clone()),
-            "status": "idle",
-            "lastActive": null,
+            "status": status,
+            "lastActive": if flagged {
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339())
+            } else {
+                serde_json::Value::Null
+            },
             "platform": "subagent",
+            "live_signal": live_signal,
+            "definition_only": definition_only,
         }));
     }
     Ok(Json(serde_json::Value::Array(out)))
