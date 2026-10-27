@@ -98,6 +98,10 @@ pub enum LoopOutcome {
 pub const EMPTY_PROGRESS_CLARIFY: &str =
     "I wasn't making progress on that. Could you clarify what you'd like me to do next?";
 
+/// ADR-0045 / #315: one-shot nudge after empty-progress threshold so the model
+/// can produce a real FinalResponse; post-guard rewrites dishonest lost-context FN.
+pub const EMPTY_PROGRESS_CLARIFY_NUDGE: &str = "[System] You weren't making progress on the prior step. Ask a short clarifying question about the user's latest message. Do not claim the inbound message was empty or that prior conversation context was lost. Do not list capabilities or greet as if starting fresh.";
+
 /// ADR-0045 / #298 short meta-token allowlist (trim; optional trailing `.`).
 /// `Done` deliberately omitted — legitimate FinalResponse `"done"` / `"Done."` must not clarify.
 const META_TOKEN_ALLOWLIST: &[&str] = &["Output", "Emit", "Final", "Write", "Ok"];
@@ -272,6 +276,9 @@ impl<'a> AgenticLoop<'a> {
         let has_prior_continuity =
             crate::cold_intro::has_prior_continuity(&messages.messages_snapshot());
         let mut cold_intro_regen_used = false;
+        // ADR-0045 / #315: armed when empty-progress threshold forces clarify;
+        // subsequent FinalResponse lost-context claims (menu or not) rewrite.
+        let mut after_empty_progress_clarify = false;
 
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
@@ -358,6 +365,23 @@ impl<'a> AgenticLoop<'a> {
                             threshold = self.config.loop_detection_threshold,
                             "Empty-progress loop detected — forcing clarify FinalResponse"
                         );
+                        // First hit: arm #315 post-clarify guard + nudge once so a
+                        // dishonest lost-context / menu regen can be caught on the
+                        // shared FinalResponse path. Still-empty after arm → ship
+                        // fixed clarify (ADR-0045 B unchanged outcome).
+                        if !after_empty_progress_clarify {
+                            after_empty_progress_clarify = true;
+                            messages.push_user(ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(MessageContent::from_text(
+                                    EMPTY_PROGRESS_CLARIFY_NUDGE.to_string(),
+                                )),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            });
+                            continue;
+                        }
                         return Ok(LoopOutcome::FinalResponse {
                             text: EMPTY_PROGRESS_CLARIFY.to_string(),
                             iterations,
@@ -571,6 +595,19 @@ impl<'a> AgenticLoop<'a> {
                     }
                     tracing::warn!(
                         "Anti cold-intro: regenerate still cold-intro; rewriting to clarify"
+                    );
+                    text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
+                }
+
+                // ADR-0045 / #315: after empty-progress force-clarify, lost-context /
+                // empty-inbound claims (with or without ≥2 menu lines) → rewrite.
+                // Closes the C1 hole where menu-reject regen ships lost-context alone.
+                if after_empty_progress_clarify
+                    && has_prior_continuity
+                    && crate::cold_intro::has_lost_context_signal(&text)
+                {
+                    tracing::warn!(
+                        "Post–empty-progress: lost-context / empty-inbound FinalResponse — rewriting to clarify"
                     );
                     text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
                 }
