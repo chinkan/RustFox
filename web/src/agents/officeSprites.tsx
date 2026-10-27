@@ -48,6 +48,7 @@ export function OfficeDecor() {
     <div className="office-decor" aria-hidden="true">
       <div className="office-wall" aria-hidden="true">
         <Window />
+        <PawFrieze />
         <Window />
         <div className="office-wall-end">
           <Poster />
@@ -87,6 +88,28 @@ function Window() {
   )
 }
 
+function PawFrieze() {
+  return (
+    <Tile piece="paws" width={22} height={8}>
+      <FoxMark x={0} y={1} />
+      <FoxMark x={8} y={1} />
+      <FoxMark x={16} y={1} />
+    </Tile>
+  )
+}
+
+function FoxMark({ x, y }: { x: number; y: number }) {
+  return (
+    <g data-fox-mark="fox">
+      <rect className="px-fur" x={x} y={y} width="2" height="2" />
+      <rect className="px-fur" x={x + 4} y={y} width="2" height="2" />
+      <rect className="px-fur" x={x + 1} y={y + 2} width="4" height="3" />
+      <rect className="px-cream" x={x + 2} y={y + 3} width="2" height="1" />
+      <rect className="px-ink" x={x + 2} y={y + 3} width="1" height="1" />
+    </g>
+  )
+}
+
 function Door() {
   return (
     <Tile piece="door" width={16} height={36}>
@@ -94,6 +117,7 @@ function Door() {
       <rect className="px-desk-dark" x="1" y="1" width="14" height="2" />
       <rect className="px-desk" x="2" y="4" width="12" height="13" />
       <rect className="px-desk-dark" x="3" y="5" width="10" height="1" />
+      <FoxMark x={5} y={7} />
       <rect className="px-desk" x="2" y="19" width="12" height="15" />
       <rect className="px-desk-dark" x="3" y="20" width="10" height="1" />
       <rect className="px-ink" x="2" y="17" width="12" height="2" />
@@ -115,6 +139,7 @@ function Rug() {
       <rect className="px-scarf" x="24" y="1" width="3" height="10" />
       <rect className="px-desk-dark" x="2" y="4" width="24" height="1" />
       <rect className="px-desk-dark" x="2" y="7" width="24" height="1" />
+      <FoxMark x={11} y={3} />
     </Tile>
   )
 }
@@ -153,7 +178,7 @@ function Shelf() {
       <rect className="px-scarf" x="17" y="16" width="4" height="6" />
       <rect className="px-desk-dark" x="1" y="22" width="22" height="2" />
       <rect className="px-key" x="3" y="25" width="8" height="5" />
-      <rect className="px-desk" x="13" y="26" width="8" height="4" />
+      <FoxMark x={14} y={25} />
     </Tile>
   )
 }
@@ -167,6 +192,7 @@ function Cabinet() {
       <rect className="px-ink" x="1" y="11" width="16" height="1" />
       <rect className="px-ink" x="1" y="20" width="16" height="1" />
       <rect className="px-ink" x="7" y="6" width="4" height="2" />
+      <FoxMark x={6} y={4} />
       <rect className="px-ink" x="7" y="15" width="4" height="2" />
       <rect className="px-ink" x="7" y="24" width="4" height="2" />
     </Tile>
@@ -202,6 +228,7 @@ function Clock() {
 function Poster() {
   return (
     <Tile piece="poster" width={18} height={24}>
+      <g data-fox-mark="poster">
       <rect className="px-ink" width="18" height="24" />
       <rect className="px-cream" x="1" y="1" width="16" height="22" />
       <rect className="px-fur" x="4" y="3" width="3" height="3" />
@@ -218,6 +245,7 @@ function Poster() {
       <rect className="px-cream" x="1" y="16" width="2" height="2" />
       <rect className="px-desk-dark" x="6" y="17" width="2" height="4" />
       <rect className="px-desk-dark" x="10" y="17" width="2" height="4" />
+      </g>
     </Tile>
   )
 }

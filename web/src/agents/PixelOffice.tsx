@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import type { Agent } from '../api/types'
-import { FoxSprite } from './FoxSprite'
+import { FoxSprite, type FoxFacing } from './FoxSprite'
 import { OfficeDecor } from './officeSprites'
 import { foxVariant, roamDelaySeconds, seatView, shouldRoam, visibleDeskSlice } from './seats'
 
@@ -35,9 +35,9 @@ export function PixelOffice({
           </div>
         ) : (
           <div className="office-scene">
-            <div className="office-row">
+            <div className="office-row" data-row="top">
               {top.map((agent) => (
-                <DeskCard key={agent.id} agent={agent} motion={motion} />
+                <DeskCard key={agent.id} agent={agent} motion={motion} facing="down" />
               ))}
             </div>
             <div className="office-aisle" data-aisle="roam">
@@ -59,9 +59,9 @@ export function PixelOffice({
                 )
               })}
             </div>
-            <div className="office-row">
+            <div className="office-row" data-row="bottom">
               {bottom.map((agent) => (
-                <DeskCard key={agent.id} agent={agent} motion={motion} />
+                <DeskCard key={agent.id} agent={agent} motion={motion} facing="up" />
               ))}
               {overflow > 0 ? (
                 <button type="button" className="agent-desk-more" onClick={onShowOverflow}>
@@ -76,7 +76,15 @@ export function PixelOffice({
   )
 }
 
-function DeskCard({ agent, motion }: { agent: Agent; motion: boolean }) {
+function DeskCard({
+  agent,
+  motion,
+  facing,
+}: {
+  agent: Agent
+  motion: boolean
+  facing: FoxFacing
+}) {
   const { t } = useTranslation()
   const view = seatView(agent)
   const variant = foxVariant(agent.name)
@@ -97,10 +105,11 @@ function DeskCard({ agent, motion }: { agent: Agent; motion: boolean }) {
       data-coat={variant.coat}
       data-accessory={variant.accessory}
       data-desk-prop={variant.deskProp}
+      data-facing={facing}
       aria-label={nameBits.join(', ')}
     >
       <div className={returning ? 'fox-arriving' : undefined}>
-        <FoxSprite pose={view.pose} variant={variant} mode={roaming ? 'desk' : 'seat'} />
+        <FoxSprite pose={view.pose} variant={variant} mode={roaming ? 'desk' : 'seat'} facing={facing} />
       </div>
       <strong className="agent-desk-name">{agent.name}</strong>
       <span className="agent-desk-model mono">{agent.model}</span>

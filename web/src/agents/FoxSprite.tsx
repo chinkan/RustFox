@@ -5,16 +5,22 @@ import type { FoxAccessory, FoxProp, FoxVariant } from './seats'
  * RustFox pixel fox (ears, snout, white-tipped tail). Not a person.
  * `walk` is the idle roam pose. Desk poses stay idle / running / error.
  */
+export type FoxFacing = 'down' | 'up'
+
 export function FoxSprite({
   pose,
   variant,
   mode = 'seat',
+  facing = 'down',
 }: {
   pose: AgentStatus
   variant: FoxVariant
   mode?: 'seat' | 'walk' | 'desk'
+  /** `down` looks toward the viewer and the aisle below. `up` looks toward the aisle above. */
+  facing?: FoxFacing
 }) {
   const shown = mode === 'walk' ? 'walk' : pose
+  const seatFacing: FoxFacing = mode === 'walk' ? 'down' : facing
   return (
     <svg
       className={`seat-sprite pose-${shown} coat-${variant.coat}`}
@@ -27,16 +33,17 @@ export function FoxSprite({
       data-coat={variant.coat}
       data-accessory={variant.accessory}
       data-desk-prop={variant.deskProp}
+      data-facing={seatFacing}
     >
-      {mode !== 'walk' ? <Desk pose={pose} prop={variant.deskProp} /> : null}
+      {mode !== 'walk' ? <Desk pose={pose} prop={variant.deskProp} facing={seatFacing} /> : null}
       {mode === 'desk' ? null : shown === 'walk' ? (
         <WalkFox accessory={variant.accessory} />
       ) : pose === 'idle' ? (
-        <IdleFox accessory={variant.accessory} />
+        <IdleFox accessory={variant.accessory} facing={seatFacing} />
       ) : pose === 'running' ? (
-        <RunningFox accessory={variant.accessory} />
+        <RunningFox accessory={variant.accessory} facing={seatFacing} />
       ) : (
-        <ErrorFox accessory={variant.accessory} />
+        <ErrorFox accessory={variant.accessory} facing={seatFacing} />
       )}
     </svg>
   )
@@ -45,10 +52,10 @@ export function FoxSprite({
 /** Seat line shared by the chair and the fox's feet. Haunches rest on y=26. */
 const SEAT_Y = 26
 
-function Desk({ pose, prop }: { pose: AgentStatus; prop: FoxProp }) {
+function Desk({ pose, prop, facing }: { pose: AgentStatus; prop: FoxProp; facing: FoxFacing }) {
   const screen = pose === 'running' ? 'px-screen-run' : pose === 'error' ? 'px-screen-err' : 'px-screen-idle'
   return (
-    <g data-fox-part="desk">
+    <g data-fox-part="desk" data-facing={facing}>
       <rect className="px-bezel" x="17" y="0" width="14" height="8" />
       <rect className={screen} x="19" y="2" width="10" height="5" />
       {pose === 'error' ? (
@@ -154,41 +161,41 @@ function Accessory({
   )
 }
 
-function IdleFox({ accessory }: { accessory: FoxAccessory }) {
+function IdleFox({ accessory, facing }: { accessory: FoxAccessory; facing: FoxFacing }) {
   return (
     <g className="px-lounge">
       <SeatTail />
       <Haunches />
       <Feet />
       <rect className="px-fur" x="18" y="16" width="12" height="10" />
-      <rect className="px-cream" x="20" y="20" width="8" height="3" />
-      <Head accessory={accessory} mood="idle" />
+      {facing === 'down' ? <rect className="px-cream" x="20" y="20" width="8" height="3" /> : null}
+      <Head accessory={accessory} mood="idle" facing={facing} />
       <rect className="px-fur" x="20" y="22" width="3" height="2" />
       <rect className="px-fur" x="25" y="22" width="3" height="2" />
     </g>
   )
 }
 
-function RunningFox({ accessory }: { accessory: FoxAccessory }) {
+function RunningFox({ accessory, facing }: { accessory: FoxAccessory; facing: FoxFacing }) {
   return (
     <g className="px-arrive">
       <SeatTail />
       <Haunches />
       <Feet />
       <rect className="px-fur" x="18" y="15" width="12" height="11" />
-      <rect className="px-cream" x="20" y="20" width="8" height="3" />
-      <Head accessory={accessory} mood="running" />
+      {facing === 'down' ? <rect className="px-cream" x="20" y="20" width="8" height="3" /> : null}
+      <Head accessory={accessory} mood="running" facing={facing} />
       <g className="px-arm">
-        <rect className="px-fur" x="17" y="15" width="4" height="2" />
-        <rect className="px-fur" x="27" y="15" width="4" height="2" />
-        <rect className="px-shade" x="18" y="17" width="3" height="1" />
-        <rect className="px-shade" x="27" y="17" width="3" height="1" />
+        <rect className="px-fur" x="17" y={facing === 'up' ? 12 : 15} width="4" height="3" />
+        <rect className="px-fur" x="27" y={facing === 'up' ? 12 : 15} width="4" height="3" />
+        <rect className="px-shade" x="18" y={facing === 'up' ? 14 : 17} width="3" height="1" />
+        <rect className="px-shade" x="27" y={facing === 'up' ? 14 : 17} width="3" height="1" />
       </g>
     </g>
   )
 }
 
-function ErrorFox({ accessory }: { accessory: FoxAccessory }) {
+function ErrorFox({ accessory, facing }: { accessory: FoxAccessory; facing: FoxFacing }) {
   return (
     <g>
       <g className="px-alert" data-fox-part="tail">
@@ -199,10 +206,10 @@ function ErrorFox({ accessory }: { accessory: FoxAccessory }) {
       <Haunches />
       <Feet />
       <rect className="px-fur" x="18" y="15" width="12" height="11" />
-      <Head accessory={accessory} mood="error" />
+      <Head accessory={accessory} mood="error" facing={facing} />
       <g className="px-alert">
-        <rect className="px-fur" x="15" y="14" width="3" height="3" />
-        <rect className="px-fur" x="30" y="14" width="3" height="3" />
+        <rect className="px-fur" x="15" y={facing === 'up' ? 12 : 14} width="3" height="3" />
+        <rect className="px-fur" x="30" y={facing === 'up' ? 12 : 14} width="3" height="3" />
       </g>
     </g>
   )
@@ -231,9 +238,39 @@ function SeatTail() {
   )
 }
 
-function Head({ accessory, mood }: { accessory: FoxAccessory; mood: 'idle' | 'running' | 'error' }) {
+function Head({
+  accessory,
+  mood,
+  facing,
+}: {
+  accessory: FoxAccessory
+  mood: 'idle' | 'running' | 'error'
+  facing: FoxFacing
+}) {
+  if (facing === 'up') {
+    return (
+      <g data-facing="up">
+        <rect className="px-fur" x="18" y="12" width="12" height="6" />
+        <g data-fox-part="ears">
+          <rect className="px-fur" x="17" y="10" width="4" height="3" />
+          <rect className="px-fur" x="27" y="10" width="4" height="3" />
+          <rect className="px-shade" x="18" y="11" width="2" height="2" />
+          <rect className="px-shade" x="28" y="11" width="2" height="2" />
+        </g>
+        <rect className="px-ink" x="21" y="11" width="2" height="2" />
+        <rect className="px-white" x="21" y="11" width="1" height="1" />
+        <rect className="px-ink" x="25" y="11" width="2" height="2" />
+        <rect className="px-white" x="25" y="11" width="1" height="1" />
+        <g data-fox-part="snout">
+          <rect className="px-cream" x="21" y="6" width="6" height="5" />
+          <rect className="px-ink" x="23" y="6" width="2" height="2" />
+        </g>
+        <Accessory kind={accessory} x={19} y={12} />
+      </g>
+    )
+  }
   return (
-    <g>
+    <g data-facing="down">
       <g data-fox-part="ears">
         <rect className="px-fur" x="18" y="6" width="3" height="4" />
         <rect className="px-fur" x="27" y="6" width="3" height="4" />

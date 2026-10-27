@@ -266,6 +266,32 @@ describe('PixelOffice', () => {
     expect(svg?.querySelector('[data-fox-part="desk"]')).toBeTruthy()
   })
 
+  it('faces the top row down and the bottom row up, with fox marks around the room', () => {
+    render(
+      <PixelOffice
+        agents={[
+          row(0, { status: 'running', name: 'rustfox' }),
+          row(1, { status: 'running', name: 'writer', id: 'agent:writer' }),
+        ]}
+        motion={false}
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const office = screen.getByRole('region', { name: 'Agent office' })
+    const top = screen.getByRole('article', { name: /rustfox/i })
+    const bottom = screen.getByRole('article', { name: /writer/i })
+    expect(top.getAttribute('data-facing')).toBe('down')
+    expect(bottom.getAttribute('data-facing')).toBe('up')
+    expect(top.querySelector('svg')?.getAttribute('data-facing')).toBe('down')
+    expect(bottom.querySelector('svg')?.getAttribute('data-facing')).toBe('up')
+    const downSnout = Number(top.querySelector('[data-fox-part="snout"] rect')?.getAttribute('y'))
+    const upSnout = Number(bottom.querySelector('[data-fox-part="snout"] rect')?.getAttribute('y'))
+    expect(upSnout).toBeLessThan(downSnout)
+    expect(bottom.querySelector('[data-fox-part="paws"]')?.getAttribute('data-seat-y')).toBe('26')
+    expect(bottom.querySelector('[data-fox-part="keyboard"]')).toBeTruthy()
+    expect(office.querySelectorAll('[data-fox-mark]').length).toBeGreaterThanOrEqual(4)
+  })
+
   it('frames the floor with office décor outside the roam aisle and the desks', () => {
     render(
       <PixelOffice
