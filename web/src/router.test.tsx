@@ -7,6 +7,7 @@ import { authStore, bindAuthApi, __resetAuthForTests, type RouterContext } from 
 import { BootWatcher } from './hooks/useBootWatcher'
 import { ChatSession } from './hooks/useChatStream'
 import { fakeApi } from './api/fake'
+import { __resetOfficePrefsForTests } from './agents/officePrefs'
 
 /**
  * Integration tests: mount the real router (memory history) against a FAKE
@@ -50,6 +51,7 @@ beforeEach(() => {
   __resetAuthForTests()
   localStorage.clear()
   sessionStorage.clear()
+  __resetOfficePrefsForTests()
 })
 
 /** Seed a session via the fake login round-trip. */
@@ -196,6 +198,76 @@ describe('type-safe search params', () => {
       // zod `.catch()` restores the default instead of crashing the route.
       expect(router.state.location.search).toMatchObject({ status: 'all' })
     })
+  })
+
+  it('opens the pixel office by default and keeps the table as a toggle', async () => {
+    await signIn()
+    const ctx = makeContext()
+    const router = renderAt('/agents', ctx)
+    const office = await screen.findByRole('region', { name: 'Agent office' })
+    expect(office.getAttribute('data-motion')).toBe('on')
+    expect(await screen.findByRole('article', { name: /rustfox/i })).toBeTruthy()
+    expect(screen.queryByRole('columnheader', { name: 'Agent' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Table' }))
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ view: 'table' })
+    })
+    expect(screen.getByRole('columnheader', { name: 'Agent' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Agent office' })).toBeNull()
+
+    const agentsQuery = ctx.queryClient.getQueryCache().find({ queryKey: ['agents'] })
+    const observer = agentsQuery?.observers[0]
+    const interval = observer?.options.refetchInterval
+    expect(typeof interval).toBe('function')
+    if (typeof interval === 'function' && agentsQuery) {
+      expect(interval(agentsQuery)).toBe(4000)
+    }
+    expect(observer?.options.refetchIntervalInBackground).toBe(false)
+  })
+
+  it('settings can disable office animations for the agents page', async () => {
+    await signIn()
+    const router = renderAt('/settings', makeContext())
+    const box = await screen.findByRole('checkbox', { name: 'Disable office animations' })
+    expect((box as HTMLInputElement).checked).toBe(false)
+    fireEvent.click(box)
+    await router.navigate({ to: '/agents' })
+    const office = await screen.findByRole('region', { name: 'Agent office' })
+    expect(office.getAttribute('data-motion')).toBe('off')
+  })
+
+  it('shows a subagent running when live_signal is true and definition_only is false', async () => {
+    await signIn()
+    renderAt('/agents', makeContext())
+    const desk = await screen.findByRole('article', { name: /exp-executor/i })
+    expect(desk.getAttribute('data-pose')).toBe('running')
+    expect(desk.getAttribute('data-definition-only')).toBe('false')
+    expect(desk.textContent).toContain('Running')
+    expect(desk.textContent).not.toContain('Definition only')
+  })
+
+  it('labels a seat definition-only when definition_only is set or live_signal is false', async () => {
+    await signIn()
+    renderAt('/agents', makeContext({
+      listAgents: async () => [
+        {
+          id: 'agent:legacy-def',
+          name: 'legacy-def',
+          model: 'm',
+          status: 'running' as const,
+          lastActive: null,
+          platform: 'subagent',
+          live_signal: false,
+          definition_only: true,
+        },
+      ],
+    }))
+    const desk = await screen.findByRole('article', { name: /legacy-def/i })
+    expect(desk.getAttribute('data-pose')).toBe('idle')
+    expect(desk.textContent).toContain('Definition only')
+    expect(desk.textContent).toContain('No live run')
+    expect(desk.textContent).not.toContain('Running')
   })
 })
 
