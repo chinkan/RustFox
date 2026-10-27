@@ -18,9 +18,9 @@ export function FoxSprite({
   return (
     <svg
       className={`seat-sprite pose-${shown} coat-${variant.coat}`}
-      viewBox="0 0 34 32"
-      width={mode === 'walk' ? 64 : 88}
-      height={mode === 'walk' ? 52 : 82}
+      viewBox={mode === 'walk' ? '0 0 34 32' : '0 0 48 40'}
+      width={mode === 'walk' ? 68 : 96}
+      height={mode === 'walk' ? 64 : 80}
       shapeRendering="crispEdges"
       aria-hidden="true"
       data-character={mode === 'desk' ? undefined : 'fox'}
@@ -42,25 +42,34 @@ export function FoxSprite({
   )
 }
 
+/** Seat line shared by the chair and the fox's feet. Haunches rest on y=26. */
+const SEAT_Y = 26
+
 function Desk({ pose, prop }: { pose: AgentStatus; prop: FoxProp }) {
   const screen = pose === 'running' ? 'px-screen-run' : pose === 'error' ? 'px-screen-err' : 'px-screen-idle'
   return (
     <g data-fox-part="desk">
-      <rect className="px-bezel" x="22" y="2" width="10" height="9" />
-      <rect className={screen} x="24" y="4" width="6" height="5" />
+      <rect className="px-bezel" x="17" y="0" width="14" height="8" />
+      <rect className={screen} x="19" y="2" width="10" height="5" />
       {pose === 'error' ? (
         <g className="px-alert">
-          <rect className="px-ink" x="26" y="5" width="1" height="2" />
-          <rect className="px-ink" x="26" y="8" width="1" height="1" />
+          <rect className="px-ink" x="23" y="3" width="2" height="2" />
+          <rect className="px-ink" x="23" y="6" width="2" height="1" />
         </g>
       ) : null}
-      <rect className="px-bezel" x="26" y="11" width="2" height="3" />
+      <rect className="px-bezel" x="22" y="8" width="4" height="2" />
+      <rect className="px-desk" x="4" y="12" width="40" height="6" />
+      <rect className="px-desk-dark" x="4" y="18" width="40" height="3" />
+      <rect className="px-desk-dark" x="6" y="21" width="3" height="6" />
+      <rect className="px-desk-dark" x="39" y="21" width="3" height="6" />
       <DeskProp prop={prop} />
-      <rect className="px-desk" x="0" y="22" width="34" height="3" />
-      <rect className="px-desk-dark" x="0" y="25" width="34" height="3" />
-      <rect className="px-desk-dark" x="3" y="28" width="2" height="3" />
-      <rect className="px-desk-dark" x="29" y="28" width="2" height="3" />
-      {pose === 'running' ? <rect className="px-key" x="13" y="20" width="10" height="2" /> : null}
+      {pose === 'running' ? <rect className="px-key" x="16" y="14" width="16" height="3" data-fox-part="keyboard" /> : null}
+      <g data-fox-part="chair" data-seat-y={SEAT_Y}>
+        <rect className="px-ink" x="16" y="24" width="16" height="2" />
+        <rect className="px-key" x="14" y={SEAT_Y} width="20" height="4" />
+        <rect className="px-ink" x="15" y="30" width="2" height="7" />
+        <rect className="px-ink" x="31" y="30" width="2" height="7" />
+      </g>
     </g>
   )
 }
@@ -69,32 +78,33 @@ function DeskProp({ prop }: { prop: FoxProp }) {
   if (prop === 'plant') {
     return (
       <g data-fox-part="prop" data-prop="plant">
-        <rect className="px-leaf" x="20" y="14" width="2" height="3" />
-        <rect className="px-leaf" x="18" y="15" width="2" height="2" />
-        <rect className="px-desk-dark" x="19" y="17" width="3" height="2" />
+        <rect className="px-leaf" x="6" y="7" width="3" height="4" />
+        <rect className="px-leaf" x="4" y="9" width="3" height="3" />
+        <rect className="px-desk-dark" x="5" y="12" width="4" height="2" />
+        <rect className="px-ink" x="5" y="14" width="4" height="1" />
       </g>
     )
   }
   if (prop === 'mug') {
     return (
       <g data-fox-part="prop" data-prop="mug">
-        <rect className="px-cream" x="19" y="15" width="3" height="3" />
-        <rect className="px-shade" x="22" y="16" width="1" height="2" />
+        <rect className="px-cream" x="38" y="13" width="4" height="4" />
+        <rect className="px-shade" x="42" y="14" width="1" height="2" />
       </g>
     )
   }
   if (prop === 'lamp') {
     return (
       <g data-fox-part="prop" data-prop="lamp">
-        <rect className="px-lamp" x="19" y="13" width="3" height="2" />
-        <rect className="px-ink" x="20" y="15" width="1" height="4" />
+        <rect className="px-lamp" x="37" y="9" width="5" height="3" />
+        <rect className="px-ink" x="39" y="12" width="1" height="5" />
       </g>
     )
   }
   return (
     <g data-fox-part="prop" data-prop="papers">
-      <rect className="px-white" x="18" y="16" width="4" height="3" />
-      <rect className="px-cream" x="19" y="15" width="4" height="2" />
+      <rect className="px-white" x="36" y="13" width="6" height="4" />
+      <rect className="px-cream" x="37" y="12" width="6" height="3" />
     </g>
   )
 }
@@ -147,28 +157,14 @@ function Accessory({
 function IdleFox({ accessory }: { accessory: FoxAccessory }) {
   return (
     <g className="px-lounge">
-      <rect className="px-desk-dark" x="1" y="8" width="3" height="14" />
-      <rect className="px-fur" x="6" y="14" width="16" height="4" />
-      <rect className="px-cream" x="10" y="16" width="6" height="2" />
-      <rect className="px-fur" x="16" y="9" width="8" height="5" />
-      <g data-fox-part="ears">
-        <rect className="px-fur" x="16" y="6" width="2" height="2" />
-        <rect className="px-fur" x="15" y="8" width="4" height="2" />
-        <rect className="px-shade" x="16" y="8" width="2" height="1" />
-      </g>
-      <rect className="px-ink" x="20" y="11" width="3" height="1" />
-      <g data-fox-part="snout">
-        <rect className="px-cream" x="22" y="10" width="5" height="3" />
-        <rect className="px-ink" x="26" y="11" width="1" height="1" />
-      </g>
-      <Accessory kind={accessory} x={18} y={8} />
-      <rect className="px-fur" x="12" y="12" width="3" height="2" />
-      <rect className="px-fur" x="24" y="18" width="5" height="2" />
-      <g data-fox-part="tail">
-        <rect className="px-fur" x="3" y="15" width="5" height="4" />
-        <rect className="px-shade" x="1" y="18" width="3" height="2" />
-        <rect className="px-cream" x="0" y="19" width="2" height="2" />
-      </g>
+      <SeatTail />
+      <Haunches />
+      <Feet />
+      <rect className="px-fur" x="18" y="16" width="12" height="10" />
+      <rect className="px-cream" x="20" y="20" width="8" height="3" />
+      <Head accessory={accessory} mood="idle" />
+      <rect className="px-fur" x="20" y="22" width="3" height="2" />
+      <rect className="px-fur" x="25" y="22" width="3" height="2" />
     </g>
   )
 }
@@ -176,31 +172,17 @@ function IdleFox({ accessory }: { accessory: FoxAccessory }) {
 function RunningFox({ accessory }: { accessory: FoxAccessory }) {
   return (
     <g className="px-arrive">
-      <g data-fox-part="ears">
-        <rect className="px-fur" x="11" y="3" width="2" height="2" />
-        <rect className="px-fur" x="10" y="5" width="4" height="2" />
-        <rect className="px-shade" x="11" y="5" width="2" height="1" />
-      </g>
-      <rect className="px-fur" x="8" y="7" width="9" height="5" />
-      <rect className="px-ink" x="13" y="8" width="2" height="2" />
-      <rect className="px-white" x="13" y="8" width="1" height="1" />
-      <g data-fox-part="snout">
-        <rect className="px-cream" x="15" y="9" width="4" height="3" />
-        <rect className="px-ink" x="18" y="10" width="1" height="1" />
-      </g>
-      <Accessory kind={accessory} x={11} y={7} />
-      <rect className="px-fur" x="7" y="12" width="10" height="5" />
-      <rect className="px-cream" x="9" y="14" width="4" height="2" />
+      <SeatTail />
+      <Haunches />
+      <Feet />
+      <rect className="px-fur" x="18" y="15" width="12" height="11" />
+      <rect className="px-cream" x="20" y="20" width="8" height="3" />
+      <Head accessory={accessory} mood="running" />
       <g className="px-arm">
-        <rect className="px-fur" x="14" y="16" width="3" height="2" />
-        <rect className="px-fur" x="18" y="16" width="3" height="2" />
-        <rect className="px-shade" x="15" y="18" width="2" height="1" />
-        <rect className="px-shade" x="19" y="18" width="2" height="1" />
-      </g>
-      <g data-fox-part="tail">
-        <rect className="px-fur" x="2" y="12" width="6" height="3" />
-        <rect className="px-shade" x="1" y="14" width="3" height="2" />
-        <rect className="px-cream" x="0" y="15" width="2" height="2" />
+        <rect className="px-fur" x="17" y="15" width="4" height="2" />
+        <rect className="px-fur" x="27" y="15" width="4" height="2" />
+        <rect className="px-shade" x="18" y="17" width="3" height="1" />
+        <rect className="px-shade" x="27" y="17" width="3" height="1" />
       </g>
     </g>
   )
@@ -209,30 +191,81 @@ function RunningFox({ accessory }: { accessory: FoxAccessory }) {
 function ErrorFox({ accessory }: { accessory: FoxAccessory }) {
   return (
     <g>
-      <g data-fox-part="ears">
-        <rect className="px-fur" x="4" y="8" width="5" height="2" />
-        <rect className="px-shade" x="4" y="9" width="3" height="1" />
+      <g className="px-alert" data-fox-part="tail">
+        <rect className="px-fur" x="32" y="16" width="3" height="10" />
+        <rect className="px-shade" x="32" y="22" width="2" height="2" />
+        <rect className="px-cream" x="33" y="14" width="2" height="3" />
       </g>
-      <rect className="px-fur" x="9" y="6" width="9" height="6" />
-      <rect className="px-white" x="11" y="8" width="2" height="2" />
-      <rect className="px-white" x="15" y="8" width="2" height="2" />
-      <rect className="px-ink" x="12" y="9" width="1" height="1" />
-      <rect className="px-ink" x="16" y="9" width="1" height="1" />
-      <g data-fox-part="snout">
-        <rect className="px-cream" x="15" y="11" width="4" height="2" />
-        <rect className="px-ink" x="18" y="12" width="1" height="1" />
-      </g>
-      <Accessory kind={accessory} x={10} y={7} />
-      <rect className="px-fur" x="10" y="12" width="8" height="5" />
+      <Haunches />
+      <Feet />
+      <rect className="px-fur" x="18" y="15" width="12" height="11" />
+      <Head accessory={accessory} mood="error" />
       <g className="px-alert">
-        <rect className="px-fur" x="7" y="10" width="2" height="3" />
-        <rect className="px-fur" x="18" y="10" width="2" height="3" />
+        <rect className="px-fur" x="15" y="14" width="3" height="3" />
+        <rect className="px-fur" x="30" y="14" width="3" height="3" />
       </g>
-      <g data-fox-part="tail">
-        <rect className="px-fur" x="18" y="1" width="3" height="6" />
-        <rect className="px-shade" x="18" y="3" width="2" height="2" />
-        <rect className="px-cream" x="19" y="0" width="2" height="2" />
+    </g>
+  )
+}
+
+function Haunches() {
+  return <rect className="px-fur" x="16" y="22" width="16" height="8" />
+}
+
+function Feet() {
+  return (
+    <g data-fox-part="paws" data-seat-y={SEAT_Y}>
+      <rect className="px-shade" x="18" y="29" width="4" height="3" />
+      <rect className="px-shade" x="26" y="29" width="4" height="3" />
+    </g>
+  )
+}
+
+function SeatTail() {
+  return (
+    <g data-fox-part="tail">
+      <rect className="px-fur" x="8" y="26" width="8" height="4" />
+      <rect className="px-shade" x="6" y="28" width="3" height="2" />
+      <rect className="px-cream" x="4" y="29" width="3" height="2" />
+    </g>
+  )
+}
+
+function Head({ accessory, mood }: { accessory: FoxAccessory; mood: 'idle' | 'running' | 'error' }) {
+  return (
+    <g>
+      <g data-fox-part="ears">
+        <rect className="px-fur" x="18" y="6" width="3" height="4" />
+        <rect className="px-fur" x="27" y="6" width="3" height="4" />
+        <rect className="px-shade" x="19" y="8" width="1" height="2" />
+        <rect className="px-shade" x="28" y="8" width="1" height="2" />
       </g>
+      <rect className="px-fur" x="18" y="9" width="12" height="8" />
+      {mood === 'error' ? (
+        <>
+          <rect className="px-white" x="20" y="11" width="3" height="3" />
+          <rect className="px-white" x="25" y="11" width="3" height="3" />
+          <rect className="px-ink" x="21" y="12" width="1" height="1" />
+          <rect className="px-ink" x="26" y="12" width="1" height="1" />
+        </>
+      ) : mood === 'running' ? (
+        <>
+          <rect className="px-ink" x="21" y="11" width="2" height="2" />
+          <rect className="px-white" x="21" y="11" width="1" height="1" />
+          <rect className="px-ink" x="25" y="11" width="2" height="2" />
+          <rect className="px-white" x="25" y="11" width="1" height="1" />
+        </>
+      ) : (
+        <>
+          <rect className="px-ink" x="21" y="12" width="3" height="1" />
+          <rect className="px-ink" x="25" y="12" width="3" height="1" />
+        </>
+      )}
+      <g data-fox-part="snout">
+        <rect className="px-cream" x="21" y="14" width="6" height="3" />
+        <rect className="px-ink" x="23" y="15" width="2" height="1" />
+      </g>
+      <Accessory kind={accessory} x={20} y={8} />
     </g>
   )
 }

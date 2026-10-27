@@ -249,6 +249,23 @@ describe('PixelOffice', () => {
     expect(writer.getAttribute('data-coat')).toBe(writerVariant.coat)
   })
 
+  it('seats a working fox on the chair with feet on the same line as the seat', () => {
+    render(
+      <PixelOffice
+        agents={[row(0, { status: 'running', name: 'rustfox' })]}
+        motion={false}
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const svg = screen.getByRole('article', { name: /rustfox/i }).querySelector('svg')
+    const chair = svg?.querySelector('[data-fox-part="chair"]')
+    const paws = svg?.querySelector('[data-fox-part="paws"]')
+    expect(chair?.getAttribute('data-seat-y')).toBe('26')
+    expect(paws?.getAttribute('data-seat-y')).toBe('26')
+    expect(svg?.querySelector('[data-fox-part="keyboard"]')).toBeTruthy()
+    expect(svg?.querySelector('[data-fox-part="desk"]')).toBeTruthy()
+  })
+
   it('frames the floor with office décor outside the roam aisle and the desks', () => {
     render(
       <PixelOffice

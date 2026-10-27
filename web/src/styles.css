@@ -823,10 +823,11 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 }
 
 .agent-office {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
+  background: #f4efe4;
+  border: 1px solid #6e4424;
   border-radius: var(--radius);
   padding: 14px;
+  color: #1a1206;
 }
 
 .office-room {
@@ -895,8 +896,12 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 
 .agent-office-hint {
   margin: 0 0 12px;
-  color: var(--text-dim);
+  color: #6e4424;
   font-size: 12.5px;
+}
+
+.office-room .empty {
+  color: #6e4424;
 }
 
 .office-scene {
@@ -909,6 +914,13 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 12px 22px;
+  padding: 8px;
+  border-radius: 6px;
+  background-color: #c4a574;
+  background-image:
+    linear-gradient(#f4efe4 1px, transparent 1px),
+    linear-gradient(90deg, #f4efe4 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
 .office-aisle {
@@ -969,16 +981,17 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 }
 
 .agent-desk {
-  background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: none;
   border-radius: 8px;
-  padding: 8px 8px 12px;
+  padding: 4px 4px 8px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   text-align: center;
   min-width: 0;
+  color: #1a1206;
 }
 
 .agent-desk-name {
@@ -987,6 +1000,7 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: #1a1206;
 }
 
 .agent-desk-model {
@@ -995,6 +1009,40 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10.5px;
+  color: #6e4424;
+}
+
+.agent-office .badge {
+  background: #f4efe4;
+  border-color: #c4a574;
+  color: #3a2820;
+}
+
+.agent-office .badge.running {
+  color: #2f6b32;
+  border-color: #3fb950;
+  background: #f4efe4;
+}
+
+.agent-office .badge.idle {
+  color: #6e4424;
+  background: #f4efe4;
+}
+
+.agent-office .badge.error {
+  color: #a33b32;
+  border-color: #f85149;
+  background: #f4efe4;
+}
+
+.agent-office .seat-nolive {
+  color: #6e4424;
+}
+
+.agent-office .agent-desk-more {
+  background: #f4efe4;
+  color: #6e4424;
+  border-color: #6e4424;
 }
 
 .agent-desk-more {
@@ -1021,7 +1069,12 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 .seat-sprite {
   display: block;
   width: 96px;
-  height: 90px;
+  height: 80px;
+}
+
+.seat-sprite.pose-walk {
+  width: 68px;
+  height: 64px;
 }
 
 .seat-sprite .px-fur,
