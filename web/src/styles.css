@@ -823,15 +823,74 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 }
 
 .agent-office {
-  background-color: #10141c;
-  background-image:
-    linear-gradient(180deg, rgba(88, 166, 255, 0.06), transparent 28%),
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: auto, 16px 16px, 16px 16px;
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px;
+}
+
+.office-room {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) 84px;
+  grid-template-rows: auto 1fr;
+  gap: 8px 10px;
+  padding: 0 8px 12px;
+  border-radius: 8px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      #c9844a 0 8px,
+      #6e4424 8px 10px
+    );
+  border: 3px solid #6e4424;
+  overflow: hidden;
+}
+
+.office-decor {
+  display: contents;
+}
+
+.office-wall {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  min-height: 72px;
+  margin: 0 -8px;
+  padding: 10px 14px 6px;
+  background: #f4efe4;
+  border-bottom: 4px solid #6e4424;
+}
+
+.office-wall-end {
+  margin-left: auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.office-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0 4px;
+  min-width: 0;
+}
+
+.office-side-left { grid-column: 1; grid-row: 2; }
+.office-side-right { grid-column: 3; grid-row: 2; }
+
+.office-scene,
+.office-room > .empty {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.office-sprite {
+  display: block;
+  flex: 0 0 auto;
 }
 
 .agent-office-hint {
@@ -860,8 +919,10 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   background:
     repeating-linear-gradient(
       90deg,
-      rgba(201, 132, 74, 0.22) 0 14px,
-      rgba(110, 68, 36, 0.16) 14px 28px
+      #c9844a 0 12px,
+      #6e4424 12px 14px,
+      #c9844a 14px 26px,
+      #6e4424 26px 28px
     );
   overflow: hidden;
 }
@@ -963,8 +1024,10 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   height: 90px;
 }
 
-.seat-sprite .px-fur { fill: var(--accent); }
-.seat-sprite .px-shade { fill: var(--accent-dim); }
+.seat-sprite .px-fur,
+.office-sprite .px-fur { fill: var(--accent); }
+.seat-sprite .px-shade,
+.office-sprite .px-shade { fill: var(--accent-dim); }
 .seat-sprite.coat-red .px-fur { fill: #e85d4c; }
 .seat-sprite.coat-red .px-shade { fill: #a33b32; }
 .seat-sprite.coat-cream .px-fur { fill: #f3d7b0; }
@@ -973,20 +1036,31 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 .seat-sprite.coat-silver .px-shade { fill: #8b97a3; }
 .seat-sprite.coat-dark .px-fur { fill: #5c4033; }
 .seat-sprite.coat-dark .px-shade { fill: #3a2820; }
-.seat-sprite .px-ink { fill: #1a1206; }
-.seat-sprite .px-cream { fill: #f4efe4; }
-.seat-sprite .px-white { fill: #f7f8fb; }
-.seat-sprite .px-bezel { fill: #0b0e14; }
-.seat-sprite .px-desk { fill: #c9844a; }
-.seat-sprite .px-desk-dark { fill: #6e4424; }
-.seat-sprite .px-key { fill: #d5dbe3; }
+.seat-sprite .px-ink,
+.office-sprite .px-ink { fill: #1a1206; }
+.seat-sprite .px-cream,
+.office-sprite .px-cream { fill: #f4efe4; }
+.seat-sprite .px-white,
+.office-sprite .px-white { fill: #f7f8fb; }
+.seat-sprite .px-bezel,
+.office-sprite .px-bezel { fill: #0b0e14; }
+.seat-sprite .px-desk,
+.office-sprite .px-desk { fill: #c9844a; }
+.seat-sprite .px-desk-dark,
+.office-sprite .px-desk-dark { fill: #6e4424; }
+.seat-sprite .px-key,
+.office-sprite .px-key { fill: #d5dbe3; }
 .seat-sprite .px-screen-idle { fill: #1c2430; }
 .seat-sprite .px-screen-run { fill: var(--blue); }
 .seat-sprite .px-screen-err { fill: var(--red); }
-.seat-sprite .px-leaf { fill: #3fb950; }
-.seat-sprite .px-scarf { fill: #58a6ff; }
-.seat-sprite .px-bow { fill: #f85149; }
-.seat-sprite .px-lamp { fill: #ffd866; }
+.seat-sprite .px-leaf,
+.office-sprite .px-leaf { fill: #3fb950; }
+.seat-sprite .px-scarf,
+.office-sprite .px-scarf { fill: #58a6ff; }
+.seat-sprite .px-bow,
+.office-sprite .px-bow { fill: #f85149; }
+.seat-sprite .px-lamp,
+.office-sprite .px-lamp { fill: #ffd866; }
 
 .agent-office[data-motion="on"] .pose-running .px-arm,
 .agent-office[data-motion="on"] .pose-idle .px-lounge,

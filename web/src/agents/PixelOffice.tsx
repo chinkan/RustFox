@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import type { Agent } from '../api/types'
 import { FoxSprite } from './FoxSprite'
+import { OfficeDecor } from './officeSprites'
 import { foxVariant, roamDelaySeconds, seatView, shouldRoam, visibleDeskSlice } from './seats'
 
 export function PixelOffice({
@@ -25,49 +26,52 @@ export function PixelOffice({
       data-motion={motion ? 'on' : 'off'}
     >
       <p className="agent-office-hint">{t('agents.officeHint')}</p>
-      {visible.length === 0 ? (
-        <div className="empty">
-          <div className="big">🔍</div>
-          <p>{t('agents.noneFound')}</p>
-        </div>
-      ) : (
-        <div className="office-scene">
-          <div className="office-row">
-            {top.map((agent) => (
-              <DeskCard key={agent.id} agent={agent} motion={motion} />
-            ))}
+      <div className="office-room" data-decor="office">
+        <OfficeDecor />
+        {visible.length === 0 ? (
+          <div className="empty">
+            <div className="big">🔍</div>
+            <p>{t('agents.noneFound')}</p>
           </div>
-          <div className="office-aisle" data-aisle="roam">
-            <span className="office-plant" aria-hidden="true" />
-            {visible.map((agent) => {
-              const view = seatView(agent)
-              if (!shouldRoam(view, motion)) return null
-              const variant = foxVariant(agent.name)
-              return (
-                <div
-                  key={agent.id}
-                  className="office-roamer"
-                  data-roam="on"
-                  data-lane={roamDelaySeconds(agent.name) > 3.5 ? '1' : '0'}
-                  style={{ animationDelay: `-${roamDelaySeconds(agent.name)}s` }}
-                >
-                  <FoxSprite pose="idle" variant={variant} mode="walk" />
-                </div>
-              )
-            })}
+        ) : (
+          <div className="office-scene">
+            <div className="office-row">
+              {top.map((agent) => (
+                <DeskCard key={agent.id} agent={agent} motion={motion} />
+              ))}
+            </div>
+            <div className="office-aisle" data-aisle="roam">
+              <span className="office-plant" aria-hidden="true" />
+              {visible.map((agent) => {
+                const view = seatView(agent)
+                if (!shouldRoam(view, motion)) return null
+                const variant = foxVariant(agent.name)
+                return (
+                  <div
+                    key={agent.id}
+                    className="office-roamer"
+                    data-roam="on"
+                    data-lane={roamDelaySeconds(agent.name) > 3.5 ? '1' : '0'}
+                    style={{ animationDelay: `-${roamDelaySeconds(agent.name)}s` }}
+                  >
+                    <FoxSprite pose="idle" variant={variant} mode="walk" />
+                  </div>
+                )
+              })}
+            </div>
+            <div className="office-row">
+              {bottom.map((agent) => (
+                <DeskCard key={agent.id} agent={agent} motion={motion} />
+              ))}
+              {overflow > 0 ? (
+                <button type="button" className="agent-desk-more" onClick={onShowOverflow}>
+                  {t('agents.moreDesks', { count: overflow })}
+                </button>
+              ) : null}
+            </div>
           </div>
-          <div className="office-row">
-            {bottom.map((agent) => (
-              <DeskCard key={agent.id} agent={agent} motion={motion} />
-            ))}
-            {overflow > 0 ? (
-              <button type="button" className="agent-desk-more" onClick={onShowOverflow}>
-                {t('agents.moreDesks', { count: overflow })}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }

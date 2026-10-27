@@ -249,6 +249,38 @@ describe('PixelOffice', () => {
     expect(writer.getAttribute('data-coat')).toBe(writerVariant.coat)
   })
 
+  it('frames the floor with office décor outside the roam aisle and the desks', () => {
+    render(
+      <PixelOffice
+        agents={[
+          row(0, { status: 'idle', name: 'rustfox' }),
+          row(1, { status: 'running', name: 'writer', id: 'agent:writer' }),
+        ]}
+        motion
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const office = screen.getByRole('region', { name: 'Agent office' })
+    const room = office.querySelector('[data-decor="office"]')
+    expect(room).toBeTruthy()
+    for (const piece of ['window', 'poster', 'clock', 'door', 'rug', 'plant', 'shelf', 'cabinet', 'lamp']) {
+      const tile = room?.querySelector(`[data-decor-piece="${piece}"]`)
+      expect(tile?.tagName.toLowerCase()).toBe('svg')
+      expect(tile?.getAttribute('shape-rendering')).toBe('crispEdges')
+      const [, , vw, vh] = (tile?.getAttribute('viewBox') ?? '').split(' ').map(Number)
+      expect(vw).toBeGreaterThan(0)
+      expect(vh).toBeGreaterThan(0)
+      const scale = 96 / 34
+      expect(Number(tile?.getAttribute('width')) / vw).toBeCloseTo(scale, 5)
+      expect(Number(tile?.getAttribute('height')) / vh).toBeCloseTo(scale, 5)
+    }
+    const aisle = office.querySelector('[data-aisle="roam"]')
+    expect(aisle?.querySelector('[data-decor-piece]')).toBeNull()
+    expect(office.querySelector('.office-side article')).toBeNull()
+    expect(office.querySelector('[data-roam="on"]')).toBeTruthy()
+    expect(screen.getByRole('article', { name: /writer/i }).getAttribute('data-returning')).toBe('true')
+  })
+
   it('shows the empty state when no seats match', () => {
     render(<PixelOffice agents={[]} motion onShowOverflow={() => undefined} />)
     expect(screen.getByText('No agents match this filter.')).toBeTruthy()
