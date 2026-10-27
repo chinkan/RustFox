@@ -72,3 +72,15 @@ _Avoid_: unsafe mode, no sandbox
 **Tool cap**:
 Rule that a caller-supplied `tools` list on `invoke_agent` / `spawn_agents` is intersected with the parent's tools and the agent's declared tools. Empty result is an error; never escalates (ADR-0025).
 _Avoid_: tool override, tool grant
+
+**How to use**:
+Docs sidebar group for end-user / self-hoster how-tos: Setup · Config · Telegram · Portal · Update (ADR-0049). Getting started stays separate and links in; not an operator GUIDE dump.
+_Avoid_: GUIDE, Usage (MVP slug), operator runbook
+
+**Features** (docs):
+One capability-catalog page (what / limits + links): tools · MCP · schedule · memory (ADR-0049). Not the daily Telegram how-to.
+_Avoid_: Telegram how-to, feature dump, GUIDE
+
+**Providers** (docs):
+One page for choosing a provider, credentials, and Active·peer: OpenRouter · OpenCode · xAI · Ollama (ADR-0049). Not a Config knob dump.
+_Avoid_: Config page, provider dump, settings reference
