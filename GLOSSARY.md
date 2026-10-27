@@ -28,6 +28,14 @@ _Avoid_: injection map, pending injections
 Injecting a queued user message into the running turn between loop iterations (never mid-tool), so the final reply covers it. Default `/mode`; scheduled runs are never steered (ADR-0020).
 _Avoid_: interrupt, preempt
 
+**Quoted reply**:
+The prior Telegram message a user is answering via `reply_to_message` (text/caption, or a media/unavailable placeholder). Injected into **this turn's** Active `messages[]` as part of one composed user message (ADR-0048). Not Continuity history rewrite, not an emoji Reaction, not Steer.
+_Avoid_: Continuity, Reaction, Steer, Mid-run queue
+
+**Inbound reply-to**:
+Telegram-only (v1) ingress path: when an update carries `reply_to_message`, compose the locked `[Reply to {role} msg {id}]:` prefix with the quoted body and the user's new text into one user message, persist that composed text in existing SQLite history, and keep the quote on `QueuedInput` if mid-run (ADR-0048 + ADR-0020). Distinct from Continuity (#279/#282/#285), Reaction (follow-up), and Steer.
+_Avoid_: Continuity, Reaction, Steer, Mid-run queue
+
 **Schedule timezone**:
 The IANA zone (e.g. `Asia/Hong_Kong`) a scheduled task's cron or naive one-shot time is read in. Stored per task; new tasks get the effective default (config `[general] timezone`, else system local, else UTC). Pre-ADR recurring rows keep `UTC` and pre-ADR one-shot rows get the system local zone, so no fire time changes; the user can change them later. Shown in the portal Tasks page (ADR-0022).
 _Avoid_: server time, UTC offset (`+08:00`)
