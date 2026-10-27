@@ -912,19 +912,9 @@ impl Provider for OpenRouterProvider {
         )
         .await?;
 
-        // Kimi tool-call fallback
-        let has_tool_calls = choice
-            .message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|t| !t.is_empty());
-        if !has_tool_calls {
-            if let Some(ref content) = choice.message.content {
-                if let Some(parsed) = crate::llm::parse_kimi_tool_calls(&content.as_text()) {
-                    choice.message.tool_calls = Some(parsed);
-                    choice.message.content = None;
-                }
-            }
+        // Kimi / DSML tool-markup recover (#307; shared with OpenAI-compat / OpenCode).
+        if crate::llm::recover_leaked_tool_markup(&mut choice.message) {
+            choice.finish_reason = Some("tool_calls".to_string());
         }
 
         Ok(ChatCompletion {
@@ -1034,7 +1024,7 @@ impl Provider for OpenAICompatibleProvider {
         let api_key = self.config.api_key.as_deref();
         let provider_name = self.config.name.as_str();
 
-        let choice = chat_completion_with_retry(
+        let mut choice = chat_completion_with_retry(
             client,
             &url,
             &request,
@@ -1043,6 +1033,13 @@ impl Provider for OpenAICompatibleProvider {
             &self.config,
         )
         .await?;
+
+        // OpenCode Go Active (+ openai_compatible): recover DSML/kimi leaked into
+        // content when tool_calls is empty; strip closers-only so FinalResponse
+        // never posts raw markup to Telegram (#307).
+        if crate::llm::recover_leaked_tool_markup(&mut choice.message) {
+            choice.finish_reason = Some("tool_calls".to_string());
+        }
 
         Ok(ChatCompletion {
             message: choice.message,
@@ -2436,6 +2433,122 @@ mod tests {
             .get(crate::opencode::SESSION_HEADER)
             .expect("x-opencode-session on chat request");
         assert_eq!(hdr.to_str().unwrap(), stamped.as_str());
+    }
+
+    /// #307: OpenCode Active path recovers full DSML leaked into content.
+    #[tokio::test]
+    async fn opencode_peer_recovers_dsml_tool_calls_from_content() {
+        let server = MockServer::start().await;
+        let dsml = format!(
+            concat!(
+                "<{t}tool_calls>\n",
+                "<{t}invoke name=\"web_search\">\n",
+                "<{t}parameter name=\"query\" string=\"true\">HK weather</{t}parameter>\n",
+                "</{t}invoke>\n",
+                "</{t}tool_calls>"
+            ),
+            t = "｜DSML｜"
+        );
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": dsml},
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let cfg = ProviderConfig {
+            name: "opencode".to_string(),
+            provider_type: ProviderType::OpenCode,
+            base_url: server.uri(),
+            api_key: Some("k".to_string()),
+            default_model: "deepseek-v4.1-flash".to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 128_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+            extra_headers: vec![],
+        };
+        let provider = OpenCodeProvider::new(cfg);
+        let client = reqwest::Client::new();
+        let completion = provider
+            .chat_completion(&client, &[], &[], "deepseek-v4.1-flash", 10)
+            .await
+            .expect("chat");
+        assert!(
+            completion.message.content.is_none(),
+            "DSML content must be cleared after recover"
+        );
+        let calls = completion
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls recovered");
+        assert_eq!(calls[0].function.name, "web_search");
+        assert_eq!(completion.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// #307: closers-only DSML must not become FinalResponse text on OpenCode path.
+    #[tokio::test]
+    async fn opencode_peer_strips_dsml_closers_only() {
+        let server = MockServer::start().await;
+        let closers = format!(
+            "</{t} parameter> </{t} invoke> </{t} calls>",
+            t = "｜DSML｜"
+        );
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": closers},
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let cfg = ProviderConfig {
+            name: "opencode".to_string(),
+            provider_type: ProviderType::OpenCode,
+            base_url: server.uri(),
+            api_key: Some("k".to_string()),
+            default_model: "deepseek-v4.1-flash".to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 128_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+            extra_headers: vec![],
+        };
+        let provider = OpenCodeProvider::new(cfg);
+        let client = reqwest::Client::new();
+        let completion = provider
+            .chat_completion(&client, &[], &[], "deepseek-v4.1-flash", 10)
+            .await
+            .expect("chat");
+        let text = completion
+            .message
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        assert!(
+            text.trim().is_empty(),
+            "closers-only must strip to empty on OpenCode path, got {text:?}"
+        );
+        assert!(!completion.message.has_tool_calls());
     }
 
     /// #273 soft repro: bare Active id `xai` (no `/model`) must hit the xAI

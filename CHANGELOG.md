@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **OpenCode / OpenAI-compat DSML strip+recover (#307):** when DeepSeek DSML (or Kimi) tool markup lands in `content` with empty `tool_calls`, recover into `tool_calls` or strip closers-only / residual tags so FinalResponse never posts raw DSML to Telegram. Mirrors OpenRouter kimi parse on the Active OpenCode Go path. Soft = unit fixtures only; no TG Soft; no tag. Closes #307.
+
 ## [1.0.8] — TBD
 
 Bug-fix release on main after `v1.0.7`. Headline: stash-exe + kill-all before selfupgrade re-register (#303/#304). No tag in this commit.
