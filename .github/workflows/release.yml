@@ -83,7 +83,9 @@ jobs:
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
-        run: tar -czf ${{ steps.archive.outputs.name }} -C staging .
+        # List members explicitly so the binary entry is bare `rustfox`
+        # (not `./rustfox`). self_update matches bin_name exactly.
+        run: tar -C staging -czf ${{ steps.archive.outputs.name }} rustfox config.example.toml install.sh services
 
       - name: Create archive (Windows)
         if: runner.os == 'Windows'
