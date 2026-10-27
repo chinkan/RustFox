@@ -437,7 +437,7 @@ async fn meta_token_stub_forces_clarify_final_response() {
 #[tokio::test]
 async fn meta_token_streak_forces_clarify_final_response() {
     let calls = Arc::new(Mutex::new(0usize));
-    let llm = client(vec![text_step("Emit.\nWrite.\nDone.")], calls.clone());
+    let llm = client(vec![text_step("Emit.\nWrite.\nOk.")], calls.clone());
     let tools = ToolRegistry::new();
     let mcp = McpManager::new();
     let cfg = base_loop_cfg();
@@ -532,4 +532,59 @@ async fn benign_short_substantive_still_final_response() {
         other => panic!("expected substantive FinalResponse, got {other:?}"),
     }
     assert!(!is_meta_token_filler("Ok, I'll schedule that."));
+}
+
+/// ADR-0045 / #298: "done" / "Done." are NOT allowlist stubs (Done omitted).
+#[tokio::test]
+async fn benign_done_still_final_response() {
+    assert!(!is_meta_token_filler("done"));
+    assert!(!is_meta_token_filler("Done"));
+    assert!(!is_meta_token_filler("Done."));
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let llm = client(vec![text_step("done")], calls.clone());
+    let tools = ToolRegistry::new();
+    let mcp = McpManager::new();
+    let cfg = base_loop_cfg();
+    let sender = NullSender;
+    let loop_runner = AgenticLoop::new(
+        &llm,
+        &tools,
+        &mcp,
+        &cfg,
+        None,
+        None,
+        None,
+        &sender,
+        Box::new(|uid, cid| ToolContext {
+            sandbox_dir: std::path::PathBuf::from("/tmp"),
+            home_dir: None,
+            sender: Arc::new(NullSender),
+            cancel_registry: Arc::new(rustfox::cancel_registry::CancelRegistry::new()),
+            user_id: uid.into(),
+            chat_id: cid.into(),
+            bot_id: "main".into(),
+            tool_ui_mode: ToolUiMode::Silent,
+        }),
+        None,
+    );
+    let mut msgs = MessageContainer::Plain(vec![ChatMessage {
+        role: "user".into(),
+        content: Some(MessageContent::from_text("finish")),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }]);
+    let outcome = loop_runner
+        .run(&mut msgs, "u", "c")
+        .await
+        .expect("loop should return Ok");
+    match outcome {
+        LoopOutcome::FinalResponse { text, iterations } => {
+            assert_eq!(text, "done");
+            assert_ne!(text, EMPTY_PROGRESS_CLARIFY);
+            assert_eq!(iterations, 1);
+        }
+        other => panic!("expected FinalResponse done, got {other:?}"),
+    }
 }

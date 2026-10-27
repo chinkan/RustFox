@@ -99,7 +99,8 @@ pub const EMPTY_PROGRESS_CLARIFY: &str =
     "I wasn't making progress on that. Could you clarify what you'd like me to do next?";
 
 /// ADR-0045 / #298 short meta-token allowlist (trim; optional trailing `.`).
-const META_TOKEN_ALLOWLIST: &[&str] = &["Output", "Done", "Emit", "Final", "Write", "Ok"];
+/// `Done` deliberately omitted — legitimate FinalResponse `"done"` / `"Done."` must not clarify.
+const META_TOKEN_ALLOWLIST: &[&str] = &["Output", "Emit", "Final", "Write", "Ok"];
 
 /// True when `line` (already conceptually one line) is an allowlist stub.
 fn is_meta_token_stub(line: &str) -> bool {
@@ -675,7 +676,6 @@ mod tests {
             "Write.",
             "Emit.",
             "Output",
-            "Done.",
             "Final.",
             "Ok.",
             "  write.  ",
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn meta_token_streak_is_filler() {
-        let streak = "Write.\nEmit.\nDone.";
+        let streak = "Write.\nEmit.\nOk.";
         assert!(is_meta_token_filler(streak));
         let alt = "Output.\nOk.\nFinal.\nWrite.";
         assert!(is_meta_token_filler(alt));
@@ -696,6 +696,10 @@ mod tests {
     #[test]
     fn meta_token_benign_short_is_not_filler() {
         for s in [
+            "done",
+            "Done",
+            "Done.",
+            "all done",
             "Ok, I'll do that.",
             "Done with the report.",
             "Yes",

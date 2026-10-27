@@ -32,11 +32,11 @@ Product locks are authoritative for the first implementable slice after this ADR
 
 ## Decision — Short meta-token FinalResponse filler (#298)
 
-Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-channel fillers such as `Output.` / `Done.` / `Emit.` / `Final.` / `Write.` / `Ok.` can pass empty-progress clarify (non-empty), LoopDetector, and cold-intro guards, and ship to Telegram as a normal FinalResponse. Class is **not** DSML (#307 / #308). Amend in place; keep (A) register-time dedupe and (B) empty-progress clarify unchanged.
+Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-channel fillers such as `Output.` / `Emit.` / `Final.` / `Write.` / `Ok.` can pass empty-progress clarify (non-empty), LoopDetector, and cold-intro guards, and ship to Telegram as a normal FinalResponse. Class is **not** DSML (#307 / #308). Amend in place; keep (A) register-time dedupe and (B) empty-progress clarify unchanged.
 
 1. **Shared FinalResponse path (all Active peers, not OpenCode-only):** before a text-only FinalResponse ships, detect short meta-token / filler replies.
 
-2. **Allowlist (trim):** `{Output, Done, Emit, Final, Write, Ok}` with optional trailing `.`. Matching is case-insensitive on the token.
+2. **Allowlist (trim):** `{Output, Emit, Final, Write, Ok}` with optional trailing `.`. Matching is case-insensitive on the token. **`Done` omitted** — a legitimate FinalResponse of `"done"` / `"Done."` must not be treated as filler (false-positive on #298 QA `langsmith_child_runs`).
 
 3. **Filler when:**
    - **single stub:** entire trimmed content is only one allowlist token + optional `.`; **or**
@@ -44,7 +44,7 @@ Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-
 
 4. **On filler:** **abort → clarify** FinalResponse (same family as (B) empty-progress clarify copy). Do **not** silent-drop. Do **not** mention MCP / DeepSeek / internals in user-visible copy.
 
-5. **False-positive guard:** benign short substantive answers (not only an allowlist stub / not a ≥3-line stub streak) must still FinalResponse.
+5. **False-positive guard:** benign short substantive answers (not only an allowlist stub / not a ≥3-line stub streak) must still FinalResponse — including `"done"` / `"Done."` (hence `Done` is not on the allowlist).
 
 6. **Unchanged:** (A) register-time first-wins; (B) empty-progress clarify (N = `agent.loop_detection.threshold`); no DSML strip/recover changes (#307 / #308); no leave-Go / Active peer / W2 / #194 / #202; parallel ADR-0050 / #309 left alone. Soft = fixtures + Soft TG on QA/QA2 later (QA); **no tag**; not in v1.0.8 Soft/tag train.
 
