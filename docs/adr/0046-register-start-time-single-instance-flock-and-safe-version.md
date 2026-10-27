@@ -1,6 +1,6 @@
 # ADR-0046: Register start-time single-instance flock and safe `--version`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-27
 - **Related:** ADR-0030 (self-upgrade out of scope), ADR-0028 (CLI service verbs; must stay unlock-friendly), live tip `7ddd3db`
 - **Issue:** this docs PR **Refs #289**; later impl PR **Closes #289**
