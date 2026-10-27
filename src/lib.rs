@@ -35,6 +35,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod scheduling_tools;
 pub mod secret_store;
+pub mod self_upgrade_ops;
 pub mod setup;
 pub mod skill_tools;
 pub mod skills;

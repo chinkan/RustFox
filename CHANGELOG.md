@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Self-upgrade release re-register ENOENT (#303):** stash absolute exe before `self_replace`; re-register/`install` and foreground restart use the stashed path (do not re-call `current_exe()` after replace). Before re-register: stop (when safe) + kill-all leftovers for the same fox-home (ADR-0046). ADR-0030 Accepted delta. Soft required; **no tag**. Closes #303.
+
 ## [1.0.7] — TBD
 
 Release on main after `v1.0.6`. Headline: xAI + OpenCode Active peers, MCP Settings, scheduler timeout continue, single-instance flock. No tag in this commit.
