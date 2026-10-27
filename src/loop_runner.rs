@@ -92,6 +92,12 @@ pub enum LoopOutcome {
     MaxIterations,
 }
 
+/// ADR-0045 (B) / #231 empty-progress clarify: user-visible FinalResponse when
+/// loop_detection sees N consecutive empty-progress iterations. Do **not**
+/// mention MCP or duplicate-tool internals.
+pub const EMPTY_PROGRESS_CLARIFY: &str =
+    "I wasn't making progress on that. Could you clarify what you'd like me to do next?";
+
 #[allow(dead_code)]
 #[allow(clippy::type_complexity)]
 pub struct AgenticLoop<'a> {
@@ -219,6 +225,13 @@ impl<'a> AgenticLoop<'a> {
         );
         let mut loop_recovery_count = 0u32;
         const MAX_LOOP_RECOVERIES: u32 = 2;
+        // ADR-0045 (B): consecutive empty-progress / no-FinalResponse streak.
+        // Reuses agent.loop_detection.threshold (default 3) when enabled.
+        let mut empty_progress_streak = 0usize;
+        // ADR-0043 / #277: anti cold-intro on shared Active final-reply path.
+        let has_prior_continuity =
+            crate::cold_intro::has_prior_continuity(&messages.messages_snapshot());
+        let mut cold_intro_regen_used = false;
 
         for iteration in 0..self.config.max_iterations {
             if let Some(ref cancel) = self.cancel {
@@ -284,16 +297,35 @@ impl<'a> AgenticLoop<'a> {
             iterations = iteration + 1;
 
             if text.is_empty() && tool_calls.is_empty() {
-                empty_count += 1;
                 if let Some(ref nudge) = self.config.recovery_nudge {
                     let nudge_msg = ChatMessage {
                         role: "user".to_string(),
                         content: Some(MessageContent::from_text(nudge.clone())),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     };
                     messages.push_user(nudge_msg);
                 }
+                // ADR-0045 (B): when loop_detection is enabled, N consecutive
+                // empty-progress iterations → clarify FinalResponse (no silent
+                // burn / no MCP-duplicate internals in user copy).
+                if self.config.loop_detection_enabled {
+                    empty_progress_streak += 1;
+                    if empty_progress_streak >= self.config.loop_detection_threshold {
+                        tracing::warn!(
+                            streak = empty_progress_streak,
+                            threshold = self.config.loop_detection_threshold,
+                            "Empty-progress loop detected — forcing clarify FinalResponse"
+                        );
+                        return Ok(LoopOutcome::FinalResponse {
+                            text: EMPTY_PROGRESS_CLARIFY.to_string(),
+                            iterations,
+                        });
+                    }
+                    continue;
+                }
+                empty_count += 1;
                 if empty_count >= self.config.empty_response_retry_limit {
                     return Ok(LoopOutcome::FinalResponse {
                         text: "I'm having trouble processing that. Please try again.".to_string(),
@@ -302,6 +334,9 @@ impl<'a> AgenticLoop<'a> {
                 }
                 continue;
             }
+
+            // Non-empty progress resets the empty-progress streak.
+            empty_progress_streak = 0;
 
             if !tool_calls.is_empty() {
                 loop_detector.record(&tool_calls, iteration as usize);
@@ -328,6 +363,7 @@ impl<'a> AgenticLoop<'a> {
                         content: Some(MessageContent::Text(text.clone())),
                         tool_calls: Some(tool_calls.clone()),
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     let nudge_text = format!(
                         "Error: You have called {} {} times with the same arguments.                          The result has not changed. Try a different approach or answer the user now.",
@@ -345,6 +381,7 @@ impl<'a> AgenticLoop<'a> {
                     content: Some(MessageContent::Text(text.clone())),
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
 
                 for tc in &tool_calls {
@@ -456,12 +493,48 @@ impl<'a> AgenticLoop<'a> {
                         content: Some(MessageContent::Text(text)),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     for msg in drained {
                         messages.push_user(msg);
                     }
                     continue;
                 }
+
+                // ADR-0043 / #277 structural guard (all Active peers): with prior
+                // continuity, reject a capability cold-intro once; if still cold
+                // after regenerate, rewrite to a short clarify (no menu).
+                let mut text = text;
+                if has_prior_continuity && crate::cold_intro::is_capability_cold_intro(&text) {
+                    if !cold_intro_regen_used {
+                        cold_intro_regen_used = true;
+                        tracing::warn!(
+                            "Anti cold-intro: rejecting capability menu final reply; regenerating once"
+                        );
+                        messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(MessageContent::Text(text)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        messages.push_user(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(MessageContent::from_text(
+                                crate::cold_intro::COLD_INTRO_REGEN_NUDGE.to_string(),
+                            )),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        continue;
+                    }
+                    tracing::warn!(
+                        "Anti cold-intro: regenerate still cold-intro; rewriting to clarify"
+                    );
+                    text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
+                }
+
                 if let Some(ref tx) = self.config.stream_token_tx {
                     let _ = LlmClient::stream_text(text.clone(), tx.clone()).await;
                 }
@@ -510,6 +583,7 @@ impl MessageContainer {
             content: Some(MessageContent::Text(result)),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            reasoning_content: None,
         };
         match self {
             MessageContainer::Conversation(cm) => cm.add_tool_result(msg),
@@ -625,6 +699,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let provider: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(cfg));
         let mut providers = std::collections::HashMap::new();
@@ -705,6 +780,7 @@ mod tests {
             content: Some(MessageContent::from_text("run sleep")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]);
 
         let started = Instant::now();

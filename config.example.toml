@@ -102,6 +102,40 @@ Be concise and helpful."""
 # base_url = "http://localhost:1234/v1"
 # model = "qwen2.5-7b-instruct"
 
+# OpenCode Go Active peer (ADR-0043 Direction D / #267).
+# Chat: OpenAI-compat at …/openai/v1/chat/completions (Bearer).
+# Models list: …/go/v1/models (not under /openai/v1).
+# Leave-Go: HTTP 402 or 429+GoUsageLimitError/Policy → OpenRouter DeepSeek.
+# Without base_url + api_key, OpenCode stays detect-only (typed error, no silent hop).
+# [[provider]]
+# name = "opencode"
+# type = "opencode"
+# base_url = "https://opencode.ai/inference/go/openai/v1"
+# api_key = "secret:opencode.api_key"   # or OPENCODE_API_KEY / pasted key
+# model = "deepseek-v4.1-flash"
+# max_tokens = 8192
+# discover_models = true
+# # default_provider = "opencode"  # under [general] when ready
+# # Suggested fallback after leave-Go:
+# # [fallback]
+# # chain = ["openrouter/deepseek/deepseek-chat"]
+
+# xAI Active peer (ADR-0044 / #266).
+# Direct OpenAI-compat Chat Completions at https://api.x.ai/v1 (Bearer).
+# Not an OpenRouter alias. No Responses API in this cut.
+# Credentials: SecretStore + Settings/config (wizard does not force-ask).
+# Misconfigured (missing key) → typed error; no silent hop to another provider.
+# Default fallback chain is unchanged — add xai/… yourself if you want it.
+# [[provider]]
+# name = "xai"
+# type = "xai"
+# base_url = "https://api.x.ai/v1"
+# api_key = "secret:xai.api_key"   # or pasted key (sealed on migrate)
+# model = "grok-4.7"
+# max_tokens = 8192
+# discover_models = true
+# # default_provider = "xai"  # under [general] when ready
+
 # ── Fallback Chain (optional) ──────────────────────────────────────────
 # When the primary model fails, RustFox tries each fallback in order.
 # Each entry is a full provider-prefixed model string.

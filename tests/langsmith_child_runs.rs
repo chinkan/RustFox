@@ -47,6 +47,7 @@ impl ScriptLlm {
                 context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                 parse_retry_limit: 0,
                 rate_limit_retry_limit: 0,
+                extra_headers: vec![],
             },
             steps: Mutex::new(VecDeque::from(steps)),
         });
@@ -92,12 +93,14 @@ impl Provider for ScriptLlm {
                 content: Some(rustfox::llm::MessageContent::from_text(text)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             Step::Tools(calls) => ChatMessage {
                 role: "assistant".into(),
                 content: None,
                 tool_calls: Some(calls),
                 tool_call_id: None,
+                reasoning_content: None,
             },
         };
         Ok(ChatCompletion {
@@ -323,6 +326,7 @@ fn user_messages() -> MessageContainer {
         content: Some(rustfox::llm::MessageContent::from_text("hi")),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }])
 }
 

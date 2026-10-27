@@ -127,6 +127,7 @@ fn turn(role: &str, text: &str) -> ChatMessage {
         content: Some(MessageContent::from_text(text)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 

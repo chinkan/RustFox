@@ -74,6 +74,9 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// DeepSeek / OpenCode Go thinking; echo when present (ADR-0043 / #267).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -113,8 +116,9 @@ pub struct FunctionDefinition {
 }
 
 /// Deduplicate tool definitions by exact `function.name`, keeping the **first**
-/// occurrence (ADR-0019 slice ② / Wafer `duplicate_tool_name`). Later duplicates
-/// are dropped; do not rename tools or change MCP prefix rules.
+/// occurrence (ADR-0019 slice ② / Wafer `duplicate_tool_name`; ADR-0045 send-time
+/// belt — register-time first-wins is the root fix). Later duplicates are dropped;
+/// do not rename tools or change MCP prefix rules.
 pub fn dedupe_tool_definitions_keep_first(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     use std::collections::HashSet;
 
@@ -394,7 +398,7 @@ pub fn is_tool_weak_provider(config: &crate::provider::ProviderConfig) -> bool {
     match config.provider_type {
         ProviderType::Ollama => true,
         ProviderType::OpenAICompatible => is_ollama_openai_compat_endpoint(config),
-        ProviderType::OpenRouter | ProviderType::OpenCode => false,
+        ProviderType::OpenRouter | ProviderType::OpenCode | ProviderType::Xai => false,
     }
 }
 
@@ -473,6 +477,7 @@ pub fn rewrite_messages_for_tool_weak(messages: &[ChatMessage]) -> Vec<ChatMessa
         content: Some(MessageContent::from_text(body)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     debug_assert!(
         has_plain_user_turn(&out),
@@ -1267,6 +1272,7 @@ mod tests {
             content: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(is_empty_assistant_response(&message));
     }
@@ -1278,6 +1284,7 @@ mod tests {
             content: Some(MessageContent::Text("  \n\t  ".to_string())),
             tool_calls: Some(vec![]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(is_empty_assistant_response(&message));
     }
@@ -1296,6 +1303,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(!is_empty_assistant_response(&message));
     }
@@ -1307,6 +1315,7 @@ mod tests {
             content: Some(MessageContent::Text("Done".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         assert!(!is_empty_assistant_response(&message));
     }
@@ -1424,6 +1433,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0, // fail fast → deterministic request counts
+            extra_headers: vec![],
         }
     }
 
@@ -1445,6 +1455,7 @@ mod tests {
             content: Some(MessageContent::from_text("hi".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]
     }
 
@@ -1833,6 +1844,7 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
@@ -1846,12 +1858,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::from_text("tool-out")),
                 tool_calls: None,
                 tool_call_id: Some("c1".into()),
+                reasoning_content: None,
             },
         ]
     }
@@ -1865,6 +1879,7 @@ mod tests {
                 content: Some(MessageContent::from_text("list files")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         );
         m
@@ -1884,6 +1899,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         }
     }
 
@@ -2069,12 +2085,14 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::from_text("HK weather please")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]
     }
@@ -2230,6 +2248,7 @@ mod tests {
             content: Some(MessageContent::from_text("   ")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         assert!(!has_plain_user_turn(&msgs));
     }

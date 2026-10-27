@@ -798,10 +798,26 @@ impl Agent {
 
         // Validate: resolve succeeds for any string
         let (provider, actual_model) = self.registry.resolve_model(model_id);
-        // ADR-0043 Phase 1: OpenCode must not become Active.
-        if provider.config().provider_type == crate::config::ProviderType::OpenCode {
+        // ADR-0043 / #267: OpenCode Active only when Go peer path is configured.
+        if provider.config().provider_type == crate::config::ProviderType::OpenCode
+            && !crate::opencode::peer_configured(
+                &provider.config().base_url,
+                provider.config().api_key.as_deref(),
+            )
+        {
             return Err(anyhow::Error::from(
                 crate::opencode::OpenCodeDetectOnlyError::active(),
+            ));
+        }
+        // ADR-0044: xAI Active only when peer path is configured.
+        if provider.config().provider_type == crate::config::ProviderType::Xai
+            && !crate::xai::peer_configured(
+                &provider.config().base_url,
+                provider.config().api_key.as_deref(),
+            )
+        {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::active(),
             ));
         }
         if let Some((prefix, _)) = model_id.split_once('/') {
@@ -932,6 +948,7 @@ impl Agent {
                 content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             };
             if let Err(e) = self.memory.save_message(conversation_id, &msg).await {
                 warn!("Failed to persist steer message: {}", e);
@@ -1208,6 +1225,7 @@ impl Agent {
             content: Some(user_msg_content),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         cmgr.add_user_turn(user_msg);
 
@@ -1504,8 +1522,10 @@ impl Agent {
             }
         };
 
-        // ADR-0020: attach steer drain only for live chat turns in Steer mode.
-        // Scheduled runs and /mode queue leave pending for finish() instead.
+        // ADR-0020 / #275: attach steer drain only for live chat turns in Steer
+        // mode. Scheduled runs never get a steer source (schedule_id is Some);
+        // TurnGate::drain also no-ops while Scheduled. /mode queue leaves
+        // pending for finish() instead.
         let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,
@@ -1631,6 +1651,7 @@ impl Agent {
                 content: Some(MessageContent::from_text(text.clone())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             };
             self.memory
                 .save_message(&conversation_id, &save_msg)
@@ -2390,12 +2411,14 @@ impl Agent {
                     content: Some(MessageContent::from_text(system_content)),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
                 ChatMessage {
                     role: "user".to_string(),
                     content: Some(MessageContent::from_text(user_prompt)),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
             ];
 
@@ -2571,12 +2594,14 @@ impl Agent {
                 content: Some(MessageContent::from_text(system_content)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::from_text(user_prompt)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
 
@@ -2956,6 +2981,7 @@ Simply answer the question with the information you have.
         content: Some(MessageContent::from_text(reminder)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     result
 }
@@ -3300,12 +3326,14 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::from_text("HK weather please")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         let tools = vec![ToolDefinition {
@@ -3332,12 +3360,14 @@ mod tests {
                 content: Some(MessageContent::from_text("sys")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::from_text("HK weather please")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
@@ -3351,12 +3381,14 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "tool".to_string(),
                 content: Some(MessageContent::from_text("sunny")),
                 tool_calls: None,
                 tool_call_id: Some("c1".into()),
+                reasoning_content: None,
             },
         ];
         assert!(crate::llm::is_mid_tool_loop(&messages));
@@ -3937,6 +3969,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         let msgs = vec![assistant];
         let result = build_btw_context(&msgs, "test question");
@@ -3957,6 +3990,7 @@ mod tests {
             content: Some(MessageContent::from_text("result")),
             tool_calls: None,
             tool_call_id: Some("call_1".into()),
+            reasoning_content: None,
         };
         let assistant = ChatMessage {
             role: "assistant".to_string(),
@@ -3970,6 +4004,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         let msgs = vec![tool_msg, assistant];
         let result = build_btw_context(&msgs, "test question");
@@ -3987,6 +4022,7 @@ mod tests {
             content: Some(MessageContent::from_text("hello")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let result = build_btw_context(&msgs, "question");
         assert!(result.len() > msgs.len(), "should append question");
@@ -4170,6 +4206,7 @@ mod tests {
                 content: Some(MessageContent::Text("partial".into())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             iteration: 4,
             dangling_tool_ids: vec![],

@@ -515,6 +515,7 @@ fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
         content: content_str.map(MessageContent::Text),
         tool_calls,
         tool_call_id: row.get(3)?,
+        reasoning_content: None,
     })
 }
 
@@ -528,6 +529,7 @@ mod tests {
             content: Some(MessageContent::from_text(content)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -996,6 +998,7 @@ mod tests {
             content: Some(crate::llm::MessageContent::from_text("hello world")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         store.save_message(&conv, &msg).await.unwrap();
 
@@ -1088,6 +1091,7 @@ mod tests {
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         store.save_message(&conv, &msg).await.unwrap();
 
@@ -1125,6 +1129,7 @@ mod tests {
             content: Some(crate::llm::MessageContent::from_text("test")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         store.save_message(&conv, &msg).await.unwrap();
 

@@ -281,6 +281,7 @@ impl ToolThenReply {
                 context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                 parse_retry_limit: 0,
                 rate_limit_retry_limit: 0,
+                extra_headers: vec![],
             },
             step: AtomicUsize::new(0),
             reply: reply.into(),
@@ -341,6 +342,7 @@ impl rustfox::provider::Provider for ToolThenReply {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             }
         } else {
             rustfox::llm::ChatMessage {
@@ -348,6 +350,7 @@ impl rustfox::provider::Provider for ToolThenReply {
                 content: Some(rustfox::llm::MessageContent::from_text(self.reply.clone())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }
         };
         Ok(rustfox::llm::ChatCompletion {

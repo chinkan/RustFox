@@ -99,6 +99,9 @@ regex = "1"
 # OS home-directory resolution for the persistent home dir (~/.rustfox)
 dirs = "5"
 
+# Exclusive single-instance flock on fox-home (ADR-0046 / #289)
+fs2 = "0.4"
+
 # Unix process group management (kill child process trees)
 nix = { version = "0.31", features = ["signal"] }
 rustc-hash = "2.1.3"

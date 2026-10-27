@@ -283,6 +283,7 @@ async fn extract_skill_from_conversation(
         content: Some(MessageContent::Text(analysis_prompt)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }];
 
     let response = llm.chat(&analysis_messages, &[]).await?;
@@ -681,6 +682,7 @@ async fn write_user_model_from_snippets(
         content: Some(MessageContent::Text(prompt)),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }];
 
     let response = match model {
@@ -1141,6 +1143,7 @@ mod tests {
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
 
         let snippets = format_snippets(&[&msg]);
@@ -1193,18 +1196,21 @@ mod tests {
                 content: Some(MessageContent::Text("System prompt".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
                 content: Some(MessageContent::Text("Hi there".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         let transcript = build_transcript(&messages);

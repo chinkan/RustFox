@@ -36,6 +36,9 @@ pub struct ProviderConfig {
     /// transient upstream failure). Honours `Retry-After` when present.
     /// Defaults to 3; set to 0 to disable (fail fast, pre-429-retry behaviour).
     pub rate_limit_retry_limit: u32,
+    /// Extra HTTP headers on chat (and OpenCode Go models list). Used for
+    /// OpenCode Go `x-opencode-session` (#271); empty for other providers.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl From<&ProviderSection> for ProviderConfig {
@@ -53,6 +56,7 @@ impl From<&ProviderSection> for ProviderConfig {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 0,      // overwritten by build_registry
             rate_limit_retry_limit: 0, // overwritten by build_registry
+            extra_headers: vec![],
         }
     }
 }
@@ -134,18 +138,41 @@ pub fn should_walk_fallback(err: &anyhow::Error) -> bool {
     if err.downcast_ref::<LlmPreHttpError>().is_some() {
         return false;
     }
-    // ADR-0043: detect-only miss must not silent-hop via [fallback] chain.
+    // ADR-0043: detect-only / peer-not-configured must not silent-hop.
     if err
         .downcast_ref::<crate::opencode::OpenCodeDetectOnlyError>()
         .is_some()
     {
         return false;
     }
+    // ADR-0044: misconfigured xAI must not silent-hop to another provider type.
+    if err
+        .downcast_ref::<crate::xai::XaiMisconfiguredError>()
+        .is_some()
+    {
+        return false;
+    }
     if let Some(http) = err.downcast_ref::<LlmHttpError>() {
-        return !http.is_auth_hard_exclusion();
+        if http.is_auth_hard_exclusion() {
+            return false;
+        }
+        // Leave-Go (#267 / ADR-0043 §7): OpenCode plain short 429 stays put;
+        // 402 and 429+GoUsageLimitError/Policy walk to OpenRouter DeepSeek.
+        if is_opencode_http_provider(&http.provider)
+            && http.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            && !crate::opencode::is_go_leave_signal(&http.body)
+        {
+            return false;
+        }
+        return true;
     }
     // Network / timeout / DNS / JSON-or-body parse / missing-choices exhaustion.
     true
+}
+
+/// Provider names that mean OpenCode Go peer (registered name or reserved aliases).
+fn is_opencode_http_provider(name: &str) -> bool {
+    name == "opencode" || OPENCODE_MODEL_ALIASES.contains(&name)
 }
 
 /// Documented OpenRouter `error_type` values that mean upstream transient
@@ -304,6 +331,9 @@ async fn chat_completion_with_retry(
         let mut req = client.post(url).json(request);
         if let Some(key) = api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        for (name, value) in &config.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
         }
 
         let response = match req.send().await {
@@ -476,7 +506,7 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Longest-prefix aliases for OpenCode catalog ids (ADR-0043 Phase 1).
+/// Longest-prefix aliases for OpenCode catalog ids (ADR-0043).
 /// Reserved even when no `[[provider]] type=opencode` section exists (#262).
 const OPENCODE_MODEL_ALIASES: &[&str] = &["opencode", "opencode-go"];
 
@@ -496,6 +526,20 @@ fn strip_opencode_alias(model: &str) -> Option<&str> {
     best.map(|(_, rest)| rest)
 }
 
+/// Match reserved xAI Active ids: exact `xai` (#273) or `xai/<model>` (ADR-0044).
+///
+/// Returns `Some("")` for bare `xai` (caller substitutes the provider default
+/// model). Returns `Some(rest)` after `xai/`. Case rules match existing
+/// prefix stubs (exact ASCII equality on [`crate::xai::MODEL_ALIAS`]).
+fn strip_xai_alias(model: &str) -> Option<&str> {
+    if model == crate::xai::MODEL_ALIAS {
+        return Some("");
+    }
+    model
+        .strip_prefix(crate::xai::MODEL_ALIAS)
+        .and_then(|s| s.strip_prefix('/'))
+}
+
 fn opencode_detect_only_stub() -> Arc<dyn Provider> {
     Arc::new(OpenCodeProvider::new(ProviderConfig {
         name: "opencode".to_string(),
@@ -510,6 +554,25 @@ fn opencode_detect_only_stub() -> Arc<dyn Provider> {
         context_window_cache: Arc::new(RwLock::new(None)),
         parse_retry_limit: 0,
         rate_limit_retry_limit: 0,
+        extra_headers: vec![],
+    }))
+}
+
+fn xai_misconfigured_stub() -> Arc<dyn Provider> {
+    Arc::new(XaiProvider::new(ProviderConfig {
+        name: crate::xai::MODEL_ALIAS.to_string(),
+        provider_type: ProviderType::Xai,
+        base_url: crate::xai::DEFAULT_BASE.to_string(),
+        api_key: None,
+        default_model: crate::xai::DEFAULT_MODEL.to_string(),
+        supports_vision: false,
+        max_tokens: 8192,
+        discover_models: true,
+        context_window: 128_000,
+        context_window_cache: Arc::new(RwLock::new(None)),
+        parse_retry_limit: 0,
+        rate_limit_retry_limit: 0,
+        extra_headers: vec![],
     }))
 }
 
@@ -522,6 +585,9 @@ pub struct ProviderRegistry {
     /// `[[provider]] type=opencode` is registered (ADR-0043 §6 / #262).
     /// Not listed in [`Self::provider_names`].
     opencode_detect_only: Option<Arc<dyn Provider>>,
+    /// Misconfigured stub for reserved `xai` / `xai/` when no `type=xai`
+    /// section is registered (ADR-0044 §9 / #273). Not listed in [`Self::provider_names`].
+    xai_stub: Option<Arc<dyn Provider>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -530,6 +596,7 @@ impl std::fmt::Debug for ProviderRegistry {
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .field("default_provider", &self.default_provider)
             .field("opencode_detect_only", &self.opencode_detect_only.is_some())
+            .field("xai_stub", &self.xai_stub.is_some())
             .finish()
     }
 }
@@ -540,6 +607,7 @@ impl ProviderRegistry {
             providers,
             default_provider,
             opencode_detect_only: None,
+            xai_stub: None,
         }
     }
 
@@ -550,8 +618,10 @@ impl ProviderRegistry {
     /// pick the longest `N`. Reserved OpenCode aliases (`opencode`,
     /// `opencode-go`) resolve to the detect-only stub even when no
     /// `[[provider]] type=opencode` section exists (#262) — never silent-hop
-    /// to the default provider. Other unknown prefixes fall through to the
-    /// default provider (unchanged). Never fails.
+    /// to the default provider. Reserved xAI ids (`xai`, `xai/…`) likewise
+    /// resolve to the xAI provider or misconfigured stub (#273 / ADR-0044 §9).
+    /// Other unknown prefixes fall through to the default provider
+    /// (unchanged). Never fails.
     pub fn resolve_model<'a>(&'a self, model: &'a str) -> (&'a dyn Provider, &'a str) {
         let mut best: Option<(&str, &str)> = None;
         for name in self.providers.keys() {
@@ -574,6 +644,26 @@ impl ProviderRegistry {
         if let Some(stub) = &self.opencode_detect_only {
             if let Some(rest) = strip_opencode_alias(model) {
                 return (stub.as_ref(), rest);
+            }
+        }
+        // ADR-0044 §9 / #273: reserved bare `xai` and `xai/<model>` — typed
+        // misconfigured error, never silent-hop to the default provider.
+        if let Some(rest) = strip_xai_alias(model) {
+            if let Some(p) = self.providers.get(crate::xai::MODEL_ALIAS) {
+                let model_id = if rest.is_empty() {
+                    p.default_model()
+                } else {
+                    rest
+                };
+                return (p.as_ref(), model_id);
+            }
+            if let Some(stub) = &self.xai_stub {
+                let model_id = if rest.is_empty() {
+                    stub.default_model()
+                } else {
+                    rest
+                };
+                return (stub.as_ref(), model_id);
             }
         }
         // Fall through to default provider with full string
@@ -640,11 +730,31 @@ pub fn build_registry(
         let mut cfg: ProviderConfig = ProviderConfig::from(section);
         cfg.parse_retry_limit = parse_retry_limit;
         cfg.rate_limit_retry_limit = rate_limit_retry_limit;
+        // OpenCode peer (#267): empty base_url + api_key → Go OpenAI-compat default.
+        if section.provider_type == ProviderType::OpenCode
+            && cfg.base_url.trim().is_empty()
+            && cfg.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+        {
+            cfg.base_url = crate::opencode::GO_OPENAI_BASE.to_string();
+        }
+        if section.provider_type == ProviderType::OpenCode && cfg.default_model.trim().is_empty() {
+            cfg.default_model = crate::opencode::GO_DEFAULT_MODEL.to_string();
+        }
+        // ADR-0044: empty base_url / model → xAI defaults when type=xai.
+        if section.provider_type == ProviderType::Xai {
+            if cfg.base_url.trim().is_empty() {
+                cfg.base_url = crate::xai::DEFAULT_BASE.to_string();
+            }
+            if cfg.default_model.trim().is_empty() {
+                cfg.default_model = crate::xai::DEFAULT_MODEL.to_string();
+            }
+        }
         let provider: Arc<dyn Provider> = match section.provider_type {
             ProviderType::OpenRouter => Arc::new(OpenRouterProvider::new(cfg)),
             ProviderType::OpenAICompatible => Arc::new(OpenAICompatibleProvider::new(cfg)),
             ProviderType::Ollama => Arc::new(OllamaProvider::new(cfg)),
             ProviderType::OpenCode => Arc::new(OpenCodeProvider::new(cfg)),
+            ProviderType::Xai => Arc::new(XaiProvider::new(cfg)),
         };
         providers.insert(section.name.clone(), provider.clone());
         // Catalog ids are double-segmented (`opencode-go/kimi-k3`). Alias so
@@ -658,6 +768,14 @@ pub fn build_registry(
                 }
             }
         }
+        // ADR-0044: also alias `xai/` when the section uses a different name.
+        if section.provider_type == ProviderType::Xai
+            && section.name.as_str() != crate::xai::MODEL_ALIAS
+        {
+            providers
+                .entry(crate::xai::MODEL_ALIAS.to_string())
+                .or_insert_with(|| provider.clone());
+        }
     }
 
     if providers.is_empty() {
@@ -670,14 +788,28 @@ pub fn build_registry(
             default_name
         );
     }
-    if providers
-        .get(default_name)
-        .is_some_and(|p| p.config().provider_type == ProviderType::OpenCode)
-    {
-        anyhow::bail!(
-            "Default provider '{}' is OpenCode (ADR-0043 Phase 1 detect-only); choose openrouter or ollama as Active",
-            default_name
-        );
+    if let Some(p) = providers.get(default_name) {
+        if p.config().provider_type == ProviderType::OpenCode
+            && !crate::opencode::peer_configured(
+                &p.config().base_url,
+                p.config().api_key.as_deref(),
+            )
+        {
+            anyhow::bail!(
+                "Default provider '{}' is OpenCode without peer path (ADR-0043); set base_url + api_key for Go Active, or choose openrouter/ollama",
+                default_name
+            );
+        }
+    }
+    if let Some(p) = providers.get(default_name) {
+        if p.config().provider_type == ProviderType::Xai
+            && !crate::xai::peer_configured(&p.config().base_url, p.config().api_key.as_deref())
+        {
+            anyhow::bail!(
+                "Default provider '{}' is xAI without api_key/base_url (ADR-0044); set credentials or choose another Active",
+                default_name
+            );
+        }
     }
 
     // #262: when no type=opencode section exists, keep a resolve-only stub so
@@ -691,10 +823,22 @@ pub fn build_registry(
         Some(opencode_detect_only_stub())
     };
 
+    // ADR-0044 §9 / #273: when no type=xai section, stub bare `xai` and `xai/`
+    // so they cannot silent-hop.
+    let xai_stub = if providers
+        .values()
+        .any(|p| p.config().provider_type == ProviderType::Xai)
+    {
+        None
+    } else {
+        Some(xai_misconfigured_stub())
+    };
+
     Ok(ProviderRegistry {
         providers,
         default_provider: default_name.to_string(),
         opencode_detect_only,
+        xai_stub,
     })
 }
 
@@ -1046,15 +1190,119 @@ impl Provider for OllamaProvider {
     }
 }
 
-// === OpenCodeProvider (ADR-0043 Phase 1 detect-only) ===
+// === XaiProvider (ADR-0044 / #266 Active peer) ===
+
+pub struct XaiProvider {
+    config: ProviderConfig,
+    /// Set when peer path is configured; reuses OpenAI-compat chat.
+    inner: Option<OpenAICompatibleProvider>,
+}
+
+impl XaiProvider {
+    pub fn new(config: ProviderConfig) -> Self {
+        let inner = if crate::xai::peer_configured(&config.base_url, config.api_key.as_deref()) {
+            Some(OpenAICompatibleProvider::new(config.clone()))
+        } else {
+            None
+        };
+        Self { config, inner }
+    }
+
+    pub fn is_peer(&self) -> bool {
+        self.inner.is_some()
+    }
+}
+
+#[async_trait]
+impl Provider for XaiProvider {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn default_model(&self) -> &str {
+        &self.config.default_model
+    }
+    fn supports_vision(&self) -> bool {
+        self.config.supports_vision
+    }
+    fn config(&self) -> &ProviderConfig {
+        &self.config
+    }
+
+    async fn chat_completion(
+        &self,
+        client: &reqwest::Client,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+        max_tokens: u32,
+    ) -> Result<ChatCompletion> {
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::chat(),
+            ));
+        };
+        inner
+            .chat_completion(client, messages, tools, model, max_tokens)
+            .await
+    }
+
+    async fn list_models(&self, client: &reqwest::Client) -> Result<Vec<String>> {
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::xai::XaiMisconfiguredError::chat(),
+            ));
+        };
+        inner.list_models(client).await
+    }
+
+    async fn fetch_context_window(&self, client: &reqwest::Client, model: &str) -> Option<usize> {
+        let inner = self.inner.as_ref()?;
+        inner.fetch_context_window(client, model).await
+    }
+}
+
+// === OpenCodeProvider (ADR-0043: detect-only stub OR Go Active peer #267) ===
 
 pub struct OpenCodeProvider {
     config: ProviderConfig,
+    /// Set when peer path is configured; reuses OpenAI-compat chat.
+    inner: Option<OpenAICompatibleProvider>,
 }
 
 impl OpenCodeProvider {
-    pub fn new(config: ProviderConfig) -> Self {
-        Self { config }
+    pub fn new(mut config: ProviderConfig) -> Self {
+        let inner = if crate::opencode::peer_configured(&config.base_url, config.api_key.as_deref())
+        {
+            // #271: stable x-opencode-session for the process lifetime of this peer.
+            if !config
+                .extra_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(crate::opencode::SESSION_HEADER))
+            {
+                config.extra_headers.push((
+                    crate::opencode::SESSION_HEADER.to_string(),
+                    crate::opencode::mint_session_id(),
+                ));
+            }
+            if !config
+                .extra_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            {
+                config.extra_headers.push((
+                    "User-Agent".to_string(),
+                    format!("RustFox/{}", env!("CARGO_PKG_VERSION")),
+                ));
+            }
+            Some(OpenAICompatibleProvider::new(config.clone()))
+        } else {
+            None
+        };
+        Self { config, inner }
+    }
+
+    pub fn is_peer(&self) -> bool {
+        self.inner.is_some()
     }
 }
 
@@ -1075,18 +1323,52 @@ impl Provider for OpenCodeProvider {
 
     async fn chat_completion(
         &self,
-        _client: &reqwest::Client,
-        _messages: &[ChatMessage],
-        _tools: &[ToolDefinition],
-        _model: &str,
-        _max_tokens: u32,
+        client: &reqwest::Client,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        model: &str,
+        max_tokens: u32,
     ) -> Result<ChatCompletion> {
-        Err(anyhow::Error::from(
-            crate::opencode::OpenCodeDetectOnlyError::chat(),
-        ))
+        let Some(inner) = &self.inner else {
+            return Err(anyhow::Error::from(
+                crate::opencode::OpenCodeDetectOnlyError::chat(),
+            ));
+        };
+        inner
+            .chat_completion(client, messages, tools, model, max_tokens)
+            .await
     }
 
-    async fn list_models(&self, _client: &reqwest::Client) -> Result<Vec<String>> {
+    async fn list_models(&self, client: &reqwest::Client) -> Result<Vec<String>> {
+        if let Some(_inner) = &self.inner {
+            let url = crate::opencode::go_models_url(&self.config.base_url);
+            let mut req = client.get(&url);
+            if let Some(ref key) = self.config.api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+            for (name, value) in &self.config.extra_headers {
+                req = req.header(name.as_str(), value.as_str());
+            }
+            let response = req
+                .send()
+                .await
+                .context("Failed to fetch models from OpenCode Go")?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                anyhow::bail!("OpenCode Go models API error ({}): {}", status, body);
+            }
+            let list: serde_json::Value = response.json().await?;
+            let models = list["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(models);
+        }
         let status = crate::opencode::detect_async().await;
         if status.state != crate::opencode::STATE_READY {
             anyhow::bail!(
@@ -1248,22 +1530,48 @@ mod tests {
     }
 
     #[test]
-    fn build_registry_rejects_opencode_as_default() {
-        let sections = vec![make_section(
-            "opencode",
-            ProviderType::OpenCode,
-            "",
-            "opencode/glm",
-        )];
+    fn build_registry_rejects_opencode_as_default_without_peer() {
+        let mut section = make_section("opencode", ProviderType::OpenCode, "", "opencode/glm");
+        section.api_key = None; // no peer path
+        let sections = vec![section];
         let err = build_registry(&sections, "opencode", 3, 0).unwrap_err();
         assert!(
-            err.to_string().contains("detect-only") || err.to_string().contains("OpenCode"),
+            err.to_string().contains("OpenCode")
+                && (err.to_string().contains("peer")
+                    || err.to_string().contains("detect-only")
+                    || err.to_string().contains("api_key")),
             "{err}"
         );
     }
 
+    #[test]
+    fn build_registry_allows_opencode_as_default_when_peer_configured() {
+        let mut section = make_section(
+            "opencode",
+            ProviderType::OpenCode,
+            crate::opencode::GO_OPENAI_BASE,
+            crate::opencode::GO_DEFAULT_MODEL,
+        );
+        section.api_key = Some("sk-go-test".into());
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-chat",
+            ),
+            section,
+        ];
+        let reg = build_registry(&sections, "opencode", 3, 0).unwrap();
+        assert_eq!(reg.default_provider_name(), "opencode");
+        let p = reg.get_provider("opencode").unwrap();
+        assert!(p.config().api_key.as_ref().is_some_and(|k| !k.is_empty()));
+    }
+
     #[tokio::test]
-    async fn opencode_chat_returns_detect_only_typed_error() {
+    async fn opencode_chat_returns_detect_only_when_peer_not_configured() {
+        let mut oc = make_section("opencode", ProviderType::OpenCode, "", "opencode/glm");
+        oc.api_key = None;
         let sections = vec![
             make_section(
                 "openrouter",
@@ -1271,7 +1579,7 @@ mod tests {
                 "https://openrouter.ai/api/v1",
                 "moonshotai/kimi-k2.6",
             ),
-            make_section("opencode", ProviderType::OpenCode, "", "opencode/glm"),
+            oc,
         ];
         let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
         let (provider, _) = reg.resolve_model("opencode/glm");
@@ -1461,6 +1769,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: parse_limit,
             rate_limit_retry_limit: rate_limit,
+            extra_headers: vec![],
         }
     }
 
@@ -1472,6 +1781,7 @@ mod tests {
                 content: Some(MessageContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             tools: None,
             max_tokens: 10,
@@ -1730,6 +2040,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -1750,6 +2061,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -1770,6 +2082,7 @@ mod tests {
             context_window_cache: Arc::new(RwLock::new(None)),
             parse_retry_limit: 3,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let p = OllamaProvider::new(cfg);
         assert_eq!(p.discovery_url(), "http://localhost:11434/api/tags");
@@ -1860,12 +2173,76 @@ mod tests {
         assert!(!should_walk_fallback(&anyhow::Error::from(
             crate::opencode::OpenCodeDetectOnlyError::chat()
         )));
+        assert!(!should_walk_fallback(&anyhow::Error::from(
+            crate::xai::XaiMisconfiguredError::chat()
+        )));
         assert!(should_walk_fallback(&anyhow::anyhow!(
             "Failed to send request"
         )));
         assert!(should_walk_fallback(&anyhow::anyhow!(
             "Failed to parse JSON response"
         )));
+    }
+
+    #[test]
+    fn leave_go_fallback_triggers() {
+        let mk = |status: u16, body: &str| {
+            anyhow::Error::from(LlmHttpError {
+                provider: "opencode".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                body: body.into(),
+            })
+        };
+        // 402 credits → leave
+        assert!(should_walk_fallback(&mk(
+            402,
+            r#"{"error":"Payment Required"}"#
+        )));
+        // 429 + GoUsageLimitError → leave
+        assert!(should_walk_fallback(&mk(
+            429,
+            r#"{"error":{"type":"GoUsageLimitError","message":"quota"}}"#
+        )));
+        // 429 + Policy budget → leave
+        assert!(should_walk_fallback(&mk(429, "Policy budget exceeded")));
+        // plain short 429 → do NOT leave
+        assert!(!should_walk_fallback(&mk(
+            429,
+            "rate limited, retry shortly"
+        )));
+        // #271: MissingSessionID body is not a leave-Go signal (header fix, not hop).
+        // HTTP 400 still walks under ADR-0019 for non-OpenCode leave rules; leave-Go
+        // itself remains 402 / 429+GoUsageLimitError/Policy only.
+        assert!(!crate::opencode::is_go_leave_signal(
+            r#"{"error":{"type":"MissingSessionID"}}"#
+        ));
+        // other providers: plain 429 still walks (ADR-0019)
+        assert!(should_walk_fallback(&anyhow::Error::from(LlmHttpError {
+            provider: "openrouter".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limited".into(),
+        })));
+    }
+
+    #[test]
+    fn reasoning_content_round_trips_on_chat_message() {
+        let raw = r#"{
+            "role": "assistant",
+            "content": "pong",
+            "reasoning_content": "thinking…"
+        }"#;
+        let msg: ChatMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(msg.content.as_ref().unwrap().as_text(), "pong");
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking…"));
+        let back = serde_json::to_value(&msg).unwrap();
+        assert_eq!(back["reasoning_content"], "thinking…");
+        assert_eq!(back["content"], "pong");
+        // Absent field stays absent on serialize
+        let bare: ChatMessage =
+            serde_json::from_str(r#"{"role":"assistant","content":"hi"}"#).unwrap();
+        assert!(bare.reasoning_content.is_none());
+        let bare_v = serde_json::to_value(&bare).unwrap();
+        assert!(bare_v.get("reasoning_content").is_none());
     }
 
     #[test]
@@ -1891,5 +2268,277 @@ mod tests {
         };
         assert!(!e402.is_auth_hard_exclusion());
         assert!(!e402.is_transient()); // still not same-model retryable
+    }
+
+    #[test]
+    fn build_registry_allows_xai_as_default_when_configured() {
+        let mut section = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            crate::xai::DEFAULT_MODEL,
+        );
+        section.api_key = Some("sk-xai-test".into());
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-chat",
+            ),
+            section,
+        ];
+        let reg = build_registry(&sections, "xai", 3, 0).unwrap();
+        assert_eq!(reg.default_provider_name(), "xai");
+        let p = reg.get_provider("xai").unwrap();
+        assert_eq!(p.config().provider_type, ProviderType::Xai);
+        assert_eq!(p.default_model(), "grok-4.7");
+        assert!(p.config().api_key.as_ref().is_some_and(|k| !k.is_empty()));
+    }
+
+    #[test]
+    fn build_registry_rejects_xai_as_default_without_key() {
+        let mut section = make_section("xai", ProviderType::Xai, "", "grok-4.7");
+        section.api_key = None;
+        let err = build_registry(&[section], "xai", 3, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("xAI") && (err.contains("api_key") || err.contains("base_url")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn xai_defaults_filled_when_empty() {
+        let mut section = make_section("xai", ProviderType::Xai, "", "");
+        section.api_key = Some("sk".into());
+        let reg = build_registry(&[section], "xai", 3, 0).unwrap();
+        let p = reg.get_provider("xai").unwrap();
+        assert_eq!(p.config().base_url, crate::xai::DEFAULT_BASE);
+        assert_eq!(p.default_model(), "grok-4.7");
+    }
+
+    #[tokio::test]
+    async fn xai_chat_returns_typed_error_when_not_configured() {
+        let mut xai = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            "grok-4.7",
+        );
+        xai.api_key = None;
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            xai,
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, _) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], "grok-4.7", 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::xai::XaiMisconfiguredError>();
+        assert!(
+            typed.is_some(),
+            "expected XaiMisconfiguredError, got {err:#}"
+        );
+        assert!(!should_walk_fallback(&err));
+    }
+
+    #[tokio::test]
+    async fn unregistered_xai_alias_no_silent_hop() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(model, "grok-4.7");
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], model, 16)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::xai::XaiMisconfiguredError>()
+                .is_some(),
+            "expected typed error, got {err:#}"
+        );
+        assert!(!should_walk_fallback(&err));
+    }
+
+    #[tokio::test]
+    async fn opencode_peer_chat_sends_stable_session_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(ok_body()))
+            .mount(&server)
+            .await;
+
+        let cfg = ProviderConfig {
+            name: "opencode".to_string(),
+            provider_type: ProviderType::OpenCode,
+            base_url: server.uri(),
+            api_key: Some("k".to_string()),
+            default_model: "deepseek-v4.1-flash".to_string(),
+            supports_vision: false,
+            max_tokens: 10,
+            discover_models: false,
+            context_window: 128_000,
+            context_window_cache: Arc::new(RwLock::new(None)),
+            parse_retry_limit: 0,
+            rate_limit_retry_limit: 0,
+            extra_headers: vec![],
+        };
+        let provider = OpenCodeProvider::new(cfg);
+        assert!(provider.is_peer());
+        let stamped = provider
+            .config()
+            .extra_headers
+            .iter()
+            .find(|(k, _)| k == crate::opencode::SESSION_HEADER)
+            .map(|(_, v)| v.clone());
+        let stamped = stamped.expect("peer must stamp x-opencode-session");
+        assert!(
+            stamped.starts_with("rustfox-") && stamped.len() > "rustfox-".len(),
+            "{stamped}"
+        );
+
+        let client = reqwest::Client::new();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Text("hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        provider
+            .chat_completion(&client, &messages, &[], "deepseek-v4.1-flash", 10)
+            .await
+            .expect("chat should succeed");
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let hdr = requests[0]
+            .headers
+            .get(crate::opencode::SESSION_HEADER)
+            .expect("x-opencode-session on chat request");
+        assert_eq!(hdr.to_str().unwrap(), stamped.as_str());
+    }
+
+    /// #273 soft repro: bare Active id `xai` (no `/model`) must hit the xAI
+    /// stub, not silent-hop to the default / OpenRouter alias.
+    #[test]
+    fn resolve_model_unregistered_bare_xai_does_not_silent_hop() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        assert!(
+            reg.get_provider("xai").is_none(),
+            "xAI stub must not pollute registered provider list"
+        );
+        assert!(!reg.provider_names().iter().any(|n| n == "xai"));
+
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(
+            provider.config().provider_type,
+            ProviderType::Xai,
+            "bare xai must not silent-hop to openrouter"
+        );
+        assert_eq!(
+            model,
+            crate::xai::DEFAULT_MODEL,
+            "bare xai uses provider default model id"
+        );
+
+        // Prefixed form still works (unchanged ADR-0044).
+        let (provider2, model2) = reg.resolve_model("xai/grok-4.7");
+        assert_eq!(provider2.config().provider_type, ProviderType::Xai);
+        assert_eq!(model2, "grok-4.7");
+
+        // Unrelated bare / unknown prefix still falls through to default.
+        let (provider3, model3) = reg.resolve_model("moonshotai/kimi-k2.5");
+        assert_eq!(provider3.name(), "openrouter");
+        assert_eq!(model3, "moonshotai/kimi-k2.5");
+    }
+
+    /// #273: Active / chat path with bare unregistered `xai` → typed error,
+    /// no fallback walk (mirrors #262 bare-alias chat test).
+    #[tokio::test]
+    async fn unregistered_bare_xai_chat_returns_typed_error() {
+        let sections = vec![make_section(
+            "openrouter",
+            ProviderType::OpenRouter,
+            "https://openrouter.ai/api/v1",
+            "moonshotai/kimi-k2.6",
+        )];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(model, crate::xai::DEFAULT_MODEL);
+        let client = reqwest::Client::new();
+        let err = provider
+            .chat_completion(&client, &[], &[], model, 16)
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<crate::xai::XaiMisconfiguredError>();
+        assert!(
+            typed.is_some(),
+            "expected XaiMisconfiguredError, got {err:#}"
+        );
+        assert!(
+            !should_walk_fallback(&err),
+            "must not silent-hop via fallback"
+        );
+    }
+
+    /// #273: registered-but-misconfigured `type=xai` + bare `xai` must still
+    /// resolve to Xai (not OpenRouter), so Active validate / chat typed-reject.
+    #[test]
+    fn resolve_model_registered_bare_xai_does_not_silent_hop() {
+        let mut xai = make_section(
+            "xai",
+            ProviderType::Xai,
+            crate::xai::DEFAULT_BASE,
+            "grok-4.7",
+        );
+        xai.api_key = None;
+        let sections = vec![
+            make_section(
+                "openrouter",
+                ProviderType::OpenRouter,
+                "https://openrouter.ai/api/v1",
+                "moonshotai/kimi-k2.6",
+            ),
+            xai,
+        ];
+        let reg = build_registry(&sections, "openrouter", 3, 0).unwrap();
+        let (provider, model) = reg.resolve_model("xai");
+        assert_eq!(provider.config().provider_type, ProviderType::Xai);
+        assert_eq!(provider.name(), "xai");
+        assert_eq!(model, "grok-4.7");
+        assert!(
+            !crate::xai::peer_configured(
+                &provider.config().base_url,
+                provider.config().api_key.as_deref()
+            ),
+            "fixture must stay misconfigured so Active validate rejects"
+        );
     }
 }

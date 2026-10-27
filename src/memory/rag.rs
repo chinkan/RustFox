@@ -126,6 +126,7 @@ mod tests {
             content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -228,6 +229,7 @@ mod tests {
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         store.save_message(&conv, &msg).await.unwrap();
 
@@ -250,6 +252,7 @@ mod tests {
             content: Some(MessageContent::from_text("some result")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let preserved = vec![];
         let result = retrieve_context_for_compaction(&store, &to_summarize, &preserved, &conv, 5)
@@ -271,6 +274,7 @@ mod tests {
             content: Some(MessageContent::from_text("Tell me about Rust async")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         store.save_message(&conv, &msg).await.unwrap();
 
@@ -279,12 +283,14 @@ mod tests {
             content: Some(MessageContent::from_text("Here's how...")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let preserved = vec![ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::from_text("Tell me about Rust async")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
 
         let result = retrieve_context_for_compaction(&store, &to_summarize, &preserved, &conv, 5)

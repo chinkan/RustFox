@@ -37,12 +37,14 @@ pub async fn rewrite_for_rag(
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         },
         ChatMessage {
             role: "user".to_string(),
             content: Some(MessageContent::from_text(prompt)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         },
     ];
 
@@ -114,6 +116,7 @@ mod tests {
             content: Some(MessageContent::from_text(text)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 

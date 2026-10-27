@@ -84,13 +84,22 @@ impl ConversationManager {
             offset
         );
 
+        // ADR-0043 / #277: light continuity prompt when SQLite history already
+        // has ≥1 prior user/assistant turn (excludes pure system/summary).
+        let continuity_note = if crate::cold_intro::has_continuity_turns(&raw) {
+            crate::cold_intro::CONTINUITY_LIGHT_PROMPT
+        } else {
+            ""
+        };
+
         let system_msg = ChatMessage {
             role: "system".to_string(),
             content: Some(MessageContent::Text(format!(
-                "{system_prompt}{context_prompt}"
+                "{system_prompt}{context_prompt}{continuity_note}"
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
 
         let mut messages = vec![system_msg];
@@ -102,6 +111,7 @@ impl ConversationManager {
                 ))),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         messages.extend(raw);
@@ -155,6 +165,7 @@ impl ConversationManager {
             content: Some(MessageContent::Text(combined.clone())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         // Scheduled runs persist the prompt and the result together, once,
         // from the job runner (failure / cancel / max-iterations included).
@@ -215,6 +226,7 @@ impl ConversationManager {
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         new_msgs.extend(self.messages.iter().skip(tail_start).cloned());
         self.messages = new_msgs;
@@ -224,6 +236,7 @@ impl ConversationManager {
             content: Some(MessageContent::Text(format!("[SUMMARY]\n{layer}"))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         };
         if let Err(e) = self
             .memory
@@ -392,12 +405,14 @@ impl ConversationManager {
                 )),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text(summary_prompt)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
 
@@ -456,6 +471,7 @@ mod tests {
             context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
             parse_retry_limit: 0,
             rate_limit_retry_limit: 0,
+            extra_headers: vec![],
         };
         let provider: Arc<dyn crate::provider::Provider> =
             Arc::new(OpenRouterProvider::new(config));
@@ -490,6 +506,7 @@ mod tests {
                     context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
                     parse_retry_limit: 0,
                     rate_limit_retry_limit: 0,
+                    extra_headers: vec![],
                 },
                 reply: reply.into(),
                 calls: std::sync::atomic::AtomicUsize::new(0),
@@ -536,6 +553,7 @@ mod tests {
                     content: Some(MessageContent::Text(self.reply.clone())),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some("stop".to_string()),
                 model: model.to_string(),
@@ -553,6 +571,7 @@ mod tests {
             content: Some(MessageContent::Text(system.to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         messages.push(ChatMessage {
             role: "user".to_string(),
@@ -562,6 +581,7 @@ mod tests {
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         for i in 0..15 {
             messages.push(ChatMessage {
@@ -576,6 +596,7 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(ChatMessage {
                 role: "tool".to_string(),
@@ -585,6 +606,7 @@ mod tests {
                 ))),
                 tool_calls: None,
                 tool_call_id: Some(format!("call_{i}")),
+                reasoning_content: None,
             });
         }
         messages.push(ChatMessage {
@@ -594,6 +616,7 @@ mod tests {
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages
     }
@@ -634,24 +657,28 @@ mod tests {
                 content: Some(MessageContent::Text("sys".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("old request".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
                 content: Some(MessageContent::Text("old reply".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("latest request".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]);
         cm.memory = store.clone();
@@ -718,6 +745,7 @@ mod tests {
             content: Some(MessageContent::Text("sys".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]);
         assert!(cm.apply_summary_layer("   ", 1).await.is_err());
     }
@@ -730,18 +758,21 @@ mod tests {
                 content: Some(MessageContent::Text("sys".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("how are you".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]);
         let texts = |cm: &ConversationManager| -> Vec<(String, String)> {
@@ -779,6 +810,7 @@ mod tests {
             content: Some(MessageContent::Text("system prompt".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         messages.push(ChatMessage {
             role: "user".to_string(),
@@ -788,6 +820,7 @@ mod tests {
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "assistant".to_string(),
@@ -801,12 +834,14 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "tool".to_string(),
             content: Some(MessageContent::Text("lookup result payload".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_split".to_string()),
+            reasoning_content: None,
         });
         messages.push(ChatMessage {
             role: "user".to_string(),
@@ -816,6 +851,7 @@ mod tests {
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         let start = protected_tail_start(&messages, 1_000_000);
@@ -845,6 +881,7 @@ mod tests {
             content: Some(MessageContent::Text("system prompt".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         messages.push(ChatMessage {
             role: "user".to_string(),
@@ -854,6 +891,7 @@ mod tests {
             ))),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         for i in 0..15 {
             messages.push(ChatMessage {
@@ -868,6 +906,7 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(ChatMessage {
                 role: "tool".to_string(),
@@ -877,6 +916,7 @@ mod tests {
                 ))),
                 tool_calls: None,
                 tool_call_id: Some(format!("call_{i}")),
+                reasoning_content: None,
             });
         }
         messages.push(ChatMessage {
@@ -886,6 +926,7 @@ mod tests {
             )),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         let mut cm = manager(messages);
@@ -951,6 +992,7 @@ mod tests {
                 content: Some(MessageContent::Text("sys".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -960,18 +1002,21 @@ mod tests {
                 ))),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "assistant".to_string(),
                 content: Some(MessageContent::Text("old reply".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: Some(MessageContent::Text("middle message".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -980,6 +1025,7 @@ mod tests {
                 )),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]);
         cm.conversation_id = conv.clone();
@@ -1181,6 +1227,96 @@ allowed_directory = "."
         let mut out = Vec::new();
         doc.save_to(&mut out).expect("write pdf");
         out
+    }
+
+    #[tokio::test]
+    async fn continuity_light_prompt_appended_when_history_has_turns() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cid = store
+            .get_or_create_conversation_with_claim(
+                "telegram",
+                crate::platform::DEFAULT_BOT_ID,
+                "cont_light",
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "user".into(),
+                    content: Some(MessageContent::from_text("prior")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(MessageContent::from_text("ack")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let cm = ConversationManager::new(
+            &store,
+            "telegram",
+            crate::platform::DEFAULT_BOT_ID,
+            "cont_light",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let sys = cm.messages()[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        assert!(
+            sys.contains(crate::cold_intro::CONTINUITY_LIGHT_PROMPT.trim()),
+            "system prompt should carry continuity light prompt: {sys}"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuity_light_prompt_absent_on_empty_history() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cm = ConversationManager::new(
+            &store,
+            "telegram",
+            crate::platform::DEFAULT_BOT_ID,
+            "cont_empty",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let sys = cm.messages()[0]
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+        assert!(
+            !sys.contains("Continuity note:"),
+            "empty history must not inject continuity note: {sys}"
+        );
     }
 
     #[tokio::test]

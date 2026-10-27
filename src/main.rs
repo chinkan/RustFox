@@ -599,6 +599,16 @@ fn spawn_bare_user_turns(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ADR-0046 / #289: --version / -V print and exit before any
+    // bot / scheduler / instance lock (safe probe; never starts a stray).
+    if std::env::args()
+        .skip(1)
+        .any(|a| rustfox::instance_lock::is_version_flag(&a))
+    {
+        rustfox::instance_lock::print_version();
+        return Ok(());
+    }
+
     // Resolve home early so the tracing file sink matches config home
     // (RUSTFOX_HOME / [general].home / ~/.rustfox) before Config::load.
     let log_home = {
@@ -655,6 +665,10 @@ async fn main() -> Result<()> {
     // Check for --setup / service verbs / --service before normal bot start
     if let Some(cmd) = setup::parse_args() {
         match cmd {
+            setup::Command::Version => {
+                rustfox::instance_lock::print_version();
+                return Ok(());
+            }
             setup::Command::Setup { cli } => {
                 let cfg_path = rustfox::home::resolve_config_path(
                     std::env::var("RUSTFOX_CONFIG_PATH").ok().as_deref(),
@@ -689,6 +703,15 @@ async fn main() -> Result<()> {
     info!("Loading configuration from: {}", config_path.display());
     let mut config = Config::load(&config_path)
         .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+
+    // ADR-0046 / #289: exclusive flock on fox-home for normal bot start only.
+    // Held until process exit (RAII). Service verbs / --setup return above.
+    let fox_home = config.resolved_home().cloned().unwrap_or_else(|| {
+        dirs::home_dir()
+            .map(|h| h.join(".rustfox"))
+            .unwrap_or_else(|| PathBuf::from(".rustfox"))
+    });
+    let _instance_lock = rustfox::instance_lock::try_acquire(&fox_home)?;
 
     // Slice 3: host secret bridge (store + pending) shared by MCP / tools / portal.
     let (secret_bridge, secret_backend) = {
@@ -782,6 +805,8 @@ async fn main() -> Result<()> {
 
     // ADR 0016: resolve `secret:openrouter.api_key` before providers are built.
     rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
+    // ADR-0044: resolve `secret:xai.api_key` on type=xai [[provider]] rows.
+    rustfox::secret_store::resolve_xai_api_keys(&mut config, &secret_bridge)?;
 
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config
