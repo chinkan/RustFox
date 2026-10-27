@@ -14,6 +14,7 @@ pub mod fallback_edit;
 pub mod file_processor;
 pub mod google_mcp;
 pub mod home;
+pub mod instance_lock;
 pub mod langsmith;
 pub mod learning;
 pub mod llm;

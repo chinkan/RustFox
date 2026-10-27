@@ -180,9 +180,9 @@ rustfox status
 3. Upgrade (prefer self-upgrade above)
 4. Start **once** (`rustfox start` / `systemctl --user start rustfox`, or a single bare start)
 
-**Do not** use bare `rustfox` or `rustfox --version` as a diagnostic probe today: `--version` is not implemented yet, and unknown flags can fall through and start a full bot+scheduler. Prefer `rustfox status` / `systemctl --user status rustfox`.
+**Safe probe:** `rustfox --version` / `rustfox -V` prints the package version and exits 0 (no bot/scheduler start). Prefer `rustfox status` / `systemctl --user status rustfox` for service health. Avoid bare `rustfox` as a probe — that starts the bot.
 
-**#289 contract (docs):** one fox-home → exclusive **flock** (single bot instance) + safe `--version` print-and-exit. Locked in [ADR-0046](docs/adr/0046-register-start-time-single-instance-flock-and-safe-version.md); **runtime code lands in a later impl PR that Closes #289** (this docs track is docs-only). Until then, stop + kill-all strays before upgrade remains required — flock will be a belt, not a replacement.
+**#289 / ADR-0046:** one fox-home → exclusive **flock** on `rustfox.lock` (single bot+scheduler). Second start with the same home fail-fast; different `RUSTFOX_HOME` values may run side by side. Service verbs and `--setup` stay unlock-friendly. Stop + kill-all strays before upgrade remains required — flock is a belt, not a replacement. See [ADR-0046](docs/adr/0046-register-start-time-single-instance-flock-and-safe-version.md).
 
 → Operator detail: [docs/GUIDE.md](docs/GUIDE.md#self-upgrade--ops).
 
