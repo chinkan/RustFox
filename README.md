@@ -22,7 +22,7 @@ Single binary. Setup wizard. Runs as systemd/launchd service. `cargo install` an
 
 Star the repo ⭐, fork to contribute, or open an issue for feedback.
 
-**docs:** [README.md](README.md) · [GUIDE.md](docs/GUIDE.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [CHANGELOG.md](CHANGELOG.md)
+**docs:** [User docs](https://chinkan.github.io/rustfox-docs/) · [GUIDE.md](docs/GUIDE.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ---
 

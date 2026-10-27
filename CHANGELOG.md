@@ -5,7 +5,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.7] — TBD
+
+Release on main after `v1.0.6`. Headline: xAI + OpenCode Active peers, MCP Settings, scheduler timeout continue, single-instance flock. No tag in this commit.
+
 ### Added
+- **Telegram inbound Reply-to → Active (ADR-0048, #295):** compose `reply_to_message` quote into one Active user message before TurnGate; QueuedInput / SQLite share the composed text; no new schema. Closes #295.
+- **OpenCode Active peer Go DeepSeek (ADR-0043, #267):** OpenCode as selectable Active peer (Direction D); Leave-Go on HTTP 402 or 429+GoUsageLimitError/Policy (not plain short 429); `reasoning_content` echo when present; detect-only typed error / no silent hop when peer unset. Closes #267.
+- **ADR-0049 rustfox-docs end-user content IA (docs):** Accepted IA for end-user / self-hoster pages on `rustfox-docs` (plain language; Decision 11: no ADR body hyperlinks on end-user pages). ADR-0047 Decision 10 allows Starlight-compatible Mermaid on the docs site. No RustFox runtime change. Refs #296, #297.
 - **Single-instance flock + safe `--version` (ADR-0046, #289):** on normal bot start (bare / `run` / systemd ExecStart) acquire an exclusive flock on `{fox-home}/rustfox.lock`; second start same home fail-fast; different `RUSTFOX_HOME` OK. `status` / `restart` / `stop` / `install` / `--setup` do not hold the bot lock. `--version` / `-V` print `CARGO_PKG_VERSION` and exit 0 before bot/scheduler/lock. Kill-all-before-upgrade remains required (flock is a belt). Closes #289.
 - **ADR-0047 Starlight docs site `rustfox-docs` (docs):** Accepted Product-lock GO 2026-10-27 — separate repo `chinkan/rustfox-docs`, GH Pages `https://chinkan.github.io/rustfox-docs/` (no custom domain); Astro 7 + Starlight 0.42.x + `starlight-llms-txt` + community `starlight-versions` (pin; early-dev risk); MVP EN Getting started / Install / Build / Usage / Upgrade & selfupgrade + llms.txt; Upgrade links ADR-0030 + ADR-0046/#289 (kill-all same fox-home; ban bare/`--version` probe until flock+safe `--version`); ADRs stay in RustFox `docs/adr/`; main README pointer when site live (separate). This PR does not create the docs repo or implement the site. No runtime change.
 - **ADR-0046 single-instance flock + `--version` (docs):** records flock + `--version` decision; README + GUIDE self-upgrade (ADR-0030) and ops safe-upgrade notes; Refs #289. **No runtime change.**
@@ -32,6 +39,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Explicit `mode=source` / Telegram `main` no longer falls back to `current_dir` when no `Cargo.toml` is near the executable (ADR-0030 Q2); auto mode behaviour unchanged.
 
 ### Fixed
+- **Telegram `/config` allow `scheduler.run_timeout_secs` (#254):** add to EDITABLE_KEYS (restart required) with ADR-0024 floor validation; surface real deny reasons on `/config set` so allowlist misses are not mislabeled as secrets. Closes #254.
+- **Typed-reject bare Active id `xai` (#274):** exact `xai` resolves to the xAI provider or a misconfigured stub — no silent hop to the default provider (mirrors OpenCode bare-alias). Closes #273 / #274.
 - **Register-time tool name dedupe + empty-progress clarify (ADR-0045, #286):** at tool/MCP register time keep the first `function.name` only (all tools, not Threads-only); `llm.rs` send-time drop remains belt. When `agent.loop_detection` is enabled, N=`threshold` (default 3) consecutive empty-progress iterations force a clarify FinalResponse (no MCP/duplicate internals; no silent empty / unbounded `llm_call`). Closes #286.
 
 - **Anti cold-intro W2+ phrase widen (ADR-0043 / #283):** widen lost-context matcher phrases — P1 CJK (`收唔到` / `收唔到你今次` / `只見到系統 context` / `只見到系統` / `今次嘅內容` / `冇見到` ≠ `見唔到`) and E1 EN (`didn't get your` / `only see system context` / `only seeing system`). W1 ∪ W2 structure, M1 (≥2 menu), C1 (phrase alone ≠ reject), and F1 unchanged. Tip `9f58afb` live FN was W2 phrase coverage (docs ADR already on main via #284). Closes #283.
@@ -52,6 +61,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - **Agent invoke follows Active model (ADR-0033, #223):** `run_subagent` no longer defaults to `[openrouter].model` when the agent has no `model` override — uses `current_model` (banner Active). Explicit agent/override `model` stays sticky. Does not block v1.0.6 (v1.0.7+).
 - **Ollama fallback first turn + tools (ADR-0029 amend, #218):** walking onto tool-weak Ollama with tools present (including first turn + plain user) always rewrites and omits tools — never raw tools that 500 with `no user query found`. Log says “after rewrite” only when rewrite ran. Primary keep-tools (ADR-0032) unchanged.
 - **Telegram online banner `Model:` (#217):** startup/online notify now shows `current_model` (same as `/models` Active), not `config.openrouter.model`.
+
+### Known limitations
+
+- Windows binaries in this release are not code-signed yet. On Windows with
+  Smart App Control turned on, the unsigned `rustfox.exe` cannot be opened and
+  there is no "Run anyway" option. Please wait for a signed release (#198); we
+  do not recommend turning Smart App Control off. Advanced users can build
+  RustFox themselves on a machine without Smart App Control. Code signing
+  (#198) remains deferred and does not block this release.
+- If Windows SmartScreen shows "Windows protected your PC", click "More info",
+  then "Run anyway".
 
 ## [1.0.6] — 2026-10-14
 
