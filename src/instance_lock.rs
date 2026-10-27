@@ -30,6 +30,18 @@ pub fn lock_path(home: &Path) -> PathBuf {
     home.join(LOCK_FILE_NAME)
 }
 
+/// True when an I/O error means the exclusive flock is already held.
+///
+/// Unix `fs2` typically surfaces [`std::io::ErrorKind::WouldBlock`]. On Windows,
+/// a held lock often returns raw OS error 33 (`ERROR_LOCK_VIOLATION`) instead.
+/// Some platforms may also use [`std::io::ErrorKind::ResourceBusy`].
+pub(crate) fn is_lock_contended(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ResourceBusy
+    ) || (cfg!(windows) && e.raw_os_error() == Some(33)) // ERROR_LOCK_VIOLATION
+}
+
 /// Try to acquire an exclusive, non-blocking flock on `{home}/rustfox.lock`.
 ///
 /// Creates `home` if needed. Returns a clear error when another process
@@ -47,7 +59,7 @@ pub fn try_acquire(home: &Path) -> Result<InstanceLock> {
 
     match file.try_lock_exclusive() {
         Ok(()) => Ok(InstanceLock { _file: file, path }),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(e) if is_lock_contended(&e) => {
             bail!(
                 "another rustfox instance is already running for fox-home {} \
                  (lock held: {}). Stop it first (`rustfox stop` / systemctl --user stop rustfox, \
@@ -73,6 +85,7 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Error, ErrorKind};
     use tempfile::TempDir;
 
     #[test]
@@ -119,5 +132,41 @@ mod tests {
         assert!(!is_version_flag("--help"));
         assert!(!is_version_flag("version"));
         assert!(!is_version_flag("-v"));
+    }
+
+    #[test]
+    fn is_lock_contended_would_block() {
+        let e = Error::from(ErrorKind::WouldBlock);
+        assert!(is_lock_contended(&e));
+    }
+
+    #[test]
+    fn is_lock_contended_resource_busy() {
+        let e = Error::from(ErrorKind::ResourceBusy);
+        assert!(is_lock_contended(&e));
+    }
+
+    #[test]
+    fn is_lock_contended_unrelated_kind_false() {
+        let e = Error::from(ErrorKind::PermissionDenied);
+        assert!(!is_lock_contended(&e));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn is_lock_contended_windows_error_lock_violation() {
+        // ERROR_LOCK_VIOLATION = 33
+        let e = Error::from_raw_os_error(33);
+        assert!(
+            is_lock_contended(&e),
+            "Windows ERROR_LOCK_VIOLATION must map to contended"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn is_lock_contended_windows_unrelated_os_error_false() {
+        let e = Error::from_raw_os_error(5); // ERROR_ACCESS_DENIED
+        assert!(!is_lock_contended(&e));
     }
 }
