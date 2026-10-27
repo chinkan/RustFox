@@ -141,6 +141,10 @@ pub fn is_service_installed() -> bool {
 
 /// Restart the bot: for service mode, restart via systemd/launchd;
 /// for foreground mode, spawn new binary and exit.
+///
+/// After a release `self_replace`, foreground restart must use the path
+/// stashed by [`crate::self_upgrade_ops::stash_running_exe`] — not a fresh
+/// `current_exe()` (ADR-0030 Accepted delta / #303).
 pub fn restart_bot() -> anyhow::Result<()> {
     if is_service_installed() {
         #[cfg(target_os = "linux")]
@@ -181,12 +185,18 @@ pub fn restart_bot() -> anyhow::Result<()> {
             }
         }
     } else {
-        let exe = std::env::current_exe().context("Failed to get current executable path")?;
+        let exe = crate::self_upgrade_ops::exe_for_post_replace()
+            .context("Failed to get executable path for restart")?;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut child = std::process::Command::new(&exe)
             .args(&args)
             .spawn()
-            .context("Failed to spawn new binary")?;
+            .with_context(|| {
+                format!(
+                    "Failed to spawn new binary at {} (stashed post-replace path)",
+                    exe.display()
+                )
+            })?;
         // Brief pause to detect immediate startup failure.
         std::thread::sleep(std::time::Duration::from_millis(500));
         if let Ok(Some(status)) = child.try_wait() {
@@ -820,6 +830,10 @@ pub async fn self_upgrade(
         }
     };
 
+    // ADR-0030 Accepted delta / #303: stash absolute exe **before** any
+    // release `self_replace`. Re-register + foreground restart must reuse it.
+    let stashed_exe = crate::self_upgrade_ops::stash_running_exe()?;
+
     let deployment = match mode {
         "source" => UpgradeMode::Source,
         "release" => UpgradeMode::Release,
@@ -940,12 +954,28 @@ pub async fn self_upgrade(
     if service_installed {
         log.push_str("\n→ Re-registering service...\n");
         send_progress(&mut log);
-        let exe = std::env::current_exe().context("Failed to get current executable path")?;
+        // ADR-0046 / #303: stop + kill-all leftovers for this fox-home first.
+        let fox_home = crate::self_upgrade_ops::fox_home_for_upgrade();
+        match crate::self_upgrade_ops::stop_and_kill_before_reregister(&fox_home) {
+            Ok(fragment) => log.push_str(&fragment),
+            Err(e) => {
+                tracing::warn!("pre-reregister stop/kill-all: {e:#}");
+                log.push_str(&format!("  ⚠ pre-reregister stop/kill-all: {e:#}\n"));
+            }
+        }
+        send_progress(&mut log);
+        // Never re-call current_exe() here — use the pre-replace stash (#303).
+        let exe = crate::self_upgrade_ops::exe_for_post_replace().unwrap_or(stashed_exe);
         let service_output = tokio::process::Command::new(&exe)
             .args(["install"])
             .output()
             .await
-            .context("Failed to run rustfox install")?;
+            .with_context(|| {
+                format!(
+                    "Failed to run rustfox install at {} (stashed post-replace path)",
+                    exe.display()
+                )
+            })?;
         if !service_output.status.success() {
             let combined = format!(
                 "{}{}",
