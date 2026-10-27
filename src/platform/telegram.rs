@@ -2178,6 +2178,34 @@ pub async fn handle_message(
         return send_markdown_message(&bot, msg.chat.id, &reply, msg_format).await;
     }
 
+    // ADR-0048: inject reply_to_message quote into this turn's user text before
+    // TurnGate so Active messages[], SQLite history, and QueuedInput mid-run all
+    // see the same composed string (no new schema; Continuity untouched).
+    let text = if let Some(replied) = msg.reply_to_message() {
+        let role = replied
+            .from
+            .as_ref()
+            .map(|u| crate::platform::telegram_reply_to::role_from_is_bot(u.is_bot))
+            .unwrap_or("user");
+        let id = replied.id.0;
+        let has_media = replied.photo().is_some()
+            || replied.document().is_some()
+            || replied.video().is_some()
+            || replied.audio().is_some()
+            || replied.voice().is_some()
+            || replied.video_note().is_some()
+            || replied.animation().is_some()
+            || replied.sticker().is_some();
+        let quote = crate::platform::telegram_reply_to::quote_from_reply_parts(
+            replied.text(),
+            replied.caption(),
+            has_media,
+        );
+        crate::platform::telegram_reply_to::compose_reply_to_user_text(role, id, &quote, &text)
+    } else {
+        text
+    };
+
     // ADR-0020: submit to TurnGate, then spawn the turn so the dispatcher is free.
     let key = session_key(&bot_id, &user_id.to_string());
     let input = QueuedInput {

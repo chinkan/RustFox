@@ -95,14 +95,14 @@ plus known `role` / `id`. Do **not** omit the reply-to marker, and do **not** re
 
 Docs-level acceptance checklist for a **later** implementation PR (not implemented here):
 
-- [ ] Compose uses the locked English template exactly (one user message; `{role}`, `{id}`, `{quoted_text}`, `{user_text}`).
-- [ ] Quote truncate: >4000 Unicode scalars → cut to 4000 + `…`.
-- [ ] Unavailable: inject `[Reply to {role} msg {id}: unavailable]` with known role/id; message still accepted (no silent omit, no refuse).
-- [ ] Media-only: inject `[Reply to {role} msg {id}: media attachment, no text]`.
-- [ ] Mid-run: TurnGate enqueue / steer / next-turn drain preserves the composed quote on `QueuedInput`.
-- [ ] SQLite history stores the **full composed** user text; no new schema.
-- [ ] No Continuity coupling: Continuity SoT / anti cold-intro / matcher paths unchanged.
-- [ ] Outbound 👀 still only ADR-0020 mid-run ack on the new user message.
+- [x] Compose uses the locked English template exactly (one user message; `{role}`, `{id}`, `{quoted_text}`, `{user_text}`).
+- [x] Quote truncate: >4000 Unicode scalars → cut to 4000 + `…`.
+- [x] Unavailable: inject `[Reply to {role} msg {id}: unavailable]` with known role/id; message still accepted (no silent omit, no refuse).
+- [x] Media-only: inject `[Reply to {role} msg {id}: media attachment, no text]`.
+- [x] Mid-run: TurnGate enqueue / steer / next-turn drain preserves the composed quote on `QueuedInput`.
+- [x] SQLite history stores the **full composed** user text; no new schema.
+- [x] No Continuity coupling: Continuity SoT / anti cold-intro / matcher paths unchanged.
+- [x] Outbound 👀 still only ADR-0020 mid-run ack on the new user message.
 
 ## Follow-ups
 
