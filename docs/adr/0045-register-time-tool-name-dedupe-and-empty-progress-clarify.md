@@ -1,9 +1,9 @@
 # ADR-0045: Register-time tool name dedupe and empty-progress clarify
 
-- **Status:** Accepted (#286 shipped A+B; #298 amends short meta-token FinalResponse filler class)
+- **Status:** Accepted (#286 shipped A+B; #298 amends short meta-token FinalResponse filler class; #315 thin amend post–empty-progress lost-context / W2++ — docs this PR; Phase 2 impl pending)
 - **Date:** 2026-10-26
-- **Related:** #231, ADR-0019 (send-time duplicate drop is a symptom shield, not the root fix), live tip `7b7bbaa`, #286 (A+B shipped), #298 (short meta-token filler amend)
-- **Issue:** #286 Closed (A+B); #298 thin amend (this PR Closes #298)
+- **Related:** #231, ADR-0019 (send-time duplicate drop is a symptom shield, not the root fix), live tip `7b7bbaa`, #286 (A+B shipped), #298 (short meta-token filler amend), #315 (post–empty-progress lost-context / dishonest FN thin amend; Phase 2 impl pending)
+- **Issue:** #286 Closed (A+B); #298 Closed (filler amend); this docs PR **Refs #315** (do not close; Phase 2 impl Closes #315)
 
 ## Context
 
@@ -50,13 +50,31 @@ Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-
 
 7. **Impl MUST tests:** filler / streak → clarify; benign short → FinalResponse; empty-progress path unchanged.
 
+
+## Decision — Post–empty-progress lost-context / dishonest FN (#315)
+
+Related: #315 (MAIN TG false empty+lost context after link; live dig A locked). Soft = **N/A** for this docs PR. Soft after Phase 2 only; tip match MAIN `13714ff`+. Amend in place; Status stays Accepted. This docs PR **Refs #315**; do **not** close #315. Sequencing: this docs PR **Refs #315** → four gates Soft N/A squash → Phase 2 impl PR **Closes #315**.
+
+1. **Amend (after empty-progress force-clarify, ADR-0045 B):** if the clarify/regen FinalResponse still claims lost-context / empty inbound (`訊息係空`, `掉失`/`掉失咗`, or existing W2 lost-context signals) **with or without** ≥2 capability menu lines → treat as cold-intro / dishonest FN: **rewrite or honest clarify**; do **not** ship the FN prose. This closes the C1 hole where menu-reject regen ships lost-context alone.
+
+2. **W2++ (same track; note in ADR; code in Phase 2):** add phrases `訊息係空` and `掉失`/`掉失咗` to the lost-context matcher. Near-synonyms are follow-up OOS for #315.
+
+3. **Unchanged:** register-time first-wins (A); empty-progress N=`agent.loop_detection.threshold` still force clarify; #298 meta-token filler; no leave-Go / Active / #194 / #202; `SOFT_BLOCKS_v1.0.8` **NO**. Soft after Phase 2 only; tip match MAIN `13714ff`+. Not a v1.0.8 Soft gate.
+
+4. **Impl MUST (Phase 2, not this PR):**
+   - W2++ in `src/cold_intro.rs` + unit tests
+   - post–empty-progress clarify guard on the shared FinalResponse path (all Active peers)
+   - tests for dig path force-clarify → menu reject → regen without menu FN must not ship
+   - CHANGELOG Unreleased for code
+
 ## Non-goals
 
 - Restart / token / Active provider changes.
-- W2 cold-intro matcher work (#283 / #285) — different symptom class.
+- Broader W2 cold-intro matcher work beyond the #315 W2++ phrases (`訊息係空`, `掉失`/`掉失咗`); near-synonyms and #283 / #285 follow-ups remain OOS for #315.
 - A release tag from this docs change or the later impl PR without owner.
 - Threads upstream root cause (why the MCP schema double-reports); optional follow-up, does not block #286.
-- Rust, tests, or CHANGELOG in this docs PR.
+- Rust, tests, or CHANGELOG runtime code in this docs PR (Phase 2 owns code + Unreleased code bullet).
+- Closing #315 from this docs PR (Refs only; Phase 2 Closes).
 - #194 / #202.
 - Replacing (A) with send-time drop alone; send-time drop remains belt only.
 - Mentions of MCP / duplicate internals in user-visible clarify copy.
@@ -67,7 +85,7 @@ Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-
 - Safety net (B) reuses existing `agent.loop_detection` knobs (`threshold`, default 3) rather than inventing a parallel counter.
 - First-wins trade-off is acceptable: later duplicate registrations are skipped; callers that relied on a second same-name tool must rename.
 - (B) may still fire if (A) is imperfect or another empty-progress class appears; that is intentional belt-and-suspenders, not a substitute for (A).
-- Tracking for A+B closed on #286. #298 adds the short meta-token filler safety net on the shared FinalResponse path (abort→clarify; Soft QA/QA2; no tag; not v1.0.8). #194 / #202 remain parked.
+- Tracking for A+B closed on #286. #298 adds the short meta-token filler safety net on the shared FinalResponse path (abort→clarify; Soft QA/QA2; no tag; not v1.0.8). #315 thin amend: after empty-progress force-clarify, lost-context / empty-inbound FN (including W2++ phrases) with or without ≥2 menu lines → rewrite/honest clarify (closes C1 hole); Soft N/A this docs PR; Soft after Phase 2 only; `SOFT_BLOCKS_v1.0.8` NO. #194 / #202 remain parked.
 
 ## Related
 
@@ -75,7 +93,8 @@ Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-
 - #231 — historical empty-progress / duplicate-tool loop class; clarify copy alignment for (B).
 - #286 — Closed: (A) register-time dedupe + (B) empty-progress clarify shipped.
 - #298 — thin amend: short meta-token / filler FinalResponse abort→clarify + streak; Soft QA/QA2; no tag; not v1.0.8.
+- #315 — thin amend: post–empty-progress lost-context / dishonest FN + W2++ phrases (`訊息係空`, `掉失`/`掉失咗`); docs this PR Refs #315; Phase 2 impl Closes #315; Soft N/A here; Soft after Phase 2 only; tip match MAIN `13714ff`+; `SOFT_BLOCKS_v1.0.8` NO.
 - #307 / #308 — DSML strip/recover (different class; out of scope for #298).
 - Live tip `7b7bbaa` — incident base for #286 (Active OpenCode / `deepseek-v4.1-flash`; duplicate `mcp_threads_schedule_post`).
-- Live tip `13714ff` — evidence base for #298 short meta-token FinalResponse filler (OpenCode Go + DeepSeek).
+- Live tip `13714ff` — evidence base for #298 short meta-token FinalResponse filler (OpenCode Go + DeepSeek); also tip-match base for #315 Soft after Phase 2.
 - #194 / #202 — parked; out of scope.
