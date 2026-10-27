@@ -334,17 +334,19 @@ async fn empty_progress_streak_forces_clarify_final_response() {
                 !text.to_lowercase().contains("mcp") && !text.to_lowercase().contains("duplicate"),
                 "clarify must not mention MCP/duplicate internals: {text}"
             );
+            // threshold arms + nudges once (#315); still-empty on the next
+            // iteration ships the fixed clarify (ADR-0045 B).
             assert_eq!(
-                iterations, 3,
-                "must stop at loop_detection.threshold; got {iterations}"
+                iterations, 4,
+                "must stop after threshold arm+nudge then still-empty; got {iterations}"
             );
         }
         other => panic!("expected FinalResponse clarify, got {other:?}"),
     }
     let n_llm = *calls.lock().unwrap();
     assert!(
-        n_llm <= 3,
-        "llm_call must be bounded by threshold; llm={n_llm}"
+        n_llm <= 4,
+        "llm_call must be bounded by threshold+nudge; llm={n_llm}"
     );
 }
 
