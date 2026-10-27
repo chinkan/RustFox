@@ -264,6 +264,7 @@ describe('PixelOffice', () => {
     expect(chair?.getAttribute('data-seat-y')).toBe('10')
     expect(paws?.getAttribute('data-seat-y')).toBe('10')
     expect(Number(svg?.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeGreaterThan(10)
+    expectMonitorStandsOnDesk(svg ?? null)
     expect(keyboard).toBeTruthy()
     expect(svg?.querySelector('.px-arm .px-shade')?.getAttribute('y')).toBe(keyboard?.getAttribute('y'))
     expect(svg?.querySelector('[data-fox-part="desk"]')).toBeTruthy()
@@ -296,6 +297,8 @@ describe('PixelOffice', () => {
     expect(upSeat).toBe(26)
     expect(Number(top.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeGreaterThan(downSeat)
     expect(Number(bottom.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeLessThan(upSeat)
+    expectMonitorStandsOnDesk(top.querySelector('svg'))
+    expectMonitorStandsOnDesk(bottom.querySelector('svg'))
     expect(bottom.querySelector('[data-fox-part="paws"]')?.getAttribute('data-seat-y')).toBe('26')
     expect(bottom.querySelector('.px-arm .px-shade')?.getAttribute('y')).toBe(
       bottom.querySelector('[data-fox-part="keyboard"]')?.getAttribute('y'),
@@ -342,6 +345,20 @@ describe('PixelOffice', () => {
     expect(screen.queryByRole('article')).toBeNull()
   })
 })
+
+/** Screen ends at the desk top. Stand bottom sits in the desktop, not in the leg bay. */
+function expectMonitorStandsOnDesk(svg: Element | null) {
+  const desk = svg?.querySelector('[data-fox-part="desk-top"]')
+  const monitor = svg?.querySelector('[data-fox-part="monitor"]')
+  const stand = svg?.querySelector('[data-fox-part="monitor-stand"]')
+  const deskTop = Number(desk?.getAttribute('y'))
+  const deskBottom = deskTop + Number(desk?.getAttribute('height'))
+  const monitorBottom = Number(monitor?.getAttribute('y')) + Number(monitor?.getAttribute('height'))
+  const standBottom = Number(stand?.getAttribute('y')) + Number(stand?.getAttribute('height'))
+  expect(monitorBottom).toBeLessThanOrEqual(deskTop)
+  expect(standBottom).toBeGreaterThanOrEqual(deskTop)
+  expect(standBottom).toBeLessThanOrEqual(deskBottom)
+}
 
 function viShow(): { fn: () => void; calls: number } {
   const box = { fn: () => undefined, calls: 0 }

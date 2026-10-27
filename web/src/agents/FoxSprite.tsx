@@ -36,6 +36,7 @@ export function FoxSprite({
       data-facing={seatFacing}
     >
       {mode !== 'walk' ? <Desk pose={pose} prop={variant.deskProp} facing={seatFacing} /> : null}
+      {mode !== 'walk' && seatFacing === 'up' ? <Monitor pose={pose} facing={seatFacing} /> : null}
       {mode === 'desk' ? null : shown === 'walk' ? (
         <WalkFox accessory={variant.accessory} />
       ) : pose === 'idle' ? (
@@ -45,33 +46,25 @@ export function FoxSprite({
       ) : (
         <ErrorFox accessory={variant.accessory} facing={seatFacing} />
       )}
+      {mode !== 'walk' && seatFacing === 'down' ? <Monitor pose={pose} facing={seatFacing} /> : null}
     </svg>
   )
 }
 
 /**
- * Up row: monitor toward the aisle (top), chair at y=26.
- * Down row: chair behind the fox, monitor toward the aisle (bottom).
+ * Up row: chair at y=26, monitor standing on the desk toward the aisle.
+ * Down row: chair behind the fox at y=10, monitor standing on the desk toward the aisle.
+ * The stand's bottom edge lands inside the desk top. The screen never drops into the leg bay.
  */
 const SEAT_Y_UP = 26
 const SEAT_Y_DOWN = 10
 
 function Desk({ pose, prop, facing }: { pose: AgentStatus; prop: FoxProp; facing: FoxFacing }) {
-  const screen = pose === 'running' ? 'px-screen-run' : pose === 'error' ? 'px-screen-err' : 'px-screen-idle'
   const down = facing === 'down'
   const seat = down ? SEAT_Y_DOWN : SEAT_Y_UP
   return (
     <g data-fox-part="desk" data-facing={facing}>
-      <rect className="px-bezel" data-fox-part="monitor" x="17" y={down ? 30 : 0} width="14" height="8" />
-      <rect className={screen} x="19" y={down ? 32 : 2} width="10" height="5" />
-      {pose === 'error' ? (
-        <g className="px-alert">
-          <rect className="px-ink" x="23" y={down ? 33 : 3} width="2" height="2" />
-          <rect className="px-ink" x="23" y={down ? 36 : 6} width="2" height="1" />
-        </g>
-      ) : null}
-      <rect className="px-bezel" x="22" y={down ? 28 : 8} width="4" height="2" />
-      <rect className="px-desk" x="4" y={down ? 20 : 12} width="40" height="6" />
+      <rect className="px-desk" data-fox-part="desk-top" x="4" y={down ? 20 : 12} width="40" height="6" />
       <rect className="px-desk-dark" x="4" y={down ? 26 : 18} width="40" height="2" />
       <rect className="px-desk-dark" x="6" y={down ? 26 : 20} width="3" height="6" />
       <rect className="px-desk-dark" x="39" y={down ? 26 : 20} width="3" height="6" />
@@ -85,6 +78,36 @@ function Desk({ pose, prop, facing }: { pose: AgentStatus; prop: FoxProp; facing
         <rect className="px-ink" x="15" y={down ? 14 : 30} width="2" height="6" />
         <rect className="px-ink" x="31" y={down ? 14 : 30} width="2" height="6" />
       </g>
+    </g>
+  )
+}
+
+function Monitor({ pose, facing }: { pose: AgentStatus; facing: FoxFacing }) {
+  const screen = pose === 'running' ? 'px-screen-run' : pose === 'error' ? 'px-screen-err' : 'px-screen-idle'
+  const down = facing === 'down'
+  // Down: screen sits in front of the torso, stand planted on desk y=20.
+  // Up: screen stays above the desk, stand reaches desk y=12.
+  const bezelY = down ? 12 : 0
+  const standY = down ? 20 : 10
+  const standH = down ? 2 : 3
+  return (
+    <g data-fox-part="monitor-rig" data-facing={facing}>
+      <rect className="px-bezel" data-fox-part="monitor" x="17" y={bezelY} width="14" height="8" />
+      <rect className={screen} x="19" y={bezelY + 2} width="10" height="5" />
+      {pose === 'error' ? (
+        <g className="px-alert">
+          <rect className="px-ink" x="23" y={bezelY + 3} width="2" height="2" />
+          <rect className="px-ink" x="23" y={bezelY + 6} width="2" height="1" />
+        </g>
+      ) : null}
+      <rect
+        className="px-bezel"
+        data-fox-part="monitor-stand"
+        x="22"
+        y={standY}
+        width="4"
+        height={standH}
+      />
     </g>
   )
 }
