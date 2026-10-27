@@ -385,6 +385,185 @@ pub fn parse_kimi_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
     }
 }
 
+/// DeepSeek DSML special token fragment (`｜DSML｜`).
+const DSML_TOKEN: &str = "｜DSML｜";
+
+fn contains_tool_markup(content: &str) -> bool {
+    content.contains(DSML_TOKEN)
+        || content.contains("<|tool_calls_section_begin|>")
+        || content.contains("<|tool_call_begin|>")
+        || content.contains("<|tool_call_argument_begin|>")
+        || content.contains("<|tool_call_end|>")
+        || content.contains("<|tool_calls_section_end|>")
+}
+
+fn dsml_invoke_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        // Tolerant of optional whitespace after ｜DSML｜ (V4.1 Flash " calls" style).
+        regex::Regex::new(r#"(?s)<｜DSML｜\s*invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜\s*invoke>"#)
+            .expect("dsml invoke regex")
+    })
+}
+
+fn dsml_param_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?s)<｜DSML｜\s*parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</｜DSML｜\s*parameter>"#,
+        )
+        .expect("dsml param regex")
+    })
+}
+
+fn dsml_block_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        // Full tool_calls / calls blocks (open through matching close).
+        regex::Regex::new(r"(?s)<｜DSML｜\s*(?:tool_)?calls\s*>.*?</｜DSML｜\s*(?:tool_)?calls\s*>")
+            .expect("dsml block regex")
+    })
+}
+
+fn dsml_tag_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"</?｜DSML｜[^>]*>").expect("dsml tag regex"))
+}
+
+/// Parse DeepSeek DSML tool-call markup leaked into `content`.
+///
+/// Official shape (spaces after `｜DSML｜` optional):
+///
+/// ```text
+/// <｜DSML｜tool_calls>
+/// <｜DSML｜invoke name="my_tool">
+/// <｜DSML｜parameter name="arg" string="true">value</｜DSML｜parameter>
+/// </｜DSML｜invoke>
+/// </｜DSML｜tool_calls>
+/// ```
+///
+/// Returns `Some` with at least one call when an `invoke` with a name is found.
+pub fn parse_dsml_tool_calls(content: &str) -> Option<Vec<ToolCall>> {
+    if !content.contains(DSML_TOKEN) {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    for (idx, cap) in dsml_invoke_re().captures_iter(content).enumerate() {
+        let Some(name_m) = cap.get(1) else {
+            continue;
+        };
+        let func_name = name_m.as_str().trim();
+        if func_name.is_empty() {
+            continue;
+        }
+        let Some(body_m) = cap.get(2) else {
+            continue;
+        };
+        let body = body_m.as_str();
+        let mut args = serde_json::Map::new();
+        for p in dsml_param_re().captures_iter(body) {
+            let key = p.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let is_string = p.get(2).map(|m| m.as_str()) == Some("true");
+            let raw = p.get(3).map(|m| m.as_str()).unwrap_or("").to_string();
+            let value = if is_string {
+                serde_json::Value::String(raw)
+            } else {
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
+            };
+            args.insert(key, value);
+        }
+        let arguments = serde_json::Value::Object(args).to_string();
+        calls.push(ToolCall {
+            id: format!("dsml_fallback_{func_name}_{idx}"),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: func_name.to_string(),
+                arguments,
+            },
+        });
+    }
+
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
+/// Strip DSML / Kimi tool-call markup from assistant text (closers-only, residual tags).
+///
+/// Used when markup cannot be recovered into `tool_calls` so FinalResponse never
+/// posts raw DSML closers to Telegram (#307).
+pub fn strip_tool_markup(content: &str) -> String {
+    let mut s = dsml_block_re().replace_all(content, "").into_owned();
+    s = dsml_tag_re().replace_all(&s, "").into_owned();
+    for marker in [
+        "<|tool_calls_section_begin|>",
+        "<|tool_calls_section_end|>",
+        "<|tool_call_begin|>",
+        "<|tool_call_argument_begin|>",
+        "<|tool_call_end|>",
+    ] {
+        s = s.replace(marker, "");
+    }
+    // Collapse leftover whitespace runs from stripped tags; keep single spaces.
+    let ws = regex::Regex::new(r"[ 	]{2,}").expect("ws regex");
+    let s = ws.replace_all(s.trim(), " ").into_owned();
+    s.trim().to_string()
+}
+
+/// Recover leaked tool markup in an assistant message (#307).
+///
+/// When `tool_calls` is empty and `content` holds Kimi or DSML tool markup,
+/// parse into `tool_calls` and clear content (mirror OpenRouter kimi path).
+/// Otherwise strip residual / closers-only markup so FinalResponse text is clean.
+///
+/// Returns `true` when tool calls were recovered from content.
+pub fn recover_leaked_tool_markup(message: &mut ChatMessage) -> bool {
+    if message.has_tool_calls() {
+        if let Some(ref content) = message.content {
+            let text = content.as_text();
+            if contains_tool_markup(&text) {
+                let cleaned = strip_tool_markup(&text);
+                message.content = if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(MessageContent::Text(cleaned))
+                };
+            }
+        }
+        return false;
+    }
+
+    let Some(ref content) = message.content else {
+        return false;
+    };
+    let text = content.as_text();
+    if text.trim().is_empty() {
+        return false;
+    }
+
+    if let Some(parsed) = parse_kimi_tool_calls(&text).or_else(|| parse_dsml_tool_calls(&text)) {
+        message.tool_calls = Some(parsed);
+        message.content = None;
+        return true;
+    }
+
+    if contains_tool_markup(&text) {
+        let cleaned = strip_tool_markup(&text);
+        message.content = if cleaned.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(cleaned))
+        };
+    }
+    false
+}
+
 /// ADR-0029 / ADR-0032 / ADR-0034: tool-weak backends must not receive a
 /// mid-tool-loop transcript unchanged — they 500 with "no user query found".
 ///
@@ -1010,6 +1189,171 @@ mod tests {
         assert!(calls[0].id.contains("7"), "id should embed the call index");
     }
 
+    // --- #307 DSML strip / recover fixtures ---
+
+    fn dsml_full_fixture() -> String {
+        format!(
+            concat!(
+                "<{t}tool_calls>\n",
+                "<{t}invoke name=\"web_search\">\n",
+                "<{t}parameter name=\"query\" string=\"true\">HK weather</{t}parameter>\n",
+                "<{t}parameter name=\"num_results\" string=\"false\">3</{t}parameter>\n",
+                "</{t}invoke>\n",
+                "</{t}tool_calls>"
+            ),
+            t = "｜DSML｜"
+        )
+    }
+
+    fn dsml_closers_only_fixture() -> String {
+        format!(
+            "</{t} parameter> </{t} invoke> </{t} calls>",
+            t = "｜DSML｜"
+        )
+    }
+
+    fn dsml_mixed_fixture() -> String {
+        format!(
+            "Here is a short answer.\n</{t} parameter> </{t} invoke>",
+            t = "｜DSML｜"
+        )
+    }
+
+    #[test]
+    fn test_parse_dsml_tool_calls_full() {
+        let calls = parse_dsml_tool_calls(&dsml_full_fixture()).expect("should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "web_search");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["query"], "HK weather");
+        assert_eq!(args["num_results"], 3);
+    }
+
+    #[test]
+    fn test_parse_dsml_tool_calls_spaced_flash_variant() {
+        let content = format!(
+            concat!(
+                "<{t} calls>\n",
+                "<{t} invoke name=\"ping\">\n",
+                "<{t} parameter name=\"x\" string=\"true\">y</{t} parameter>\n",
+                "</{t} invoke>\n",
+                "</{t} calls>"
+            ),
+            t = "｜DSML｜"
+        );
+        let calls = parse_dsml_tool_calls(&content).expect("should parse spaced");
+        assert_eq!(calls[0].function.name, "ping");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["x"], "y");
+    }
+
+    #[test]
+    fn test_parse_dsml_closers_only_returns_none() {
+        assert!(parse_dsml_tool_calls(&dsml_closers_only_fixture()).is_none());
+    }
+
+    #[test]
+    fn test_strip_tool_markup_closers_only() {
+        let cleaned = strip_tool_markup(&dsml_closers_only_fixture());
+        assert!(
+            cleaned.is_empty(),
+            "closers-only must strip to empty, got {cleaned:?}"
+        );
+    }
+
+    #[test]
+    fn test_strip_tool_markup_mixed_keeps_prose() {
+        let cleaned = strip_tool_markup(&dsml_mixed_fixture());
+        assert_eq!(cleaned, "Here is a short answer.");
+    }
+
+    #[test]
+    fn test_strip_tool_markup_control_unchanged() {
+        assert_eq!(strip_tool_markup("Hello, world!"), "Hello, world!");
+        assert_eq!(strip_tool_markup(""), "");
+    }
+
+    #[test]
+    fn test_recover_dsml_full_into_tool_calls() {
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text(dsml_full_fixture())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(recover_leaked_tool_markup(&mut msg));
+        assert!(msg.content.is_none());
+        let calls = msg.tool_calls.expect("recovered");
+        assert_eq!(calls[0].function.name, "web_search");
+    }
+
+    #[test]
+    fn test_recover_dsml_closers_only_clears_content() {
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text(dsml_closers_only_fixture())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(!recover_leaked_tool_markup(&mut msg));
+        assert!(
+            msg.content.is_none() || msg.content.as_ref().is_some_and(|c| c.as_text().is_empty()),
+            "closers must not remain as FinalResponse text"
+        );
+        assert!(!msg.has_tool_calls());
+    }
+
+    #[test]
+    fn test_recover_dsml_mixed_strips_markup_keeps_prose() {
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text(dsml_mixed_fixture())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(!recover_leaked_tool_markup(&mut msg));
+        assert_eq!(
+            msg.content.as_ref().map(|c| c.as_text()).as_deref(),
+            Some("Here is a short answer.")
+        );
+    }
+
+    #[test]
+    fn test_recover_control_plain_text_untouched() {
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text("Done.".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(!recover_leaked_tool_markup(&mut msg));
+        assert_eq!(msg.content.as_ref().unwrap().as_text(), "Done.");
+    }
+
+    #[test]
+    fn test_recover_kimi_regression_still_parses() {
+        let content = " <|tool_calls_section_begin|> <|tool_call_begin|> functions.read_skill_file:5 \
+            <|tool_call_argument_begin|> {\"skill_name\": \"reddit-fetcher\", \"relative_path\": \"SKILL.md\"} \
+            <|tool_call_end|> <|tool_calls_section_end|>";
+        let mut msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text(content.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(recover_leaked_tool_markup(&mut msg));
+        assert_eq!(
+            msg.tool_calls.as_ref().unwrap()[0].function.name,
+            "read_skill_file"
+        );
+        assert!(msg.content.is_none());
+    }
+
     #[tokio::test]
     async fn test_stream_text_sends_all_content() {
         let content = "Hello, world! This is a test of stream_text.".to_string();
@@ -1359,20 +1703,9 @@ mod tests {
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
         let mut choice = resp.choices.into_iter().next().unwrap();
 
-        // Apply the same Kimi parsing logic used in chat_completion_with_model
-        let has_tool_calls = choice
-            .message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|t| !t.is_empty());
-        if !has_tool_calls {
-            if let Some(ref content) = choice.message.content.clone() {
-                if let Some(parsed) = parse_kimi_tool_calls(&content.as_text()) {
-                    choice.message.tool_calls = Some(parsed);
-                    choice.message.content = None;
-                    choice.finish_reason = Some("tool_calls".to_string());
-                }
-            }
+        // Shared recover path used by OpenRouter + OpenAI-compat / OpenCode (#307).
+        if recover_leaked_tool_markup(&mut choice.message) {
+            choice.finish_reason = Some("tool_calls".to_string());
         }
 
         // Construct ChatCompletion as chat_completion_with_model does
