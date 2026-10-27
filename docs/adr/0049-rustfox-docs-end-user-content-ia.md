@@ -1,6 +1,6 @@
 # ADR-0049: rustfox-docs end-user content IA
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-27
 - **Related:** ADR-0047 (Starlight stack / repo / MVP ship record — **do not amend**), ADR-0030 (self-upgrade; Update page links/ingests), ADR-0043 (OpenCode peer / MissingSessionID), ADR-0044 (xAI Active; bare `xai` refuse), ADR-0046 (flock + safe `--version`; Update/Setup kill-stray notes), Product grill 2026-10-27 (PO r3 Q11–Q15 all ACCEPT), Product delta 2026-10-27 (Commands expand + Providers/Troubleshooting soft locks)
 - **Issue:** none (Product grill 2026-10-27; no tracking issue)
@@ -11,7 +11,7 @@ ADR-0047 locked the **stack**, separate repo `chinkan/rustfox-docs`, GH Pages, A
 
 Operators now need a second lock: **end-user / self-hoster content information architecture** for the public sidebar — audience, tone, full tree, migration from MVP slugs, page boundaries, Commands inventory, Contribute paths, and phased ship batches — without rewriting ADR-0047 or implementing Starlight pages in this PR.
 
-Product grill 2026-10-27 (PO r3 Q11–Q15 all ACCEPT) locked the tree and boundaries below. Product delta 2026-10-27 expands the Commands inventory (OS CLI + Telegram slash) and soft-locks Providers / Troubleshooting symptoms with ADR links. This document records them as **Proposed** until Product Accept flips Status to Accepted. Soft test is N/A. **No tag.** This PR does **not** implement Starlight pages in `rustfox-docs`; **RustFox UI** owns Phase 1 on the docs repo after Accept.
+Product grill 2026-10-27 (PO r3 Q11–Q15 all ACCEPT) locked the tree and boundaries below. Product delta 2026-10-27 expands the Commands inventory (OS CLI + Telegram slash) and soft-locks Providers / Troubleshooting symptoms with ADR links. Product Accept landed; Status is **Accepted**. Soft test is N/A. **No tag.** This PR does **not** implement Starlight pages in `rustfox-docs`; **RustFox UI** owns Phase 1 on the docs repo after Accept.
 
 ## Decision
 
@@ -88,7 +88,7 @@ Product locks (PO grill 2026-10-27; Q11–Q15 ACCEPT + Product delta 2026-10-27)
 
 14. **Staffing after Accept.** Assign **RustFox UI** Phase 1 on `rustfox-docs` (not this PR). This docs-only PR records locks only.
 
-15. **Sequencing.** This docs-only PR → Product Accept (flip Status to Accepted) → four gates as usual for follow-on work. Soft N/A. **No tag.** No Rust / portal / package / `Cargo.lock` / runtime / tests in this PR.
+15. **Sequencing.** This docs-only PR records locks; Product Accept landed (Status **Accepted**). Follow-on work uses four gates as usual. Soft N/A. **No tag.** No Rust / portal / package / `Cargo.lock` / runtime / tests in this PR.
 
 ## Non-goals
 
@@ -112,7 +112,7 @@ Product locks (PO grill 2026-10-27; Q11–Q15 ACCEPT + Product delta 2026-10-27)
 - Providers / Troubleshooting carry soft locks with ADR-0043 / ADR-0044 and portal-access links, not GUIDE-only dumps.
 - Commands/Update document the shipped safe `--version` probe without amending ADR-0046 engine text.
 - Contribute stays two PR paths (code vs docs content); ADRs stay in RustFox.
-- Soft N/A on this docs PR; no tag; Status stays **Proposed** until Product Accept.
+- Soft N/A on this docs PR; no tag; Status is **Accepted** (Product Accept landed).
 
 ## Related
 
