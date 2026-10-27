@@ -1,6 +1,6 @@
 # ADR-0048: Telegram inbound Reply-to → Active
 
-- **Status:** Proposed (awaiting Product Accept)
+- **Status:** Accepted
 - **Date:** 2026-10-27
 - **Related:** ADR-0020 (mid-run message queue / TurnGate); Continuity #279 / #282 / #285 — **do not change**
 - **Decision source:** PO grill 2026-10-27
