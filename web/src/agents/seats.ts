@@ -65,3 +65,49 @@ export function officeMotionEnabled(opts: {
 export function agentsPollInterval(visible: boolean): number | false {
   return visible ? AGENTS_POLL_MS : false
 }
+
+export const FOX_COATS = ['orange', 'red', 'cream', 'silver', 'dark'] as const
+export const FOX_ACCESSORIES = ['none', 'scarf', 'glasses', 'bow', 'headset'] as const
+export const FOX_PROPS = ['plant', 'mug', 'lamp', 'papers'] as const
+
+export type FoxCoat = (typeof FOX_COATS)[number]
+export type FoxAccessory = (typeof FOX_ACCESSORIES)[number]
+export type FoxProp = (typeof FOX_PROPS)[number]
+
+export interface FoxVariant {
+  coat: FoxCoat
+  accessory: FoxAccessory
+  deskProp: FoxProp
+}
+
+/** FNV-1a. Same name always picks the same fox. */
+export function hashName(name: string): number {
+  let h = 2166136261
+  for (const ch of name) {
+    h ^= ch.charCodeAt(0)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+export function foxVariant(name: string): FoxVariant {
+  const h = hashName(name)
+  return {
+    coat: FOX_COATS[h % FOX_COATS.length],
+    accessory: FOX_ACCESSORIES[(h >>> 8) % FOX_ACCESSORIES.length],
+    deskProp: FOX_PROPS[(h >>> 16) % FOX_PROPS.length],
+  }
+}
+
+/**
+ * Idle roam is not a status. Only a live-signal seat that is idle walks
+ * the floor, and only while office motion is allowed.
+ */
+export function shouldRoam(view: SeatView, motion: boolean): boolean {
+  return motion && view.pose === 'idle' && !view.definitionOnly
+}
+
+/** Stagger roam loops so foxes do not stack. */
+export function roamDelaySeconds(name: string): number {
+  return (hashName(name) % 700) / 100
+}

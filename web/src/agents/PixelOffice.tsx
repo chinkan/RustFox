@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import type { Agent } from '../api/types'
 import { FoxSprite } from './FoxSprite'
-import { seatView, visibleDeskSlice } from './seats'
+import { foxVariant, roamDelaySeconds, seatView, shouldRoam, visibleDeskSlice } from './seats'
 
 export function PixelOffice({
   agents,
@@ -14,6 +14,8 @@ export function PixelOffice({
 }) {
   const { t } = useTranslation()
   const { visible, overflow } = visibleDeskSlice(agents)
+  const top = visible.filter((_, i) => i % 2 === 0)
+  const bottom = visible.filter((_, i) => i % 2 === 1)
 
   return (
     <div
@@ -29,37 +31,77 @@ export function PixelOffice({
           <p>{t('agents.noneFound')}</p>
         </div>
       ) : (
-        <div className="agent-office-floor">
-          {visible.map((agent) => {
-            const view = seatView(agent)
-            const statusLabel = t(`agents.${view.pose}`)
-            const nameBits = [agent.name, statusLabel]
-            if (view.definitionOnly) {
-              nameBits.push(t('agents.definitionOnly'), t('agents.noLiveRun'))
-            }
-            return (
-              <article
-                key={agent.id}
-                className="agent-desk"
-                data-pose={view.pose}
-                data-definition-only={view.definitionOnly ? 'true' : 'false'}
-                aria-label={nameBits.join(', ')}
-              >
-                <FoxSprite pose={view.pose} />
-                <strong className="agent-desk-name">{agent.name}</strong>
-                <span className="agent-desk-model mono">{agent.model}</span>
-                <SeatStatus agent={agent} />
-              </article>
-            )
-          })}
-          {overflow > 0 ? (
-            <button type="button" className="agent-desk-more" onClick={onShowOverflow}>
-              {t('agents.moreDesks', { count: overflow })}
-            </button>
-          ) : null}
+        <div className="office-scene">
+          <div className="office-row">
+            {top.map((agent) => (
+              <DeskCard key={agent.id} agent={agent} motion={motion} />
+            ))}
+          </div>
+          <div className="office-aisle" data-aisle="roam">
+            <span className="office-plant" aria-hidden="true" />
+            {visible.map((agent) => {
+              const view = seatView(agent)
+              if (!shouldRoam(view, motion)) return null
+              const variant = foxVariant(agent.name)
+              return (
+                <div
+                  key={agent.id}
+                  className="office-roamer"
+                  data-roam="on"
+                  data-lane={roamDelaySeconds(agent.name) > 3.5 ? '1' : '0'}
+                  style={{ animationDelay: `-${roamDelaySeconds(agent.name)}s` }}
+                >
+                  <FoxSprite pose="idle" variant={variant} mode="walk" />
+                </div>
+              )
+            })}
+          </div>
+          <div className="office-row">
+            {bottom.map((agent) => (
+              <DeskCard key={agent.id} agent={agent} motion={motion} />
+            ))}
+            {overflow > 0 ? (
+              <button type="button" className="agent-desk-more" onClick={onShowOverflow}>
+                {t('agents.moreDesks', { count: overflow })}
+              </button>
+            ) : null}
+          </div>
         </div>
       )}
     </div>
+  )
+}
+
+function DeskCard({ agent, motion }: { agent: Agent; motion: boolean }) {
+  const { t } = useTranslation()
+  const view = seatView(agent)
+  const variant = foxVariant(agent.name)
+  const roaming = shouldRoam(view, motion)
+  const returning = motion && view.pose === 'running'
+  const statusLabel = t(`agents.${view.pose}`)
+  const nameBits = [agent.name, statusLabel]
+  if (view.definitionOnly) {
+    nameBits.push(t('agents.definitionOnly'), t('agents.noLiveRun'))
+  }
+  return (
+    <article
+      className="agent-desk"
+      data-pose={view.pose}
+      data-definition-only={view.definitionOnly ? 'true' : 'false'}
+      data-roaming={roaming ? 'true' : 'false'}
+      data-returning={returning ? 'true' : 'false'}
+      data-coat={variant.coat}
+      data-accessory={variant.accessory}
+      data-desk-prop={variant.deskProp}
+      aria-label={nameBits.join(', ')}
+    >
+      <div className={returning ? 'fox-arriving' : undefined}>
+        <FoxSprite pose={view.pose} variant={variant} mode={roaming ? 'desk' : 'seat'} />
+      </div>
+      <strong className="agent-desk-name">{agent.name}</strong>
+      <span className="agent-desk-model mono">{agent.model}</span>
+      <SeatStatus agent={agent} />
+    </article>
   )
 }
 

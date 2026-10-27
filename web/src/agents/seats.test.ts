@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest'
 import type { Agent } from '../api/types'
 import {
   AGENTS_POLL_MS,
+  FOX_ACCESSORIES,
+  FOX_COATS,
+  FOX_PROPS,
   OFFICE_DESK_CAP,
   agentsPollInterval,
+  foxVariant,
   officeMotionEnabled,
   seatView,
+  shouldRoam,
   visibleDeskSlice,
 } from './seats'
 
@@ -133,6 +138,43 @@ describe('officeMotionEnabled', () => {
     expect(officeMotionEnabled({ ...base, reduceMotion: true })).toBe(false)
     expect(officeMotionEnabled({ ...base, disableOfficeAnimations: true })).toBe(false)
     expect(officeMotionEnabled({ ...base, prefersReducedMotion: true })).toBe(false)
+  })
+})
+
+describe('foxVariant', () => {
+  it('is deterministic for an agent name', () => {
+    expect(foxVariant('thread-writer-hk')).toEqual(foxVariant('thread-writer-hk'))
+    expect(foxVariant('rustfox')).toEqual(foxVariant('rustfox'))
+  })
+
+  it('stays inside fox coats, accessories, and desk props', () => {
+    for (const name of ['rustfox', 'verifier', 'researcher', 'writer', 'explorer']) {
+      const variant = foxVariant(name)
+      expect(FOX_COATS).toContain(variant.coat)
+      expect(FOX_ACCESSORIES).toContain(variant.accessory)
+      expect(FOX_PROPS).toContain(variant.deskProp)
+    }
+  })
+
+  it('differs across agent names', () => {
+    const names = ['rustfox', 'verifier', 'researcher', 'writer', 'explorer', 'thread-writer-hk']
+    const keys = new Set(names.map((name) => JSON.stringify(foxVariant(name))))
+    expect(keys.size).toBeGreaterThan(1)
+  })
+})
+
+describe('shouldRoam', () => {
+  const idle = { pose: 'idle' as const, definitionOnly: false }
+
+  it('lets a live idle fox roam only while office motion is on', () => {
+    expect(shouldRoam(idle, true)).toBe(true)
+    expect(shouldRoam(idle, false)).toBe(false)
+  })
+
+  it('keeps definition-only, running, and error foxes at the desk', () => {
+    expect(shouldRoam({ pose: 'idle', definitionOnly: true }, true)).toBe(false)
+    expect(shouldRoam({ pose: 'running', definitionOnly: false }, true)).toBe(false)
+    expect(shouldRoam({ pose: 'error', definitionOnly: false }, true)).toBe(false)
   })
 })
 

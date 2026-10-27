@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import '../i18n'
 import type { Agent } from '../api/types'
 import { PixelOffice } from './PixelOffice'
+import { foxVariant } from './seats'
 
 function row(i: number, over: Partial<Agent> = {}): Agent {
   const main = i === 0
@@ -149,6 +150,103 @@ describe('PixelOffice', () => {
       <PixelOffice agents={[row(0, { status: 'idle' })]} motion onShowOverflow={() => undefined} />,
     )
     expect(screen.getByRole('region', { name: 'Agent office' }).getAttribute('data-motion')).toBe('on')
+  })
+
+  it('roams a live idle fox through the aisle and keeps a running fox at its desk', () => {
+    render(
+      <PixelOffice
+        agents={[
+          row(0, { status: 'idle', name: 'rustfox' }),
+          row(1, { status: 'running', name: 'writer', id: 'agent:writer' }),
+        ]}
+        motion
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const office = screen.getByRole('region', { name: 'Agent office' })
+    expect(office.querySelector('[data-aisle="roam"]')).toBeTruthy()
+
+    const idle = screen.getByRole('article', { name: /rustfox/i })
+    expect(idle.getAttribute('data-roaming')).toBe('true')
+    expect(idle.getAttribute('data-pose')).toBe('idle')
+    expect(idle.querySelector('[data-character="fox"]')).toBeNull()
+
+    const walker = office.querySelector('[data-roam="on"] svg')
+    expect(walker?.getAttribute('data-character')).toBe('fox')
+    expect(walker?.querySelector('[data-fox-part="ears"]')).toBeTruthy()
+    expect(walker?.querySelector('[data-fox-part="snout"]')).toBeTruthy()
+    expect(walker?.querySelector('[data-fox-part="tail"]')).toBeTruthy()
+
+    const busy = screen.getByRole('article', { name: /writer/i })
+    expect(busy.getAttribute('data-roaming')).toBe('false')
+    expect(busy.getAttribute('data-returning')).toBe('true')
+    expect(busy.getAttribute('data-pose')).toBe('running')
+    expect(busy.querySelector('[data-character="fox"]')).toBeTruthy()
+  })
+
+  it('stops roam when office motion is off and parks the fox at the desk', () => {
+    render(
+      <PixelOffice
+        agents={[row(1, { status: 'idle', name: 'researcher', id: 'agent:researcher' })]}
+        motion={false}
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const office = screen.getByRole('region', { name: 'Agent office' })
+    expect(office.querySelector('[data-roam="on"]')).toBeNull()
+    const desk = screen.getByRole('article', { name: /researcher/i })
+    expect(desk.getAttribute('data-roaming')).toBe('false')
+    expect(desk.getAttribute('data-returning')).toBe('false')
+    expect(desk.querySelector('[data-character="fox"]')).toBeTruthy()
+    expect(desk.querySelector('[data-fox-part="tail"]')).toBeTruthy()
+  })
+
+  it('does not roam a definition-only seat', () => {
+    render(
+      <PixelOffice
+        agents={[
+          row(1, {
+            name: 'verifier',
+            id: 'agent:verifier',
+            status: 'idle',
+            live_signal: false,
+            definition_only: true,
+          }),
+        ]}
+        motion
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const office = screen.getByRole('region', { name: 'Agent office' })
+    expect(office.querySelector('[data-roam="on"]')).toBeNull()
+    expect(screen.getByRole('article', { name: /verifier/i }).getAttribute('data-roaming')).toBe('false')
+  })
+
+  it('paints name-deterministic fox variants on the desk', () => {
+    render(
+      <PixelOffice
+        agents={[
+          row(0, { status: 'running', name: 'rustfox' }),
+          row(1, { status: 'running', name: 'writer', id: 'agent:writer' }),
+        ]}
+        motion={false}
+        onShowOverflow={() => undefined}
+      />,
+    )
+    const rust = screen.getByRole('article', { name: /rustfox/i })
+    const writer = screen.getByRole('article', { name: /writer/i })
+    const rustVariant = foxVariant('rustfox')
+    const writerVariant = foxVariant('writer')
+    expect(rust.getAttribute('data-coat')).toBe(rustVariant.coat)
+    expect(rust.getAttribute('data-accessory')).toBe(rustVariant.accessory)
+    expect(rust.getAttribute('data-desk-prop')).toBe(rustVariant.deskProp)
+    expect(rust.querySelector('svg')?.getAttribute('data-coat')).toBe(rustVariant.coat)
+    expect(
+      `${rust.getAttribute('data-coat')}|${rust.getAttribute('data-accessory')}|${rust.getAttribute('data-desk-prop')}`,
+    ).not.toBe(
+      `${writer.getAttribute('data-coat')}|${writer.getAttribute('data-accessory')}|${writer.getAttribute('data-desk-prop')}`,
+    )
+    expect(writer.getAttribute('data-coat')).toBe(writerVariant.coat)
   })
 
   it('shows the empty state when no seats match', () => {
