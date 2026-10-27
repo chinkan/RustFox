@@ -86,7 +86,7 @@ One page for choosing a provider, credentials, and Active·peer: OpenRouter · O
 _Avoid_: Config page, provider dump, settings reference
 
 **Agent seat**:
-Portal desk for one loaded Agent definition (`listAgents` row). Shows idle/running/error ambient pose (ADR-0050).
+Portal desk for one loaded Agent definition (`listAgents` row). Shows idle/running/error ambient pose (ADR-0050). Game-office expand: idle foxes may roam the floor; busy/live-run paths back to the assigned desk; slight fox variants are deterministic from the agent name (fox sprites only, not humans).
 _Avoid_: session, turn, ToolNotifier row
 
 **Agent run**:
