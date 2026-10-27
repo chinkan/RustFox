@@ -1370,6 +1370,63 @@ allowed_directory = "."
         );
     }
 
+    /// ADR-0048: full composed reply-to user text persists on the existing
+    /// history path (no new schema). Continuity paths untouched.
+    #[tokio::test]
+    async fn add_incoming_persists_composed_reply_to_user_text() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let mut cm = ConversationManager::new(
+            &store,
+            "telegram",
+            crate::platform::DEFAULT_BOT_ID,
+            "persist_reply_to",
+            "sys".to_string(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let composed = crate::platform::telegram_reply_to::compose_reply_to_user_text(
+            "bot",
+            42,
+            &crate::platform::telegram_reply_to::ReplyQuote::Text("prior".into()),
+            "and now?",
+        );
+        let msg = IncomingMessage {
+            platform: "telegram".to_string(),
+            bot_id: crate::platform::DEFAULT_BOT_ID.to_string(),
+            user_id: "persist_reply_to".to_string(),
+            chat_id: "1".to_string(),
+            user_name: "tester".to_string(),
+            text: composed.clone(),
+            attachments: vec![],
+            schedule_id: None,
+        };
+
+        let (combined, _) = cm.add_incoming(&msg, &config, false).await.unwrap();
+        assert_eq!(combined, composed);
+
+        let conv = store
+            .get_or_create_conversation(
+                "telegram",
+                crate::platform::DEFAULT_BOT_ID,
+                "persist_reply_to",
+            )
+            .await
+            .unwrap();
+        let rows = store.load_messages(&conv).await.unwrap();
+        let user_rows: Vec<_> = rows.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(user_rows.len(), 1);
+        assert_eq!(
+            user_rows[0].content.as_ref().unwrap().as_text(),
+            composed.as_str(),
+            "SQLite must store the full composed reply-to text"
+        );
+    }
+
     #[tokio::test]
     async fn add_incoming_persists_user_text_plus_attachment_text() {
         let store = crate::memory::MemoryStore::open_in_memory().unwrap();
