@@ -84,3 +84,15 @@ _Avoid_: Telegram how-to, feature dump, GUIDE
 **Providers** (docs):
 One page for choosing a provider, credentials, and Active·peer: OpenRouter · OpenCode · xAI · Ollama (ADR-0049). Not a Config knob dump.
 _Avoid_: Config page, provider dump, settings reference
+
+**Agent seat**:
+Portal desk for one loaded Agent definition (`listAgents` row). Shows idle/running/error ambient pose (ADR-0050).
+_Avoid_: session, turn, ToolNotifier row
+
+**Agent run**:
+In-flight `invoke_agent` / `spawn_agents` (or equivalent) activity instance; used by Telegram ToolNotifier roster (separate ADR).
+_Avoid_: Agent seat, Plan step
+
+**Definition-only seat**:
+Seat with no live run signal capability yet; v1 stays idle and is labeled definition only / no live run (ADR-0050).
+_Avoid_: fake busy, always-running
