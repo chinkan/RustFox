@@ -5,8 +5,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.8] — TBD
+
+Bug-fix release on main after `v1.0.7`. Headline: stash-exe + kill-all before selfupgrade re-register (#303/#304). No tag in this commit.
+
+Packaging note: bare-`rustfox` Unix tar + `compression-zip-deflate` (#301/#302) already shipped on **1.0.7** / main — not re-claimed as a 1.0.8 feature.
+
 ### Fixed
-- **Self-upgrade release re-register ENOENT (#303):** stash absolute exe before `self_replace`; re-register/`install` and foreground restart use the stashed path (do not re-call `current_exe()` after replace). Before re-register: stop (when safe) + kill-all leftovers for the same fox-home (ADR-0046). ADR-0030 Accepted delta. Soft required; **no tag**. Closes #303.
+- **Self-upgrade release re-register ENOENT (#303/#304):** stash absolute exe before `self_replace`; re-register/`install` and foreground restart use the stashed path (do not re-call `current_exe()` after replace). Before re-register: stop (when safe) + kill-all leftovers for the same fox-home (ADR-0046). ADR-0030 Accepted delta. Soft required; **no tag**. Closes #303.
+- Upgrading **from** a pre-stash **1.0.7** release binary may still Telegram-fail on the **first** `/selfupgrade release` (stale `current_exe` ENOENT after replace). After that replace, run **`rustfox install` once** manually; subsequent upgrades use the stash path.
+
+### Known limitations
+
+- Windows binaries in this release are not code-signed yet. On Windows with
+  Smart App Control turned on, the unsigned `rustfox.exe` cannot be opened and
+  there is no "Run anyway" option. Please wait for a signed release (#198); we
+  do not recommend turning Smart App Control off. Advanced users can build
+  RustFox themselves on a machine without Smart App Control. Code signing
+  (#198) remains deferred and does not block this release.
+- If Windows SmartScreen shows "Windows protected your PC", click "More info",
+  then "Run anyway".
 
 ## [1.0.7] — TBD
 
