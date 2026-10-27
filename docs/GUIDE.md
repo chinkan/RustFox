@@ -5,6 +5,7 @@
 - [MCP Server Integration](#mcp-server-integration)
 - [Built-in Tools](#built-in-tools)
 - [Bot Commands](#bot-commands)
+- [Self-upgrade & ops](#self-upgrade--ops)
 - [Skills & Agents System](#skills--agents-system)
 - [Advanced Features](#advanced-features)
 - [Roadmap](#roadmap)
@@ -270,9 +271,9 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 | Tool | Description |
 |------|-------------|
 | `try_new_tech` | Run a sandboxed experiment with a new technology (Rust/JS) |
-| `self_upgrade` | Upgrade the bot — auto-detects source code (git + cargo build) or release binary (downloads from GitHub). Re-registers systemd/launchd service if installed. Restarts after success. |
+| `self_upgrade` | Self-upgrade ([ADR-0030](adr/0030-selfupgrade-main-or-release.md)): `auto` / `main` / `release` — same mapping as Telegram `/selfupgrade`. Re-registers systemd/launchd if installed. Restarts after success. |
 
-Release-binary `/selfupgrade` asks GitHub for the latest release. Anonymous calls share a low rate limit; if Telegram shows HTTP 403 / rate limit, wait for the quota to reset or export `GITHUB_TOKEN` / `GH_TOKEN` (classic PAT with `public_repo`, or fine-grained Releases read) and retry. See ADR 0018.
+Release-binary `/selfupgrade` asks GitHub for the latest release. Anonymous calls share a low rate limit; if Telegram shows HTTP 403 / rate limit, wait for the quota to reset or export `GITHUB_TOKEN` / `GH_TOKEN` (classic PAT with `public_repo`, or fine-grained Releases read) and retry. See [ADR-0018](adr/0018-selfupgrade-release-errors-and-github-auth.md). Full operator notes: [Self-upgrade & ops](#self-upgrade--ops).
 
 ---
 
@@ -294,6 +295,7 @@ Release-binary `/selfupgrade` asks GitHub for the latest release. Anonymous call
 | `/config show` | Redacted config summary (sandbox path read-only) | Active |
 | `/config keys` | Slash map: editable keys vs restart-required vs denied | Active |
 | `/config set <key> <value>` | Validate → `config.toml.bak` → atomic write | Active |
+| `/selfupgrade` | Bare = **auto** (source if `Cargo.toml` near exe, else latest release). `main` = tip-of-main (**requires** source; refuse if missing — no silent clone). `release` = latest GitHub binary. Unknown args rejected. ([ADR-0030](adr/0030-selfupgrade-main-or-release.md)) | Active |
 | `/restart` | Ack, then clean process exit (systemd/launchd/shell brings it back) | Active |
 | `/agents` | List bot ids + personas (`bot_token=***`) | Active |
 | `/agents show <id>` | One bot (token redacted) | Active |
@@ -337,6 +339,37 @@ Editable via Telegram (only users already on the bot allowlist):
 3. Send the BotFather token as the next message — message is **deleted** best-effort; logs/replies show `bot_token=***` only; token is never stored in conversation memory.
 4. Stores the token in SecretStore as `bot.<id>.token`, appends `[[bots]] { id, bot_token="secret:bot.<id>.token", persona=<id>, allowed_user_ids=[caller] }` via validate → `config.toml.bak` → atomic write (same path as `/config`), rejects duplicate `id` or resolved token, then **restarts**.
 5. Delete / soft-disable and hot-add without restart are **not** in v1.
+
+---
+
+## Self-upgrade & ops
+
+### Self-upgrade ([ADR-0030](adr/0030-selfupgrade-main-or-release.md))
+
+| Surface | Label | Behaviour |
+|---------|-------|-----------|
+| Telegram | bare `/selfupgrade` | **auto** — `Cargo.toml` near the executable → source/git pull + build; otherwise → latest GitHub release binary |
+| Telegram | `/selfupgrade main` | tip-of-`main` source path — **requires** a source tree near the exe; **refuse clearly** if missing (**no silent clone**) |
+| Telegram | `/selfupgrade release` | download the latest GitHub release binary |
+| Telegram | other args | **rejected** with a tip (only bare / `main` / `release`) |
+| Portal Settings | `auto` \| `main` \| `release` | same mapping as Telegram |
+
+**Preference:** with a git clone + systemd/launchd service, prefer `/selfupgrade main` (or Portal `main`). Discourage a manual tmp clone → build → `cargo install` unless there is no self-upgrade path (e.g. release-only install that needs tip-of-main — that still requires a source tree; do not expect a silent clone).
+
+### Safe upgrade procedure
+
+Before any upgrade or `cargo install` that replaces the running binary:
+
+1. Stop the service: `rustfox stop` (or `systemctl --user stop rustfox` / equivalent on macOS/Windows).
+2. Confirm **no stray** `rustfox` processes still share the same fox-home (`RUSTFOX_HOME` or `~/.rustfox`).
+3. Upgrade — prefer self-upgrade above when available.
+4. Start **once** (`rustfox start` / `systemctl --user start rustfox`, or a single bare start).
+
+**Do not** use bare `rustfox` or `rustfox --version` as a diagnostic probe today. `--version` is not implemented yet; unknown flags can fall through and start a full bot+scheduler (another stray). Prefer `rustfox status` or `systemctl --user status rustfox`.
+
+### #289 contract (docs only)
+
+**One fox-home = exclusive flock (single bot instance) + safe `--version` print-and-exit.** Product locks live in [ADR-0046](adr/0046-register-start-time-single-instance-flock-and-safe-version.md). **Runtime code lands in a later impl PR that Closes #289** — this documentation does not change Rust behaviour. Until that impl ships, stop + kill-all strays before upgrade remains required; flock will be a belt, not a replacement for stop+kill. Different `RUSTFOX_HOME` values may still run side by side. Service verbs (`status` / `restart` / `stop` / `install`) and `--setup` stay unlock-friendly relative to the bot lock.
 
 ---
 
