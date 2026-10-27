@@ -34,6 +34,7 @@ pub mod provider;
 pub mod sandbox;
 pub mod scheduler;
 pub mod scheduling_tools;
+pub mod seat_run;
 pub mod secret_store;
 pub mod self_upgrade_ops;
 pub mod setup;

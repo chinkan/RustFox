@@ -36,6 +36,16 @@ use crate::tool_registry::ToolUiMode;
 pub trait AgentOps: Send + Sync {
     fn current_model(&self) -> futures::future::BoxFuture<'_, String>;
     fn is_processing(&self, user_id: &str) -> futures::future::BoxFuture<'_, bool>;
+    /// ADR-0050 seat←run: true when an in-flight invoke/spawn is tagged to `agent_name`.
+    fn is_seat_running(&self, agent_name: &str) -> bool {
+        let _ = agent_name;
+        false
+    }
+    /// ADR-0050: whether this seat can receive a live run signal (else definition-only).
+    fn seat_has_live_signal(&self, agent_name: &str) -> bool {
+        let _ = agent_name;
+        true
+    }
     fn set_model(&self, model_id: String) -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
     fn reload_skills_and_agents(&self) -> futures::future::BoxFuture<'_, (usize, usize)>;
     fn cancel_processing(&self, user_id: String) -> futures::future::BoxFuture<'_, bool>;
@@ -110,6 +120,14 @@ impl AgentOps for Agent {
             self.is_processing(crate::platform::DEFAULT_BOT_ID, &user_id)
                 .await
         })
+    }
+    fn is_seat_running(&self, agent_name: &str) -> bool {
+        self.seat_run.is_running(agent_name)
+    }
+    fn seat_has_live_signal(&self, agent_name: &str) -> bool {
+        // Loaded agent definitions are taggable via invoke_agent / spawn_agents.
+        let _ = agent_name;
+        true
     }
     fn set_model(&self, model_id: String) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async move { self.set_model(&model_id).await.map(|_| ()) })
