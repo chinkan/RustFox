@@ -98,6 +98,46 @@ pub enum LoopOutcome {
 pub const EMPTY_PROGRESS_CLARIFY: &str =
     "I wasn't making progress on that. Could you clarify what you'd like me to do next?";
 
+/// ADR-0045 / #298 short meta-token allowlist (trim; optional trailing `.`).
+/// `Done` deliberately omitted — legitimate FinalResponse `"done"` / `"Done."` must not clarify.
+const META_TOKEN_ALLOWLIST: &[&str] = &["Output", "Emit", "Final", "Write", "Ok"];
+
+/// True when `line` (already conceptually one line) is an allowlist stub.
+fn is_meta_token_stub(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let t = t.strip_suffix('.').unwrap_or(t);
+    META_TOKEN_ALLOWLIST
+        .iter()
+        .any(|tok| t.eq_ignore_ascii_case(tok))
+}
+
+/// ADR-0045 / #298: short meta-token FinalResponse filler.
+///
+/// Filler when:
+/// - **single stub:** entire trimmed content is only an allowlist token + optional `.`; or
+/// - **≥3-line / alternating streak:** ≥3 non-empty lines, each an allowlist stub.
+///
+/// Benign short substantive answers must return false.
+pub fn is_meta_token_filler(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let non_empty: Vec<&str> = trimmed.lines().filter(|l| !l.trim().is_empty()).collect();
+    if non_empty.is_empty() {
+        return false;
+    }
+    // Single stub (one non-empty line that is only the allowlist token).
+    if non_empty.len() == 1 {
+        return is_meta_token_stub(non_empty[0]);
+    }
+    // ≥3-line / alternating streak of allowlist stubs.
+    non_empty.len() >= 3 && non_empty.iter().all(|l| is_meta_token_stub(l))
+}
+
 #[allow(dead_code)]
 #[allow(clippy::type_complexity)]
 pub struct AgenticLoop<'a> {
@@ -535,6 +575,17 @@ impl<'a> AgenticLoop<'a> {
                     text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
                 }
 
+                // ADR-0045 / #298: short meta-token filler → abort→clarify
+                // (same family as empty-progress; no silent drop; no MCP/DeepSeek
+                // internals in user copy). Shared Active FinalResponse path.
+                if is_meta_token_filler(&text) {
+                    tracing::warn!(
+                        preview = %text.chars().take(80).collect::<String>(),
+                        "Short meta-token FinalResponse filler — forcing clarify"
+                    );
+                    text = EMPTY_PROGRESS_CLARIFY.to_string();
+                }
+
                 if let Some(ref tx) = self.config.stream_token_tx {
                     let _ = LlmClient::stream_text(text.clone(), tx.clone()).await;
                 }
@@ -618,6 +669,48 @@ mod tests {
     use tokio::sync::RwLock;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn meta_token_single_stub_is_filler() {
+        for s in [
+            "Write.",
+            "Emit.",
+            "Output",
+            "Final.",
+            "Ok.",
+            "  write.  ",
+            "OK",
+        ] {
+            assert!(is_meta_token_filler(s), "expected filler for {s:?}");
+        }
+    }
+
+    #[test]
+    fn meta_token_streak_is_filler() {
+        let streak = "Write.\nEmit.\nOk.";
+        assert!(is_meta_token_filler(streak));
+        let alt = "Output.\nOk.\nFinal.\nWrite.";
+        assert!(is_meta_token_filler(alt));
+    }
+
+    #[test]
+    fn meta_token_benign_short_is_not_filler() {
+        for s in [
+            "done",
+            "Done",
+            "Done.",
+            "all done",
+            "Ok, I'll do that.",
+            "Done with the report.",
+            "Yes",
+            "42",
+            "Write a poem.",
+            "Write.\nSomething useful.",
+            "Write.\nEmit.", // only 2 stub lines — not a ≥3 streak
+        ] {
+            assert!(!is_meta_token_filler(s), "false-positive on {s:?}");
+        }
+    }
 
     struct NopSender;
 

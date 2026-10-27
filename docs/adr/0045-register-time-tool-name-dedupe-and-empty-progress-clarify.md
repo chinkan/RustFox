@@ -1,9 +1,9 @@
 # ADR-0045: Register-time tool name dedupe and empty-progress clarify
 
-- **Status:** Proposed
+- **Status:** Accepted (#286 shipped A+B; #298 amends short meta-token FinalResponse filler class)
 - **Date:** 2026-10-26
-- **Related:** #231, ADR-0019 (send-time duplicate drop is a symptom shield, not the root fix), live tip `7b7bbaa`
-- **Issue:** this docs PR **Refs #286**; later impl PR **Closes #286**
+- **Related:** #231, ADR-0019 (send-time duplicate drop is a symptom shield, not the root fix), live tip `7b7bbaa`, #286 (A+B shipped), #298 (short meta-token filler amend)
+- **Issue:** #286 Closed (A+B); #298 thin amend (this PR Closes #298)
 
 ## Context
 
@@ -29,6 +29,27 @@ Product locks are authoritative for the first implementable slice after this ADR
    - (a) register the same name twice → one entry in schema / registry
    - (b) N× empty-progress / duplicate-drop → clarify FinalResponse (no unbounded `llm_call`)
 
+
+## Decision — Short meta-token FinalResponse filler (#298)
+
+Accepted delta after live tip `13714ff` (OpenCode Go + DeepSeek): short content-channel fillers such as `Output.` / `Emit.` / `Final.` / `Write.` / `Ok.` can pass empty-progress clarify (non-empty), LoopDetector, and cold-intro guards, and ship to Telegram as a normal FinalResponse. Class is **not** DSML (#307 / #308). Amend in place; keep (A) register-time dedupe and (B) empty-progress clarify unchanged.
+
+1. **Shared FinalResponse path (all Active peers, not OpenCode-only):** before a text-only FinalResponse ships, detect short meta-token / filler replies.
+
+2. **Allowlist (trim):** `{Output, Emit, Final, Write, Ok}` with optional trailing `.`. Matching is case-insensitive on the token. **`Done` omitted** — a legitimate FinalResponse of `"done"` / `"Done."` must not be treated as filler (false-positive on #298 QA `langsmith_child_runs`).
+
+3. **Filler when:**
+   - **single stub:** entire trimmed content is only one allowlist token + optional `.`; **or**
+   - **≥3-line / alternating streak:** ≥3 non-empty lines, each an allowlist stub (tokens may differ / alternate).
+
+4. **On filler:** **abort → clarify** FinalResponse (same family as (B) empty-progress clarify copy). Do **not** silent-drop. Do **not** mention MCP / DeepSeek / internals in user-visible copy.
+
+5. **False-positive guard:** benign short substantive answers (not only an allowlist stub / not a ≥3-line stub streak) must still FinalResponse — including `"done"` / `"Done."` (hence `Done` is not on the allowlist).
+
+6. **Unchanged:** (A) register-time first-wins; (B) empty-progress clarify (N = `agent.loop_detection.threshold`); no DSML strip/recover changes (#307 / #308); no leave-Go / Active peer / W2 / #194 / #202; parallel ADR-0050 / #309 left alone. Soft = fixtures + Soft TG on QA/QA2 later (QA); **no tag**; not in v1.0.8 Soft/tag train.
+
+7. **Impl MUST tests:** filler / streak → clarify; benign short → FinalResponse; empty-progress path unchanged.
+
 ## Non-goals
 
 - Restart / token / Active provider changes.
@@ -46,12 +67,15 @@ Product locks are authoritative for the first implementable slice after this ADR
 - Safety net (B) reuses existing `agent.loop_detection` knobs (`threshold`, default 3) rather than inventing a parallel counter.
 - First-wins trade-off is acceptable: later duplicate registrations are skipped; callers that relied on a second same-name tool must rename.
 - (B) may still fire if (A) is imperfect or another empty-progress class appears; that is intentional belt-and-suspenders, not a substitute for (A).
-- Tracking stays on #286: this PR Refs; later impl PR Closes after four gates. Soft QA/QA2 only after impl; no tag. #194 / #202 remain parked.
+- Tracking for A+B closed on #286. #298 adds the short meta-token filler safety net on the shared FinalResponse path (abort→clarify; Soft QA/QA2; no tag; not v1.0.8). #194 / #202 remain parked.
 
 ## Related
 
 - ADR-0019 — noted follow-up ② “dedupe tool names before the LLM call (keep first)”; send-time drop is a symptom shield. This ADR moves the root fix to **register** time and adds the empty-progress clarify safety net.
 - #231 — historical empty-progress / duplicate-tool loop class; clarify copy alignment for (B).
-- #286 — tracking. This docs PR Refs; later impl PR Closes #286 (A+B) after four gates. Soft QA/QA2 only; no tag.
-- Live tip `7b7bbaa` — incident base (Active OpenCode / `deepseek-v4.1-flash`; duplicate `mcp_threads_schedule_post`).
+- #286 — Closed: (A) register-time dedupe + (B) empty-progress clarify shipped.
+- #298 — thin amend: short meta-token / filler FinalResponse abort→clarify + streak; Soft QA/QA2; no tag; not v1.0.8.
+- #307 / #308 — DSML strip/recover (different class; out of scope for #298).
+- Live tip `7b7bbaa` — incident base for #286 (Active OpenCode / `deepseek-v4.1-flash`; duplicate `mcp_threads_schedule_post`).
+- Live tip `13714ff` — evidence base for #298 short meta-token FinalResponse filler (OpenCode Go + DeepSeek).
 - #194 / #202 — parked; out of scope.
