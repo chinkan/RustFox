@@ -365,11 +365,11 @@ Before any upgrade or `cargo install` that replaces the running binary:
 3. Upgrade — prefer self-upgrade above when available.
 4. Start **once** (`rustfox start` / `systemctl --user start rustfox`, or a single bare start).
 
-**Do not** use bare `rustfox` or `rustfox --version` as a diagnostic probe today. `--version` is not implemented yet; unknown flags can fall through and start a full bot+scheduler (another stray). Prefer `rustfox status` or `systemctl --user status rustfox`.
+**Safe probe:** `rustfox --version` / `rustfox -V` prints `CARGO_PKG_VERSION` and exits 0 without starting the bot or scheduler. Prefer `rustfox status` or `systemctl --user status rustfox` for service health. Do **not** use bare `rustfox` as a probe — that is a full start.
 
-### #289 contract (docs only)
+### #289 / ADR-0046 (runtime)
 
-**One fox-home = exclusive flock (single bot instance) + safe `--version` print-and-exit.** Product locks live in [ADR-0046](adr/0046-register-start-time-single-instance-flock-and-safe-version.md). **Runtime code lands in a later impl PR that Closes #289** — this documentation does not change Rust behaviour. Until that impl ships, stop + kill-all strays before upgrade remains required; flock will be a belt, not a replacement for stop+kill. Different `RUSTFOX_HOME` values may still run side by side. Service verbs (`status` / `restart` / `stop` / `install`) and `--setup` stay unlock-friendly relative to the bot lock.
+**One fox-home = exclusive flock (single bot instance) + safe `--version`.** On normal bot start RustFox acquires an exclusive flock on `{fox-home}/rustfox.lock`. A second start for the same home exits non-zero with a clear error. Different `RUSTFOX_HOME` values may run side by side. Service verbs (`status` / `restart` / `stop` / `install`) and `--setup` do not hold the bot lock. Stop + kill-all strays before upgrade remains required; flock is a belt, not a replacement for stop+kill. Product locks: [ADR-0046](adr/0046-register-start-time-single-instance-flock-and-safe-version.md).
 
 ---
 

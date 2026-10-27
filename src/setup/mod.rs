@@ -12,6 +12,8 @@ pub enum Command {
     },
     /// Explicit foreground start (`rustfox run`). Same as bare `rustfox`.
     Run,
+    /// Print `CARGO_PKG_VERSION` and exit (ADR-0046 / #289). No bot start.
+    Version,
 }
 
 pub fn parse_args() -> Option<Command> {
@@ -29,6 +31,9 @@ pub fn parse_args_from(args: &[String]) -> Option<Command> {
 
     while i < args.len() {
         match args[i].as_str() {
+            "--version" | "-V" => {
+                command = Some(Command::Version);
+            }
             "--config" => {
                 i += 1;
                 config_path = args.get(i).cloned();
@@ -166,5 +171,14 @@ mod tests {
     fn bare_args_without_verb_is_none() {
         assert_eq!(parse_args_from(&args(&[])), None);
         assert_eq!(parse_args_from(&args(&["--config", "/x.toml"])), None);
+    }
+
+    #[test]
+    fn parse_version_flags() {
+        assert_eq!(
+            parse_args_from(&args(&["--version"])),
+            Some(Command::Version)
+        );
+        assert_eq!(parse_args_from(&args(&["-V"])), Some(Command::Version));
     }
 }
