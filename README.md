@@ -47,7 +47,7 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 
 | Capability | Description |
 |------------|-------------|
-| **Self-Upgrade** | Trigger an in-place upgrade: pulls from git source or downloads the latest GitHub release binary. Auto-restarts after upgrade — no SSH, no manual steps. |
+| **Self-Upgrade** | In-place upgrade ([ADR-0030](docs/adr/0030-selfupgrade-main-or-release.md)): Telegram bare `/selfupgrade` = **auto** (Cargo.toml near exe → source/git; else → latest GitHub release); `/selfupgrade main` = tip-of-main (**requires** source tree — refuse clearly if missing, **no silent clone**); `/selfupgrade release` = latest GitHub binary. Portal Settings: `auto` \| `main` \| `release` (same mapping). Auto-restarts after upgrade. |
 | **Model Switching** | Switch models at runtime via `/models`. Interactive picker lets you choose the best model per task: fast/cheap for simple queries, powerful for complex reasoning. |
 | **Model Fallback** | Ordered `[fallback] chain` of provider-prefixed model IDs. When the primary model fails (e.g. HTTP 429), RustFox retries down the chain before surfacing an error. |
 | **Soul Files** | SOUL.md (persona), AGENTS.md (behaviour), USER.md (preferences) — persistent identity files auto-injected into every system prompt. Session-end self-reflection with `.bak` backups. |
@@ -160,6 +160,32 @@ rustfox install   # Linux (systemd), macOS (launchd), or Windows
 rustfox status
 ```
 
+### Upgrade & ops (self-upgrade + safe upgrade)
+
+**Self-upgrade** ([ADR-0030](docs/adr/0030-selfupgrade-main-or-release.md)):
+
+| Surface | Label | Behaviour |
+|---------|-------|-----------|
+| Telegram | bare `/selfupgrade` | **auto** — `Cargo.toml` near the exe → source/git; else → latest GitHub release binary |
+| Telegram | `/selfupgrade main` | tip-of-`main` source build — **requires** a source tree (`Cargo.toml` near the exe); **refuse clearly** if missing (**no silent clone**) |
+| Telegram | `/selfupgrade release` | download latest GitHub release binary |
+| Portal Settings | `auto` \| `main` \| `release` | same mapping as Telegram |
+
+**Preference:** if you run from a git clone under systemd/launchd, prefer `/selfupgrade main` (or Portal `main`). Discourage a manual tmp clone → build → `cargo install` unless there is no self-upgrade path.
+
+**Ops — safe upgrade** (before any upgrade / `cargo install`):
+
+1. `rustfox stop` (or `systemctl --user stop rustfox`)
+2. Confirm **no stray** `rustfox` processes share the same fox-home (`RUSTFOX_HOME` / `~/.rustfox`)
+3. Upgrade (prefer self-upgrade above)
+4. Start **once** (`rustfox start` / `systemctl --user start rustfox`, or a single bare start)
+
+**Do not** use bare `rustfox` or `rustfox --version` as a diagnostic probe today: `--version` is not implemented yet, and unknown flags can fall through and start a full bot+scheduler. Prefer `rustfox status` / `systemctl --user status rustfox`.
+
+**#289 contract (docs):** one fox-home → exclusive **flock** (single bot instance) + safe `--version` print-and-exit. Locked in [ADR-0046](docs/adr/0046-register-start-time-single-instance-flock-and-safe-version.md); **runtime code lands in a later impl PR that Closes #289** (this docs track is docs-only). Until then, stop + kill-all strays before upgrade remains required — flock will be a belt, not a replacement.
+
+→ Operator detail: [docs/GUIDE.md](docs/GUIDE.md#self-upgrade--ops).
+
 ---
 
 ## Configuration
@@ -223,7 +249,7 @@ python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t);
 | `read_file` / `write_file` / `list_files` | Read, write, and list files within the sandbox |
 | `send_file` | Send a file from the sandbox to the current chat |
 | `execute_command` | Run shell commands within the sandbox |
-| `self_upgrade` | Trigger self-upgrade from git source or GitHub release, auto-restart |
+| `self_upgrade` | Self-upgrade (ADR-0030): `auto` / `main` / `release` — same mapping as `/selfupgrade`; auto-restart |
 | `read_soul_file` / `update_soul_file` / `revert_soul_file` | Read, update (append/replace, `.bak` backup), or restore SOUL.md / AGENTS.md / USER.md |
 | `remember` / `recall` / `search_memory` | Store, look up, and search long-term user knowledge |
 | `plan_create` / `plan_update` / `plan_view` | Create and track a structured execution plan |
