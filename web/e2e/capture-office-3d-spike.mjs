@@ -94,12 +94,22 @@ for (const page of [wide, narrow]) {
 
 await wide.screenshot({ path: join(outDir, 'agents-pixel-wide.png'), fullPage: true })
 await wide.getByRole('button', { name: '3D' }).click()
-await wide.waitForTimeout(1200)
+await wide.locator('.office-3d-canvas-wrap canvas').waitFor({ state: 'visible', timeout: 15000 })
+const wideBody = await wide.locator('body').innerText()
+if (wideBody.includes('Something went wrong')) {
+  throw new Error('3D wide capture hit route ErrorBoundary')
+}
+await wide.waitForTimeout(800)
 await wide.screenshot({ path: join(outDir, 'agents-3d-wide.png'), fullPage: true })
 
 await narrow.screenshot({ path: join(outDir, 'agents-pixel-narrow.png'), fullPage: true })
 await narrow.getByRole('button', { name: '3D' }).click()
-await narrow.waitForTimeout(1200)
+await narrow.locator('.office-3d-canvas-wrap canvas').waitFor({ state: 'visible', timeout: 15000 })
+const narrowBody = await narrow.locator('body').innerText()
+if (narrowBody.includes('Something went wrong')) {
+  throw new Error('3D narrow capture hit route ErrorBoundary')
+}
+await narrow.waitForTimeout(800)
 await narrow.screenshot({ path: join(outDir, 'agents-3d-narrow.png'), fullPage: true })
 
 console.log('Wrote screenshots to', outDir)

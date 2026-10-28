@@ -1,6 +1,6 @@
 import { Billboard } from '@react-three/drei'
 import { useLoader } from '@react-three/fiber'
-import { useMemo } from 'react'
+import { useLayoutEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import type { Agent } from '../../api/types'
 import { foxBillboardDataUrl } from './foxBillboardSvg'
@@ -11,8 +11,11 @@ function FoxTexture({ agent }: { agent: Agent }) {
   const variant = foxVariant(agent.name)
   const url = useMemo(() => foxBillboardDataUrl(variant, view.pose), [agent.name, view.pose])
   const texture = useLoader(THREE.TextureLoader, url)
-  texture.magFilter = THREE.NearestFilter
-  texture.minFilter = THREE.NearestFilter
+  useLayoutEffect(() => {
+    texture.magFilter = THREE.NearestFilter
+    texture.minFilter = THREE.NearestFilter
+    texture.needsUpdate = true
+  }, [texture])
   return (
     <Billboard follow lockX lockY lockZ position={[0, 0.55, 0.35]}>
       <mesh>
@@ -26,7 +29,7 @@ function FoxTexture({ agent }: { agent: Agent }) {
 export function DeskFox3D({ agent }: { agent: Agent }) {
   const view = seatView(agent)
   return (
-    <group data-pose={view.pose} data-definition-only={view.definitionOnly ? 'true' : 'false'}>
+    <group userData={{ pose: view.pose, definitionOnly: view.definitionOnly }}>
       <mesh position={[0, 0.42, 0]} castShadow>
         <boxGeometry args={[1.1, 0.08, 0.7]} />
         <meshStandardMaterial color="#4a3f35" />

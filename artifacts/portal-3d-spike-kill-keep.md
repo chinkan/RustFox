@@ -23,6 +23,12 @@
 - **Busy/running pose** only when `seatView()` returns non–definition-only and `pose === 'running'` (requires `live_signal` / not `definition_only` per ADR-0050).
 - **Definition-only** seats: pose forced to idle (or error), badges in HTML legend match Pixel `SeatStatus`.
 
+## Spike fix (2026-10-28 tip)
+
+**Root cause:** `data-definition-only` / `data-pose` on R3F `<group>` — React Three Fiber treats `data-*` as instance props and threw (`Cannot set "data-definition-only"`). That escaped to the **route** ErrorBoundary (“Something went wrong!”), bypassing Pixel fallback.
+
+**Fix:** `userData` on Three groups; local `Office3DErrorBoundary` + existing WebGL/Suspense paths → **PixelOffice** on any 3D failure. Evidence re-captured after fix.
+
 ## Fallback behavior
 
 | Condition | UI |
