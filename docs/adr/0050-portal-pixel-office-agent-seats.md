@@ -2,8 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-27
-- **Related:** Portal `/agents`, `GET /api/agents`; follow-up ADR for Telegram multi-agent ToolNotifier roster (out of scope here); #313 Portal pixel office UI tip (game-office expand after Product visual NO)
-- **Issue:** Refs #309; implementation PR(s) follow this docs lock. Game-office expand: this docs PR Refs #313 (do not close #313); UI iterates on the #313 tip after amend Soft N/A squash.
+- **Related:** Portal `/agents`, `GET /api/agents`; follow-up ADR for Telegram multi-agent ToolNotifier roster (out of scope here); #313 Portal pixel office UI tip (game-office expand after Product visual NO); optional WebGL visualize amend (2026-10-28): Product KEEP evidence on #321 — this docs PR does not merge #321 and does not close #321 unless Product closes after evidence; production UI is a separate PR after Accept
+- **Issue:** Refs #309; implementation PR(s) follow this docs lock. Game-office expand: this docs PR Refs #313 (do not close #313); UI iterates on the #313 tip after amend Soft N/A squash. Optional WebGL visualize (2026-10-28): cites Product KEEP evidence on #321 (do not merge #321; do not close #321 unless Product closes after evidence); production UI is a separate PR after Accept. No UI in this docs PR.
 
 ## Context
 
@@ -49,6 +49,46 @@ Product locks after Kan visual **NO** on the #313 tip (static desk-grid feel). A
 
 6. **Soft / train.** Soft = Portal web after UI tip squash on #313. **Not** v1.0.8. UI stays on the #313 tip; no new release train; Soft N/A for this docs amend.
 
+## Decision — Optional WebGL visualize (amend 2026-10-28)
+
+Product KEEP on the disposable R3F spike (#321). This amend records production locks for an **optional** WebGL office layer. It does not replace pixel/SVG ownership, seat←run honesty, fox-only sprites, the soft-cap, or the reduce-motion locks above. This docs PR does not implement UI. Disposable #321 is evidence only and is not merged into `main` as the production path.
+
+1. **Optional visualize modes.** Portal `/agents` supports `office_visualize: svg | webgl` (Settings key **`office_visualize`**).
+   - **`svg`** = current ADR-0050 pixel / SVG office (#313 path) — **default**.
+   - **`webgl`** = optional isometric dollhouse layer.
+   - UI copy: **`Office view: Pixel | 3D`** (Pixel ↔ `svg`, 3D ↔ `webgl`). The ADR uses the technical enum; the UI keeps the human labels.
+
+2. **Default.** Unset / first visit / cleared settings → **`svg` (Pixel)**. Kan lock: SVG #313 remains the `/agents` default.
+
+3. **Persistence.** Production **Settings persist** the last chosen `office_visualize` (survives refresh). Spike session-only behaviour is discarded for production.
+
+4. **Stack (webgl).** **R3F (`@react-three/fiber`) + OrthographicCamera** (drei as needed). Vanilla Three only as an exception if R3F is unfit. This office visualize path does not use Spline, Unity, Babylon, Threlte, Pixi, or Phaser.
+
+5. **Silhouette (webgl).** **Fox SVG billboards** (or textures derived from the existing fox SVG). **No** humanoids, blob mascots, or non-fox avatars (extends the fox-only lock).
+
+6. **Honesty.** Decision 4 (Honesty / seat←run, above) is unchanged: busy/running poses **only** with `live_signal` / non-`definition_only`. Never invent busy animation in either visualize mode.
+
+7. **webgl v1 motion scope.** **Fixed seats / desk poses only** under `webgl`. Idle **roam** remains an **`svg`**-mode behaviour (game-office expand). When a seat is busy per Decision 4, show the working pose at the assigned desk (no requirement for 3D pathing roam). Richer 3D roam is a later Product call, not this amend.
+
+8. **Fallback locks (must).**
+   1. Default / unset → **svg**.
+   2. `prefers-reduced-motion: reduce` → **force svg** (no WebGL rAF; no static one-frame WebGL).
+   3. Settings **Reduce motion** / **Disable office animations** → **force svg** (Decision 6 applies to webgl; no exception).
+   4. WebGL unavailable / context lost / chunk load fail → **svg**; **never** a blank canvas.
+   5. Table / list toggle (Decision 1) remains available and is orthogonal to `office_visualize`.
+
+9. **Code-split / budget.** WebGL deps (**three / r3f / drei**) are **lazy-loaded only when `webgl` is active**. The Pixel / `svg` initial path ships **zero** three/r3f/drei. Soft target: WebGL JS chunk **≤ 350 KB gzip** (assets reported separately, lazy). Over target → Soft HOLD / revisit this amend; this is not a CI hard-fail kill switch.
+
+10. **Soft-cap.** Decision 7 soft-cap (~12 desks) applies to **both** visualize modes.
+
+11. **Entry.** In-page control on `/agents` only. A separate route (for example `/agents/office`) is **out of scope** (P2).
+
+12. **Chrome out of this amend.** Approve/Decline workflows, day/night sky, speech bubbles, and orbit/bloom/LOD polish are not required by this amend (follow-up Product if wanted).
+
+13. **Release / Soft.** Does **not** gate Soft / v1.0.8. This docs amend is Soft N/A (or an independent Portal docs Soft). Production UI PR Soft = Portal web after that PR’s squash — not by merging disposable #321. This docs PR does not merge #321 and does not close #321; Product may close #321 after KEEP evidence. Production is a **new** UI PR that follows this ADR.
+
+14. **Ownership / sequencing.** Portal UI owns the R3F scene, the visualize toggle, and the fallbacks. Backend stays unchanged unless honesty API gaps appear. This docs PR records the amend only. After Accept, production UI is a separate PR. Disposable #321 stays KEEP evidence and is not the production branch.
+
 ## Consequences
 
 - Users can see a full office while only seats with live signals animate as running; definition-only labels prevent false busy.
@@ -57,6 +97,11 @@ Product locks after Kan visual **NO** on the #313 tip (static desk-grid feel). A
 - The `error` pose may be unused until the API emits `error`.
 - Shared lightweight invoke/spawn name flags may later feed a Telegram roster ADR without expanding this ADR’s Portal scope.
 - #313 tip squash stays HOLD until this amend lands and UI re-gates the game-office expand; Soft Portal web follows tip squash, not this docs PR.
+- Users keep a crisp SVG default; WebGL is opt-in and remembered in Settings (`office_visualize`).
+- Reduced-motion and animation-off users never enter a WebGL render loop.
+- webgl v1 stays cheap (no 3D idle roam); svg keeps game-office roam.
+- Bundle stays small on the default path; WebGL cost is isolated and Soft-visible via the 350 KB gzip soft target.
+- Disposable spike #321 stays evidence-only; production code is reviewed against this amend, not the spike branch shape.
 
 ## Out of scope
 
@@ -66,3 +111,9 @@ Product locks after Kan visual **NO** on the #313 tip (static desk-grid feel). A
 - Full SSE/WS activity bus.
 - Human / humanoid seat sprites (Kan lock: foxes only).
 - Closing #313 from this docs PR; runtime / UI code in this amend.
+- Merging disposable #321 as production.
+- A separate `/agents/office` route.
+- Approve/Decline, day-night, and speech-bubble chrome.
+- 3D idle roam / pathing under `webgl` (v1).
+- A hard CI fail on chunk size.
+- Changing seat←run rules, the fox-only lock, or soft-cap numbers.
