@@ -4,9 +4,10 @@ import '../i18n'
 import type { Agent } from '../api/types'
 import { AgentOffice } from './AgentOffice'
 import { __resetOfficePrefsForTests, writeOfficePrefs } from './officePrefs'
+import { probeWebGL } from './webgl'
 
 vi.mock('./webgl', () => ({
-  probeWebGL: () => ({ ok: true }),
+  probeWebGL: vi.fn(() => ({ ok: true })),
 }))
 
 vi.mock('./office3d/Office3D', () => ({
@@ -27,6 +28,7 @@ const agent: Agent = {
 beforeEach(() => {
   localStorage.clear()
   __resetOfficePrefsForTests()
+  vi.mocked(probeWebGL).mockReturnValue({ ok: true })
 })
 
 describe('AgentOffice', () => {
@@ -41,6 +43,15 @@ describe('AgentOffice', () => {
     writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: false, office_visualize: 'webgl' })
     render(<AgentOffice agents={[agent]} motion onShowOverflow={() => undefined} />)
     expect(await screen.findByTestId('office-3d-mock')).toBeTruthy()
+  })
+
+  it('falls back to Pixel when WebGL probe fails (effective visualize stays svg)', () => {
+    vi.mocked(probeWebGL).mockReturnValue({ ok: false, reason: 'no-context' })
+    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: false, office_visualize: 'webgl' })
+    render(<AgentOffice agents={[agent]} motion onShowOverflow={() => undefined} />)
+    expect(screen.getByRole('region', { name: /Agent office/i })).toBeTruthy()
+    expect(screen.queryByTestId('office-3d-mock')).toBeNull()
+    expect(screen.getByText(/Idle foxes roam/i)).toBeTruthy()
   })
 
   it('falls back to Pixel when motion is disabled (reduced motion path)', () => {

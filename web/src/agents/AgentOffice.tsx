@@ -41,6 +41,7 @@ export function AgentOffice({
               agents={agents}
               onShowOverflow={onShowOverflow}
               onFatalError={onFatalError}
+              fallback={pixelFallback}
             />
           </Suspense>
         </Office3DErrorBoundary>

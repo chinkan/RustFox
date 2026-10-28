@@ -1,5 +1,5 @@
 import { Canvas } from '@react-three/fiber'
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Agent } from '../../api/types'
 import { SeatStatus } from '../PixelOffice'
@@ -10,20 +10,24 @@ export function Office3D({
   agents,
   onShowOverflow,
   onFatalError,
+  fallback,
 }: {
   agents: Agent[]
   onShowOverflow: () => void
   onFatalError: () => void
+  /** Pixel/svg shell shown on context loss (never a blank canvas). */
+  fallback: ReactNode
 }) {
   const { t } = useTranslation()
   const { visible, overflow } = visibleDeskSlice(agents)
   const [glFailed, setGlFailed] = useState(false)
 
-  useEffect(() => {
-    if (glFailed) onFatalError()
-  }, [glFailed, onFatalError])
+  const onContextLost = () => {
+    setGlFailed(true)
+    onFatalError()
+  }
 
-  if (glFailed) return null
+  if (glFailed) return fallback
 
   return (
     <div className="agent-office agent-office-3d" role="region" aria-label={t('agents.officeLabel')}>
@@ -34,7 +38,7 @@ export function Office3D({
           dpr={[1, 1.5]}
           gl={{ antialias: false, powerPreference: 'low-power' }}
           onCreated={({ gl }) => {
-            gl.domElement.addEventListener('webglcontextlost', () => setGlFailed(true), { once: true })
+            gl.domElement.addEventListener('webglcontextlost', onContextLost, { once: true })
           }}
         >
           <Suspense fallback={null}>
