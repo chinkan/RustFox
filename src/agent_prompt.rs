@@ -1254,7 +1254,7 @@ mod tests {
         let start = protected_tail_start(&msgs, 1_000_000);
         assert!(
             start <= last_user,
-            "start={start} must not advance past last_user={last_user}"
+            "protected_tail must not advance past last user"
         );
         assert!(
             msgs[start..].iter().any(|m| {
