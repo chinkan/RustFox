@@ -54,7 +54,12 @@ export function PixelOffice({
                     data-lane={roamDelaySeconds(agent.name) > 3.5 ? '1' : '0'}
                     style={{ animationDelay: `-${roamDelaySeconds(agent.name)}s` }}
                   >
-                    <FoxSprite pose="idle" variant={variant} mode="walk" />
+                    <FoxSprite
+                      pose="idle"
+                      variant={variant}
+                      mode="walk"
+                      facing={roamDelaySeconds(agent.name) > 3.5 ? 'left' : 'right'}
+                    />
                   </div>
                 )
               })}
@@ -106,6 +111,7 @@ function DeskCard({
       data-accessory={variant.accessory}
       data-desk-prop={variant.deskProp}
       data-facing={facing}
+      data-dir={facing}
       aria-label={nameBits.join(', ')}
     >
       <div className={returning ? 'fox-arriving' : undefined}>

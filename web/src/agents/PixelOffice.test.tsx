@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import '../i18n'
 import type { Agent } from '../api/types'
+import { FoxSprite, type SeatDir } from './FoxSprite'
 import { PixelOffice } from './PixelOffice'
 import { foxVariant } from './seats'
 
@@ -173,6 +174,7 @@ describe('PixelOffice', () => {
 
     const walker = office.querySelector('[data-roam="on"] svg')
     expect(walker?.getAttribute('data-character')).toBe('fox')
+    expect(['left', 'right']).toContain(walker?.getAttribute('data-dir'))
     expect(walker?.querySelector('[data-fox-part="ears"]')).toBeTruthy()
     expect(walker?.querySelector('[data-fox-part="snout"]')).toBeTruthy()
     expect(walker?.querySelector('[data-fox-part="tail"]')).toBeTruthy()
@@ -249,7 +251,7 @@ describe('PixelOffice', () => {
     expect(writer.getAttribute('data-coat')).toBe(writerVariant.coat)
   })
 
-  it('seats a working fox on the chair with feet on the same line as the seat', () => {
+  it('composes a working fox from props that share one dir', () => {
     render(
       <PixelOffice
         agents={[row(0, { status: 'running', name: 'rustfox' })]}
@@ -258,16 +260,14 @@ describe('PixelOffice', () => {
       />,
     )
     const svg = screen.getByRole('article', { name: /rustfox/i }).querySelector('svg')
-    const chair = svg?.querySelector('[data-fox-part="chair"]')
-    const paws = svg?.querySelector('[data-fox-part="paws"]')
-    const keyboard = svg?.querySelector('[data-fox-part="keyboard"]')
-    expect(chair?.getAttribute('data-seat-y')).toBe('10')
-    expect(paws?.getAttribute('data-seat-y')).toBe('10')
-    expect(Number(svg?.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeGreaterThan(10)
+    expectSharedDir(svg ?? null, 'down')
     expectMonitorStandsOnDesk(svg ?? null)
+    const keyboard = svg?.querySelector('[data-fox-part="keyboard"]')
     expect(keyboard).toBeTruthy()
     expect(svg?.querySelector('.px-arm .px-shade')?.getAttribute('y')).toBe(keyboard?.getAttribute('y'))
-    expect(svg?.querySelector('[data-fox-part="desk"]')).toBeTruthy()
+    expect(svg?.querySelector('[data-seat-prop="desk"]')).toBeTruthy()
+    expect(svg?.querySelector('[data-seat-prop="monitor"]')).toBeTruthy()
+    expect(svg?.querySelector('[data-seat-prop="fox"]')).toBeTruthy()
   })
 
   it('faces the top row down and the bottom row up, with fox marks around the room', () => {
@@ -291,15 +291,12 @@ describe('PixelOffice', () => {
     const downSnout = Number(top.querySelector('[data-fox-part="snout"] rect')?.getAttribute('y'))
     const upSnout = Number(bottom.querySelector('[data-fox-part="snout"] rect')?.getAttribute('y'))
     expect(upSnout).toBeLessThan(downSnout)
-    const downSeat = Number(top.querySelector('[data-fox-part="chair"]')?.getAttribute('data-seat-y'))
-    const upSeat = Number(bottom.querySelector('[data-fox-part="chair"]')?.getAttribute('data-seat-y'))
-    expect(downSeat).toBe(10)
-    expect(upSeat).toBe(26)
-    expect(Number(top.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeGreaterThan(downSeat)
-    expect(Number(bottom.querySelector('[data-fox-part="monitor"]')?.getAttribute('y'))).toBeLessThan(upSeat)
+    expectSharedDir(top.querySelector('svg'), 'down')
+    expectSharedDir(bottom.querySelector('svg'), 'up')
+    expect(top.getAttribute('data-dir')).toBe('down')
+    expect(bottom.getAttribute('data-dir')).toBe('up')
     expectMonitorStandsOnDesk(top.querySelector('svg'))
     expectMonitorStandsOnDesk(bottom.querySelector('svg'))
-    expect(bottom.querySelector('[data-fox-part="paws"]')?.getAttribute('data-seat-y')).toBe('26')
     expect(bottom.querySelector('.px-arm .px-shade')?.getAttribute('y')).toBe(
       bottom.querySelector('[data-fox-part="keyboard"]')?.getAttribute('y'),
     )
@@ -339,12 +336,45 @@ describe('PixelOffice', () => {
     expect(screen.getByRole('article', { name: /writer/i }).getAttribute('data-returning')).toBe('true')
   })
 
+  it('composes left and right seats from the same dir on every prop', () => {
+    const variant = foxVariant('rustfox')
+    for (const dir of ['left', 'right'] as const) {
+      const { container } = render(<FoxSprite pose="running" variant={variant} facing={dir} />)
+      expectSharedDir(container.querySelector('svg'), dir)
+      expectMonitorStandsOnDesk(container.querySelector('svg'))
+    }
+  })
+
+  it('leaves the keyboard off an idle seat and keeps the empty desk on one dir', () => {
+    const variant = foxVariant('writer')
+    const idle = render(<FoxSprite pose="idle" variant={variant} facing="up" />)
+    expect(idle.container.querySelector('[data-seat-prop="keyboard"]')).toBeNull()
+    expectSharedDir(idle.container.querySelector('svg'), 'up')
+    idle.unmount()
+    const empty = render(<FoxSprite pose="idle" variant={variant} mode="desk" facing="down" />)
+    expect(empty.container.querySelector('[data-seat-prop="fox"]')).toBeNull()
+    expect(empty.container.querySelector('[data-character="fox"]')).toBeNull()
+    expectSharedDir(empty.container.querySelector('svg'), 'down')
+  })
+
   it('shows the empty state when no seats match', () => {
     render(<PixelOffice agents={[]} motion onShowOverflow={() => undefined} />)
     expect(screen.getByText('No agents match this filter.')).toBeTruthy()
     expect(screen.queryByRole('article')).toBeNull()
   })
 })
+
+const COMPOSE_DIRS: SeatDir[] = ['down', 'left', 'right', 'up']
+
+function expectSharedDir(svg: Element | null, dir: SeatDir) {
+  expect(svg?.getAttribute('data-dir')).toBe(dir)
+  const props = svg?.querySelectorAll('[data-seat-prop]') ?? []
+  expect(props.length).toBeGreaterThanOrEqual(3)
+  for (const prop of props) {
+    expect(COMPOSE_DIRS).toContain(prop.getAttribute('data-dir'))
+    expect(prop.getAttribute('data-dir')).toBe(dir)
+  }
+}
 
 /** Screen ends at the desk top. Stand bottom sits in the desktop, not in the leg bay. */
 function expectMonitorStandsOnDesk(svg: Element | null) {
