@@ -830,6 +830,82 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
   color: #1a1206;
 }
 
+.agent-office-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.office-renderer-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.office-renderer-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #3d2a14;
+}
+
+.office-renderer-segmented {
+  flex-shrink: 0;
+}
+
+.agent-office-3d .office-3d-canvas-wrap {
+  width: 100%;
+  min-height: 280px;
+  height: min(52vh, 420px);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 3px solid #6e4424;
+  background: #1a1410;
+}
+
+.agent-office-3d .office-3d-canvas-wrap canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.office-3d-legend {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.office-3d-legend li {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid #c4a882;
+  font-size: 12px;
+}
+
+.office-3d-legend li strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.office-3d-overflow {
+  margin-top: 10px;
+}
+
+@media (max-width: 480px) {
+  .agent-office-3d .office-3d-canvas-wrap {
+    min-height: 220px;
+    height: 38vh;
+  }
+
+  .office-3d-legend {
+    grid-template-columns: 1fr;
+  }
+}
+
 .office-room {
   display: grid;
   grid-template-columns: 84px minmax(0, 1fr) 84px;
