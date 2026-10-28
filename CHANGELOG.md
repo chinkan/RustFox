@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **MCP client (`rmcp`) `2.1`/`2.2` → `3.7`:** Dependabot major bump (Supersedes #178). Features unchanged (`client`, `transport-child-process`, `transport-io`, `transport-streamable-http-client-reqwest`). Call sites in `src/mcp.rs` compile against 3.7 without source edits (`CallToolRequestParams`, `ContentBlock`, `RunningService`, `serve`, transport builders). Soft N/A (Cargo-only; no runtime behavior change expected); Soft fixtures if live MCP paths regress. **SOFT_BLOCKS_v1.0.8=NO**; no tag.
+
 ### Added
 - **ADR-0045 post-clarify lost-context / W2++ (docs, Refs #315 / #316):** thin Accepted amend — Decision #315 locks; Soft N/A for docs; Soft after Phase 2; SOFT_BLOCKS_v1.0.8 NO. Runtime in Fixed below.
 - **ADR-0050 game-office expand (docs, Refs #313):** thin Accepted amend — game-office feel; idle=roam; busy→desk; name-deterministic fox variants (foxes only, not humans); Reduce motion / Disable office animations stop roam; Soft = Portal web after #313 tip squash; not v1.0.8; seat←run honesty unchanged. No runtime change.
