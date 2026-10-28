@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rustfox::cold_intro::{
-    is_capability_cold_intro, COLD_INTRO_CLARIFY_REWRITE, COLD_INTRO_REGEN_NUDGE,
+    has_lost_context_signal, is_capability_cold_intro, COLD_INTRO_CLARIFY_REWRITE,
+    COLD_INTRO_REGEN_NUDGE,
 };
 use rustfox::llm::{ChatCompletion, ChatMessage, LlmClient, MessageContent, ToolDefinition};
 use rustfox::loop_runner::{AgenticLoop, LoopConfig, LoopOutcome, MessageContainer};
@@ -339,4 +340,143 @@ async fn normal_short_reply_not_rejected() {
         other => panic!("expected FinalResponse, got {other:?}"),
     }
     assert_eq!(seen.len(), 1);
+}
+
+fn cfg_loop(max_iterations: u32, threshold: usize) -> LoopConfig {
+    LoopConfig {
+        max_iterations,
+        empty_response_retry_limit: 100,
+        context_window: 4096,
+        loop_detection_enabled: true,
+        loop_detection_threshold: threshold,
+        interactive_loop_callback: false,
+        allowed_tools: None,
+        langsmith_project: None,
+        model: None,
+        tool_event_tx: None,
+        stream_token_tx: None,
+        recovery_nudge: None,
+        session_key: None,
+    }
+}
+
+async fn run_loop_cfg(
+    history: Vec<ChatMessage>,
+    steps: Vec<ChatMessage>,
+    cfg: LoopConfig,
+) -> (LoopOutcome, Vec<Vec<String>>) {
+    let seen: Seen = Arc::default();
+    let llm = client(steps, seen.clone());
+    let tools = ToolRegistry::new();
+    let mcp = McpManager::new();
+    let sender = Arc::new(NullSender);
+    let s2 = sender.clone();
+    let make_ctx = move |uid: &str, cid: &str| ToolContext {
+        sandbox_dir: std::path::PathBuf::from("/tmp"),
+        home_dir: None,
+        sender: s2.clone(),
+        cancel_registry: Arc::new(rustfox::cancel_registry::CancelRegistry::new()),
+        user_id: uid.into(),
+        chat_id: cid.into(),
+        bot_id: "main".into(),
+        tool_ui_mode: ToolUiMode::Silent,
+    };
+    let mut messages = MessageContainer::Plain(history);
+    let outcome = AgenticLoop::new(
+        &llm,
+        &tools,
+        &mcp,
+        &cfg,
+        None,
+        None,
+        None,
+        sender.as_ref(),
+        Box::new(make_ctx),
+        None,
+    )
+    .run(&mut messages, "u", "c")
+    .await
+    .unwrap();
+    let seen = seen.lock().unwrap().clone();
+    (outcome, seen)
+}
+
+fn empty_assistant() -> ChatMessage {
+    ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }
+}
+
+/// ADR-0045 / #315 dig path: empty-progress force-clarify → menu reject →
+/// regen lost-context alone (no ≥2 menu) must not ship the FN prose.
+#[tokio::test]
+async fn post_empty_progress_menu_reject_regen_lost_context_rewrites() {
+    let lost_alone = "收到——不過我今次真係收唔到你嗰段內容（訊息係空嘅，之前嘅對話 context 亦都掉失咗）。\n\n你直接再貼一次想我做嘅嘢就得。";
+    assert!(has_lost_context_signal(lost_alone));
+    assert!(
+        !is_capability_cold_intro(lost_alone),
+        "C1: lost-context alone must not match capability matcher"
+    );
+    let menu = cantonese_cold_intro();
+    assert!(is_capability_cold_intro(&menu));
+
+    // threshold=3 → 3 empties arm+nudge; then menu (reject); then lost-alone (rewrite).
+    let steps = vec![
+        empty_assistant(),
+        empty_assistant(),
+        empty_assistant(),
+        assistant(&menu),
+        assistant(lost_alone),
+    ];
+    let (outcome, seen) =
+        run_loop_cfg(history_with_prior_and_current(), steps, cfg_loop(10, 3)).await;
+    match outcome {
+        LoopOutcome::FinalResponse { text, .. } => {
+            assert_eq!(
+                text, COLD_INTRO_CLARIFY_REWRITE,
+                "must not ship lost-context FN after post–empty-progress path; got: {text}"
+            );
+            assert!(!has_lost_context_signal(&text));
+            assert!(!text.contains("訊息係空"));
+            assert!(!text.contains("掉失"));
+        }
+        other => panic!("expected FinalResponse rewrite, got {other:?}"),
+    }
+    assert!(
+        seen.len() >= 4,
+        "expected empty×3 + menu + regen calls; seen={}",
+        seen.len()
+    );
+    assert!(
+        seen.iter()
+            .any(|turn| turn.iter().any(|u| u.contains("capability cold-intro"))),
+        "menu reject must inject cold-intro nudge: {seen:?}"
+    );
+}
+
+/// ADR-0045 / #315: after empty-progress arm, lost-context alone (no menu) rewrites
+/// even without a prior menu-reject cycle.
+#[tokio::test]
+async fn post_empty_progress_lost_context_alone_rewrites() {
+    let lost_alone = "訊息係空嘅，之前嘅對話 context 亦都掉失咗 — 可唔可以再講一次？";
+    assert!(has_lost_context_signal(lost_alone));
+    assert!(!is_capability_cold_intro(lost_alone));
+
+    let steps = vec![
+        empty_assistant(),
+        empty_assistant(),
+        empty_assistant(),
+        assistant(lost_alone),
+    ];
+    let (outcome, _) = run_loop_cfg(history_with_prior_and_current(), steps, cfg_loop(8, 3)).await;
+    match outcome {
+        LoopOutcome::FinalResponse { text, .. } => {
+            assert_eq!(text, COLD_INTRO_CLARIFY_REWRITE);
+        }
+        other => panic!("expected rewrite FinalResponse, got {other:?}"),
+    }
 }

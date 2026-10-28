@@ -53,13 +53,17 @@ fn is_continuity_turn(m: &ChatMessage) -> bool {
     }
 }
 
-/// Capability cold-intro matcher (ADR-0043 / #280): **W1 ∪ W2**.
+/// Capability cold-intro matcher (ADR-0043 / #280 / #315 W2++): **W1 ∪ W2**.
 ///
 /// - **W1:** greeting + ≥2 menu lines (help-offer no longer required)
-/// - **W2:** explicit lost-context / cannot-see-prior (+ #283 P1/E1) + ≥2 menu lines
+/// - **W2:** explicit lost-context / cannot-see-prior (+ #283 P1/E1 / #315 W2++)
+///   + ≥2 menu lines
 ///
 /// Prefer false-negatives (F1): greeting and menu-line definitions are
-/// unchanged from #277. Lost-context alone without ≥2 menu does not match (C1).
+/// unchanged from #277. Lost-context alone without ≥2 menu does not match (C1)
+/// on this matcher. ADR-0045 / #315 closes the post–empty-progress C1 hole on
+/// the shared FinalResponse path (lost-context alone after empty-progress
+/// force-clarify → rewrite), not by widening C1 globally here.
 pub fn is_capability_cold_intro(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -118,11 +122,17 @@ fn has_greeting_signal(text: &str) -> bool {
     false
 }
 
-/// Explicit lost-context / cannot-see-prior language (locale-aware; #280 / #283).
+/// Explicit lost-context / cannot-see-prior / empty-inbound language
+/// (locale-aware; #280 / #283 / #315 W2++).
+///
 /// Prefer FN: keep the list tight so normal “I can’t see file X” without a menu
-/// never reaches this path alone (C1 still requires ≥2 menu at the caller).
+/// never reaches the capability-cold-intro matcher alone (C1 still requires ≥2
+/// menu at `is_capability_cold_intro`). Callers on the post–empty-progress
+/// path (#315) may use this signal **without** a menu requirement.
+///
 /// W2+ (#283): P1 CJK (`收唔到` / `只見到系統…` / `冇見到` ≠ `見唔到`) + E1 EN.
-fn has_lost_context_signal(text: &str) -> bool {
+/// W2++ (#315): `訊息係空`, `掉失` / `掉失咗` (near-synonyms OOS).
+pub fn has_lost_context_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
 
     // Cantonese / CJK lost-prior / broken-context (+ #283 P1 lost-content).
@@ -146,6 +156,9 @@ fn has_lost_context_signal(text: &str) -> bool {
         || text.contains("只見到系統")
         || text.contains("今次嘅內容")
         || text.contains("冇見到")
+        // #315 W2++ (live MAIN hit): empty-inbound / dropped-context claims.
+        || text.contains("訊息係空")
+        || text.contains("掉失")
     {
         return true;
     }
@@ -408,6 +421,34 @@ mod tests {
         assert!(!is_capability_cold_intro(
             "I'm only seeing system prompts right now."
         ));
+    }
+
+    /// #315 W2++: live MAIN phrases + ≥2 menu → W2 cold-intro.
+    #[test]
+    fn w2_plus_plus_empty_inbound_phrases_plus_menu() {
+        let live = "收到——不過我今次真係收唔到你嗰段內容（訊息係空嘅，之前嘅對話 context 亦都掉失咗）。不如揀返：\n\
+                    - 📰 出帖 / fetch 新聞\n\
+                    - 📁 Obsidian vault 整理\n\
+                    - 💻 寫 code / debug";
+        assert!(is_capability_cold_intro(live));
+        assert!(has_lost_context_signal(live));
+
+        let diu = "對唔住，context 掉失咗。可以揀：\n\
+                   - 📰 出帖 / fetch 新聞\n\
+                   - 📁 Obsidian vault 整理";
+        assert!(is_capability_cold_intro(diu));
+        assert!(has_lost_context_signal(diu));
+    }
+
+    /// #315 W2++: phrases alone still C1 for capability matcher; signal is true.
+    #[test]
+    fn w2_plus_plus_phrases_alone_are_c1_but_signal_matches() {
+        let alone = "收到——不過我今次真係收唔到你嗰段內容（訊息係空嘅，之前嘅對話 context 亦都掉失咗）。\n\n你直接再貼一次想我做嘅嘢就得。";
+        assert!(!is_capability_cold_intro(alone));
+        assert!(has_lost_context_signal(alone));
+        assert!(has_lost_context_signal("訊息係空嘅"));
+        assert!(has_lost_context_signal("之前嘅對話 context 亦都掉失咗"));
+        assert!(has_lost_context_signal("掉失咗"));
     }
 
     #[test]
