@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
-import { PixelOffice, SeatStatus } from '../../agents/PixelOffice'
+import { AgentOffice } from '../../agents/AgentOffice'
+import { SeatStatus } from '../../agents/PixelOffice'
 import { useOfficeMotion } from '../../agents/officePrefs'
 import { agentsPollInterval } from '../../agents/seats'
 
@@ -138,7 +139,7 @@ function AgentsPage() {
       {reloadMsg ? <div className="hint" style={{ marginBottom: 12 }}>{reloadMsg}</div> : null}
 
       {view === 'office' ? (
-        <PixelOffice
+        <AgentOffice
           agents={filtered}
           motion={motion}
           onShowOverflow={() => void navigate({ search: (prev) => ({ ...prev, view: 'table' }) })}

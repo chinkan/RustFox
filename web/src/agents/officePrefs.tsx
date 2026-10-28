@@ -5,14 +5,19 @@ import { officeMotionEnabled } from './seats'
 /** Same persistence style as `rustfox.portal.lang` — this browser only. */
 export const OFFICE_PREFS_KEY = 'rustfox.portal.office'
 
+/** ADR-0050 optional office visualize (`office_visualize` in persisted settings). */
+export type OfficeVisualize = 'svg' | 'webgl'
+
 export interface OfficePrefs {
   reduceMotion: boolean
   disableOfficeAnimations: boolean
+  office_visualize: OfficeVisualize
 }
 
 const DEFAULT_PREFS: OfficePrefs = {
   reduceMotion: false,
   disableOfficeAnimations: false,
+  office_visualize: 'svg',
 }
 
 const listeners = new Set<() => void>()
@@ -29,6 +34,7 @@ function loadOfficePrefs(): OfficePrefs {
     return {
       reduceMotion: rec.reduceMotion === true,
       disableOfficeAnimations: rec.disableOfficeAnimations === true,
+      office_visualize: rec.office_visualize === 'webgl' ? 'webgl' : 'svg',
     }
   } catch {
     return { ...DEFAULT_PREFS }
@@ -47,6 +53,7 @@ export function writeOfficePrefs(next: OfficePrefs) {
   snapshot = {
     reduceMotion: next.reduceMotion === true,
     disableOfficeAnimations: next.disableOfficeAnimations === true,
+    office_visualize: next.office_visualize === 'webgl' ? 'webgl' : 'svg',
   }
   try {
     localStorage.setItem(OFFICE_PREFS_KEY, JSON.stringify(snapshot))
@@ -81,6 +88,22 @@ export function systemPrefersReducedMotion(): boolean {
   } catch {
     return false
   }
+}
+
+export function useOfficeVisualize(): [OfficeVisualize, (next: OfficeVisualize) => void] {
+  const prefs = useOfficePrefs()
+  const set = (next: OfficeVisualize) =>
+    writeOfficePrefs({ ...prefs, office_visualize: next === 'webgl' ? 'webgl' : 'svg' })
+  return [prefs.office_visualize, set]
+}
+
+/** ADR-0050: reduced-motion / animation-off forces Pixel (svg), not WebGL. */
+export function effectiveOfficeVisualize(
+  requested: OfficeVisualize,
+  motionAllowed: boolean,
+): OfficeVisualize {
+  if (!motionAllowed) return 'svg'
+  return requested === 'webgl' ? 'webgl' : 'svg'
 }
 
 export function useOfficeMotion(): boolean {
