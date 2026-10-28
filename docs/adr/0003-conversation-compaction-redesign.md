@@ -3,6 +3,8 @@
 ## Status
 Accepted (implemented)
 
+**Amendment (2026-10-28):** Product lock **Option A** — RustFox always owns compaction for all Active peers (including OpenCode Go); no provider skip; target harness UX/invariants; cold-intro removal sequencing after P0 #326/#327 and harness parity — see [ADR-0051](./0051-compaction-ownership-option-a-and-harness-target.md). Q1–Q9 below remain authoritative for the compact pipeline; ADR-0051 does not reopen them.
+
 ## Date
 2026-08-06
 

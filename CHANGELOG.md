@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **ADR-0051 compaction ownership Option A + target harness (docs, Kan 2026-10-28):** Accepted Product lock — RustFox always owns compact for all Active peers (no OpenCode skip); future local OpenCode harness must disable `compaction.auto` (no dual-enable); target pack = system + history since `/clear` + current ask; overflow summary carries status/context/pending/next + user-visible compacting (impl follow-on); invariants align #326/#327 (`protected_tail_start` never past `last_user`; no mid-loop system-only / ask dropped). Cold-intro removal (W1 ∪ W2 + CONTINUITY_LIGHT) only after harness verified — sequencing P0 → harness parity → demotion (separate issue). Amends ADR-0003 pointer; notes ADR-0043 continuity + ADR-0045 demotion. **Soft N/A** (docs-only); **Soft Portal Soft N/A**; no Telegram Soft; **SOFT_BLOCKS_v1.0.8=NO**; no tag; do not self-squash. Refs #326 / #327. No runtime change.
+
 ### Changed
 - **MCP client (`rmcp`) `2.1`/`2.2` → `3.7`:** Dependabot major bump (Supersedes #178). Features unchanged (`client`, `transport-child-process`, `transport-io`, `transport-streamable-http-client-reqwest`). Call sites in `src/mcp.rs` compile against 3.7 without source edits (`CallToolRequestParams`, `ContentBlock`, `RunningService`, `serve`, transport builders). Soft N/A (Cargo-only; no runtime behavior change expected); Soft fixtures if live MCP paths regress. **SOFT_BLOCKS_v1.0.8=NO**; no tag.
 
