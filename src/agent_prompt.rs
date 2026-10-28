@@ -195,8 +195,11 @@ fn is_cjk(ch: char) -> bool {
 /// First index of the protected tail — messages from this index on are kept
 /// verbatim (ADR 0003 Q4): the last two user turns plus the active exchange,
 /// capped at 20% of `window` tokens. The boundary never splits a
-/// [tool_call, tool_result] pair. Returns 0 when nothing can be protected
-/// (no user messages) — callers treat 0 as "do not compact".
+/// [tool_call, tool_result] pair, and **never advances past `last_user`** so
+/// mid-turn tool traffic after the current ask stays inside the protected
+/// active exchange (hard-cap / compact consumers must not drop the ask).
+/// Returns 0 when nothing can be protected (no user messages) — callers
+/// treat 0 as "do not compact".
 pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
     let user_idx: Vec<usize> = messages
         .iter()
@@ -223,7 +226,9 @@ pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
         start += 1;
     }
 
-    // Never split a [tool_call, tool_result] pair.
+    // Never split a [tool_call, tool_result] pair — but never eject the
+    // current user: tool groups after `last_user` belong to the protected
+    // active exchange (mid-turn prepare / hard-cap must keep the ask).
     loop {
         let mut changed = false;
         let mut i = start;
@@ -249,8 +254,12 @@ pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
                         break;
                     }
                 }
-                if last_result + 1 > start {
-                    start = last_result + 1;
+                // Advance past a complete pair only when it sits *before*
+                // the current user. Clamping at `last_user` keeps post-ask
+                // tool traffic in the protected active exchange.
+                let candidate = (last_result + 1).min(last_user);
+                if candidate > start {
+                    start = candidate;
                     changed = true;
                 }
             }
@@ -1221,6 +1230,91 @@ mod tests {
                     .unwrap_or(false)
             }),
             "last user turn verbatim"
+        );
+    }
+
+    #[test]
+    fn protected_tail_start_keeps_user_when_tools_follow_last_user() {
+        // Mid-turn shape: tools after the current ask must stay in the
+        // protected active exchange — start must not advance past last_user.
+        let mut msgs = vec![
+            chat_msg("system", "sys"),
+            chat_msg("user", "prior ask"),
+            chat_msg("assistant", "prior reply"),
+            chat_msg("user", "request last"),
+        ];
+        for i in 0..4 {
+            msgs.push(tool_call_msg(&format!("mid_{i}"), "lookup"));
+            msgs.push(tool_result_msg(&format!("mid_{i}")));
+        }
+        let last_user = msgs
+            .iter()
+            .rposition(|m| m.role == "user")
+            .expect("last user");
+        let start = protected_tail_start(&msgs, 1_000_000);
+        assert!(
+            start <= last_user,
+            "start={start} must not advance past last_user={last_user}"
+        );
+        assert!(
+            msgs[start..].iter().any(|m| {
+                m.content
+                    .as_ref()
+                    .map(|c| c.as_text() == "request last")
+                    .unwrap_or(false)
+            }),
+            "current ask must remain in the protected tail"
+        );
+    }
+
+    #[test]
+    fn hard_cap_keeps_current_ask_when_huge_tools_follow_last_user() {
+        // Mid-turn hard-cap shape: last user *before* huge trailing tool
+        // groups (the existing hard-cap test places the user after them).
+        let mut msgs = vec![chat_msg("system", "sys")];
+        msgs.push(chat_msg("user", "request 0"));
+        msgs.push(chat_msg("assistant", "reply 0"));
+        msgs.push(chat_msg("user", "request last"));
+        // Enough oversized groups that T1/T2 cannot shrink under the hard cap.
+        for i in 0..7 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("mid{i}"),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "x".repeat(60_000),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+            msgs.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("y".repeat(60_000))),
+                tool_calls: None,
+                tool_call_id: Some(format!("mid{i}")),
+                reasoning_content: None,
+            });
+        }
+        let prepared = prepare_messages_for_llm(&msgs, 1_000);
+        assert!(
+            prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(|c| c.as_text() == "request last")
+                .unwrap_or(false)),
+            "current ask must survive hard-cap with tools-after-last-user"
+        );
+        assert!(
+            !prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(|c| c.as_text() == "request 0")
+                .unwrap_or(false)),
+            "oldest traffic still dropped"
         );
     }
 
