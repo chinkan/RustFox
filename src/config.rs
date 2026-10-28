@@ -2,6 +2,58 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// Harden a config-file path before filesystem access.
+///
+/// 1. Reject lexical `..` components (and the literal `".."` substring) so a
+///    portal-adjacent `PathBuf` cannot walk out of its directory.
+/// 2. Canonicalize the path (resolves symlinks).
+/// 3. Require the canonical path to stay under the canonical parent directory
+///    (or under the process CWD when the input has no parent). This matches
+///    the CodeQL-recommended normalize + `starts_with` containment check and
+///    blocks symlink escapes such as `config.toml` → `/etc/passwd`.
+///
+/// The portal never lets HTTP bodies set this path — it is boot-resolved in
+/// `main` and stored on `PortalState` — but containment here still clears the
+/// `Config::load` sink and defends against a future regression.
+pub fn sanitize_config_path(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("config path is empty");
+    }
+
+    let as_str = path.to_string_lossy();
+    if as_str.contains("..") || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        anyhow::bail!("config path must not contain '..': {}", path.display());
+    }
+
+    let canon = path.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve config path (does the file exist?): {}",
+            path.display()
+        )
+    })?;
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let base = match parent {
+        Some(p) => p.canonicalize().with_context(|| {
+            format!("Failed to resolve config parent directory: {}", p.display())
+        })?,
+        None => std::env::current_dir()
+            .context("Failed to resolve current directory for config path containment")?,
+    };
+
+    if !canon.starts_with(&base) {
+        anyhow::bail!(
+            "config path escapes its parent directory: {} (resolved {})",
+            path.display(),
+            canon.display()
+        );
+    }
+
+    Ok(canon)
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Legacy single-bot Telegram section. Optional in TOML when `[[bots]]`
@@ -1037,8 +1089,14 @@ impl Config {
         Ok(warnings)
     }
 
+    /// Load and resolve a config file.
+    ///
+    /// Before reading, the path is passed through [`sanitize_config_path`] so
+    /// callers that hold a boot-resolved path in shared portal state cannot
+    /// open an arbitrary filesystem location (CodeQL `rust/path-injection`).
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
+        let path = sanitize_config_path(path)?;
+        let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
         let mut config: Config =
             toml::from_str(&content).with_context(|| "Failed to parse config file")?;
@@ -1443,6 +1501,84 @@ mod tests {
         assert_eq!(cfg.sandbox.allowed_directory, home.join("workspace"));
         assert!(cfg.sandbox.allowed_directory.is_dir());
         assert_eq!(cfg.resolved_home.unwrap(), home);
+    }
+
+    #[test]
+    fn sanitize_config_path_accepts_normal_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        std::fs::write(&cfg_path, "x = 1\n").unwrap();
+        let got = super::sanitize_config_path(&cfg_path).unwrap();
+        assert_eq!(got, cfg_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn sanitize_config_path_rejects_parent_dir_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sneaky = tmp.path().join("sub").join("..").join("config.toml");
+        // Create the target so canonicalize would otherwise succeed.
+        std::fs::write(tmp.path().join("config.toml"), "x = 1\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+        let err = super::sanitize_config_path(&sneaky)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".."),
+            "expected parent-dir rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sanitize_config_path_rejects_empty() {
+        let err = super::sanitize_config_path(Path::new(""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sanitize_config_path_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let outside = tmp.path().join("outside.txt");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(&outside, "secret\n").unwrap();
+        let link = home.join("config.toml");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = super::sanitize_config_path(&link).unwrap_err().to_string();
+        assert!(
+            err.contains("escapes") || err.contains("parent"),
+            "expected containment failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_parent_dir_in_path() {
+        let _env = isolate_home_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let cfg_path = tmp.path().join("config.toml");
+        let toml = format!(
+            r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [general]
+            home = '{}'
+            "#,
+            home.display()
+        );
+        std::fs::write(&cfg_path, &toml).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+        let sneaky = tmp.path().join("sub").join("..").join("config.toml");
+        let err = Config::load(&sneaky).unwrap_err().to_string();
+        assert!(
+            err.contains(".."),
+            "Config::load should refuse '..' paths, got: {err}"
+        );
     }
 
     #[test]
