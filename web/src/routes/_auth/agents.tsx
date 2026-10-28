@@ -3,6 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
+import { PixelOffice, SeatStatus } from '../../agents/PixelOffice'
+import { useOfficeMotion } from '../../agents/officePrefs'
+import { agentsPollInterval } from '../../agents/seats'
 
 /**
  * Type-safe search params — the TanStack Router killer feature.
@@ -12,6 +15,7 @@ const agentSearchSchema = z.object({
   q: z.string().default('').catch(''),
   status: z.enum(['all', 'idle', 'running', 'error']).default('all').catch('all'),
   sort: z.enum(['name', 'status']).default('name').catch('name'),
+  view: z.enum(['office', 'table']).default('office').catch('office'),
 })
 
 export const Route = createFileRoute('/_auth/agents')({
@@ -21,13 +25,23 @@ export const Route = createFileRoute('/_auth/agents')({
 
 function AgentsPage() {
   const { api } = Route.useRouteContext()
-  const { q, status, sort } = Route.useSearch()
+  const { q, status, sort, view } = Route.useSearch()
   const navigate = Route.useNavigate()
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [reloadMsg, setReloadMsg] = useState<string | null>(null)
+  const motion = useOfficeMotion()
 
-  const agents = useQuery({ queryKey: ['agents'], queryFn: api.listAgents })
+  // Poll only while this page is mounted. refetchIntervalInBackground pauses
+  // the timer when the document is hidden (focusManager treats hidden as
+  // unfocused). The interval function also returns false while hidden.
+  const agents = useQuery({
+    queryKey: ['agents'],
+    queryFn: api.listAgents,
+    refetchInterval: () =>
+      agentsPollInterval(typeof document !== 'undefined' && document.visibilityState !== 'hidden'),
+    refetchIntervalInBackground: false,
+  })
   const skills = useQuery({ queryKey: ['skills'], queryFn: api.listSkills })
 
   const reload = useMutation({
@@ -54,6 +68,25 @@ function AgentsPage() {
       </div>
 
       <div className="row" style={{ marginBottom: 18 }}>
+        <div className="segmented" role="group" aria-label={t('agents.viewLabel')}>
+          <button
+            type="button"
+            className={view === 'office' ? 'sm primary' : 'sm ghost'}
+            aria-pressed={view === 'office'}
+            onClick={() => void navigate({ search: (prev) => ({ ...prev, view: 'office' }) })}
+          >
+            {t('agents.viewOffice')}
+          </button>
+          <button
+            type="button"
+            className={view === 'table' ? 'sm primary' : 'sm ghost'}
+            aria-pressed={view === 'table'}
+            onClick={() => void navigate({ search: (prev) => ({ ...prev, view: 'table' }) })}
+          >
+            {t('agents.viewTable')}
+          </button>
+        </div>
+
         <input
           type="search"
           placeholder={t('agents.searchPlaceholder')}
@@ -104,38 +137,46 @@ function AgentsPage() {
 
       {reloadMsg ? <div className="hint" style={{ marginBottom: 12 }}>{reloadMsg}</div> : null}
 
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <table>
-          <thead>
-            <tr>
-              <th>{t('agents.col.agent')}</th>
-              <th>{t('agents.col.platform')}</th>
-              <th>{t('agents.col.model')}</th>
-              <th>{t('agents.col.status')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((a) => (
-              <tr key={a.id}>
-                <td>
-                  <strong>{a.name}</strong>
-                </td>
-                <td className="mono">{a.platform}</td>
-                <td className="mono">{a.model}</td>
-                <td>
-                  <span className={`badge dot ${a.status}`}>{a.status}</span>
-                </td>
+      {view === 'office' ? (
+        <PixelOffice
+          agents={filtered}
+          motion={motion}
+          onShowOverflow={() => void navigate({ search: (prev) => ({ ...prev, view: 'table' }) })}
+        />
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>{t('agents.col.agent')}</th>
+                <th>{t('agents.col.platform')}</th>
+                <th>{t('agents.col.model')}</th>
+                <th>{t('agents.col.status')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {filtered.length === 0 ? (
-          <div className="empty">
-            <div className="big">🔍</div>
-            <p>{t('agents.noneFound')}</p>
-          </div>
-        ) : null}
-      </div>
+            </thead>
+            <tbody>
+              {filtered.map((a) => (
+                <tr key={a.id}>
+                  <td>
+                    <strong>{a.name}</strong>
+                  </td>
+                  <td className="mono">{a.platform}</td>
+                  <td className="mono">{a.model}</td>
+                  <td>
+                    <SeatStatus agent={a} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {filtered.length === 0 ? (
+            <div className="empty">
+              <div className="big">🔍</div>
+              <p>{t('agents.noneFound')}</p>
+            </div>
+          ) : null}
+        </div>
+      )}
 
       <section className="section">
         <h2 className="section-title">Skills ({skills.data?.length ?? '…'})</h2>

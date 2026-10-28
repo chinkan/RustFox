@@ -14,6 +14,7 @@ import type {
   SoulName,
 } from '../../api/types'
 import { ensureAuthBootstrapped } from '../../auth'
+import { OfficePrefsSection } from '../../agents/officePrefs'
 
 /**
  * `/settings` — admin-only (RBAC at the route level). Talks to the real
@@ -207,6 +208,8 @@ function SettingsPage() {
         <h1>{t('settings.title')}</h1>
         <p>{t('settings.subtitle')}</p>
       </div>
+
+      <OfficePrefsSection />
 
       {pendingRestart.length > 0 ? (
         <div className="banner warn" role="status" style={{ marginBottom: 16 }}>
