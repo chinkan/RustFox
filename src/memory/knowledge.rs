@@ -95,6 +95,13 @@ impl MemoryStore {
     /// Hybrid search across knowledge using Reciprocal Rank Fusion (vector + FTS5).
     /// Falls back to FTS5-only if embeddings are not available.
     pub async fn search_knowledge(&self, query: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        // FTS5 raises `syntax error near ""` on a blank MATCH, which used to
+        // abort the entire lookup with "Failed to FTS-search knowledge".
+        // A blank query cannot match anything anyway - return early.
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
         let query_embedding = self.embeddings.try_embed_one(query).await;
 
         let conn = self.conn.lock().await;
@@ -107,9 +114,7 @@ impl MemoryStore {
                     SELECT rowid, distance,
                            row_number() OVER (ORDER BY distance) as rank_number
                     FROM knowledge_embeddings
-                    WHERE embedding MATCH ?1
-                    ORDER BY distance
-                    LIMIT ?2
+                    WHERE embedding MATCH ?1 AND k = ?2
                 ),
                 fts_matches AS (
                     SELECT rowid,
@@ -232,4 +237,101 @@ fn parse_knowledge_row(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEntry> 
         value: row.get(3)?,
         source: row.get(4)?,
     })
+}
+
+#[cfg(test)]
+mod vec0_regression {
+    //! Regression guards for the two 2026-10-30 retrieval bugs.
+    //!
+    //! Both surfaced as `file_processor` warnings that made every uploaded PDF
+    //! report "document indexed, but no relevant sections found":
+    //!   - `A LIMIT or 'k = ?' constraint is required on vec0 knn queries`
+    //!   - `Failed to FTS-search knowledge`
+    use super::*;
+
+    async fn seeded_store() -> MemoryStore {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        for (k, v) in [
+            ("statement-reconcile", "always reconcile against printed balance"),
+            ("statement-ocr", "scans come back empty from pdftotext"),
+            ("unrelated", "the weather in Hong Kong"),
+        ] {
+            memory
+                .remember("fact", k, v, Some("test"))
+                .await
+                .expect("remember");
+        }
+        memory
+    }
+
+    /// Bug 2: the vec0 KNN was written as `ORDER BY distance LIMIT ?2`, which
+    /// sqlite-vec refuses once a window function sits in the same CTE. The
+    /// production SQL must be accepted as written.
+    #[test]
+    fn hybrid_search_sql_is_accepted_by_sqlite_vec() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let conn = memory.connection();
+        let conn = conn.blocking_lock();
+
+        let sql = "
+            WITH vec_matches AS (
+                SELECT rowid, distance,
+                       row_number() OVER (ORDER BY distance) as rank_number
+                FROM knowledge_embeddings
+                WHERE embedding MATCH ?1 AND k = ?2
+            ),
+            fts_matches AS (
+                SELECT rowid,
+                       row_number() OVER (ORDER BY rank) as rank_number
+                FROM knowledge_fts
+                WHERE knowledge_fts MATCH ?3
+                LIMIT ?2
+            )
+            SELECT k.id FROM knowledge k
+            LEFT JOIN vec_matches vec ON k.rowid = vec.rowid
+            LEFT JOIN fts_matches fts ON k.rowid = fts.rowid
+            WHERE vec.rowid IS NOT NULL OR fts.rowid IS NOT NULL
+            LIMIT ?2
+        ";
+        let blob = vec![0u8; 1536 * 4];
+        let mut stmt = conn.prepare(sql).expect("vec0 SQL must parse");
+        // Consume the rows: `query()` is lazy, so an un-drained result set would
+        // pass without sqlite-vec ever evaluating the kNN.
+        let rows: Vec<i64> = stmt
+            .query_map(rusqlite::params![blob, 5i64, "statement"], |r| r.get(0))
+            .expect("vec0 hybrid query must execute without the LIMIT/k error")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let _ = rows;
+    }
+
+    /// Bug 1: a blank query used to reach `knowledge_fts MATCH ''`, which FTS5
+    /// rejects with `syntax error near ""`. It must short-circuit instead.
+    #[tokio::test]
+    async fn blank_query_returns_empty_instead_of_failing() {
+        let memory = seeded_store().await;
+        for q in ["", "   ", "\n\t "] {
+            let hits = memory.search_knowledge(q, 5).await;
+            assert!(hits.is_ok(), "blank query {q:?} must not error: {hits:?}");
+            assert!(
+                hits.unwrap().is_empty(),
+                "blank query {q:?} must match nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn limit_zero_returns_empty_instead_of_failing() {
+        let memory = seeded_store().await;
+        let hits = memory.search_knowledge("statement", 0).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// The happy path must still work after the guard.
+    #[tokio::test]
+    async fn real_query_still_returns_hits() {
+        let memory = seeded_store().await;
+        let hits = memory.search_knowledge("statement", 5).await.unwrap();
+        assert!(!hits.is_empty(), "FTS fallback should find `statement` rows");
+    }
 }

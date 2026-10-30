@@ -252,6 +252,10 @@ impl MemoryStore {
         conversation_id: &str,
         limit: usize,
     ) -> Result<Vec<ChatMessage>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
         let query_embedding = self.embeddings.try_embed_one(query).await;
 
         let conn = self.conn.lock().await;
@@ -264,11 +268,9 @@ impl MemoryStore {
                     SELECT rowid, distance,
                            row_number() OVER (ORDER BY distance) as rank_number
                     FROM message_embeddings
-                    WHERE embedding MATCH ?1
+                    WHERE embedding MATCH ?1 AND k = ?2
                       AND is_summarized = 0
                       AND role IN ('user', 'assistant')
-                    ORDER BY distance
-                    LIMIT ?2
                 ),
                 fts_matches AS (
                     SELECT rowid,
@@ -342,6 +344,10 @@ impl MemoryStore {
     /// Hybrid search across messages using Reciprocal Rank Fusion (vector + FTS5).
     /// Falls back to FTS5-only if embeddings are not available.
     pub async fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<ChatMessage>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
         // Try to get query embedding for vector search
         let query_embedding = self.embeddings.try_embed_one(query).await;
 
@@ -355,11 +361,9 @@ impl MemoryStore {
                     SELECT rowid, distance,
                            row_number() OVER (ORDER BY distance) as rank_number
                     FROM message_embeddings
-                    WHERE embedding MATCH ?1
+                    WHERE embedding MATCH ?1 AND k = ?2
                       AND is_summarized = 0
                       AND role IN ('user', 'assistant')
-                    ORDER BY distance
-                    LIMIT ?2
                 ),
                 fts_matches AS (
                     SELECT rowid,
