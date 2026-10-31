@@ -129,12 +129,59 @@ pub fn validate_artifact_grace(secs: i64) -> Result<(), String> {
 
 /// Reject globs the scanner will not run. Relative patterns are resolved
 /// under the RustFox home later; this only checks the pattern text.
+///
+/// A root glob (`/*.jpg`) must fail on every OS. `Path::is_absolute` is
+/// false for that string on Windows, and it does not by itself reject a
+/// drive root (`C:\*.jpg`) or a UNC share wildcard (`\\server\*.jpg`).
 pub fn validate_artifact_glob(pattern: &str) -> Result<(), String> {
     let parts = split_glob(pattern)?;
-    if Path::new(pattern.trim()).is_absolute() && literal_prefix_len(&parts) == 0 {
+    if pattern_is_rooted(pattern) && !rooted_glob_has_directory_prefix(pattern, &parts) {
         return Err("absolute artifact glob must include a literal directory prefix".to_string());
     }
     Ok(())
+}
+
+/// Anchored at a filesystem root on either platform.
+///
+/// Leading `/` is a Unix root even when this process is Windows.
+/// `C:` / `C:\` is drive-absolute. `\\` and `//` are UNC.
+fn pattern_is_rooted(pattern: &str) -> bool {
+    let trimmed = pattern.trim();
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+        return true;
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    Path::new(trimmed).is_absolute()
+}
+
+fn is_drive_designator(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn is_unc_pattern(pattern: &str) -> bool {
+    let trimmed = pattern.trim();
+    trimmed.starts_with(r"\\") || trimmed.starts_with("//")
+}
+
+/// `/*.jpg` has no directory. A drive letter alone is not one either.
+/// UNC needs a literal server and share before the wildcard.
+fn rooted_glob_has_directory_prefix(pattern: &str, parts: &[String]) -> bool {
+    let n = literal_prefix_len(parts);
+    let mut literals = &parts[..n];
+    if literals
+        .first()
+        .is_some_and(|part| is_drive_designator(part))
+    {
+        literals = &literals[1..];
+    }
+    if is_unc_pattern(pattern) {
+        return literals.len() >= 2;
+    }
+    !literals.is_empty()
 }
 
 /// Search `expected_artifact`. `home` is the root for relative patterns.
@@ -764,8 +811,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains(".."), "{err}");
+        // `Path::is_absolute("/*.jpg")` is false on Windows. Root globs are
+        // still rejected there, including a drive root and a UNC share wildcard.
         assert!(validate_artifact_glob("/*.jpg").is_err());
         assert!(validate_artifact_glob("/tmp/out/*.jpg").is_ok());
+        assert!(validate_artifact_glob(r"\*.jpg").is_err());
+        assert!(validate_artifact_glob(r"C:\*.jpg").is_err());
+        assert!(validate_artifact_glob(r"C:\out\*.jpg").is_ok());
+        assert!(validate_artifact_glob(r"\\server\*.jpg").is_err());
+        assert!(validate_artifact_glob(r"\\server\share\*.jpg").is_ok());
     }
 
     #[test]
