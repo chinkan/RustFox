@@ -88,13 +88,13 @@ User ──Telegram──▶ bot.rs ──▶ Agent.process_message()
 | **McpManager** | `mcp.rs` | Manages stdio-based MCP child processes; tools namespaced `mcp_{server}_{tool}` |
 | **SkillRegistry** | `skills/mod.rs` | Loads and manages skills/agents from the home directory with compile-time embedded fallback |
 | **Memory** | `memory/` | SQLite-backed persistence, vector embeddings, hybrid search (FTS5 + vector), query rewriting, summarization |
-| **Scheduler** | `scheduler/` | Cron and one-shot task scheduler with DB persistence; supports add/remove/list at runtime. A run is `completed` only after [`scheduler/completion.rs`](../src/scheduler/completion.rs) accepts it ([ADR-0052](adr/0052-scheduler-completion-not-model-speech.md)) |
+| **Scheduler** | `scheduler/` | Cron and one-shot task scheduler with DB persistence; supports add/remove/list at runtime. A run is `completed` only after [`scheduler/completion.rs`](../src/scheduler/completion.rs) accepts it ([ADR-0053](adr/0053-scheduler-completion-not-model-speech.md)) |
 | **Supervisor** | `supervisor/` | Generic autonomous task runner: intake → classify → plan → execute → verify → report |
 | **FileProcessor** | `file_processor/` | Handles image OCR, vision API calls, PDF/DOCX text extraction |
 
 ## Scheduled run completion
 
-`run_one_scheduled_job` (`src/main.rs`) used to mark every non-max-iterations final reply `completed`. [ADR-0052](adr/0052-scheduler-completion-not-model-speech.md) inserts a verdict first:
+`run_one_scheduled_job` (`src/main.rs`) used to mark every non-max-iterations final reply `completed`. [ADR-0053](adr/0053-scheduler-completion-not-model-speech.md) inserts a verdict first:
 
 1. If the task's `expected_artifact` glob matches a regular file with `mtime >= run_started_at - lookback` (default lookback 900s, never tighter than 300s), the run is `completed`. A guard rewrite or a short clarify on that same run is only a warning.
 2. Otherwise a guard rewrite (`RunOutcome.rewritten_by_guard`: cold-intro, lost-context, or meta-token filler) is `failed`.

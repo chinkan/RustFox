@@ -1,4 +1,4 @@
-# ADR-0052: Scheduled completion is not model speech
+# ADR-0053: Scheduled completion is not model speech
 
 - **Status:** Accepted
 - **Date:** 2026-10-31
