@@ -83,7 +83,7 @@ pdf-extract = "0.12"
 docx-rs = "0.4"
 
 # MIME type detection
-infer = "0.19"
+infer = "0.22"
 
 # Base64 for vision API content parts and OAuth PKCE helpers
 base64 = "0.22"
