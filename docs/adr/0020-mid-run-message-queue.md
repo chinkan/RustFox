@@ -7,6 +7,10 @@
   2026-10-06 that close all open questions (recorded below)
 - **Related:** ADR-0005 (portal one generation per identity), ADR-0013 (typed `RunStop`,
   scheduled runner), design `docs/superpowers/specs/2026-07-08-stop-btw-steer-design.md`
+- **Amended by:** [ADR-0052](./0052-interactive-lane-during-scheduled-run.md) (#338).
+  Decision 8 below: inbound chat while a scheduled run is already going starts
+  an interactive lane immediately. It is not deferred and not a steer into the
+  schedule loop. A scheduled run still waits to *start* until that lane is idle.
 
 ## Context
 
@@ -198,14 +202,19 @@ blocking.
    - `auto_continue_used` resets to `false` when a turn ends with `FinalResponse` or
      `Cancelled`, and when a user-initiated (non-auto) turn starts.
 
-8. **Scheduled runs wait; never parallel, never steered (Q8).**
+8. **Scheduled runs wait to start; inbound during a run is its own lane (Q8, amended by ADR-0052).**
    - The job runner calls `TurnGate::begin_scheduled(key).await` before
-     `process_message_outcome`. If the key is idle, the run starts at once. Otherwise it gets a
-     ticket in `waiting_scheduled` and awaits it. A user turn always finishes before a waiting
-     scheduled run starts (Decision 5.1).
-   - During a scheduled turn, user messages are enqueued as in Decision 3 (👀 reaction, cap,
-     refusal). They are **not** drained into the scheduled loop (no steer source). When the
-     scheduled run finishes, `finish` starts the user's own turn with them.
+     `process_message_outcome`. If both lanes are idle, the run starts at once. If the
+     interactive lane is busy, the run gets a ticket in `waiting_scheduled` and awaits it.
+     A user turn that ends while a schedule is waiting still hands off before leftover
+     pending (Decision 5.1).
+   - **ADR-0052 / #338:** while the scheduled lane is already running, inbound messages
+     start the interactive lane immediately (or steer it, if that lane is already busy).
+     They are not held until the schedule finishes, and they are not a steer into the
+     schedule loop (no steer source; `drain_for(Scheduled)` is empty). 👀 is only the
+     ack for a message accepted behind a busy **interactive** lane. #275's `Deferred`
+     hold is withdrawn.
+   - The two lanes do not share a cancel token. See ADR-0052.
    - The runner stays a single consumer (ADR-0013 serial semantics unchanged). A scheduled run
      waiting on a busy key therefore delays later scheduled runs for other keys
      (head-of-line). Accepted for v1: one owner, a handful of bots, turns of minutes.
@@ -267,7 +276,10 @@ blocking.
 - **Ack with a text bubble in non-silent modes.** Q7 says reaction in all modes. Bubbles clog
   the chat exactly when the user is sending several messages.
 - **Parallel scheduled and user turns on the same key.** Two loops writing to one conversation
-  and one cancel slot. This is the current bug (Context 4).
+  and one cancel slot. This is the current bug (Context 4). **Superseded in part by
+  ADR-0052:** inbound chat may run beside an already-started schedule, on a separate
+  cancel token. A schedule still does not start while the interactive lane is busy,
+  and it still does not receive steers.
 
 ## Consequences
 

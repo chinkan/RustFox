@@ -2227,7 +2227,9 @@ pub async fn handle_message(
             send_markdown_message(&bot, msg.chat.id, QUEUE_FULL_TEXT, msg_format).await
         }
         Submit::Accepted => {
-            // Mid-run behind a **user** turn: 👀 steer/queue ack (ADR-0020 Q7).
+            // Mid-run behind the **interactive** lane: 👀 steer/queue ack
+            // (ADR-0020 Q7). A scheduled lane running beside it is not this UX
+            // (ADR-0052 / #338) — that case is `Start`, not `Accepted`.
             if let Err(e) = bot
                 .set_message_reaction(msg.chat.id, msg.id)
                 .reaction([ReactionType::Emoji {
@@ -2237,12 +2239,6 @@ pub async fn handle_message(
             {
                 warn!(error = %e, "setMessageReaction(👀) failed; enqueue still accepted");
             }
-            Ok(())
-        }
-        Submit::Deferred => {
-            // #275: behind a **scheduled** turn — not a steer. Do not react 👀
-            // (that UX means mid-run steer of the busy session). Message stays
-            // pending and starts as a user turn after the schedule finishes.
             Ok(())
         }
         Submit::Start(inputs) => {
@@ -2263,8 +2259,10 @@ pub async fn handle_message(
 /// Spawn the Telegram user-turn loop used after `Submit::Start` and after a
 /// scheduled run's `finish` returns [`Next::User`] (ADR-0020 Decision 8).
 ///
-/// Runs `run_telegram_user_turn` then `finish` until Idle / Scheduled /
+/// Runs `run_telegram_user_turn` then `finish_user` until Idle / Scheduled /
 /// StepLimit. `Next::Scheduled` breaks so the waiting job runner proceeds.
+/// A scheduled lane that is already running is left alone (`finish_user`
+/// does not clear it — ADR-0052).
 pub fn spawn_telegram_turn_loop(
     bot: Bot,
     agent: Arc<Agent>,
@@ -2296,7 +2294,7 @@ pub fn spawn_telegram_turn_loop(
             )
             .await;
 
-            match agent.turn_gate.finish(&key, stop).await {
+            match agent.turn_gate.finish_user(&key, stop).await {
                 Next::User { inputs, .. } => {
                     batch = inputs;
                 }

@@ -50,7 +50,10 @@ async fn send_human_gate_reply(
 }
 
 /// One scheduled job: persist, `process_message_outcome`, reply / ADR-0013 dead-letter.
-/// Returns the stop reason for [`TurnGate::finish`] (`None` on hard error).
+/// Returns the stop reason (`None` on hard error).
+///
+/// The runner releases the scheduled TurnGate lane on its own. This stop is
+/// not applied to the interactive auto-continue guard (ADR-0052).
 async fn run_one_scheduled_job(
     agent: Arc<Agent>,
     queue_for_runner: rustfox::scheduler::reruns::RerunQueue,
@@ -89,10 +92,11 @@ async fn run_one_scheduled_job(
                 "Scheduled task {} timed out after {timeout_secs}s — cancelling",
                 req.task_id
             );
-            // Cancel the in-flight agent (same path as user /stop), then
-            // best-effort wait for the cancel to land before dropping the fut.
+            // Cancel the scheduled lane only (ADR-0052). An interactive turn
+            // on the same session key keeps its token and its tools.
+            // Best-effort wait for the cancel to land before dropping the fut.
             let _ = agent
-                .cancel_processing(&req.incoming.bot_id, &req.incoming.user_id)
+                .cancel_scheduled_run(&req.incoming.bot_id, &req.incoming.user_id)
                 .await;
             let cancelled_outcome =
                 match tokio::time::timeout(std::time::Duration::from_secs(2), &mut run_fut).await {
@@ -545,7 +549,7 @@ fn handoff_pending_user_after_schedule(
 }
 
 /// Minimal finish→User path when Telegram UI is unavailable: process pending
-/// inputs through the agent and keep calling `finish` until Idle/Scheduled.
+/// inputs through the agent and keep calling `finish_user` until Idle/Scheduled.
 fn spawn_bare_user_turns(
     agent: Arc<Agent>,
     bot_id: String,
@@ -585,7 +589,7 @@ fn spawn_bare_user_turns(
             };
             first.cleanup().await;
 
-            match agent.turn_gate.finish(&key, stop).await {
+            match agent.turn_gate.finish_user(&key, stop).await {
                 rustfox::turn_gate::Next::User { inputs, .. } => batch = inputs,
                 rustfox::turn_gate::Next::StepLimit { n } => {
                     tracing::warn!(%key, n, "bare user turn hit step-limit; queue kept idle");
@@ -1161,8 +1165,10 @@ async fn main() -> Result<()> {
     ));
 
     // Spawn background runner: receives ScheduledJobRequest, calls process_message, persists result, sends reply
-    // ADR-0020 slice 1b: each job claims the session TurnGate via begin_scheduled before the
-    // agent run, and finish after — so scheduled never parallels a user turn on the same key.
+    // ADR-0020 / ADR-0052: claim the scheduled lane before the agent run and
+    // release it after. The job waits to *start* until the interactive lane is
+    // idle. Once running, inbound chat starts that lane in parallel and is
+    // not a steer into this loop (#338).
     let agent_for_runner = Arc::clone(&agent);
     let queue_for_runner = rerun_queue.clone();
     tokio::spawn(async move {
@@ -1171,10 +1177,10 @@ async fn main() -> Result<()> {
             let key = rustfox::agent::session_key(&req.incoming.bot_id, &req.incoming.user_id);
             agent.turn_gate.begin_scheduled(&key).await;
 
-            let stop =
+            let _stop =
                 run_one_scheduled_job(Arc::clone(&agent), queue_for_runner.clone(), &req).await;
 
-            match agent.turn_gate.finish(&key, stop).await {
+            match agent.turn_gate.finish_scheduled(&key).await {
                 rustfox::turn_gate::Next::User { inputs, .. } => {
                     handoff_pending_user_after_schedule(&agent, &req, inputs);
                 }
