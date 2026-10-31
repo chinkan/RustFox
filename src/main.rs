@@ -49,6 +49,152 @@ async fn send_human_gate_reply(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// #330 / #333: decide `completed` vs manual dead-letter before the run row
+/// is updated. A missing task row still runs the guard and heuristic checks.
+async fn judge_scheduled_run(
+    agent: &Agent,
+    req: &rustfox::agent::ScheduledJobRequest,
+    response: &str,
+    rewritten_by_guard: Option<rustfox::loop_runner::GuardKind>,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+) -> rustfox::scheduler::completion::ScheduleCompletion {
+    use rustfox::scheduler::completion::{
+        judge_schedule_completion, prove_artifact, ScheduleCompletionInput,
+        DEFAULT_ARTIFACT_GRACE_SECS,
+    };
+    let loaded = match req.task_store.get_by_id(&req.task_id).await {
+        Ok(task) => task,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load task {} before completion check: {e:#}",
+                req.task_id
+            );
+            None
+        }
+    };
+    let (expected_artifact, grace_secs) = match loaded.as_ref() {
+        Some(task) => (task.expected_artifact.as_deref(), task.artifact_grace_secs),
+        None => (None, DEFAULT_ARTIFACT_GRACE_SECS),
+    };
+    let artifact = prove_artifact(
+        agent
+            .config
+            .resolved_home()
+            .map(std::path::PathBuf::as_path),
+        expected_artifact,
+        run_started_at,
+        grace_secs,
+    );
+    judge_schedule_completion(&ScheduleCompletionInput {
+        response,
+        rewritten_by_guard,
+        expected_artifact,
+        artifact,
+    })
+}
+
+/// Guard rewrite, missing artifact, or short clarify/menu reply. Same manual
+/// gate as max-iterations: `enqueue_manual` / `mark_awaiting_user`, never the
+/// transient auto re-fire queue. Does not retire a one-shot or supersede a
+/// live gate.
+async fn record_unverified_schedule_failure(
+    req: &rustfox::agent::ScheduledJobRequest,
+    queue: &rustfox::scheduler::reruns::RerunQueue,
+    run_id: &str,
+    response: &str,
+    fail_reason: &str,
+) {
+    if let Err(e) = req
+        .task_store
+        .update_run(run_id, Some(response), Some(fail_reason), "failed")
+        .await
+    {
+        tracing::warn!("Failed to mark run {run_id} unverified: {e:#}");
+    }
+    let queue_id = match &req.rerun_id {
+        Some(rid) => {
+            if let Err(e) = queue.mark_awaiting_user(rid, fail_reason).await {
+                tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
+            }
+            Some(rid.clone())
+        }
+        None => match queue
+            .enqueue_manual(&req.task_id, run_id, fail_reason)
+            .await
+        {
+            Ok(qid) => {
+                tracing::info!(
+                    "Unverified result on task {} → human-gated queue row {qid}",
+                    req.task_id
+                );
+                Some(qid)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to record unverified gate for {}: {e:#}",
+                    req.task_id
+                );
+                None
+            }
+        },
+    };
+    if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+        let chat = teloxide::types::ChatId(cv);
+        if let Some(qid) = queue_id.as_deref() {
+            let note = rustfox::scheduler::human_gate::format_human_gate_message(
+                rustfox::scheduler::human_gate::HumanGateKind::UnverifiedResult,
+                fail_reason,
+                qid,
+            );
+            let _ = send_human_gate_reply(&req.owning_telegram_bot, chat, &note, qid).await;
+        }
+        let _ = send_schedule_reply(
+            &req.owning_telegram_bot,
+            chat,
+            response,
+            rustfox::platform::telegram::MessageFormat::Auto,
+        )
+        .await;
+    }
+}
+
+async fn persist_completed_schedule_run(
+    req: &rustfox::agent::ScheduledJobRequest,
+    queue: &rustfox::scheduler::reruns::RerunQueue,
+    run_id: &str,
+    response: &str,
+) {
+    if let Err(e) = req
+        .task_store
+        .update_run(run_id, Some(response), None, "completed")
+        .await
+    {
+        tracing::warn!("Failed to update scheduled task run record: {e}");
+    }
+    let trig = if req.is_recurring {
+        "recurring"
+    } else {
+        "one_shot"
+    };
+    if let Err(e) = req
+        .task_store
+        .retire_completed_one_shot(&req.task_id, trig)
+        .await
+    {
+        tracing::warn!("Failed to retire completed one-shot {}: {e:#}", req.task_id);
+    }
+    if let Some(rid) = &req.rerun_id {
+        if let Err(e) = queue.mark_done(rid).await {
+            tracing::warn!("Failed to mark rerun {rid} done: {e:#}");
+        } else {
+            tracing::info!("Rerun {rid} succeeded — queue row closed");
+        }
+    }
+    if let Err(e) = queue.supersede_live_for_task(&req.task_id).await {
+        tracing::warn!("Failed to supersede live reruns for {}: {e:#}", req.task_id);
+    }
+}
+
 /// One scheduled job: persist, `process_message_outcome`, reply / ADR-0013 dead-letter.
 /// Returns the stop reason for [`TurnGate::finish`] (`None` on hard error).
 async fn run_one_scheduled_job(
@@ -57,7 +203,8 @@ async fn run_one_scheduled_job(
     req: &rustfox::agent::ScheduledJobRequest,
 ) -> Option<rustfox::agent::RunStop> {
     let run_id = uuid::Uuid::new_v4().to_string();
-    let run_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let run_started_at = chrono::Utc::now();
+    let run_at = run_started_at.format("%Y-%m-%dT%H:%M:%S").to_string();
     if let Err(e) = req
         .task_store
         .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
@@ -234,6 +381,7 @@ async fn run_one_scheduled_job(
 
     let (response, stop) = match processed {
         Ok(outcome) => {
+            let rewritten_by_guard = outcome.rewritten_by_guard;
             let stop = outcome.stop;
             let hit_iteration_cap = outcome.is_max_iterations();
             let r = outcome.text;
@@ -319,34 +467,33 @@ async fn run_one_scheduled_job(
                 }
                 return Some(stop);
             }
-            if let Err(e) = req
-                .task_store
-                .update_run(&run_id, Some(&r), None, "completed")
-                .await
-            {
-                tracing::warn!("Failed to update scheduled task run record: {}", e);
-            }
-            let trig = if req.is_recurring {
-                "recurring"
-            } else {
-                "one_shot"
-            };
-            if let Err(e) = req
-                .task_store
-                .retire_completed_one_shot(&req.task_id, trig)
-                .await
-            {
-                tracing::warn!("Failed to retire completed one-shot {}: {e:#}", req.task_id);
-            }
-            if let Some(rid) = &req.rerun_id {
-                if let Err(e) = queue_for_runner.mark_done(rid).await {
-                    tracing::warn!("Failed to mark rerun {rid} done: {e:#}");
-                } else {
-                    tracing::info!("Rerun {rid} succeeded — queue row closed");
+            let verdict =
+                judge_scheduled_run(&agent, req, &r, rewritten_by_guard, run_started_at).await;
+            match verdict {
+                rustfox::scheduler::completion::ScheduleCompletion::Failed { fail_reason } => {
+                    tracing::warn!(
+                        "Scheduled task {} result not verified: {fail_reason}",
+                        req.task_id
+                    );
+                    record_unverified_schedule_failure(
+                        req,
+                        &queue_for_runner,
+                        &run_id,
+                        &r,
+                        &fail_reason,
+                    )
+                    .await;
+                    return Some(stop);
                 }
-            }
-            if let Err(e) = queue_for_runner.supersede_live_for_task(&req.task_id).await {
-                tracing::warn!("Failed to supersede live reruns for {}: {e:#}", req.task_id);
+                rustfox::scheduler::completion::ScheduleCompletion::Completed { warning } => {
+                    if let Some(warning) = warning {
+                        tracing::warn!(
+                            "Scheduled task {} completed with a warning: {warning}",
+                            req.task_id
+                        );
+                    }
+                    persist_completed_schedule_run(req, &queue_for_runner, &run_id, &r).await;
+                }
             }
             (r, Some(stop))
         }

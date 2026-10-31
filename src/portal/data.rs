@@ -260,6 +260,8 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
         "platform": t.platform,
         "botId": t.bot_id,
         "timezone": t.timezone,
+        "expectedArtifact": t.expected_artifact,
+        "artifactGraceSecs": t.artifact_grace_secs,
     })
 }
 

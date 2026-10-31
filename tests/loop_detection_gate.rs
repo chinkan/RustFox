@@ -8,7 +8,7 @@ use rustfox::llm::{
     ChatCompletion, ChatMessage, FunctionCall, LlmClient, MessageContent, ToolCall, ToolDefinition,
 };
 use rustfox::loop_runner::{
-    is_meta_token_filler, AgenticLoop, LoopConfig, LoopOutcome, MessageContainer,
+    is_meta_token_filler, AgenticLoop, GuardKind, LoopConfig, LoopOutcome, MessageContainer,
     EMPTY_PROGRESS_CLARIFY,
 };
 use rustfox::mcp::McpManager;
@@ -235,7 +235,12 @@ async fn repeated_identical_tool_calls_stop_after_recoveries() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert!(
                 text.contains("repeatedly") || text.contains("stopped"),
                 "expected loop-stop message, got: {text}"
@@ -325,7 +330,15 @@ async fn empty_progress_streak_forces_clarify_final_response() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(
+                rewritten_by_guard.is_none(),
+                "empty-progress force-clarify is not a guard rewrite"
+            );
             assert!(
                 text.contains("clarify") || text.contains("progress"),
                 "expected empty-progress clarify FinalResponse, got: {text}"
@@ -420,7 +433,12 @@ async fn meta_token_stub_forces_clarify_final_response() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert_eq!(rewritten_by_guard, Some(GuardKind::MetaFillerAbort));
             assert_eq!(text, EMPTY_PROGRESS_CLARIFY);
             assert!(
                 !text.to_lowercase().contains("mcp")
@@ -477,7 +495,12 @@ async fn meta_token_streak_forces_clarify_final_response() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, .. } => {
+        LoopOutcome::FinalResponse {
+            text,
+            rewritten_by_guard,
+            ..
+        } => {
+            assert_eq!(rewritten_by_guard, Some(GuardKind::MetaFillerAbort));
             assert_eq!(text, EMPTY_PROGRESS_CLARIFY);
         }
         other => panic!("expected clarify FinalResponse, got {other:?}"),
@@ -526,7 +549,12 @@ async fn benign_short_substantive_still_final_response() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert_eq!(text, "Ok, I'll schedule that.");
             assert_ne!(text, EMPTY_PROGRESS_CLARIFY);
             assert_eq!(iterations, 1);
@@ -582,7 +610,12 @@ async fn benign_done_still_final_response() {
         .await
         .expect("loop should return Ok");
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert_eq!(text, "done");
             assert_ne!(text, EMPTY_PROGRESS_CLARIFY);
             assert_eq!(iterations, 1);

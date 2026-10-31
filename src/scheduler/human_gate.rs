@@ -20,6 +20,8 @@ pub enum HumanGateKind {
     IterationStall,
     /// Second death → ask human.
     FailedTwice,
+    /// Reply was not a verified task result (#330 / #333). Manual gate, no auto re-fire.
+    UnverifiedResult,
 }
 
 /// Parsed Retry / Cancel intent (callback or slash).
@@ -78,6 +80,7 @@ fn title_for(kind: HumanGateKind) -> &'static str {
         HumanGateKind::RerunTimeout => "Scheduled task stopped — re-run time limit reached",
         HumanGateKind::IterationStall => "Scheduled task stopped — iteration limit reached",
         HumanGateKind::FailedTwice => "Scheduled task stopped — failed twice",
+        HumanGateKind::UnverifiedResult => "Scheduled task stopped — result not verified",
     }
 }
 
@@ -94,6 +97,9 @@ fn reason_for(kind: HumanGateKind, detail: &str) -> String {
         ),
         HumanGateKind::FailedTwice => format!(
             "It failed again on re-run. I did **not** retry automatically, because some work may already have happened.\n\nLast error: {detail}"
+        ),
+        HumanGateKind::UnverifiedResult => format!(
+            "The run was not marked completed ({detail}). I did **not** retry automatically, because some work may already have happened."
         ),
     }
 }
@@ -276,6 +282,17 @@ mod tests {
         );
         assert!(rerun.contains("re-run time limit reached"));
         assert!(rerun.contains("15 minutes"));
+
+        let unverified = format_human_gate_message(
+            HumanGateKind::UnverifiedResult,
+            "guard rewrite (cold_intro_clarify) is not task completion",
+            "qid",
+        );
+        assert!(unverified.contains("**Scheduled task stopped — result not verified**"));
+        assert!(unverified.contains("was not marked completed"));
+        assert!(unverified.contains("cold_intro_clarify"));
+        assert!(unverified.contains("did **not** retry automatically"));
+        assert!(unverified.contains("run it once more"));
     }
 
     #[test]
@@ -329,7 +346,8 @@ mod tests {
                     trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
-                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC'
+                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC',
+                    expected_artifact TEXT, artifact_grace_secs INTEGER NOT NULL DEFAULT 900
                 );",
             )
             .unwrap();
