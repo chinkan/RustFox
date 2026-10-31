@@ -143,8 +143,14 @@ impl AgentOps for Agent {
     }
     fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.clear_cancel_token(crate::platform::DEFAULT_BOT_ID, &user_id)
-                .await
+            // Portal chat is the interactive lane. Do not drop a scheduled
+            // token that shares this bot+user key (ADR-0052).
+            self.clear_cancel_token(
+                crate::platform::DEFAULT_BOT_ID,
+                &user_id,
+                crate::agent::CancelLane::Interactive,
+            )
+            .await
         })
     }
     fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>> {

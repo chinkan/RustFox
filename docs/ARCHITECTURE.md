@@ -91,6 +91,15 @@ User ──Telegram──▶ bot.rs ──▶ Agent.process_message()
 | **Scheduler** | `scheduler/` | Cron and one-shot task scheduler with DB persistence; supports add/remove/list at runtime |
 | **Supervisor** | `supervisor/` | Generic autonomous task runner: intake → classify → plan → execute → verify → report |
 | **FileProcessor** | `file_processor/` | Handles image OCR, vision API calls, PDF/DOCX text extraction |
+| **TurnGate** | `turn_gate.rs` | Per `session_key` (`{bot_id}:{user_id}`): interactive lane and scheduled lane (ADR-0020, ADR-0052) |
+
+## Session turns
+
+`TurnGate` allows one scheduled job and one interactive chat on the same bot+user at the same time.
+
+- **Scheduled lane.** The job runner calls `begin_scheduled` before the agent loop and `finish_scheduled` after. The job waits to start until the interactive lane is idle. Inbound Telegram is never a steer into this loop (`drain_for(Scheduled)` is empty; the loop has no steer source).
+- **Interactive lane.** A message while a schedule is running starts this lane immediately (`Submit::Start`). Further messages steer or queue only while this lane is busy (`Submit::Accepted`, `/mode steer` or `/mode queue`, 👀 ack). `finish_user` does not clear a schedule that is still running.
+- **Cancel.** Interactive and scheduled loops use different cancel tokens (`{session_key}` and `{session_key}:sched`). A schedule timeout cancels the scheduled token and tools registered in that lane's scope. `/stop` cancels both lanes.
 
 ## Agentic Loop
 

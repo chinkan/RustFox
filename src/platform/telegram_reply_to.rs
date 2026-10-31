@@ -218,7 +218,7 @@ mod tests {
             .await,
             Submit::Accepted
         ));
-        let inputs = match g.finish("k", Some(RunStop::FinalResponse)).await {
+        let inputs = match g.finish_user("k", Some(RunStop::FinalResponse)).await {
             Next::User { inputs, .. } => inputs,
             other => panic!("expected Next::User, got {other:?}"),
         };

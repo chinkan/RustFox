@@ -12,7 +12,7 @@ use teloxide::types::ChatId;
 use teloxide::Bot;
 
 use crate::agent_prompt::PreparedPrompt;
-use crate::cancel_registry::CancelRegistry;
+use crate::cancel_registry::{CancelRegistry, CANCEL_SCOPE};
 use crate::config::Config;
 use crate::langsmith::LangSmithClient;
 use crate::llm::{ChatMessage, ContentPart, LlmClient, MessageContent, ToolCall, ToolDefinition};
@@ -66,6 +66,41 @@ pub enum LoopCallbackChoice {
 pub fn session_key(bot_id: &str, user_id: &str) -> String {
     let bot_id = crate::platform::normalize_bot_id(bot_id);
     format!("{bot_id}:{user_id}")
+}
+
+/// Which agent loop a cancel token belongs to (ADR-0052 / #338).
+///
+/// Interactive chat and a scheduled run on the same session key do not share
+/// a token: one lane finishing or timing out must not cancel the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelLane {
+    Interactive,
+    Scheduled,
+}
+
+/// Cancel-registry key for one lane. Interactive keeps [`session_key`].
+/// Scheduled appends `:sched`.
+pub fn cancel_key(bot_id: &str, user_id: &str, lane: CancelLane) -> String {
+    let base = session_key(bot_id, user_id);
+    match lane {
+        CancelLane::Interactive => base,
+        CancelLane::Scheduled => format!("{base}:sched"),
+    }
+}
+
+pub(crate) fn cancel_lane_for_schedule(schedule_id: Option<&str>) -> CancelLane {
+    if schedule_id.is_some() {
+        CancelLane::Scheduled
+    } else {
+        CancelLane::Interactive
+    }
+}
+
+/// Steer injection is only for an interactive turn in Steer mode.
+/// A scheduled run (`schedule_id` set) never receives inbound chat as steer
+/// (ADR-0020 / ADR-0052). `/mode queue` leaves messages for `finish_user`.
+pub(crate) fn attach_steer(schedule_id: Option<&str>, mode: MidRunMode) -> bool {
+    schedule_id.is_none() && mode == MidRunMode::Steer
 }
 
 /// A request dispatched from a fire closure to the background job runner.
@@ -855,10 +890,15 @@ impl Agent {
         *current = model_id.to_string();
     }
 
-    /// Register a CancellationToken for `(bot_id, user_id)` before processing starts.
+    /// Register a CancellationToken for one lane before processing starts.
     /// Called at the start of process_message. Returns the token for cancellation checks.
-    pub async fn register_cancel_token(&self, bot_id: &str, user_id: &str) -> CancellationToken {
-        let key = session_key(bot_id, user_id);
+    pub async fn register_cancel_token(
+        &self,
+        bot_id: &str,
+        user_id: &str,
+        lane: CancelLane,
+    ) -> CancellationToken {
+        let key = cancel_key(bot_id, user_id, lane);
         let token = CancellationToken::new();
         self.cancel_token_registry
             .lock()
@@ -891,31 +931,60 @@ impl Agent {
     /// cancellable supervisor tasks for the same session key. Returns true if
     /// the loop token, at least one tool, or a supervisor task was cancelled.
     pub async fn cancel_processing(&self, bot_id: &str, user_id: &str) -> bool {
-        let key = session_key(bot_id, user_id);
-        // Kill in-flight execute_command (and peers) before / with the loop
-        // token so a wall-clock timeout's ~2s wait can observe Cancelled and
-        // save an ADR-0039 transcript checkpoint (#250).
+        // `/stop` cancels both lanes (ADR-0024: an active scheduled turn stops
+        // too) and every in-flight tool.
         let tools_n = self.cancel_registry.cancel_all().await;
-        let loop_cancelled = {
-            let mut map = self.cancel_token_registry.lock().await;
-            if let Some(token) = map.remove(&key) {
-                token.cancel();
-                true
-            } else {
-                false
-            }
-        };
+        let loop_cancelled = self
+            .cancel_lanes(
+                bot_id,
+                user_id,
+                &[CancelLane::Interactive, CancelLane::Scheduled],
+            )
+            .await;
         let sup_n = self.cancel_supervisor_session(bot_id, user_id).await;
         loop_cancelled || tools_n > 0 || sup_n > 0
     }
 
+    /// Wall-clock timeout for a scheduled run (ADR-0024, amended by ADR-0052).
+    ///
+    /// Cancels the scheduled loop token and tools registered in that lane's
+    /// scope. Does not cancel the interactive token or interactive tools.
+    pub async fn cancel_scheduled_run(&self, bot_id: &str, user_id: &str) -> bool {
+        let scope = cancel_key(bot_id, user_id, CancelLane::Scheduled);
+        let tools_n = self.cancel_registry.cancel_scope(&scope).await;
+        let loop_cancelled = self
+            .cancel_lanes(bot_id, user_id, &[CancelLane::Scheduled])
+            .await;
+        // Supervisor tasks are still keyed by the shared session, so a hung
+        // scheduled supervisor job can observe cancel. Interactive supervisor
+        // work on that same key is cancelled too — same as before lane split.
+        let sup_n = self.cancel_supervisor_session(bot_id, user_id).await;
+        loop_cancelled || tools_n > 0 || sup_n > 0
+    }
+
+    async fn cancel_lanes(&self, bot_id: &str, user_id: &str, lanes: &[CancelLane]) -> bool {
+        let mut map = self.cancel_token_registry.lock().await;
+        let mut any = false;
+        for lane in lanes {
+            if let Some(token) = map.remove(&cancel_key(bot_id, user_id, *lane)) {
+                token.cancel();
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Check if a bot+user session has active processing.
+    ///
+    /// True when either lane holds the TurnGate or still has a cancel token.
     pub async fn is_processing(&self, bot_id: &str, user_id: &str) -> bool {
         let key = session_key(bot_id, user_id);
         if self.turn_gate.is_active(&key).await {
             return true;
         }
-        self.cancel_token_registry.lock().await.contains_key(&key)
+        let map = self.cancel_token_registry.lock().await;
+        map.contains_key(&cancel_key(bot_id, user_id, CancelLane::Interactive))
+            || map.contains_key(&cancel_key(bot_id, user_id, CancelLane::Scheduled))
     }
 
     /// ADR-0020: drain the gate into `[Steer]` user messages (attachments,
@@ -1027,9 +1096,9 @@ impl Agent {
         self.memory.forget("settings", &key).await.ok();
     }
 
-    /// Remove cancel token for a user (called on process_message exit).
-    pub async fn clear_cancel_token(&self, bot_id: &str, user_id: &str) {
-        let key = session_key(bot_id, user_id);
+    /// Remove one lane's cancel token (called on that lane's process_message exit).
+    pub async fn clear_cancel_token(&self, bot_id: &str, user_id: &str, lane: CancelLane) {
+        let key = cancel_key(bot_id, user_id, lane);
         self.cancel_token_registry.lock().await.remove(&key);
     }
 
@@ -1295,8 +1364,10 @@ impl Agent {
         self.soul_updated
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
-        // Register cancel token for /stop support
-        let cancel_token = self.register_cancel_token(bot_id, user_id).await;
+        // Register this lane's cancel token. Interactive and scheduled do not
+        // share a slot (ADR-0052), so one finishing does not clear the other.
+        let lane = cancel_lane_for_schedule(incoming.schedule_id.as_deref());
+        let cancel_token = self.register_cancel_token(bot_id, user_id, lane).await;
 
         // Build make_ctx closure for ToolContext construction.
         // Tool UI (execute_command, send_file) goes out on this bot, not the shim.
@@ -1543,10 +1614,10 @@ impl Agent {
             }
         };
 
-        // ADR-0020 / #275: attach steer drain only for live chat turns in Steer
-        // mode. Scheduled runs never get a steer source (schedule_id is Some);
-        // TurnGate::drain also no-ops while Scheduled. /mode queue leaves
-        // pending for finish() instead.
+        // ADR-0020 / ADR-0052: steer drain only for an interactive turn in Steer
+        // mode. Scheduled runs never get a steer source. TurnGate::drain_for
+        // (Scheduled) is empty even if called. /mode queue leaves pending for
+        // finish_user instead.
         let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,
@@ -1559,9 +1630,10 @@ impl Agent {
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
         );
-        if incoming.schedule_id.is_none()
-            && self.get_mid_run_mode(bot_id, user_id).await == MidRunMode::Steer
-        {
+        if attach_steer(
+            incoming.schedule_id.as_deref(),
+            self.get_mid_run_mode(bot_id, user_id).await,
+        ) {
             let weak = self.self_weak.clone();
             let key = session_key(bot_id, user_id);
             let conv_id = conversation_id.clone();
@@ -1579,8 +1651,11 @@ impl Agent {
             }));
         }
         let mut container = crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr));
-        let outcome = agentic
-            .run(&mut container, user_id, &incoming.chat_id)
+        let outcome = CANCEL_SCOPE
+            .scope(
+                cancel_key(bot_id, user_id, lane),
+                agentic.run(&mut container, user_id, &incoming.chat_id),
+            )
             .await;
 
         let (text, stop, transcript) = match outcome {
@@ -1656,11 +1731,11 @@ impl Agent {
                     error: Some(format!("{:#}", e)),
                     end_time: Self::now_iso8601_static(),
                 });
-                self.clear_cancel_token(bot_id, user_id).await;
+                self.clear_cancel_token(bot_id, user_id, lane).await;
                 return Err(e);
             }
         };
-        self.clear_cancel_token(bot_id, user_id).await;
+        self.clear_cancel_token(bot_id, user_id, lane).await;
 
         // Every Ok reply is sent to the chat, so history keeps it too
         // (final, cancelled, or max iterations). A scheduled run's prompt and
@@ -1703,7 +1778,8 @@ impl Agent {
         let messages = checkpoint.messages_for_continue();
         let remaining = self.config.max_iterations().saturating_sub(used).max(1);
 
-        let cancel_token = self.register_cancel_token(bot_id, user_id).await;
+        let lane = cancel_lane_for_schedule(incoming.schedule_id.as_deref());
+        let cancel_token = self.register_cancel_token(bot_id, user_id, lane).await;
         let turn_sender = self.sender_for_bot(bot_id).await;
         let make_ctx = {
             let sandbox_dir = self.config.sandbox.allowed_directory.clone();
@@ -1841,8 +1917,11 @@ impl Agent {
             Some(Box::new(special_handler)),
         );
         let mut container = crate::loop_runner::MessageContainer::Plain(messages);
-        let outcome = agentic
-            .run(&mut container, user_id, &incoming.chat_id)
+        let outcome = CANCEL_SCOPE
+            .scope(
+                cancel_key(bot_id, user_id, lane),
+                agentic.run(&mut container, user_id, &incoming.chat_id),
+            )
             .await;
 
         let (text, stop, transcript) = match outcome {
@@ -1901,11 +1980,11 @@ impl Agent {
                     error: Some(format!("{:#}", e)),
                     end_time: Self::now_iso8601_static(),
                 });
-                self.clear_cancel_token(bot_id, user_id).await;
+                self.clear_cancel_token(bot_id, user_id, lane).await;
                 return Err(e);
             }
         };
-        self.clear_cancel_token(bot_id, user_id).await;
+        self.clear_cancel_token(bot_id, user_id, lane).await;
         Ok(RunOutcome {
             text,
             stop,
@@ -4307,6 +4386,32 @@ mod tests {
             q.due().await.unwrap().is_empty(),
             "a stalled run must never be auto-dispatched, even when overdue"
         );
+    }
+
+    #[test]
+    fn steer_attaches_only_for_interactive_steer_mode() {
+        assert!(attach_steer(None, MidRunMode::Steer));
+        assert!(!attach_steer(None, MidRunMode::Queue));
+        assert!(
+            !attach_steer(Some("sched-1"), MidRunMode::Steer),
+            "scheduled runs must not receive inbound steer"
+        );
+        assert!(!attach_steer(Some("sched-1"), MidRunMode::Queue));
+    }
+
+    #[test]
+    fn cancel_key_splits_interactive_and_scheduled_lanes() {
+        let interactive = cancel_key("main", "42", CancelLane::Interactive);
+        let scheduled = cancel_key("main", "42", CancelLane::Scheduled);
+        assert_eq!(interactive, session_key("main", "42"));
+        assert_ne!(interactive, scheduled);
+        assert!(scheduled.ends_with(":sched"));
+        assert_ne!(
+            cancel_key("bot_a", "42", CancelLane::Scheduled),
+            cancel_key("bot_b", "42", CancelLane::Scheduled)
+        );
+        assert_eq!(cancel_lane_for_schedule(None), CancelLane::Interactive);
+        assert_eq!(cancel_lane_for_schedule(Some("job")), CancelLane::Scheduled);
     }
 
     #[test]
