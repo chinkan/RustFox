@@ -274,7 +274,7 @@ async fn drain_a_injects_before_next_llm_call() {
     )
     .await;
     assert!(
-        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 2 } if text == "did X and Y")
+        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 2, .. } if text == "did X and Y")
     );
     assert_eq!(seen[0], ["first"]);
     assert_eq!(seen[1], ["first", "[Steer] also do Y"]);
@@ -290,7 +290,7 @@ async fn drain_b_reruns_instead_of_returning_the_stale_draft() {
     )
     .await;
     assert!(
-        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 2 } if text == "updated answer"),
+        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 2, .. } if text == "updated answer"),
         "{outcome:?}"
     );
     assert_eq!(seen[1], ["first", "[Steer] wait, use Z"]);
@@ -323,7 +323,7 @@ async fn steer_drains_count_toward_max_iterations() {
 async fn no_steer_source_behaves_as_before() {
     let (outcome, seen, _) = run(vec![text("hi")], vec![], 3).await;
     assert!(
-        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 1 } if text == "hi")
+        matches!(outcome, LoopOutcome::FinalResponse { ref text, iterations: 1, .. } if text == "hi")
     );
     assert_eq!(seen.len(), 1);
 }

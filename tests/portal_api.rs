@@ -925,6 +925,8 @@ fn make_task(id: &str) -> ScheduledTask {
         deleted_at: None,
         bot_id: rustfox::platform::DEFAULT_BOT_ID.into(),
         timezone: "UTC".into(),
+        expected_artifact: None,
+        artifact_grace_secs: rustfox::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
     }
 }
 
@@ -1115,6 +1117,116 @@ async fn task_create_rolls_back_row_when_arm_fails() {
         listed.iter().all(|t| t.description != "Doomed"),
         "rolled-back task still active"
     );
+}
+
+#[tokio::test]
+async fn task_create_persists_expected_artifact_and_rejects_bad_glob() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "Paper",
+                    "prompt": "write the paper",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 0 8 * * *",
+                    "expectedArtifact": "workspace/newsheet/frontpage-*.jpg",
+                    "artifactGraceSecs": 300
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let id = body_json(res).await["id"].as_str().unwrap().to_string();
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(
+        row.expected_artifact.as_deref(),
+        Some("workspace/newsheet/frontpage-*.jpg")
+    );
+    assert_eq!(row.artifact_grace_secs, 300);
+
+    let listed = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let body = body_json(listed).await;
+    let item = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap();
+    assert_eq!(
+        item["expectedArtifact"],
+        "workspace/newsheet/frontpage-*.jpg"
+    );
+    assert_eq!(item["artifactGraceSecs"], 300);
+
+    let bad = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "Bad",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 0 8 * * *",
+                    "expectedArtifact": "../secret/*.md"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(bad).await["error"]["code"],
+        "invalid_artifact_glob"
+    );
+
+    let grace = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                &format!("/api/tasks/{id}"),
+                json!({"artifactGraceSecs": 100}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(grace.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(grace).await["error"]["code"],
+        "invalid_artifact_grace"
+    );
+
+    let cleared = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                &format!("/api/tasks/{id}"),
+                json!({"expectedArtifact": null}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert!(row.expected_artifact.is_none());
+    assert_eq!(row.artifact_grace_secs, 300);
 }
 
 #[tokio::test]
