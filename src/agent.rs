@@ -156,8 +156,9 @@ pub enum RunStop {
 pub struct RunOutcome {
     pub text: String,
     pub stop: RunStop,
-    /// ADR-0039: present on Cancelled scheduled runs so the timeout gate can
-    /// persist a transcript checkpoint. Unused for chat /stop.
+    /// ADR-0039 / ADR-0054: present on a scheduled cancel, max-iterations stop,
+    /// or guard rewrite so the human-gate can persist a transcript checkpoint.
+    /// Unused for chat /stop and for a clean final reply.
     pub transcript: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
     /// Set when a guard replaced `text`. Interactive delivery still shows
     /// that text. The scheduler refuses `completed` when this is `Some`
@@ -172,6 +173,22 @@ impl RunOutcome {
     pub fn is_max_iterations(&self) -> bool {
         self.stop == RunStop::MaxIterations
     }
+}
+
+/// Snapshot the in-flight loop when this scheduled stop should be continuable.
+fn transcript_from_loop(
+    is_scheduled: bool,
+    stop: crate::scheduler::checkpoint::ScheduledLoopStop,
+    container: &crate::loop_runner::MessageContainer,
+) -> Option<crate::scheduler::checkpoint::TranscriptCheckpoint> {
+    crate::scheduler::checkpoint::scheduled_transcript_iteration(is_scheduled, stop).map(
+        |iteration| {
+            crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
+                container.messages_snapshot(),
+                iteration,
+            )
+        },
+    )
 }
 
 /// Outcome of [`Agent::set_model`] (ADR-0035 Telegram copy).
@@ -1688,10 +1705,18 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::Final {
+                        rewritten: rewritten_by_guard.is_some(),
+                        iterations,
+                    },
+                    &container,
+                );
                 (
                     final_content,
                     RunStop::FinalResponse,
-                    None,
+                    transcript,
                     rewritten_by_guard,
                 )
             }
@@ -1708,16 +1733,11 @@ impl Agent {
                 });
                 // ADR-0039: snapshot transcript on scheduled cancel so the
                 // timeout human-gate can persist a continue checkpoint.
-                let transcript = if incoming.schedule_id.is_some() {
-                    let messages = container.messages_snapshot();
-                    Some(
-                        crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
-                            messages, iterations,
-                        ),
-                    )
-                } else {
-                    None
-                };
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::Cancelled { iterations },
+                    &container,
+                );
                 (
                     "Processing was cancelled.".to_string(),
                     RunStop::Cancelled,
@@ -1740,10 +1760,19 @@ impl Agent {
                     )),
                     end_time: Self::now_iso8601_static(),
                 });
+                // ADR-0054: max-iterations is a continuable gate, same snapshot
+                // shape as the timeout path. Chat stays None.
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::MaxIterations {
+                        iterations: self.config.max_iterations(),
+                    },
+                    &container,
+                );
                 (
                     "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
                     RunStop::MaxIterations,
-                    None,
+                    transcript,
                     None,
                 )
             }
@@ -1963,10 +1992,18 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::Final {
+                        rewritten: rewritten_by_guard.is_some(),
+                        iterations: used.saturating_add(iterations),
+                    },
+                    &container,
+                );
                 (
                     final_content,
                     RunStop::FinalResponse,
-                    None,
+                    transcript,
                     rewritten_by_guard,
                 )
             }
@@ -1977,12 +2014,12 @@ impl Agent {
                     error: Some("Cancelled during continue".to_string()),
                     end_time: Self::now_iso8601_static(),
                 });
-                let messages = container.messages_snapshot();
-                let transcript = Some(
-                    crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
-                        messages,
-                        used.saturating_add(iterations),
-                    ),
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::Cancelled {
+                        iterations: used.saturating_add(iterations),
+                    },
+                    &container,
                 );
                 (
                     "Processing was cancelled.".to_string(),
@@ -1998,10 +2035,17 @@ impl Agent {
                     error: Some("max iterations on continue".to_string()),
                     end_time: Self::now_iso8601_static(),
                 });
+                let transcript = transcript_from_loop(
+                    incoming.schedule_id.is_some(),
+                    crate::scheduler::checkpoint::ScheduledLoopStop::MaxIterations {
+                        iterations: used.saturating_add(remaining),
+                    },
+                    &container,
+                );
                 (
                     "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
                     RunStop::MaxIterations,
-                    None,
+                    transcript,
                     None,
                 )
             }

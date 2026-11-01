@@ -45,6 +45,10 @@ _Avoid_: server time, UTC offset (`+08:00`)
 Wall-clock bound on one scheduled agent call (`scheduler.run_timeout_secs`, default 900). On expiry the run is cancelled, marked failed, human-gated once (ADR-0013), and the job runner plus TurnGate are released (ADR-0024).
 _Avoid_: unbounded schedule, forever cron
 
+**Daily run progress**:
+Same-day file `workspace/_runs/<task_id>-YYYY-MM-DD.json` for one scheduled task. The next fresh run that day is told to continue from `next_phase` and not redo completed work. Deleted when the run is verified complete or hits an explicit hard failure (ADR-0054).
+_Avoid_: transcript checkpoint, plan file
+
 **Zombie running row**:
 A `scheduled_task_runs` row left `status=running` after the process died or a run was abandoned. Cleared to `failed` on startup and by the stale-run watchdog (ADR-0024).
 _Avoid_: stuck run, orphan status

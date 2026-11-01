@@ -1,8 +1,9 @@
-//! Scheduler timeout transcript checkpoints (ADR-0039 Slice B).
+//! Scheduler transcript checkpoints (ADR-0039, amended by ADR-0054).
 //!
-//! Written only on the wall-clock timeout human-gate path. Retry with a
-//! checkpoint continues the agent loop from the saved transcript; Cancel
-//! clears it. No checkpoint → ADR-0013 full replay.
+//! Written on the wall-clock timeout human-gate, and also on the
+//! max-iterations and guard-rewrite gates (#331). Retry with a checkpoint
+//! continues the agent loop from the saved transcript; Cancel clears it.
+//! No checkpoint → ADR-0013 full replay.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -87,6 +88,41 @@ pub fn synthesize_interrupted_results(messages: &mut Vec<ChatMessage>, dangling:
     }
 }
 
+/// Which scheduled loop stop this is, for transcript capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduledLoopStop {
+    /// `rewritten` is set when a guard replaced the model text.
+    Final {
+        rewritten: bool,
+        iterations: u32,
+    },
+    Cancelled {
+        iterations: u32,
+    },
+    MaxIterations {
+        iterations: u32,
+    },
+}
+
+/// Iteration to store, if this stop should capture a transcript.
+///
+/// Chat (`is_scheduled == false`) and a clean final reply return `None`.
+/// Timeout / cancel, max-iterations, and a guard rewrite return the
+/// iteration the runner should persist (ADR-0039 / ADR-0054).
+pub fn scheduled_transcript_iteration(is_scheduled: bool, stop: ScheduledLoopStop) -> Option<u32> {
+    if !is_scheduled {
+        return None;
+    }
+    match stop {
+        ScheduledLoopStop::Final {
+            rewritten,
+            iterations,
+        } => rewritten.then_some(iterations),
+        ScheduledLoopStop::Cancelled { iterations }
+        | ScheduledLoopStop::MaxIterations { iterations } => Some(iterations),
+    }
+}
+
 /// SQLite-backed store keyed by pending_reruns / queue id.
 #[derive(Clone)]
 pub struct CheckpointStore {
@@ -119,7 +155,10 @@ impl CheckpointStore {
         Self::ensure_schema(&conn)
     }
 
-    /// Upsert checkpoint for a human-gate queue row (timeout path only).
+    /// Upsert checkpoint for a human-gate queue row.
+    ///
+    /// Callers: wall-clock timeout (ADR-0039), max-iterations, and guard
+    /// rewrite (ADR-0054 / #331).
     pub async fn save(
         &self,
         queue_id: &str,
@@ -152,6 +191,21 @@ impl CheckpointStore {
         )
         .context("upsert transcript checkpoint")?;
         Ok(())
+    }
+
+    /// [`Self::save`] when a snapshot exists. `Ok(false)` when there is nothing
+    /// to resume (clean final reply, chat cancel, missing snapshot).
+    pub async fn save_if_present(
+        &self,
+        queue_id: &str,
+        run_id: Option<&str>,
+        checkpoint: Option<&TranscriptCheckpoint>,
+    ) -> Result<bool> {
+        let Some(checkpoint) = checkpoint else {
+            return Ok(false);
+        };
+        self.save(queue_id, run_id, checkpoint).await?;
+        Ok(true)
     }
 
     pub async fn get(&self, queue_id: &str) -> Result<Option<TranscriptCheckpoint>> {
@@ -282,5 +336,73 @@ mod tests {
         assert!(store.clear("qid-2").await.unwrap());
         assert!(store.get("qid-2").await.unwrap().is_none());
         assert!(!store.clear("qid-2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn save_if_present_skips_missing_snapshot() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let store = CheckpointStore::new(conn);
+        assert!(!store
+            .save_if_present("qid", Some("run"), None)
+            .await
+            .unwrap());
+        assert!(store.get("qid").await.unwrap().is_none());
+        let cp = TranscriptCheckpoint {
+            messages: vec![],
+            iteration: 4,
+            dangling_tool_ids: vec![],
+        };
+        assert!(store
+            .save_if_present("qid", Some("run"), Some(&cp))
+            .await
+            .unwrap());
+        assert_eq!(store.get("qid").await.unwrap().unwrap().iteration, 4);
+    }
+
+    #[test]
+    fn transcript_capture_is_timeout_max_iterations_and_guard_only() {
+        use ScheduledLoopStop::*;
+        assert_eq!(
+            scheduled_transcript_iteration(false, MaxIterations { iterations: 25 }),
+            None
+        );
+        assert_eq!(
+            scheduled_transcript_iteration(true, MaxIterations { iterations: 25 }),
+            Some(25)
+        );
+        assert_eq!(
+            scheduled_transcript_iteration(true, Cancelled { iterations: 3 }),
+            Some(3)
+        );
+        assert_eq!(
+            scheduled_transcript_iteration(
+                true,
+                Final {
+                    rewritten: false,
+                    iterations: 2
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            scheduled_transcript_iteration(
+                true,
+                Final {
+                    rewritten: true,
+                    iterations: 2
+                }
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            scheduled_transcript_iteration(
+                false,
+                Final {
+                    rewritten: true,
+                    iterations: 2
+                }
+            ),
+            None
+        );
     }
 }
