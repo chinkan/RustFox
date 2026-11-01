@@ -2,6 +2,7 @@ pub mod checkpoint;
 pub mod completion;
 pub mod history;
 pub mod human_gate;
+pub mod progress;
 pub mod reminders;
 pub mod reruns;
 pub mod schedule;

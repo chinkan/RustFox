@@ -165,6 +165,16 @@ Today (tip ~`4b7ec3c`):
   re-fired; true mid-tool hard resume and idempotent-tool registry
   remain later work.
 
+## Amend (2026-11-01, #331 / ADR-0054)
+
+Decision 7 and Decision 11 (write the checkpoint only on the wall-clock
+timeout human-gate) are amended: the max-iterations gate and a
+guard-rewrite unverified gate also persist a transcript checkpoint on
+the same queue id. The same Retry control continues when that row is
+present. Failed-twice and any gate without a checkpoint stay full
+replay. The same-day progress file is not this table; see ADR-0054.
+`max_iterations` is unchanged.
+
 ## Related
 
 - ADR-0013 — dead-letter queue, two-strike, **full replay default**,
