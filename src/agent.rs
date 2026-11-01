@@ -119,6 +119,9 @@ pub struct ScheduledJobRequest {
     /// ADR-0039: when Retry found a timeout transcript checkpoint, continue
     /// from it instead of full-replaying the scheduled prompt.
     pub continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
+    /// Tick the scheduler armed for this cron fire (#335). `None` on a
+    /// dead-letter re-run, which is not itself a cron boundary.
+    pub scheduled_for: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub use crate::loop_runner::GuardKind;
@@ -2057,26 +2060,23 @@ impl Agent {
         telegram_bots: Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<Bot>>>>,
         store: ScheduledTaskStore,
         task: &ScheduledTask,
-    ) -> impl Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static {
+    ) -> impl Fn(chrono::DateTime<chrono::Utc>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+           + Send
+           + Sync
+           + 'static {
         let task_for_fire = task.clone();
         let is_recurring = task.trigger_type == "recurring";
-        move || {
+        move |fired_at| {
             let tx = job_tx.clone();
             let bots = Arc::clone(&telegram_bots);
             let store = store.clone();
             let task_for_fire = task_for_fire.clone();
             let recurring = is_recurring;
             Box::pin(async move {
-                // Issue #111 (Part A): advance the stored next fire time as the
-                // job fires, so `next_run_at` tracks the *actual* next run
-                // (arm refreshes it at runtime; this keeps it rolling without a
-                // restart). Best-effort bookkeeping — never block the dispatch.
-                if let Err(e) = store.refresh_next_run_at(&task_for_fire.id).await {
-                    tracing::warn!(
-                        "Failed to advance next_run_at for {}: {e:#}",
-                        task_for_fire.id
-                    );
-                }
+                // #335: do not write `next_run_at` here. This closure runs when
+                // the one-shot wakes, often ~1s before the armed tick, and
+                // `refresh_next_run_at(now)` would store that tick. The runner
+                // advances the column after `update_run`, using `fired_at`.
                 let incoming = Self::scheduled_incoming(&task_for_fire);
                 let owning_telegram_bot = {
                     let guard = bots.read().unwrap_or_else(|e| e.into_inner());
@@ -2090,6 +2090,7 @@ impl Agent {
                     task_store: store,
                     rerun_id: None,
                     continue_from: None,
+                    scheduled_for: Some(fired_at),
                 };
                 if let Err(e) = tx.send(req) {
                     tracing::error!("Failed to dispatch scheduled job: {}", e);
@@ -2123,6 +2124,7 @@ impl Agent {
             task_id: task.id.clone(),
             rerun_id: Some(rerun_id.to_string()),
             continue_from,
+            scheduled_for: None,
         };
         job_tx.send(req).context("Failed to dispatch rerun")?;
         Ok(())
@@ -2241,7 +2243,7 @@ impl Agent {
         let job_id = if task.trigger_type == "one_shot" {
             let delay = parse_one_shot_delay(&task.trigger_value, tz)?;
             self.scheduler
-                .add_one_shot_job(delay, &task.description, fire)
+                .add_one_shot_job(delay, &task.description, move || fire(chrono::Utc::now()))
                 .await?
         } else {
             self.scheduler
@@ -2281,6 +2283,15 @@ impl Agent {
     /// Re-register all active scheduled tasks from the DB into the scheduler.
     /// Called once at startup after the agent is constructed.
     pub async fn restore_scheduled_tasks(&self) {
+        // #335: recompute active recurring `next_run_at` before arming so a
+        // restart does not keep the write-once values from the previous process.
+        if let Err(e) = self
+            .task_store
+            .backfill_active_recurring_next_run_at(chrono::Utc::now())
+            .await
+        {
+            tracing::warn!("next_run_at backfill failed: {e:#}");
+        }
         let tasks = match self.task_store.list_all_active().await {
             Ok(t) => t,
             Err(e) => {

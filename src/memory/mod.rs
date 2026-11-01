@@ -390,6 +390,12 @@ impl MemoryStore {
         }
         crate::scheduler::reminders::migrate_schedule_timezones(conn)?;
         crate::scheduler::reminders::migrate_schedule_artifact_columns(conn)?;
+        // #335: one startup pass so active recurring `next_run_at` is not the
+        // stale write-once value left by an older process. Idempotent.
+        crate::scheduler::reminders::backfill_active_recurring_next_run_at(
+            conn,
+            chrono::Utc::now(),
+        )?;
 
         // Stored embedding dimension (None if legacy DB without schema_meta row)
         let raw: Option<String> = conn

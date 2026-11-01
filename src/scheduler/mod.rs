@@ -52,7 +52,9 @@ impl Scheduler {
         task: F,
     ) -> Result<Uuid>
     where
-        F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        F: Fn(
+                chrono::DateTime<Utc>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
             + Send
             + Sync
             + 'static,
@@ -204,7 +206,7 @@ async fn run_cron_chain<F>(
     handles: Arc<Mutex<HashMap<Uuid, Uuid>>>,
     inner: JobScheduler,
 ) where
-    F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    F: Fn(chrono::DateTime<Utc>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + Sync
         + 'static,
@@ -215,7 +217,9 @@ async fn run_cron_chain<F>(
         }
 
         info!("Running scheduled task: {}", job_name);
-        task().await;
+        // Pass the armed tick, not `Utc::now()`. The one-shot often wakes ~1s
+        // early; callers that persist `next_run_at` must step past this tick.
+        task(fired_at).await;
 
         if !handles.lock().await.contains_key(&handle) {
             return;
@@ -287,7 +291,7 @@ mod tests {
         let scheduler = Scheduler::new().await.unwrap();
         scheduler.start().await.unwrap();
         let id = scheduler
-            .add_cron_job("0 * * * * *", chrono_tz::UTC, "test-cron", || {
+            .add_cron_job("0 * * * * *", chrono_tz::UTC, "test-cron", |_fired_at| {
                 Box::pin(async {})
             })
             .await
