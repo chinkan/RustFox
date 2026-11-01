@@ -53,17 +53,18 @@ fn is_continuity_turn(m: &ChatMessage) -> bool {
     }
 }
 
-/// Capability cold-intro matcher (ADR-0043 / #280 / #315 W2++): **W1 ∪ W2**.
+/// Capability cold-intro matcher (ADR-0043 / #280 / #315 W2++ / #324 W2+++): **W1 ∪ W2**.
 ///
 /// - **W1:** greeting + ≥2 menu lines (help-offer no longer required)
-/// - **W2:** explicit lost-context / cannot-see-prior (+ #283 P1/E1 / #315 W2++)
+/// - **W2:** explicit lost-context / cannot-see-prior (+ #283 P1/E1 / #315 W2++ / #324 W2+++)
 ///   + ≥2 menu lines
 ///
-/// Prefer false-negatives (F1): greeting and menu-line definitions are
-/// unchanged from #277. Lost-context alone without ≥2 menu does not match (C1)
-/// on this matcher. ADR-0045 / #315 closes the post–empty-progress C1 hole on
-/// the shared FinalResponse path (lost-context alone after empty-progress
-/// force-clarify → rewrite), not by widening C1 globally here.
+/// Prefer false-negatives (F1): menu-line definitions are unchanged from #277.
+/// Greeting adds `Fox 在` / `在度` (#324) on the #277 list. Lost-context alone
+/// without ≥2 menu does not match (C1) on this matcher. ADR-0045 / #315 closes
+/// the post–empty-progress C1 hole on the shared FinalResponse path
+/// (lost-context alone after empty-progress force-clarify → rewrite), not by
+/// widening C1 globally here.
 pub fn is_capability_cold_intro(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -87,6 +88,8 @@ fn has_greeting_signal(text: &str) -> bool {
         || head.contains("哈囉")
         || head.contains("哈喽")
         || head.contains("喺度")
+        || head.contains("在度")
+        || head.contains("Fox 在")
         || head.contains("有咩想做")
     {
         return true;
@@ -123,7 +126,7 @@ fn has_greeting_signal(text: &str) -> bool {
 }
 
 /// Explicit lost-context / cannot-see-prior / empty-inbound language
-/// (locale-aware; #280 / #283 / #315 W2++).
+/// (locale-aware; #280 / #283 / #315 W2++ / #324 W2+++).
 ///
 /// Prefer FN: keep the list tight so normal “I can’t see file X” without a menu
 /// never reaches the capability-cold-intro matcher alone (C1 still requires ≥2
@@ -132,6 +135,7 @@ fn has_greeting_signal(text: &str) -> bool {
 ///
 /// W2+ (#283): P1 CJK (`收唔到` / `只見到系統…` / `冇見到` ≠ `見唔到`) + E1 EN.
 /// W2++ (#315): `訊息係空`, `掉失` / `掉失咗` (near-synonyms OOS).
+/// W2+++ (#324): `冇接到` / `冇接到內容` (tight; near-synonyms OOS).
 pub fn has_lost_context_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
 
@@ -156,6 +160,9 @@ pub fn has_lost_context_signal(text: &str) -> bool {
         || text.contains("只見到系統")
         || text.contains("今次嘅內容")
         || text.contains("冇見到")
+        // #324 W2+++: live MAIN FN — 冇接到 / 冇接到內容 (tight; near-synonyms OOS).
+        || text.contains("冇接到")
+        || text.contains("冇接到內容")
         // #315 W2++ (live MAIN hit): empty-inbound / dropped-context claims.
         || text.contains("訊息係空")
         || text.contains("掉失")
@@ -449,6 +456,55 @@ mod tests {
         assert!(has_lost_context_signal("訊息係空嘅"));
         assert!(has_lost_context_signal("之前嘅對話 context 亦都掉失咗"));
         assert!(has_lost_context_signal("掉失咗"));
+    }
+
+    /// #324 W2+++: live MAIN FN phrases + ≥2 menu → W2 cold-intro.
+    #[test]
+    fn w2_plus_plus_plus_mou_jip_dou_plus_menu() {
+        let live = "Fox 在。上一句好似冇接到內容 — 你想我做啲咩？可以揀：\n\
+                    - 📰 出帖 / fetch 新聞\n\
+                    - 📁 Obsidian vault 整理\n\
+                    - 💻 寫 code / debug";
+        assert!(is_capability_cold_intro(live));
+        assert!(has_lost_context_signal(live));
+
+        let short = "對唔住，我冇接到你今次嘅訊息。可以揀：\n\
+                     - 📰 出帖 / fetch 新聞\n\
+                     - 📁 Obsidian vault 整理";
+        assert!(is_capability_cold_intro(short));
+        assert!(has_lost_context_signal(short));
+    }
+
+    /// #324 W2+++: live ship used parenthetical examples (not ≥2 menu) → C1 on
+    /// capability matcher; lost-context signal still matches (post–empty-progress
+    /// / honesty callers). Honesty residual Product-parked.
+    #[test]
+    fn w2_plus_plus_plus_live_fn_signal_without_menu_is_c1() {
+        let live = "Fox 在。上一句好似冇接到內容 — 你想我做啲咩？可以講一句就夠（例如：天氣、arXiv 簡報、整理 vault、出 Threads 帖）。";
+        assert!(!is_capability_cold_intro(live));
+        assert!(has_lost_context_signal(live));
+        assert!(has_lost_context_signal("冇接到"));
+        assert!(has_lost_context_signal("冇接到內容"));
+        assert!(has_lost_context_signal("上一句好似冇接到內容"));
+    }
+
+    /// #324 optional greeting widen: `Fox 在` / `在度` + ≥2 menu → W1.
+    #[test]
+    fn w1_greeting_fox_zai_and_zai_dou() {
+        let fox_zai = "Fox 在。你想我做啲咩？\n\
+                       - 📰 出帖 / fetch 新聞\n\
+                       - 📁 Obsidian vault 整理";
+        assert!(is_capability_cold_intro(fox_zai));
+
+        // `在度` without `Fox 在` / legacy `喺度` / `有咩想做` must still greet-match.
+        let zai_dou = "在度。你想我做啲咩？\n\
+                       - 📰 出帖 / fetch 新聞\n\
+                       - 📁 Obsidian vault 整理";
+        assert!(is_capability_cold_intro(zai_dou));
+        assert!(!zai_dou.contains("喺度"));
+        assert!(!zai_dou.contains("有咩想做"));
+        assert!(!zai_dou.contains("Fox 在"));
+        assert!(!fox_zai.contains("在度"));
     }
 
     #[test]
