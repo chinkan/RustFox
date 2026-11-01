@@ -1,11 +1,14 @@
-//! ADR-0020: one gate per conversation key (`session_key(bot_id, user_id)`).
+//! ADR-0020 / ADR-0052: one gate per conversation key (`session_key(bot_id, user_id)`).
 //!
-//! At most one turn runs per key. Messages that arrive while a **user** turn is
-//! active wait in a FIFO (cap [`QUEUE_CAP`]); they steer that turn at its next
-//! step (or start the next turn when it ends). Messages that arrive while a
-//! **scheduled** turn is active are deferred until the schedule finishes — they
-//! are never steers for that run (#275). Nothing is dropped silently: every
-//! message is started, accepted, deferred, or refused. In-memory only (v1).
+//! Two lanes share the key. The **interactive** lane is live chat. Messages that
+//! arrive while it is busy wait in a FIFO (cap [`QUEUE_CAP`]) and steer that
+//! turn at its next step, or start the next interactive turn when it ends.
+//! The **scheduled** lane is one scheduler job. Inbound chat while it runs
+//! starts or continues the interactive lane immediately — it is never a steer
+//! into the schedule loop and it is not held until the job finishes (#338).
+//! A scheduled job still waits to *start* until the interactive lane is idle
+//! (ADR-0020 Q8). Nothing is dropped silently: every message is started,
+//! accepted, or refused. In-memory only (v1).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -61,19 +64,19 @@ pub enum TurnKind {
 /// Result of [`TurnGate::submit`].
 #[derive(Debug)]
 pub enum Submit {
-    /// The key was idle: a user turn is now active. Run it with these inputs
-    /// (any leftover queue first, then the new message — arrival order).
+    /// Interactive lane was idle (a scheduled lane may still be running).
+    /// A user turn is now active. Run it with these inputs (any leftover
+    /// queue first, then the new message — arrival order).
     Start(Vec<QueuedInput>),
-    /// Queued behind an active **user** turn (👀 mid-run steer / queue UX).
+    /// Queued behind an active **interactive** turn (👀 mid-run steer / queue UX).
+    /// A scheduled lane running beside it does not change this (#338).
     Accepted,
-    /// Queued behind an active **scheduled** turn. Not a steer: schedule is a
-    /// separate context (#275). Held until `finish` starts a user turn.
-    Deferred,
     /// Queue full: not stored (Q4 refusal). The input is handed back.
     Full(QueuedInput),
 }
 
-/// What runs after a turn ends ([`TurnGate::finish`]).
+/// What runs after one lane ends ([`TurnGate::finish_user`] /
+/// [`TurnGate::finish_scheduled`]).
 #[derive(Debug)]
 pub enum Next {
     Idle,
@@ -93,10 +96,25 @@ pub enum Next {
 
 #[derive(Default)]
 struct KeyState {
-    active: Option<TurnKind>,
+    /// Interactive (user chat) turn is running.
+    user: bool,
+    /// Scheduled turn is running. Independent of `user` (#338).
+    scheduled: bool,
     pending: VecDeque<QueuedInput>,
     waiting_scheduled: VecDeque<tokio::sync::oneshot::Sender<()>>,
     auto_continue_used: bool,
+}
+
+/// Hand the scheduled lane to the oldest waiter. Caller must only invoke this
+/// when `scheduled` is currently false. On success the lane is marked held.
+fn release_scheduled_ticket(st: &mut KeyState) -> Option<Next> {
+    while let Some(ticket) = st.waiting_scheduled.pop_front() {
+        if ticket.send(()).is_ok() {
+            st.scheduled = true;
+            return Some(Next::Scheduled);
+        }
+    }
+    None
 }
 
 /// All state changes happen under one mutex, so nothing can slip in between
@@ -113,14 +131,14 @@ impl TurnGate {
 
     /// A user message arrives (non-command, preprocessed).
     ///
-    /// Behind a **user** turn → [`Submit::Accepted`] (steer/queue UX).
-    /// Behind a **scheduled** turn → [`Submit::Deferred`] (held for after;
-    /// never a steer for that schedule — #275 / product lock).
+    /// Interactive lane idle → [`Submit::Start`], even when a scheduled lane
+    /// is running (#338). Interactive lane busy → [`Submit::Accepted`]
+    /// (steer/queue). The scheduled lane is never the steer target.
     pub async fn submit(&self, key: &str, input: QueuedInput) -> Submit {
         let mut keys = self.keys.lock().await;
         let st = keys.entry(key.to_string()).or_default();
-        if st.active.is_none() {
-            st.active = Some(TurnKind::User);
+        if !st.user {
+            st.user = true;
             st.auto_continue_used = false;
             let mut inputs: Vec<_> = st.pending.drain(..).collect();
             inputs.push(input);
@@ -130,33 +148,29 @@ impl TurnGate {
             return Submit::Full(input);
         }
         st.pending.push_back(input);
-        // active is Some (idle path returned above).
-        if st.active == Some(TurnKind::Scheduled) {
-            Submit::Deferred
-        } else {
-            Submit::Accepted
-        }
+        Submit::Accepted
     }
 
-    /// ADR-0020 Decision 8: claim the key for a scheduled run.
+    /// ADR-0020 Decision 8: claim the scheduled lane.
     ///
-    /// Idle → mark `Scheduled` and return at once. Busy → enqueue a oneshot
-    /// ticket in `waiting_scheduled` and await until [`finish`] hands us the
-    /// gate (user turn always finishes first).
+    /// Starts immediately when both lanes are idle. Waits while the
+    /// interactive lane is busy, or while another scheduled run already holds
+    /// the lane. An in-flight scheduled run does **not** block [`submit`]
+    /// (ADR-0052 / #338).
     pub async fn begin_scheduled(&self, key: &str) {
         loop {
             let rx = {
                 let mut keys = self.keys.lock().await;
                 let st = keys.entry(key.to_string()).or_default();
-                if st.active.is_none() {
-                    st.active = Some(TurnKind::Scheduled);
+                if !st.user && !st.scheduled {
+                    st.scheduled = true;
                     return;
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 st.waiting_scheduled.push_back(tx);
                 rx
             };
-            // finish already set `active = Scheduled` before sending.
+            // The releaser set `scheduled` before sending.
             if rx.await.is_ok() {
                 return;
             }
@@ -164,35 +178,49 @@ impl TurnGate {
         }
     }
 
-    /// Steer drain: queued inputs for the active **user** turn. A scheduled
-    /// turn is never steered (Q8), so this returns nothing during one.
+    /// Steer drain for the active **interactive** lane.
+    ///
+    /// A scheduled run must not call this. Use [`Self::drain_for`] with
+    /// [`TurnKind::Scheduled`] to observe that the schedule lane never
+    /// receives queued chat (#338).
     pub async fn drain(&self, key: &str) -> Vec<QueuedInput> {
+        self.drain_for(key, TurnKind::User).await
+    }
+
+    /// Drain queued inputs for `kind`. [`TurnKind::Scheduled`] is always empty:
+    /// inbound chat is not a steer into the schedule loop.
+    pub async fn drain_for(&self, key: &str, kind: TurnKind) -> Vec<QueuedInput> {
+        if kind != TurnKind::User {
+            return Vec::new();
+        }
         let mut keys = self.keys.lock().await;
         match keys.get_mut(key) {
-            Some(st) if st.active == Some(TurnKind::User) => st.pending.drain(..).collect(),
+            Some(st) if st.user => st.pending.drain(..).collect(),
             _ => Vec::new(),
         }
     }
 
-    /// The active turn ended with `stop` (`None` = the turn errored).
-    /// Returns what runs next, already marked active (ADR-0020 Decision 5/7).
-    pub async fn finish(&self, key: &str, stop: Option<RunStop>) -> Next {
+    /// The interactive lane ended with `stop` (`None` = the turn errored).
+    ///
+    /// Does not clear a scheduled lane that is still running. A waiting
+    /// schedule is released only when the scheduled lane is free, and it
+    /// still starts before leftover pending (ADR-0020 Decision 5.1).
+    pub async fn finish_user(&self, key: &str, stop: Option<RunStop>) -> Next {
         let mut keys = self.keys.lock().await;
         let st = keys.entry(key.to_string()).or_default();
-        let ended = st.active.take();
-        let user_max_iter = ended == Some(TurnKind::User) && stop == Some(RunStop::MaxIterations);
+        let was_user = st.user;
+        st.user = false;
+        let user_max_iter = was_user && stop == Some(RunStop::MaxIterations);
         if matches!(stop, Some(RunStop::FinalResponse | RunStop::Cancelled)) {
             st.auto_continue_used = false;
         }
 
-        // 1. A waiting scheduled run goes first; leftovers wait behind it.
-        while let Some(ticket) = st.waiting_scheduled.pop_front() {
-            if ticket.send(()).is_ok() {
-                st.active = Some(TurnKind::Scheduled);
-                return Next::Scheduled;
+        if !st.scheduled {
+            if let Some(next) = release_scheduled_ticket(st) {
+                return next;
             }
         }
-        // 2. Leftover messages start one user turn (never dropped).
+
         if st.pending.is_empty() {
             return Next::Idle;
         }
@@ -202,10 +230,37 @@ impl TurnGate {
             };
         }
         st.auto_continue_used = user_max_iter;
-        st.active = Some(TurnKind::User);
+        st.user = true;
         Next::User {
             inputs: st.pending.drain(..).collect(),
             auto_continue: user_max_iter,
+        }
+    }
+
+    /// The scheduled lane ended. Does not clear an interactive lane that is
+    /// still running, and does not take its pending queue (#338).
+    ///
+    /// When the interactive lane is idle, leftover pending (messages that
+    /// waited behind a schedule that was itself waiting on chat — Decision
+    /// 5.1) start one user turn. A further waiting schedule still goes first.
+    pub async fn finish_scheduled(&self, key: &str) -> Next {
+        let mut keys = self.keys.lock().await;
+        let st = keys.entry(key.to_string()).or_default();
+        st.scheduled = false;
+        if st.user {
+            return Next::Idle;
+        }
+        if let Some(next) = release_scheduled_ticket(st) {
+            return next;
+        }
+        if st.pending.is_empty() {
+            return Next::Idle;
+        }
+        st.auto_continue_used = false;
+        st.user = true;
+        Next::User {
+            inputs: st.pending.drain(..).collect(),
+            auto_continue: false,
         }
     }
 
@@ -230,12 +285,30 @@ impl TurnGate {
             .lock()
             .await
             .get(key)
-            .is_some_and(|s| s.active.is_some())
+            .is_some_and(|s| s.user || s.scheduled)
     }
 
-    /// Which turn owns the key, if any (`None` = idle).
+    pub async fn interactive_active(&self, key: &str) -> bool {
+        self.keys.lock().await.get(key).is_some_and(|s| s.user)
+    }
+
+    pub async fn scheduled_active(&self, key: &str) -> bool {
+        self.keys.lock().await.get(key).is_some_and(|s| s.scheduled)
+    }
+
+    /// Interactive lane if it is running, otherwise the scheduled lane.
+    /// `None` when both are idle. When both run, this is [`TurnKind::User`]
+    /// because steer applies only to that lane.
     pub async fn active_kind(&self, key: &str) -> Option<TurnKind> {
-        self.keys.lock().await.get(key).and_then(|s| s.active)
+        self.keys.lock().await.get(key).and_then(|s| {
+            if s.user {
+                Some(TurnKind::User)
+            } else if s.scheduled {
+                Some(TurnKind::Scheduled)
+            } else {
+                None
+            }
+        })
     }
 
     pub async fn pending_len(&self, key: &str) -> usize {
@@ -313,7 +386,7 @@ mod tests {
         g.submit("k", input("start")).await;
         g.submit("k", input("1")).await;
         g.submit("k", input("2")).await;
-        match g.finish("k", Some(RunStop::FinalResponse)).await {
+        match g.finish_user("k", Some(RunStop::FinalResponse)).await {
             Next::User {
                 inputs,
                 auto_continue,
@@ -325,7 +398,7 @@ mod tests {
         }
         assert!(g.is_active("k").await);
         assert!(matches!(
-            g.finish("k", Some(RunStop::FinalResponse)).await,
+            g.finish_user("k", Some(RunStop::FinalResponse)).await,
             Next::Idle
         ));
         assert!(!g.is_active("k").await);
@@ -336,7 +409,7 @@ mod tests {
         let g = TurnGate::new();
         g.submit("k", input("start")).await;
         g.submit("k", input("1")).await;
-        assert!(matches!(g.finish("k", None).await, Next::User { .. }));
+        assert!(matches!(g.finish_user("k", None).await, Next::User { .. }));
     }
 
     #[tokio::test]
@@ -345,7 +418,7 @@ mod tests {
         g.submit("k", input("start")).await;
         g.submit("k", input("1")).await;
         g.submit("k", input("2")).await;
-        match g.finish("k", Some(RunStop::MaxIterations)).await {
+        match g.finish_user("k", Some(RunStop::MaxIterations)).await {
             Next::User {
                 inputs,
                 auto_continue,
@@ -359,7 +432,7 @@ mod tests {
         for t in ["3", "4", "5"] {
             g.submit("k", input(t)).await;
         }
-        match g.finish("k", Some(RunStop::MaxIterations)).await {
+        match g.finish_user("k", Some(RunStop::MaxIterations)).await {
             Next::StepLimit { n } => assert_eq!(n, 3),
             other => panic!("{other:?}"),
         }
@@ -375,7 +448,7 @@ mod tests {
         }
         g.submit("k", input("7")).await;
         assert!(matches!(
-            g.finish("k", Some(RunStop::MaxIterations)).await,
+            g.finish_user("k", Some(RunStop::MaxIterations)).await,
             Next::User {
                 auto_continue: true,
                 ..
@@ -388,11 +461,11 @@ mod tests {
         let g = TurnGate::new();
         g.submit("k", input("start")).await;
         g.submit("k", input("1")).await;
-        g.finish("k", Some(RunStop::MaxIterations)).await; // auto turn
+        g.finish_user("k", Some(RunStop::MaxIterations)).await; // auto turn
         g.submit("k", input("2")).await;
         // auto turn answers normally → its leftovers start a plain turn
         assert!(matches!(
-            g.finish("k", Some(RunStop::FinalResponse)).await,
+            g.finish_user("k", Some(RunStop::FinalResponse)).await,
             Next::User {
                 auto_continue: false,
                 ..
@@ -400,7 +473,7 @@ mod tests {
         ));
         g.submit("k", input("3")).await;
         assert!(matches!(
-            g.finish("k", Some(RunStop::MaxIterations)).await,
+            g.finish_user("k", Some(RunStop::MaxIterations)).await,
             Next::User {
                 auto_continue: true,
                 ..
@@ -450,7 +523,7 @@ mod tests {
                 tokio::task::yield_now().await;
                 g2.submit("k", input("late")).await
             });
-            let fin = g.finish("k", Some(RunStop::FinalResponse)).await;
+            let fin = g.finish_user("k", Some(RunStop::FinalResponse)).await;
             let sub = sub.await.unwrap();
             let seen = match (&fin, &sub) {
                 (Next::User { inputs, .. }, Submit::Accepted) => texts(inputs) == ["late"],
@@ -466,10 +539,9 @@ mod tests {
         let g = TurnGate::new();
         g.begin_scheduled("k").await;
         assert!(g.is_active("k").await);
-        assert!(matches!(
-            g.finish("k", Some(RunStop::FinalResponse)).await,
-            Next::Idle
-        ));
+        assert!(g.scheduled_active("k").await);
+        assert!(matches!(g.finish_scheduled("k").await, Next::Idle));
+        assert!(!g.is_active("k").await);
     }
 
     #[tokio::test]
@@ -504,7 +576,7 @@ mod tests {
         ));
         assert_eq!(g.pending_len("k").await, 1);
 
-        match g.finish("k", Some(RunStop::FinalResponse)).await {
+        match g.finish_user("k", Some(RunStop::FinalResponse)).await {
             Next::Scheduled => {}
             other => panic!("expected Scheduled handoff, got {other:?}"),
         }
@@ -513,69 +585,173 @@ mod tests {
         assert!(g.is_active("k").await, "scheduled owns the key");
         // Leftover pending waits behind the scheduled turn (Decision 5.1).
         assert_eq!(g.pending_len("k").await, 1);
-        // Scheduled is never steered.
+        // Scheduled lane has no steer drain; leftovers are not injected into it.
         assert!(g.drain("k").await.is_empty());
+        assert!(g.drain_for("k", TurnKind::Scheduled).await.is_empty());
+        assert!(!g.interactive_active("k").await);
 
-        match g.finish("k", Some(RunStop::FinalResponse)).await {
+        match g.finish_scheduled("k").await {
             Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["mid"]),
             other => panic!("{other:?}"),
         }
     }
 
+    /// #338: schedule-busy inbound starts the interactive lane. It is not a
+    /// steer into the schedule, and it is not held until the job finishes.
+    /// A later message steers only that interactive lane.
     #[tokio::test]
-    async fn user_message_during_scheduled_is_not_drained() {
+    async fn schedule_busy_inbound_starts_interactive_not_schedule_steer() {
         let g = TurnGate::new();
         g.begin_scheduled("k").await;
-        assert_eq!(g.active_kind("k").await, Some(TurnKind::Scheduled));
-        // #275: not Accepted (steer UX) — Deferred behind the schedule context.
-        assert!(matches!(g.submit("k", input("hi")).await, Submit::Deferred));
-        assert!(
-            g.drain("k").await.is_empty(),
-            "scheduled turns have no steer drain"
-        );
-        assert_eq!(g.pending_len("k").await, 1);
-        match g.finish("k", Some(RunStop::FinalResponse)).await {
-            Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["hi"]),
-            other => panic!("{other:?}"),
+        assert!(g.scheduled_active("k").await);
+        assert!(!g.interactive_active("k").await);
+
+        match g.submit("k", input("hello")).await {
+            Submit::Start(v) => assert_eq!(texts(&v), ["hello"]),
+            other => panic!("expected interactive Start, got {other:?}"),
         }
+        assert!(g.interactive_active("k").await);
+        assert!(g.scheduled_active("k").await, "schedule keeps its lane");
+        assert_eq!(g.pending_len("k").await, 0);
+        assert!(
+            g.drain_for("k", TurnKind::Scheduled).await.is_empty(),
+            "schedule lane has no steer drain"
+        );
+
+        assert!(matches!(
+            g.submit("k", input("more")).await,
+            Submit::Accepted
+        ));
+        assert!(g.drain_for("k", TurnKind::Scheduled).await.is_empty());
+        assert_eq!(texts(&g.drain("k").await), ["more"]);
+
+        // Schedule ending must not take the interactive lane down with it.
+        assert!(matches!(g.finish_scheduled("k").await, Next::Idle));
+        assert!(g.interactive_active("k").await);
+        assert!(!g.scheduled_active("k").await);
+        assert!(matches!(
+            g.finish_user("k", Some(RunStop::FinalResponse)).await,
+            Next::Idle
+        ));
+        assert!(!g.is_active("k").await);
     }
 
-    /// Product lock (#275): inbound during a scheduled run is never a steer for
-    /// that run. Accepted (👀) is reserved for mid-run behind a **user** turn.
+    /// Steer (👀 / Accepted) only when the interactive lane itself is busy.
     #[tokio::test]
-    async fn inbound_during_scheduled_is_deferred_not_accepted_steer() {
+    async fn steer_only_when_interactive_lane_is_busy() {
         let g = TurnGate::new();
-        g.begin_scheduled("k").await;
-        for t in ["a", "b", "c"] {
-            assert!(
-                matches!(g.submit("k", input(t)).await, Submit::Deferred),
-                "expected Deferred for {t}"
-            );
-        }
-        assert!(g.drain("k").await.is_empty(), "must not steer the schedule");
-        assert_eq!(g.pending_len("k").await, 3);
-        // Same messages behind a user turn would be Accepted (steer/queue UX).
-        let g2 = TurnGate::new();
+        g.begin_scheduled("sched").await;
         assert!(matches!(
-            g2.submit("u", input("start")).await,
+            g.submit("sched", input("a")).await,
             Submit::Start(_)
         ));
         assert!(matches!(
-            g2.submit("u", input("mid")).await,
+            g.submit("sched", input("b")).await,
             Submit::Accepted
         ));
-        assert_eq!(texts(&g2.drain("u").await), ["mid"]);
+        assert!(matches!(
+            g.submit("sched", input("c")).await,
+            Submit::Accepted
+        ));
+        assert!(g.drain_for("sched", TurnKind::Scheduled).await.is_empty());
+        assert_eq!(texts(&g.drain("sched").await), ["b", "c"]);
+
+        let idle = TurnGate::new();
+        assert!(matches!(
+            idle.submit("u", input("start")).await,
+            Submit::Start(_)
+        ));
+        assert!(matches!(
+            idle.submit("u", input("mid")).await,
+            Submit::Accepted
+        ));
+        assert_eq!(texts(&idle.drain("u").await), ["mid"]);
     }
 
-    /// Cap refusal still applies while Scheduled; refused item is not stored.
+    /// Schedule finish must not start a second interactive turn for messages
+    /// that already belong to the running interactive lane.
     #[tokio::test]
-    async fn deferred_behind_schedule_still_respects_queue_cap() {
+    async fn schedule_finish_does_not_steal_interactive_queue() {
         let g = TurnGate::new();
         g.begin_scheduled("k").await;
+        assert!(matches!(
+            g.submit("k", input("chat")).await,
+            Submit::Start(_)
+        ));
+        assert!(matches!(
+            g.submit("k", input("later")).await,
+            Submit::Accepted
+        ));
+        match g.finish_scheduled("k").await {
+            Next::Idle => {}
+            other => panic!("schedule finish stole the interactive queue: {other:?}"),
+        }
+        assert!(g.interactive_active("k").await);
+        assert!(!g.scheduled_active("k").await);
+        assert_eq!(texts(&g.drain("k").await), ["later"]);
+    }
+
+    /// Interactive finish while a schedule is running leaves the schedule lane up.
+    #[tokio::test]
+    async fn interactive_finish_leaves_scheduled_lane_running() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        assert!(matches!(
+            g.submit("k", input("chat")).await,
+            Submit::Start(_)
+        ));
+        assert!(matches!(
+            g.finish_user("k", Some(RunStop::FinalResponse)).await,
+            Next::Idle
+        ));
+        assert!(!g.interactive_active("k").await);
+        assert!(g.scheduled_active("k").await);
+        assert!(matches!(g.finish_scheduled("k").await, Next::Idle));
+        assert!(!g.is_active("k").await);
+    }
+
+    /// Inbound racing the schedule's finish is never dropped and never steered
+    /// into the schedule: it starts the interactive lane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_racing_schedule_finish_starts_interactive() {
+        for round in 0..100 {
+            let g = std::sync::Arc::new(TurnGate::new());
+            g.begin_scheduled("k").await;
+            let g2 = g.clone();
+            let sub = tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                g2.submit("k", input("late")).await
+            });
+            let fin = g.finish_scheduled("k").await;
+            let sub = sub.await.unwrap();
+            let ok = match (&fin, &sub) {
+                (Next::Idle, Submit::Start(v)) => texts(v) == ["late"],
+                _ => false,
+            };
+            assert!(
+                ok,
+                "round {round}: inbound lost or steered ({fin:?}, {sub:?})"
+            );
+            assert!(g.interactive_active("k").await, "round {round}");
+            assert!(!g.scheduled_active("k").await, "round {round}");
+        }
+    }
+
+    /// Cap still applies to steers behind the interactive lane, including when
+    /// a schedule is running beside it. The message that *starts* the lane
+    /// does not consume a slot.
+    #[tokio::test]
+    async fn interactive_queue_cap_holds_while_schedule_runs() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        assert!(matches!(
+            g.submit("k", input("start")).await,
+            Submit::Start(_)
+        ));
         for i in 0..QUEUE_CAP {
             assert!(matches!(
                 g.submit("k", input(&i.to_string())).await,
-                Submit::Deferred
+                Submit::Accepted
             ));
         }
         match g.submit("k", input("overflow")).await {
@@ -583,7 +759,8 @@ mod tests {
             other => panic!("expected Full, got {other:?}"),
         }
         assert_eq!(g.pending_len("k").await, QUEUE_CAP);
-        assert!(g.drain("k").await.is_empty());
+        assert!(g.drain_for("k", TurnKind::Scheduled).await.is_empty());
+        assert_eq!(g.drain("k").await.len(), QUEUE_CAP);
     }
 
     #[tokio::test]
@@ -599,13 +776,14 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-        match g2.finish("k", Some(RunStop::FinalResponse)).await {
+        match g2.finish_user("k", Some(RunStop::FinalResponse)).await {
             Next::Scheduled => {}
             other => panic!("scheduled ticket beats pending, got {other:?}"),
         }
         waiter.await.unwrap();
         assert_eq!(g2.pending_len("k").await, 1);
-        match g2.finish("k", Some(RunStop::FinalResponse)).await {
+        assert!(g2.drain_for("k", TurnKind::Scheduled).await.is_empty());
+        match g2.finish_scheduled("k").await {
             Next::User { inputs, .. } => assert_eq!(texts(&inputs), ["left"]),
             other => panic!("{other:?}"),
         }
@@ -627,7 +805,7 @@ mod tests {
         assert_eq!(g.clear("k").await, 2, "clears user queue only");
         assert_eq!(g.pending_len("k").await, 0);
 
-        match g.finish("k", Some(RunStop::Cancelled)).await {
+        match g.finish_user("k", Some(RunStop::Cancelled)).await {
             Next::Scheduled => {}
             other => panic!("waiting scheduled must survive /stop clear, got {other:?}"),
         }

@@ -3,11 +3,25 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
+tokio::task_local! {
+    /// Lane scope stamped onto tool-cancel registrations (`execute_command`).
+    ///
+    /// Set for the duration of one agent loop. Empty when unset. A schedule
+    /// timeout cancels only its scope so an interactive turn's tools keep
+    /// running (ADR-0052 / #338).
+    pub static CANCEL_SCOPE: String;
+}
+
+struct Entry {
+    scope: String,
+    tx: oneshot::Sender<()>,
+}
+
 /// A shared map of oneshot sender channels keyed by opaque ID.
 /// Any tool can register a cancel channel; the Telegram callback handler
 /// cancels by ID. Distinct from `CancellationToken` (used for /stop).
 pub struct CancelRegistry {
-    inner: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    inner: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
 impl CancelRegistry {
@@ -18,27 +32,51 @@ impl CancelRegistry {
     }
 
     pub async fn register(&self, id: String, tx: oneshot::Sender<()>) {
+        let scope = CANCEL_SCOPE.try_with(|s| s.clone()).unwrap_or_default();
         let mut map = self.inner.lock().await;
-        map.insert(id, tx);
+        map.insert(id, Entry { scope, tx });
     }
 
     pub async fn cancel(&self, id: &str) -> bool {
         let mut map = self.inner.lock().await;
-        if let Some(tx) = map.remove(id) {
-            let _ = tx.send(());
+        if let Some(entry) = map.remove(id) {
+            let _ = entry.tx.send(());
             true
         } else {
             false
         }
     }
 
+    /// Cancel every in-flight tool registered under `scope`.
+    ///
+    /// An empty scope cancels nothing, so unscoped registrations (tests, turns
+    /// that never set [`CANCEL_SCOPE`]) are not wiped by a blank key.
+    pub async fn cancel_scope(&self, scope: &str) -> usize {
+        if scope.is_empty() {
+            return 0;
+        }
+        let mut map = self.inner.lock().await;
+        let ids: Vec<String> = map
+            .iter()
+            .filter(|(_, entry)| entry.scope == scope)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let n = ids.len();
+        for id in ids {
+            if let Some(entry) = map.remove(&id) {
+                let _ = entry.tx.send(());
+            }
+        }
+        n
+    }
+
     /// Cancel every registered in-flight tool (e.g. execute_command).
-    /// Used on /stop and scheduler run-timeout so children die promptly.
+    /// Used on `/stop`, which cancels both lanes (ADR-0024).
     pub async fn cancel_all(&self) -> usize {
         let mut map = self.inner.lock().await;
         let n = map.len();
-        for (_id, tx) in map.drain() {
-            let _ = tx.send(());
+        for (_id, entry) in map.drain() {
+            let _ = entry.tx.send(());
         }
         n
     }
@@ -103,5 +141,28 @@ mod tests {
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
         assert_eq!(reg.cancel_all().await, 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_scope_does_not_cancel_other_lane() {
+        let reg = CancelRegistry::new();
+        let (tx_sched, mut rx_sched) = oneshot::channel();
+        let (tx_user, mut rx_user) = oneshot::channel();
+        CANCEL_SCOPE
+            .scope("main:1:sched".to_string(), async {
+                reg.register("sched-cmd".into(), tx_sched).await;
+            })
+            .await;
+        CANCEL_SCOPE
+            .scope("main:1".to_string(), async {
+                reg.register("user-cmd".into(), tx_user).await;
+            })
+            .await;
+        assert_eq!(reg.cancel_scope("main:1:sched").await, 1);
+        assert!(rx_sched.try_recv().is_ok());
+        assert!(rx_user.try_recv().is_err());
+        assert!(reg.cancel("user-cmd").await);
+        assert!(rx_user.try_recv().is_ok());
+        assert_eq!(reg.cancel_scope("").await, 0);
     }
 }

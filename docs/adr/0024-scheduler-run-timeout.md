@@ -6,6 +6,10 @@
 - **Depends on:** ADR-0013 (human-gate / dead-letter), ADR-0020 slice 1b (TurnGate `begin_scheduled` / `finish`)
 - **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate)
 - **Amends:** none (scheduler-side analogue of #58 CLI unbound timeout)
+- **Amended by:** [ADR-0052](./0052-interactive-lane-during-scheduled-run.md) (#338).
+  Timeout cancels the scheduled lane only (`cancel_scheduled_run` + that lane's
+  tool-cancel scope), then `TurnGate::finish_scheduled`. It does not cancel an
+  interactive turn on the same session key. `/stop` still cancels both lanes.
 
 ## Context
 
@@ -31,21 +35,25 @@ watchdog; **no** concurrent runner in this slice. `#166` timezone yields.
      default (no unbound path — same spirit as fixing #58's "0 = forever").
 
 2. **On timeout**  
-   - **Cancel** the in-flight agent (same cancel-token path as user `/stop` for
-     that `session_key`), best-effort wait for the cancel to land.  
+   - **Cancel** the in-flight scheduled agent, best-effort wait for the cancel
+     to land. ADR-0052: this is `cancel_scheduled_run` (scheduled token + that
+     lane's tool scope), not the interactive token. `/stop` still cancels both
+     lanes (Decision 3).  
    - `update_run(..., status="failed", error="run timeout")`.  
    - Enqueue **ADR-0013 human-gate once** via `enqueue_manual` (born
      `awaiting_user`, `attempts=1`) — hang may have side effects; **no** auto
      re-fire. DM / schedule reply uses the existing retry/cancel gate copy,
      stating run timeout.  
-   - **Always** call `TurnGate::finish` for the key so waiting scheduled tickets
-     and pending user messages (1b) are not stranded; release the job runner
-     loop to the next `job_rx` item.
+   - **Always** call `TurnGate::finish_scheduled` so the scheduled lane is
+     released and the job runner can take the next `job_rx` item. An interactive
+     lane that is still running keeps its queue (ADR-0052). Waiting scheduled
+     tickets and Decision 5.1 leftovers are not stranded.
 
 3. **`/stop` cancels an active scheduled turn**  
-   - When the active `TurnKind` is `Scheduled` for that session key, `/stop`
-     cancels the running scheduled agent (same cancel token) **and** clears the
-     user pending queue (existing 1a behaviour).  
+   - `/stop` cancels the interactive lane and the scheduled lane for that
+     session key (both tokens) **and** clears the user pending queue (existing
+     1a behaviour). ADR-0052: the lanes have separate tokens; `/stop` still
+     hits both.  
    - Waiting scheduled **tickets** behind the active turn remain (1b: clear does
      not drop `waiting_scheduled`). After cancel + `finish`, the next waiting
      ticket (if any) may proceed.
@@ -85,9 +93,10 @@ watchdog; **no** concurrent runner in this slice. `#166` timezone yields.
 - ⚠️ Long legitimate jobs (>15m) need a higher `run_timeout_secs` in config.  
 - ⚠️ `/stop` during a scheduled turn now cancels that schedule (product change);
   document in `/help` / schedule docs.  
-- ⚠️ Timeout still serialises behind TurnGate for that user — correct per ADR-0020
-  Q8; other users' jobs still wait on the global single consumer until timeout
-  releases the loop.
+- ⚠️ The runner is still one consumer. Other users' jobs wait until this job
+  finishes or times out. Inbound chat for the **same** user no longer waits
+  on the scheduled lane (ADR-0052); the job still waits to *start* until that
+  user's interactive lane is idle (ADR-0020 Q8).
 
 ## Tests
 
