@@ -1327,6 +1327,25 @@ async fn main() -> Result<()> {
             let _stop =
                 run_one_scheduled_job(Arc::clone(&agent), queue_for_runner.clone(), &req).await;
 
+            // #335: the run row is finalized inside `run_one_scheduled_job`
+            // (`update_run` on every terminal path). Advance `next_run_at`
+            // only after that, from this task's cron + timezone. `scheduled_for`
+            // is the armed tick so a timer that woke early does not store the
+            // fire that just happened. A re-run has no tick and uses `now`.
+            if req.is_recurring {
+                let cursor = req.scheduled_for.unwrap_or_else(chrono::Utc::now);
+                if let Err(e) = req
+                    .task_store
+                    .advance_next_run_after_fire(&req.task_id, cursor)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to advance next_run_at for {} after fire: {e:#}",
+                        req.task_id
+                    );
+                }
+            }
+
             match agent.turn_gate.finish_scheduled(&key).await {
                 rustfox::turn_gate::Next::User { inputs, .. } => {
                     handoff_pending_user_after_schedule(&agent, &req, inputs);

@@ -23,7 +23,7 @@ pub async fn register_builtin_tasks(
 
     // Heartbeat — log that the bot is alive every hour
     scheduler
-        .add_cron_job("0 0 * * * *", default_tz, "heartbeat", || {
+        .add_cron_job("0 0 * * * *", default_tz, "heartbeat", |_fired_at| {
             Box::pin(async {
                 info!("Heartbeat: bot is alive");
             })
@@ -39,7 +39,7 @@ pub async fn register_builtin_tasks(
                 &summarize_cron,
                 default_tz,
                 "nightly-summarization",
-                move || {
+                move |_fired_at| {
                     let store = memory_clone.clone();
                     let llm = llm_clone.clone();
                     let threshold = summarize_threshold;
@@ -66,7 +66,7 @@ pub async fn register_builtin_tasks(
                 &user_model_cron,
                 default_tz,
                 "weekly-user-model-update",
-                move || {
+                move |_fired_at| {
                     let store = memory_clone.clone();
                     let llm = llm_clone.clone();
                     let path = home_path.join("USER.md");

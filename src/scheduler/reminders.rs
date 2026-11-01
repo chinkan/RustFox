@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Marker used to exclude non-user rows (e.g. system/builtin identities)
 /// from owner-scoped listings. Kept as a constant so future callers can
@@ -227,6 +227,75 @@ pub fn owning_bot<'a, T>(
     bots: &'a std::collections::HashMap<String, T>,
 ) -> Option<&'a T> {
     bots.get(crate::platform::normalize_bot_id(owner_bot_id))
+}
+
+/// UTC instant written to `scheduled_tasks.next_run_at`. Naive on purpose:
+/// the column has no offset, and readers treat this form as UTC.
+pub fn format_next_run_instant(next: DateTime<Utc>) -> String {
+    next.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// Parse a stored `next_run_at`. Naive timestamps are UTC — the same clock
+/// [`format_next_run_instant`] writes — not the task's wall time. Offset
+/// forms (`Z`, `+08:00`) are accepted so a legacy value still compares.
+pub fn parse_stored_next_run_at(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Recompute `next_run_at` for every active recurring row from its own cron
+/// and timezone (#335). Paused, one-shot, and deleted rows are left alone.
+/// An unparseable cron is a drift warning only: the row stays `active`.
+/// Idempotent. Returns how many rows changed.
+pub fn backfill_active_recurring_next_run_at(
+    conn: &Connection,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let tasks = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {SCHEDULED_TASK_COLUMNS} FROM scheduled_tasks
+                 WHERE status = 'active' AND deleted_at IS NULL AND trigger_type = 'recurring'"
+            ))
+            .context("Failed to prepare next_run_at backfill")?;
+        let rows = stmt
+            .query_map([], row_to_scheduled_task)
+            .context("Failed to query recurring tasks for next_run_at backfill")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to read recurring tasks for next_run_at backfill")?
+    };
+    let mut updated = 0usize;
+    for task in tasks {
+        let Some(next) = compute_next_run_at(&task, now) else {
+            warn!(
+                "next_run_at drift: task {} ({}) cron '{}' timezone '{}' could not be recomputed; left unchanged and not treated as stopped",
+                task.id, task.description, task.trigger_value, task.timezone
+            );
+            continue;
+        };
+        let formatted = format_next_run_instant(next);
+        if task.next_run_at.as_deref() == Some(formatted.as_str()) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE scheduled_tasks SET next_run_at = ?1 WHERE id = ?2",
+            rusqlite::params![formatted, task.id],
+        )
+        .with_context(|| format!("Failed to backfill next_run_at for {}", task.id))?;
+        updated += 1;
+    }
+    if updated > 0 {
+        info!("Recomputed next_run_at for {updated} active recurring task(s)");
+    }
+    Ok(updated)
 }
 
 /// Next cron fire strictly after `after` for a 6-field expression
@@ -669,8 +738,55 @@ impl ScheduledTaskStore {
         let Some(next) = compute_next_run_at(&task, Utc::now()) else {
             return Ok(());
         };
-        self.update_next_run_at(id, &next.format("%Y-%m-%dT%H:%M:%S").to_string())
+        self.update_next_run_at(id, &format_next_run_instant(next))
             .await
+    }
+
+    /// After a recurring fire's run row is finalized (#335), persist the
+    /// following occurrence. `fired_at` is the tick the scheduler armed, not
+    /// wall-clock `now`: the timer often runs ~1s early, and `now` then names
+    /// the tick that just fired.
+    ///
+    /// Uses this task's cron and timezone. Does not move the column backwards
+    /// (an older overlapping run must not clobber a later fire). One-shots,
+    /// paused, and deleted rows are left unchanged. An unparseable cron warns
+    /// and does not change `status`.
+    pub async fn advance_next_run_after_fire(
+        &self,
+        id: &str,
+        fired_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let Some(task) = self.get_by_id(id).await? else {
+            return Ok(());
+        };
+        if task.trigger_type != "recurring" || task.deleted_at.is_some() || task.status != "active"
+        {
+            return Ok(());
+        }
+        let Some(next) = compute_next_run_at(&task, fired_at) else {
+            warn!(
+                "next_run_at drift: task {} ({}) cron '{}' timezone '{}' could not be advanced after fire; left unchanged and not treated as stopped",
+                task.id, task.description, task.trigger_value, task.timezone
+            );
+            return Ok(());
+        };
+        if let Some(existing) = task
+            .next_run_at
+            .as_deref()
+            .and_then(parse_stored_next_run_at)
+        {
+            if existing >= next {
+                return Ok(());
+            }
+        }
+        self.update_next_run_at(id, &format_next_run_instant(next))
+            .await
+    }
+
+    /// See [`backfill_active_recurring_next_run_at`].
+    pub async fn backfill_active_recurring_next_run_at(&self, now: DateTime<Utc>) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        backfill_active_recurring_next_run_at(&conn, now)
     }
 
     pub async fn insert_run(
@@ -1126,6 +1242,177 @@ mod tests {
             1,
             "daily cron advances by a day"
         );
+    }
+
+    /// #335: a cron fire's completion must persist the *following* occurrence
+    /// in the task's own timezone. The live timer often stamps the run ~1s
+    /// before the tick; using that wall clock stores the tick that just
+    /// fired and the column stays stale.
+    #[tokio::test]
+    async fn cron_fire_completion_writes_next_run_at_using_task_timezone() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let mut task = make_task("hkt-daily", "user", "recurring");
+        task.trigger_value = "0 0 9 * * *".to_string();
+        task.timezone = "Asia/Hong_Kong".to_string();
+        // Write-once arm left the 09:00 HKT tick (01:00Z) behind.
+        task.next_run_at = Some("2026-10-30T01:00:00".to_string());
+        store.create(&task).await.unwrap();
+
+        store
+            .insert_run(
+                "run-1",
+                "hkt-daily",
+                "2026-10-30T00:59:59",
+                None,
+                None,
+                "running",
+            )
+            .await
+            .unwrap();
+        store
+            .update_run("run-1", Some("ok"), None, "completed")
+            .await
+            .unwrap();
+
+        let fired_at = chrono::DateTime::parse_from_rfc3339("2026-10-30T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let early = fired_at - chrono::Duration::seconds(1);
+        let stuck = compute_next_run_at(&task, early).expect("early wall clock has a next");
+        assert_eq!(
+            stuck, fired_at,
+            "1s before the tick still names this fire, which is why fire-start refresh stays stale"
+        );
+
+        store
+            .advance_next_run_after_fire("hkt-daily", fired_at)
+            .await
+            .unwrap();
+
+        let stored = store.get_by_id("hkt-daily").await.unwrap().unwrap();
+        assert_eq!(
+            stored.next_run_at.as_deref(),
+            Some("2026-10-31T01:00:00"),
+            "next fire is 09:00 Asia/Hong_Kong the next day, not 09:00 UTC and not the tick that just fired"
+        );
+        assert_eq!(stored.status, "active");
+    }
+
+    /// Same cron text in UTC must not be rewritten onto Hong Kong wall time.
+    #[tokio::test]
+    async fn advance_next_run_after_fire_keeps_utc_task_on_utc_clock() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let mut task = make_task("utc-daily", "user", "recurring");
+        task.trigger_value = "0 0 9 * * *".to_string();
+        task.timezone = "UTC".to_string();
+        task.next_run_at = Some("2026-10-30T09:00:00".to_string());
+        store.create(&task).await.unwrap();
+
+        let fired_at = chrono::DateTime::parse_from_rfc3339("2026-10-30T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store
+            .advance_next_run_after_fire("utc-daily", fired_at)
+            .await
+            .unwrap();
+
+        let stored = store.get_by_id("utc-daily").await.unwrap().unwrap();
+        assert_eq!(stored.next_run_at.as_deref(), Some("2026-10-31T09:00:00"));
+    }
+
+    /// An older fire must not move `next_run_at` backwards after a later one.
+    #[tokio::test]
+    async fn advance_next_run_after_fire_does_not_move_backwards() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+
+        let mut task = make_task("utc-daily", "user", "recurring");
+        task.trigger_value = "0 0 4 * * *".to_string();
+        task.timezone = "UTC".to_string();
+        task.next_run_at = Some("2026-11-01T04:00:00".to_string());
+        store.create(&task).await.unwrap();
+
+        let older = chrono::DateTime::parse_from_rfc3339("2026-10-30T04:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store
+            .advance_next_run_after_fire("utc-daily", older)
+            .await
+            .unwrap();
+
+        let stored = store.get_by_id("utc-daily").await.unwrap().unwrap();
+        assert_eq!(stored.next_run_at.as_deref(), Some("2026-11-01T04:00:00"));
+    }
+
+    /// Startup pass: active recurring rows are recomputed; paused, one-shot,
+    /// and unparseable rows are left alone and stay active.
+    #[tokio::test]
+    async fn backfill_recomputes_only_active_recurring_in_each_timezone() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-31T03:07:48Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let mut utc = make_task("utc", "user", "recurring");
+        utc.trigger_value = "0 0 4 * * *".to_string();
+        utc.timezone = "UTC".to_string();
+        utc.next_run_at = Some("2026-10-30T04:00:00".to_string());
+        store.create(&utc).await.unwrap();
+
+        let mut hkt = make_task("hkt", "user", "recurring");
+        hkt.trigger_value = "0 0 9 * * *".to_string();
+        hkt.timezone = "Asia/Hong_Kong".to_string();
+        hkt.next_run_at = Some("2026-10-30T01:00:00".to_string());
+        store.create(&hkt).await.unwrap();
+
+        let mut paused = make_task("paused", "user", "recurring");
+        paused.trigger_value = "0 0 4 * * *".to_string();
+        paused.status = "paused".to_string();
+        paused.next_run_at = Some("2026-10-01T04:00:00".to_string());
+        store.create(&paused).await.unwrap();
+
+        let mut once = make_task("once", "user", "one_shot");
+        once.trigger_value = "2027-01-15T02:00:00".to_string();
+        once.timezone = "UTC".to_string();
+        once.next_run_at = Some("2027-01-15T02:00:00".to_string());
+        store.create(&once).await.unwrap();
+
+        let mut bad = make_task("bad", "user", "recurring");
+        bad.trigger_value = "not a cron".to_string();
+        bad.next_run_at = Some("2026-10-01T00:00:00".to_string());
+        store.create(&bad).await.unwrap();
+
+        let n = store
+            .backfill_active_recurring_next_run_at(now)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+
+        let utc = store.get_by_id("utc").await.unwrap().unwrap();
+        assert_eq!(utc.next_run_at.as_deref(), Some("2026-10-31T04:00:00"));
+        assert_eq!(utc.status, "active");
+
+        let hkt = store.get_by_id("hkt").await.unwrap().unwrap();
+        // 03:07Z is 11:07 HKT, so the next 09:00 HKT is the following day.
+        assert_eq!(hkt.next_run_at.as_deref(), Some("2026-11-01T01:00:00"));
+        assert_eq!(hkt.status, "active");
+
+        let paused = store.get_by_id("paused").await.unwrap().unwrap();
+        assert_eq!(paused.next_run_at.as_deref(), Some("2026-10-01T04:00:00"));
+        assert_eq!(paused.status, "paused");
+
+        let once = store.get_by_id("once").await.unwrap().unwrap();
+        assert_eq!(once.next_run_at.as_deref(), Some("2027-01-15T02:00:00"));
+        assert_eq!(once.status, "active");
+
+        let bad = store.get_by_id("bad").await.unwrap().unwrap();
+        assert_eq!(bad.next_run_at.as_deref(), Some("2026-10-01T00:00:00"));
+        assert_eq!(bad.status, "active");
     }
 
     /// A fired one-shot's next-run is its (now past) trigger — honest, and it is

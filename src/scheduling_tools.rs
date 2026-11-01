@@ -403,7 +403,11 @@ impl ToolHandler for SchedulingTools {
                 );
                 match self
                     .scheduler
-                    .add_one_shot_job(std::time::Duration::from_secs(1), &task.description, fire)
+                    .add_one_shot_job(
+                        std::time::Duration::from_secs(1),
+                        &task.description,
+                        move || fire(chrono::Utc::now()),
+                    )
                     .await
                 {
                     Ok(_) => Ok(format!("Re-run scheduled for task {task_id}")),
