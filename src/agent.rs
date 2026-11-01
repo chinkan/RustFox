@@ -86,6 +86,8 @@ pub struct ScheduledJobRequest {
     pub continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
 }
 
+pub use crate::loop_runner::GuardKind;
+
 /// Why an agent run stopped short of a clean final answer.
 ///
 /// A *typed* stop reason (rather than an error string) is what lets the job
@@ -93,6 +95,10 @@ pub struct ScheduledJobRequest {
 /// mid-task — possibly after side effects — so it is notified, never
 /// auto-replayed. `Llm` is a hard failure (see `provider::LlmHttpError` for
 /// transient classification).
+///
+/// Guard rewrites are not a stop variant. They stay `FinalResponse` so
+/// interactive chat is unchanged, and [`RunOutcome::rewritten_by_guard`]
+/// tells the scheduler the text was substituted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
     FinalResponse,
@@ -106,6 +112,8 @@ pub enum RunStop {
 /// `process_message` collapses this to the text for ordinary callers (chat,
 /// portal, subagents); the scheduled-task runner inspects `stop` so a
 /// budget-exhausted run is surfaced to the human instead of vanishing.
+/// `rewritten_by_guard` stays on this struct (not [`RunStop`]) so `RunStop`
+/// remains a `Copy` unit the turn gate can compare.
 #[derive(Debug)]
 pub struct RunOutcome {
     pub text: String,
@@ -113,6 +121,10 @@ pub struct RunOutcome {
     /// ADR-0039: present on Cancelled scheduled runs so the timeout gate can
     /// persist a transcript checkpoint. Unused for chat /stop.
     pub transcript: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
+    /// Set when a guard replaced `text`. Interactive delivery still shows
+    /// that text. The scheduler refuses `completed` when this is `Some`
+    /// unless a fresh artifact proves the work (#330).
+    pub rewritten_by_guard: Option<crate::loop_runner::GuardKind>,
 }
 
 impl RunOutcome {
@@ -1583,10 +1595,11 @@ impl Agent {
             .run(&mut container, user_id, &incoming.chat_id)
             .await;
 
-        let (text, stop, transcript) = match outcome {
+        let (text, stop, transcript, rewritten_by_guard) = match outcome {
             Ok(crate::loop_runner::LoopOutcome::FinalResponse {
                 text: final_content,
                 iterations,
+                rewritten_by_guard,
             }) => {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
@@ -1597,7 +1610,12 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
-                (final_content, RunStop::FinalResponse, None)
+                (
+                    final_content,
+                    RunStop::FinalResponse,
+                    None,
+                    rewritten_by_guard,
+                )
             }
             Ok(crate::loop_runner::LoopOutcome::Cancelled { iterations }) => {
                 info!(
@@ -1626,6 +1644,7 @@ impl Agent {
                     "Processing was cancelled.".to_string(),
                     RunStop::Cancelled,
                     transcript,
+                    None,
                 )
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
@@ -1646,6 +1665,7 @@ impl Agent {
                 (
                     "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
                     RunStop::MaxIterations,
+                    None,
                     None,
                 )
             }
@@ -1683,6 +1703,7 @@ impl Agent {
             text,
             stop,
             transcript,
+            rewritten_by_guard,
         })
     }
 
@@ -1845,10 +1866,11 @@ impl Agent {
             .run(&mut container, user_id, &incoming.chat_id)
             .await;
 
-        let (text, stop, transcript) = match outcome {
+        let (text, stop, transcript, rewritten_by_guard) = match outcome {
             Ok(crate::loop_runner::LoopOutcome::FinalResponse {
                 text: final_content,
                 iterations,
+                rewritten_by_guard,
             }) => {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
@@ -1859,7 +1881,12 @@ impl Agent {
                     error: None,
                     end_time: Self::now_iso8601_static(),
                 });
-                (final_content, RunStop::FinalResponse, None)
+                (
+                    final_content,
+                    RunStop::FinalResponse,
+                    None,
+                    rewritten_by_guard,
+                )
             }
             Ok(crate::loop_runner::LoopOutcome::Cancelled { iterations }) => {
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
@@ -1879,6 +1906,7 @@ impl Agent {
                     "Processing was cancelled.".to_string(),
                     RunStop::Cancelled,
                     transcript,
+                    None,
                 )
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
@@ -1891,6 +1919,7 @@ impl Agent {
                 (
                     "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
                     RunStop::MaxIterations,
+                    None,
                     None,
                 )
             }
@@ -1910,6 +1939,7 @@ impl Agent {
             text,
             stop,
             transcript,
+            rewritten_by_guard,
         })
     }
 
@@ -4085,6 +4115,7 @@ mod tests {
             text: "I've reached the maximum number of tool call iterations.".to_string(),
             stop: RunStop::MaxIterations,
             transcript: None,
+            rewritten_by_guard: None,
         };
         assert!(
             stalled.is_max_iterations(),
@@ -4099,6 +4130,7 @@ mod tests {
                 text: "x".to_string(),
                 stop,
                 transcript: None,
+                rewritten_by_guard: None,
             };
             assert!(
                 !o.is_max_iterations(),
@@ -4139,7 +4171,8 @@ mod tests {
                     trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
-                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC'
+                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC',
+                    expected_artifact TEXT, artifact_grace_secs INTEGER NOT NULL DEFAULT 900
                 );",
             )
             .unwrap();
@@ -4212,7 +4245,8 @@ mod tests {
                     trigger_value TEXT NOT NULL, prompt TEXT NOT NULL, description TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')), next_run_at TEXT,
-                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC'
+                    deleted_at TEXT, bot_id TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC',
+                    expected_artifact TEXT, artifact_grace_secs INTEGER NOT NULL DEFAULT 900
                 );",
             )
             .unwrap();

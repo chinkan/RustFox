@@ -151,6 +151,31 @@ pub fn migrate_schedule_timezones(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// #333: `expected_artifact` + `artifact_grace_secs`. Idempotent.
+/// Existing rows stay NULL / 900 so completion stays on the compat path
+/// until an operator sets a glob. This does not backfill live task globs.
+pub fn migrate_schedule_artifact_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(scheduled_tasks)")
+        .context("scheduled_tasks schema")?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("read scheduled_tasks columns")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect scheduled_tasks columns")?;
+    if !cols.iter().any(|c| c == "expected_artifact") {
+        conn.execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN expected_artifact TEXT;")
+            .context("add scheduled_tasks.expected_artifact")?;
+    }
+    if !cols.iter().any(|c| c == "artifact_grace_secs") {
+        conn.execute_batch(
+            "ALTER TABLE scheduled_tasks ADD COLUMN artifact_grace_secs INTEGER NOT NULL DEFAULT 900;",
+        )
+        .context("add scheduled_tasks.artifact_grace_secs")?;
+    }
+    Ok(())
+}
+
 /// #154: with no `default` bot configured, `bot_id = 'default'` rows have no
 /// owner and never send. Move them to the shim bot. Returns rows moved.
 pub fn adopt_default_schedules(
@@ -255,6 +280,47 @@ pub struct ScheduledTask {
     pub bot_id: String,
     /// IANA timezone for this task (ADR-0022). Always set on new rows.
     pub timezone: String,
+    /// Glob (relative to the RustFox home, or absolute with a literal
+    /// directory prefix). `None` keeps the pre-#333 completion path.
+    pub expected_artifact: Option<String>,
+    /// Lookback for a matching file's mtime. Default 900. The checker never
+    /// uses a window tighter than 300s (#333).
+    pub artifact_grace_secs: i64,
+}
+
+const SCHEDULED_TASK_COLUMNS: &str =
+    "id, scheduler_job_id, user_id, chat_id, platform, trigger_type, \
+     trigger_value, prompt, description, status, created_at, next_run_at, deleted_at, \
+     bot_id, timezone, expected_artifact, artifact_grace_secs";
+
+fn row_to_scheduled_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
+    let expected_raw: Option<String> = row.get(15)?;
+    let expected_artifact = expected_raw
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let grace: Option<i64> = row.get(16)?;
+    Ok(ScheduledTask {
+        id: row.get(0)?,
+        scheduler_job_id: row.get(1)?,
+        user_id: row.get(2)?,
+        chat_id: row.get(3)?,
+        platform: row.get(4)?,
+        trigger_type: row.get(5)?,
+        trigger_value: row.get(6)?,
+        prompt: row.get(7)?,
+        description: row.get(8)?,
+        status: row.get(9)?,
+        created_at: row.get(10)?,
+        next_run_at: row.get(11)?,
+        deleted_at: row.get(12)?,
+        bot_id: row.get(13)?,
+        timezone: row
+            .get::<_, Option<String>>(14)?
+            .unwrap_or_else(|| "UTC".into()),
+        expected_artifact,
+        artifact_grace_secs: grace
+            .unwrap_or(crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -307,8 +373,8 @@ impl ScheduledTaskStore {
             "INSERT INTO scheduled_tasks
              (id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
               trigger_value, prompt, description, status, created_at, next_run_at,
-              deleted_at, bot_id, timezone)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+              deleted_at, bot_id, timezone, expected_artifact, artifact_grace_secs)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             rusqlite::params![
                 task.id,
                 task.scheduler_job_id,
@@ -325,6 +391,8 @@ impl ScheduledTaskStore {
                 task.deleted_at,
                 task.bot_id,
                 task.timezone,
+                task.expected_artifact,
+                task.artifact_grace_secs,
             ],
         )
         .context("Failed to insert scheduled task")?;
@@ -439,35 +507,12 @@ impl ScheduledTaskStore {
     pub async fn get_by_id(&self, id: &str) -> Result<Option<ScheduledTask>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
-                        trigger_value, prompt, description, status, created_at, next_run_at, deleted_at,
-                        bot_id, timezone
-                 FROM scheduled_tasks WHERE id = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {SCHEDULED_TASK_COLUMNS} FROM scheduled_tasks WHERE id = ?1"
+            ))
             .context("Failed to prepare get_by_id query")?;
         let mut rows = stmt
-            .query_map(rusqlite::params![id], |row| {
-                Ok(ScheduledTask {
-                    id: row.get(0)?,
-                    scheduler_job_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    chat_id: row.get(3)?,
-                    platform: row.get(4)?,
-                    trigger_type: row.get(5)?,
-                    trigger_value: row.get(6)?,
-                    prompt: row.get(7)?,
-                    description: row.get(8)?,
-                    status: row.get(9)?,
-                    created_at: row.get(10)?,
-                    next_run_at: row.get(11)?,
-                    deleted_at: row.get(12)?,
-                    bot_id: row.get(13)?,
-                    timezone: row
-                        .get::<_, Option<String>>(14)?
-                        .unwrap_or_else(|| "UTC".into()),
-                })
-            })
+            .query_map(rusqlite::params![id], row_to_scheduled_task)
             .context("Failed to query task by id")?;
         match rows.next() {
             Some(Ok(task)) => Ok(Some(task)),
@@ -537,6 +582,34 @@ impl ScheduledTaskStore {
                 ],
             )
             .context("Failed to update task fields")?;
+        Ok(n)
+    }
+
+    /// Set or clear the completion glob and/or its grace window (#333).
+    /// `expected_artifact`: `None` leaves the column, `Some(None)` clears it,
+    /// `Some(Some(glob))` stores it. `grace_secs`: `None` leaves the column.
+    pub async fn update_artifact_expectation(
+        &self,
+        id: &str,
+        expected_artifact: Option<Option<&str>>,
+        grace_secs: Option<i64>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_tasks
+                 SET expected_artifact = CASE WHEN ?1 THEN ?2 ELSE expected_artifact END,
+                     artifact_grace_secs = CASE WHEN ?3 THEN ?4 ELSE artifact_grace_secs END
+                 WHERE id = ?5 AND deleted_at IS NULL",
+                rusqlite::params![
+                    expected_artifact.is_some(),
+                    expected_artifact.flatten(),
+                    grace_secs.is_some(),
+                    grace_secs,
+                    id
+                ],
+            )
+            .context("Failed to update artifact expectation")?;
         Ok(n)
     }
 
@@ -745,36 +818,11 @@ impl ScheduledTaskStore {
         params: impl rusqlite::Params,
     ) -> Result<Vec<ScheduledTask>> {
         let sql = format!(
-            "SELECT id, scheduler_job_id, user_id, chat_id, platform, trigger_type,
-                    trigger_value, prompt, description, status, created_at, next_run_at, deleted_at,
-                    bot_id, timezone
-             FROM scheduled_tasks {}
-             ORDER BY created_at ASC",
-            where_clause
+            "SELECT {SCHEDULED_TASK_COLUMNS} FROM scheduled_tasks {where_clause} ORDER BY created_at ASC"
         );
         let mut stmt = conn.prepare(&sql).context("Failed to prepare query")?;
         let tasks = stmt
-            .query_map(params, |row| {
-                Ok(ScheduledTask {
-                    id: row.get(0)?,
-                    scheduler_job_id: row.get(1)?,
-                    user_id: row.get(2)?,
-                    chat_id: row.get(3)?,
-                    platform: row.get(4)?,
-                    trigger_type: row.get(5)?,
-                    trigger_value: row.get(6)?,
-                    prompt: row.get(7)?,
-                    description: row.get(8)?,
-                    status: row.get(9)?,
-                    created_at: row.get(10)?,
-                    next_run_at: row.get(11)?,
-                    deleted_at: row.get(12)?,
-                    bot_id: row.get(13)?,
-                    timezone: row
-                        .get::<_, Option<String>>(14)?
-                        .unwrap_or_else(|| "UTC".into()),
-                })
-            })
+            .query_map(params, row_to_scheduled_task)
             .context("Failed to map rows")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("Failed to collect rows")?;
@@ -804,7 +852,66 @@ mod tests {
             deleted_at: None,
             bot_id: crate::platform::DEFAULT_BOT_ID.to_string(),
             timezone: "UTC".to_string(),
+            expected_artifact: None,
+            artifact_grace_secs: crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_expectation_roundtrips_and_blank_reads_as_unset() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let store = ScheduledTaskStore::new(memory.connection());
+        let mut task = make_task("art", "u", "recurring");
+        task.expected_artifact = Some("workspace/newsheet/frontpage-*.jpg".into());
+        task.artifact_grace_secs = 300;
+        store.create(&task).await.unwrap();
+        let got = store.get_by_id("art").await.unwrap().unwrap();
+        assert_eq!(
+            got.expected_artifact.as_deref(),
+            Some("workspace/newsheet/frontpage-*.jpg")
+        );
+        assert_eq!(got.artifact_grace_secs, 300);
+
+        let mut blank = make_task("blank", "u", "one_shot");
+        blank.expected_artifact = Some("   ".into());
+        store.create(&blank).await.unwrap();
+        let got = store.get_by_id("blank").await.unwrap().unwrap();
+        assert!(got.expected_artifact.is_none());
+        assert_eq!(
+            got.artifact_grace_secs,
+            crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS
+        );
+
+        let n = store
+            .update_artifact_expectation("art", Some(None), Some(1200))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let got = store.get_by_id("art").await.unwrap().unwrap();
+        assert!(got.expected_artifact.is_none());
+        assert_eq!(got.artifact_grace_secs, 1200);
+    }
+
+    #[test]
+    fn migrate_artifact_columns_adds_and_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scheduled_tasks (
+                id TEXT PRIMARY KEY,
+                timezone TEXT NOT NULL DEFAULT 'UTC'
+            );",
+        )
+        .unwrap();
+        migrate_schedule_artifact_columns(&conn).unwrap();
+        migrate_schedule_artifact_columns(&conn).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(scheduled_tasks)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "expected_artifact"));
+        assert!(cols.iter().any(|c| c == "artifact_grace_secs"));
     }
 
     /// ADR-0021: restore rewrites a 5-field row, leaves a 6-field row alone,
@@ -1668,6 +1775,8 @@ mod tests {
             deleted_at: None,
             bot_id: "default".into(),
             timezone: system_name.clone(),
+            expected_artifact: None,
+            artifact_grace_secs: crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
         };
         assert_eq!(compute_next_run_at(&task, after), Some(naive_fire));
 

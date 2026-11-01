@@ -42,6 +42,38 @@ pub struct CreateTaskBody {
     /// Optional IANA timezone; missing → effective default (ADR-0022).
     #[serde(default)]
     timezone: Option<String>,
+    /// Glob under the RustFox home. Missing or blank → compat completion path.
+    #[serde(default, rename = "expectedArtifact")]
+    expected_artifact: Option<String>,
+    /// Lookback seconds. Missing → 900. Values below 300 are rejected.
+    #[serde(default, rename = "artifactGraceSecs")]
+    artifact_grace_secs: Option<i64>,
+}
+
+/// Missing field stays `None` via `#[serde(default)]`. JSON null becomes
+/// `Some(None)` so an update can clear `expected_artifact`.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn parse_expected_artifact(raw: &str) -> Result<Option<String>, PortalError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    crate::scheduler::completion::validate_artifact_glob(trimmed)
+        .map_err(|e| PortalError::bad_request("invalid_artifact_glob", e))?;
+    Ok(Some(trimmed.to_string()))
+}
+
+fn parse_artifact_grace(secs: i64) -> Result<i64, PortalError> {
+    crate::scheduler::completion::validate_artifact_grace(secs)
+        .map_err(|e| PortalError::bad_request("invalid_artifact_grace", e))?;
+    Ok(secs)
 }
 
 fn portal_owns(state: &PortalState, task: &ScheduledTask) -> Result<(), PortalError> {
@@ -104,6 +136,15 @@ pub async fn task_create(
         }
     }
 
+    let expected_artifact = match body.expected_artifact.as_deref() {
+        Some(raw) => parse_expected_artifact(raw)?,
+        None => None,
+    };
+    let artifact_grace_secs = match body.artifact_grace_secs {
+        Some(n) => parse_artifact_grace(n)?,
+        None => crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
+    };
+
     let id = uuid::Uuid::new_v4().to_string();
     let task = ScheduledTask {
         id: id.clone(),
@@ -136,6 +177,8 @@ pub async fn task_create(
         },
         deleted_at: None,
         timezone: tz_stored.clone(),
+        expected_artifact,
+        artifact_grace_secs,
     };
 
     state
@@ -201,6 +244,19 @@ pub struct UpdateTaskBody {
     /// Optional IANA timezone (ADR-0022).
     #[serde(default)]
     timezone: Option<String>,
+    /// `null` or blank clears the glob. Absent leaves it.
+    /// `deserialize_some` is required: serde's `Option` turns JSON null into
+    /// `None` before the inner `Option` can see it, so a plain
+    /// `Option<Option<String>>` cannot tell "clear" from "field omitted".
+    #[serde(
+        default,
+        rename = "expectedArtifact",
+        deserialize_with = "deserialize_some"
+    )]
+    expected_artifact: Option<Option<String>>,
+    /// Absent leaves the stored grace. Below 300 is rejected.
+    #[serde(default, rename = "artifactGraceSecs")]
+    artifact_grace_secs: Option<i64>,
 }
 
 /// PUT /api/tasks/{id} — edit + re-arm (if live). Partial update.
@@ -239,10 +295,27 @@ pub async fn task_update(
         crate::scheduler::timezone::parse_iana(name, "timezone")
             .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?;
     }
-    if new_prompt.is_none() && new_value.is_none() && new_name.is_none() && new_tz.is_none() {
+    let artifact_write = match &body.expected_artifact {
+        None => None,
+        Some(inner) => Some(match inner.as_deref() {
+            Some(raw) => parse_expected_artifact(raw)?,
+            None => None,
+        }),
+    };
+    let grace_write = match body.artifact_grace_secs {
+        Some(n) => Some(parse_artifact_grace(n)?),
+        None => None,
+    };
+    if new_prompt.is_none()
+        && new_value.is_none()
+        && new_name.is_none()
+        && new_tz.is_none()
+        && artifact_write.is_none()
+        && grace_write.is_none()
+    {
         return Err(PortalError::bad_request(
             "empty_patch",
-            "no editable fields provided (name/prompt/triggerValue/timezone)",
+            "no editable fields provided (name/prompt/triggerValue/timezone/expectedArtifact/artifactGraceSecs)",
         ));
     }
     // fall back to current values for validation of combined state
@@ -270,18 +343,33 @@ pub async fn task_update(
     // one-shots. We now recompute it from the trigger below (via arm on the
     // active path, or an explicit refresh otherwise) so the stored value is
     // always the real next fire instant.
-    let touched = state
-        .task_store
-        .update_task_fields(
-            &task.id,
-            new_prompt.as_deref(),
-            new_value.as_deref(),
-            new_name.as_deref(),
-            None,
-            new_tz.as_deref(),
-        )
-        .await
-        .map_err(PortalError::internal)?;
+    let mut touched = 0;
+    if new_prompt.is_some() || new_value.is_some() || new_name.is_some() || new_tz.is_some() {
+        touched = state
+            .task_store
+            .update_task_fields(
+                &task.id,
+                new_prompt.as_deref(),
+                new_value.as_deref(),
+                new_name.as_deref(),
+                None,
+                new_tz.as_deref(),
+            )
+            .await
+            .map_err(PortalError::internal)?;
+    }
+    if artifact_write.is_some() || grace_write.is_some() {
+        let n = state
+            .task_store
+            .update_artifact_expectation(
+                &task.id,
+                artifact_write.as_ref().map(|inner| inner.as_deref()),
+                grace_write,
+            )
+            .await
+            .map_err(PortalError::internal)?;
+        touched += n;
+    }
     if touched == 0 {
         return Err(PortalError::not_found("task"));
     }

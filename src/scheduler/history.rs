@@ -202,6 +202,8 @@ mod tests {
             deleted_at: None,
             bot_id: "researcher".to_string(),
             timezone: "UTC".to_string(),
+            expected_artifact: None,
+            artifact_grace_secs: crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
         }
     }
 

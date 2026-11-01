@@ -252,7 +252,10 @@ mod vec0_regression {
     async fn seeded_store() -> MemoryStore {
         let memory = MemoryStore::open_in_memory().unwrap();
         for (k, v) in [
-            ("statement-reconcile", "always reconcile against printed balance"),
+            (
+                "statement-reconcile",
+                "always reconcile against printed balance",
+            ),
             ("statement-ocr", "scans come back empty from pdftotext"),
             ("unrelated", "the weather in Hong Kong"),
         ] {
@@ -332,6 +335,9 @@ mod vec0_regression {
     async fn real_query_still_returns_hits() {
         let memory = seeded_store().await;
         let hits = memory.search_knowledge("statement", 5).await.unwrap();
-        assert!(!hits.is_empty(), "FTS fallback should find `statement` rows");
+        assert!(
+            !hits.is_empty(),
+            "FTS fallback should find `statement` rows"
+        );
     }
 }

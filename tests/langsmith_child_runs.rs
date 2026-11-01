@@ -368,7 +368,9 @@ async fn tool_turn_posts_ordered_child_tool_runs_and_ends_them() {
     .expect("loop");
 
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text, iterations, ..
+        } => {
             assert_eq!(text, "done");
             assert_eq!(iterations, 2, "tool round + answer round");
         }
@@ -740,7 +742,10 @@ async fn subagent_loop_reuses_chain_and_does_not_open_a_second_parent() {
                     .run(&mut user_messages(), "u", "c")
                     .await
                     .expect("inner");
-                    let LoopOutcome::FinalResponse { text, iterations } = outcome else {
+                    let LoopOutcome::FinalResponse {
+                        text, iterations, ..
+                    } = outcome
+                    else {
                         panic!("inner outcome");
                     };
                     assert_eq!(iterations, 2);
@@ -827,7 +832,9 @@ async fn one_shot_iteration_count_is_one() {
     .await
     .unwrap();
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text, iterations, ..
+        } => {
             assert_eq!(text, "hi-back");
             assert_eq!(iterations, 1);
         }

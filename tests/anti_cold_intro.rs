@@ -9,7 +9,7 @@ use rustfox::cold_intro::{
     COLD_INTRO_REGEN_NUDGE,
 };
 use rustfox::llm::{ChatCompletion, ChatMessage, LlmClient, MessageContent, ToolDefinition};
-use rustfox::loop_runner::{AgenticLoop, LoopConfig, LoopOutcome, MessageContainer};
+use rustfox::loop_runner::{AgenticLoop, GuardKind, LoopConfig, LoopOutcome, MessageContainer};
 use rustfox::mcp::McpManager;
 use rustfox::platform::sender::{MessageFormat, PlatformMessageId, PlatformSender};
 use rustfox::provider::{Provider, ProviderConfig, ProviderRegistry};
@@ -268,7 +268,12 @@ async fn guard_rejects_cold_intro_then_accepts_regen() {
     )
     .await;
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert_eq!(text, "收到，我而家跟進 cron。");
             assert!(!is_capability_cold_intro(&text));
             assert_eq!(iterations, 2);
@@ -298,7 +303,12 @@ async fn guard_rewrites_when_regen_still_cold() {
     )
     .await;
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert_eq!(rewritten_by_guard, Some(GuardKind::ColdIntroClarify));
             assert_eq!(text, COLD_INTRO_CLARIFY_REWRITE);
             assert!(!is_capability_cold_intro(&text));
             assert_eq!(iterations, 2);
@@ -314,7 +324,12 @@ async fn first_turn_allows_cold_intro() {
     let history = vec![system("you are fox"), user("hi")];
     let (outcome, seen, _) = run_loop(history, vec![assistant(&cold)], 3).await;
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert_eq!(text, cold);
             assert!(is_capability_cold_intro(&text));
             assert_eq!(iterations, 1);
@@ -333,7 +348,12 @@ async fn normal_short_reply_not_rejected() {
     )
     .await;
     match outcome {
-        LoopOutcome::FinalResponse { text, iterations } => {
+        LoopOutcome::FinalResponse {
+            text,
+            iterations,
+            rewritten_by_guard,
+        } => {
+            assert!(rewritten_by_guard.is_none());
             assert_eq!(text, "Got it — I'll pick up the cron item.");
             assert_eq!(iterations, 1);
         }
@@ -435,7 +455,12 @@ async fn post_empty_progress_menu_reject_regen_lost_context_rewrites() {
     let (outcome, seen) =
         run_loop_cfg(history_with_prior_and_current(), steps, cfg_loop(10, 3)).await;
     match outcome {
-        LoopOutcome::FinalResponse { text, .. } => {
+        LoopOutcome::FinalResponse {
+            text,
+            rewritten_by_guard,
+            ..
+        } => {
+            assert_eq!(rewritten_by_guard, Some(GuardKind::LostContextClarify));
             assert_eq!(
                 text, COLD_INTRO_CLARIFY_REWRITE,
                 "must not ship lost-context FN after post–empty-progress path; got: {text}"
@@ -474,7 +499,12 @@ async fn post_empty_progress_lost_context_alone_rewrites() {
     ];
     let (outcome, _) = run_loop_cfg(history_with_prior_and_current(), steps, cfg_loop(8, 3)).await;
     match outcome {
-        LoopOutcome::FinalResponse { text, .. } => {
+        LoopOutcome::FinalResponse {
+            text,
+            rewritten_by_guard,
+            ..
+        } => {
+            assert_eq!(rewritten_by_guard, Some(GuardKind::LostContextClarify));
             assert_eq!(text, COLD_INTRO_CLARIFY_REWRITE);
         }
         other => panic!("expected rewrite FinalResponse, got {other:?}"),

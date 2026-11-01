@@ -311,6 +311,8 @@ user_name = "web"
             deleted_at: None,
             bot_id: "default".into(),
             timezone: "UTC".into(),
+            expected_artifact: None,
+            artifact_grace_secs: rustfox::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
         })
         .await?;
     task_store
@@ -330,6 +332,8 @@ user_name = "web"
             deleted_at: None,
             bot_id: "default".into(),
             timezone: "UTC".into(),
+            expected_artifact: None,
+            artifact_grace_secs: rustfox::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
         })
         .await?;
     task_store

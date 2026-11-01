@@ -122,6 +122,10 @@ export interface ScheduledTask {
   platform: string
   /** IANA timezone for this task (ADR-0022). */
   timezone: string
+  /** Glob under the RustFox home. Null when completion is not artifact-gated. */
+  expectedArtifact?: string | null
+  /** Seconds before run start a matching file still counts. Default 900. */
+  artifactGraceSecs?: number
 }
 
 export interface TaskRun {
@@ -332,6 +336,10 @@ export interface TaskCreateBody {
   triggerValue: string
   /** Optional IANA timezone; omit → effective default. */
   timezone?: string
+  /** Optional glob. Blank omits the artifact gate. */
+  expectedArtifact?: string | null
+  /** Minimum 300. Omit for the 900s default. */
+  artifactGraceSecs?: number
 }
 
 export interface TaskUpdateBody {
@@ -341,6 +349,9 @@ export interface TaskUpdateBody {
   /** Rejected with 400 trigger_type_immutable if changed. */
   triggerType?: 'recurring' | 'one_shot'
   timezone?: string
+  /** Null clears the glob. Omit to leave it. */
+  expectedArtifact?: string | null
+  artifactGraceSecs?: number
 }
 
 export interface TaskCreateResult {

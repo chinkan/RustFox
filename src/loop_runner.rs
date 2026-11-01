@@ -76,6 +76,30 @@ pub struct TurnTrace {
     pub project: String,
 }
 
+/// Which guard replaced the model's FinalResponse text.
+///
+/// Interactive chat still shows that text. The scheduler treats
+/// `Some` as "not a real completion" unless a fresh artifact proves the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardKind {
+    /// Capability cold-intro survived one regenerate (`COLD_INTRO_CLARIFY_REWRITE`).
+    ColdIntroClarify,
+    /// Post–empty-progress lost-context / empty-inbound claim was rewritten.
+    LostContextClarify,
+    /// Short meta-token filler aborted to the clarify sentence.
+    MetaFillerAbort,
+}
+
+impl GuardKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ColdIntroClarify => "cold_intro_clarify",
+            Self::LostContextClarify => "lost_context_clarify",
+            Self::MetaFillerAbort => "meta_filler_abort",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LoopOutcome {
     /// `iterations` is the number of LLM rounds in this loop.
@@ -83,6 +107,10 @@ pub enum LoopOutcome {
     FinalResponse {
         text: String,
         iterations: u32,
+        /// Which guard replaced the model text. Interactive chat still
+        /// delivers `text`. The scheduler treats `Some` as unverified unless
+        /// a fresh artifact matches (#330 / #333).
+        rewritten_by_guard: Option<GuardKind>,
     },
     /// Cancelled before/at iteration boundary. `iterations` is completed LLM
     /// rounds so far (0 if cancelled before the first completion).
@@ -385,6 +413,7 @@ impl<'a> AgenticLoop<'a> {
                         return Ok(LoopOutcome::FinalResponse {
                             text: EMPTY_PROGRESS_CLARIFY.to_string(),
                             iterations,
+                            rewritten_by_guard: None,
                         });
                     }
                     continue;
@@ -394,6 +423,7 @@ impl<'a> AgenticLoop<'a> {
                     return Ok(LoopOutcome::FinalResponse {
                         text: "I'm having trouble processing that. Please try again.".to_string(),
                         iterations,
+                        rewritten_by_guard: None,
                     });
                 }
                 continue;
@@ -419,6 +449,7 @@ impl<'a> AgenticLoop<'a> {
                                 loop_info.tool_name
                             ),
                             iterations,
+                            rewritten_by_guard: None,
                         });
                     }
                     // Push the assistant tool_calls, then nudge results (do not re-execute).
@@ -568,7 +599,10 @@ impl<'a> AgenticLoop<'a> {
                 // ADR-0043 / #277 structural guard (all Active peers): with prior
                 // continuity, reject a capability cold-intro once; if still cold
                 // after regenerate, rewrite to a short clarify (no menu).
+                // The regenerate `continue` is not a rewrite. Last writer wins
+                // if more than one guard fires on the same reply.
                 let mut text = text;
+                let mut rewritten_by_guard = None;
                 if has_prior_continuity && crate::cold_intro::is_capability_cold_intro(&text) {
                     if !cold_intro_regen_used {
                         cold_intro_regen_used = true;
@@ -597,6 +631,7 @@ impl<'a> AgenticLoop<'a> {
                         "Anti cold-intro: regenerate still cold-intro; rewriting to clarify"
                     );
                     text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
+                    rewritten_by_guard = Some(GuardKind::ColdIntroClarify);
                 }
 
                 // ADR-0045 / #315: after empty-progress force-clarify, lost-context /
@@ -610,6 +645,7 @@ impl<'a> AgenticLoop<'a> {
                         "Post–empty-progress: lost-context / empty-inbound FinalResponse — rewriting to clarify"
                     );
                     text = crate::cold_intro::COLD_INTRO_CLARIFY_REWRITE.to_string();
+                    rewritten_by_guard = Some(GuardKind::LostContextClarify);
                 }
 
                 // ADR-0045 / #298: short meta-token filler → abort→clarify
@@ -621,12 +657,17 @@ impl<'a> AgenticLoop<'a> {
                         "Short meta-token FinalResponse filler — forcing clarify"
                     );
                     text = EMPTY_PROGRESS_CLARIFY.to_string();
+                    rewritten_by_guard = Some(GuardKind::MetaFillerAbort);
                 }
 
                 if let Some(ref tx) = self.config.stream_token_tx {
                     let _ = LlmClient::stream_text(text.clone(), tx.clone()).await;
                 }
-                return Ok(LoopOutcome::FinalResponse { text, iterations });
+                return Ok(LoopOutcome::FinalResponse {
+                    text,
+                    iterations,
+                    rewritten_by_guard,
+                });
             }
 
             empty_count += 1;

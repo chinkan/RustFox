@@ -106,7 +106,9 @@ impl ToolHandler for SchedulingTools {
                             "trigger_value": { "type": "string", "description": format!("ISO 8601 (one_shot) or cron (recurring): 5 fields 'min hour day month weekday' or 6 fields 'sec min hour day month weekday'. Evaluated in the task's timezone (argument 'timezone', IANA name; default {default_tz}). Stored as 6 fields (seconds added as 0).") },
                             "timezone": { "type": "string", "description": format!("IANA timezone for this task, e.g. 'Asia/Hong_Kong'. Omit to use the default ({default_tz}).") },
                             "prompt": { "type": "string", "description": "The message the agent will process" },
-                            "description": { "type": "string", "description": "Human-readable label" }
+                            "description": { "type": "string", "description": "Human-readable label" },
+                            "expected_artifact": { "type": "string", "description": "Optional glob. When set, the run is completed only if a matching regular file has mtime within artifact_grace_secs of the run start (minimum 300, default 900). Relative patterns resolve under the RustFox home. `**`, `*`, and `?` are allowed; `..` is not." },
+                            "artifact_grace_secs": { "type": "integer", "description": "Seconds before the run start a matching file still counts. Default 900. Minimum 300." }
                         },
                         "required": ["trigger_type", "trigger_value", "prompt", "description"]
                     })
@@ -231,6 +233,32 @@ impl ToolHandler for SchedulingTools {
                     );
                 }
 
+                let expected_artifact = match args["expected_artifact"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    None => None,
+                    Some(glob) => {
+                        crate::scheduler::completion::validate_artifact_glob(glob)
+                            .map_err(|e| anyhow::anyhow!("Invalid expected_artifact: {e}"))?;
+                        Some(glob.to_string())
+                    }
+                };
+                let artifact_grace_secs = match args.get("artifact_grace_secs") {
+                    None | Some(serde_json::Value::Null) => {
+                        crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS
+                    }
+                    Some(v) => {
+                        let n = v
+                            .as_i64()
+                            .context("artifact_grace_secs must be an integer")?;
+                        crate::scheduler::completion::validate_artifact_grace(n)
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                        n
+                    }
+                };
+
                 let task_id = Uuid::new_v4().to_string();
                 let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                 let bot_id = ctx.bot_id.trim().to_string();
@@ -257,6 +285,8 @@ impl ToolHandler for SchedulingTools {
                     next_run_at: None,
                     deleted_at: None,
                     timezone: tz_stored.clone(),
+                    expected_artifact,
+                    artifact_grace_secs,
                 };
                 if let Err(e) = self.task_store.create(&task).await {
                     return Ok(format!("Failed to save task: {}", e));
@@ -290,9 +320,16 @@ impl ToolHandler for SchedulingTools {
                         let mut out = format!("Active scheduled tasks ({}):\n\n", tasks.len());
                         for t in &tasks {
                             out.push_str(&format!(
-                                "ID: {}\nDescription: {}\nType: {} | Trigger: {}\nPrompt: {}\n\n",
+                                "ID: {}\nDescription: {}\nType: {} | Trigger: {}\nPrompt: {}\n",
                                 t.id, t.description, t.trigger_type, t.trigger_value, t.prompt
                             ));
+                            if let Some(glob) = &t.expected_artifact {
+                                out.push_str(&format!(
+                                    "Expected artifact: {glob} (grace {}s)\n",
+                                    t.artifact_grace_secs
+                                ));
+                            }
+                            out.push('\n');
                         }
                         Ok(out)
                     }
@@ -678,6 +715,78 @@ mod tests {
         );
         let tasks = store.list_all_active().await.unwrap();
         assert_eq!(tasks[0].trigger_value, "0 0 9 * * *");
+        assert!(tasks[0].expected_artifact.is_none());
+        assert_eq!(
+            tasks[0].artifact_grace_secs,
+            crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_task_persists_artifact_glob_and_rejects_dotdot() {
+        let (tools, store, _fake, _queue) = build_tools().await;
+        let out = tools
+            .execute(
+                "schedule_task",
+                json!({
+                    "trigger_type": "recurring",
+                    "trigger_value": "0 0 8 * * *",
+                    "prompt": "write the frontpage",
+                    "description": "newspaper",
+                    "expected_artifact": "workspace/newsheet/frontpage-*.jpg",
+                    "artifact_grace_secs": 300
+                }),
+                make_ctx("80180742"),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("Task scheduled"), "{out}");
+        let task = store.list_all_active().await.unwrap().pop().unwrap();
+        assert_eq!(
+            task.expected_artifact.as_deref(),
+            Some("workspace/newsheet/frontpage-*.jpg")
+        );
+        assert_eq!(task.artifact_grace_secs, 300);
+        let listed = tools
+            .execute("list_scheduled_tasks", json!({}), make_ctx("80180742"))
+            .await
+            .unwrap();
+        assert!(
+            listed.contains("Expected artifact: workspace/newsheet/frontpage-*.jpg (grace 300s)"),
+            "{listed}"
+        );
+
+        let err = tools
+            .execute(
+                "schedule_task",
+                json!({
+                    "trigger_type": "one_shot",
+                    "trigger_value": "2099-01-01T00:00:00Z",
+                    "prompt": "nope",
+                    "description": "bad glob",
+                    "expected_artifact": "../secret/*.md"
+                }),
+                make_ctx("80180742"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+
+        let err = tools
+            .execute(
+                "schedule_task",
+                json!({
+                    "trigger_type": "one_shot",
+                    "trigger_value": "2099-01-01T00:00:00Z",
+                    "prompt": "nope",
+                    "description": "tight grace",
+                    "artifact_grace_secs": 100
+                }),
+                make_ctx("80180742"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("300"), "{err}");
     }
 
     /// Regression (issue #109, Bug 2): `schedule_task` must persist the live
