@@ -2219,6 +2219,7 @@ pub async fn handle_message(
         } else {
             None
         },
+        ..Default::default()
     };
 
     match agent.turn_gate.submit(&key, input).await {
@@ -2584,6 +2585,9 @@ async fn run_telegram_user_turn(
         text,
         attachments,
         schedule_id: None,
+        device_id: input.device_id.clone(),
+        device_room: input.device_room.clone(),
+        device_fw: input.device_fw.clone(),
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx

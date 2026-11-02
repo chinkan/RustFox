@@ -888,6 +888,9 @@ fn spawn_bare_user_turns(
                 text: first.text.clone(),
                 attachments: first.attachments.clone(),
                 schedule_id: None,
+                device_id: first.device_id.clone(),
+                device_room: first.device_room.clone(),
+                device_fw: first.device_fw.clone(),
             };
             let stop = match agent
                 .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None)
@@ -1756,9 +1759,14 @@ async fn main() -> Result<()> {
         Err(e) => warn!("  Supervisor: failed to enumerate resumable tasks: {e}"),
     }
 
-    // Opt-in embedded web portal (ADR 0004): spawned only when [portal] enabled.
+    // Portal UI and/or the device WebSocket share one Axum bind+port (ADR-0056).
+    // Device-only mode is API-only: no SPA. Tokens are still issued from
+    // Portal Settings, so a headless fox needs them created while the portal
+    // is on (or with both flags on).
     let portal_shutdown = tokio_util::sync::CancellationToken::new();
-    if config.portal.enabled {
+    let portal_on = config.portal.enabled;
+    let device_on = config.device_ws.enabled;
+    if portal_on || device_on {
         let portal_agent: std::sync::Arc<dyn rustfox::portal::AgentOps> = agent.clone();
         let portal_state = rustfox::portal::PortalState::new(
             portal_agent,
@@ -1777,10 +1785,19 @@ async fn main() -> Result<()> {
         .with_secret_store(secret_bridge.store())
         .with_pending_secrets(secret_bridge.pending())
         .with_sandbox_mode(std::sync::Arc::clone(&sandbox_mode_handle));
-        rustfox::portal::auth::ensure_startup_token(&portal_state);
-        if let Err(e) = rustfox::portal::serve(portal_state, portal_shutdown.clone()).await {
-            // Portal is best-effort: a bind failure must not kill the bot.
-            tracing::error!("Portal: failed to start — {e}");
+        if portal_on {
+            rustfox::portal::auth::ensure_startup_token(&portal_state);
+        }
+        let started = if portal_on {
+            rustfox::portal::serve(portal_state, portal_shutdown.clone()).await
+        } else {
+            rustfox::portal::serve_device_api_only(portal_state, portal_shutdown.clone()).await
+        };
+        if let Err(e) = started {
+            // Best-effort: a bind failure must not kill the bot.
+            tracing::error!(
+                "HTTP server failed to start (portal={portal_on}, device_ws={device_on}): {e}"
+            );
         }
     }
 

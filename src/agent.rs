@@ -2088,6 +2088,9 @@ impl Agent {
             text: crate::scheduler::history::with_schedule_id(&task.id, &task.prompt),
             attachments: vec![],
             schedule_id: Some(task.id.clone()),
+            device_id: None,
+            device_room: None,
+            device_fw: None,
         }
     }
 

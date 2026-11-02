@@ -260,7 +260,22 @@
     "mcpEditCustom": "編輯",
     "mcpNewCustom": "新增自訂伺服器",
     "mcpStdioNote": "Stdio 伺服器（{{names}}）喺 config.toml 管理。",
-    "mcpKeylessOk": "容許無 key（預設）。"
+    "mcpKeylessOk": "容許無 key（預設）。",
+    "devicesTitle": "裝置",
+    "devicesHint": "硬件文字通道係 /api/device/v1/ws。Token 唔係入口網站登入密碼，只顯示一次。唔建議裸露公開 WebSocket — 用 loopback、Tailscale 或可信 LAN，TLS 交俾反向代理。喺 [device_ws] 設 enabled = true（共用呢個 bind 同 port）然後重啟。",
+    "devicesOff": "裝置 socket 未開。喺度建立嘅 token 要等 [device_ws] enabled = true 同重啟先會生效。",
+    "devicesLabel": "名稱",
+    "devicesRoom": "房間",
+    "devicesCreate": "建立",
+    "devicesRotate": "輪換",
+    "devicesRevoke": "撤銷",
+    "devicesRevokeConfirm": "撤銷「{{label}}」？塊板會被拒，直到攞到新 token。",
+    "devicesEmpty": "未有裝置。",
+    "devicesTokenOnce": "而家抄低呢條 token。之後唔會再顯示。",
+    "devicesFailed": "{{message}}",
+    "devicesCreated": "裝置已建立。",
+    "devicesRotated": "Token 已輪換。舊 token 唔再有效。",
+    "devicesRevoked": "裝置已撤銷。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",

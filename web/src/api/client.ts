@@ -29,6 +29,8 @@ import type {
   McpPresetsResponse,
   McpUpsertBody,
   McpServerMutationResult,
+  DeviceList,
+  IssuedDevice,
   Skill,
   SkillEntry,
   SoulFile,
@@ -316,6 +318,22 @@ export const api = {
       `/secrets/claim/${encodeURIComponent(token)}/cancel`,
       { method: 'POST' },
     ),
+  // ── device websocket tokens (ADR-0056) ──────────────────────────────────
+  listDevices: () => get<DeviceList>('/settings/devices'),
+  createDevice: (body: { label: string; room?: string }) =>
+    request<IssuedDevice>('/settings/devices', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  rotateDevice: (id: string) =>
+    request<IssuedDevice>(`/settings/devices/${encodeURIComponent(id)}/rotate`, {
+      method: 'POST',
+    }),
+  revokeDevice: (id: string) =>
+    request<{ revoked: boolean }>(`/settings/devices/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
   listPendingSecrets: () => get<PendingSecret[]>('/secrets/pending'),
   createPendingSecret: (name: string) =>
     request<{
