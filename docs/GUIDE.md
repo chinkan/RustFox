@@ -46,6 +46,10 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 | `[langsmith]` | `api_key` | LangSmith API key for LLM observability | — |
 | `[learning]` | `skill_extraction_enabled` | Post-task skill extraction | `false` |
 | `[supervisor]` | `default_autonomy_mode` | Workflow mode: `fast`, `standard`, `rigorous` | `standard` |
+| `[voice]` | `engine` | Telegram voice-note STT. Only `sensevoice` | `sensevoice` |
+| | `language` | SenseVoice language (`yue` = Cantonese) | `yue` |
+| | `openrouter_stt` | Opt-in OpenRouter transcription. Off means no cloud audio | `false` |
+| | `tts` | Also send an OGG/Opus voice note with the text reply | `false` |
 
 > Persistent home: All paths resolve relative to `~/.rustfox` by default.
 > Override with `RUSTFOX_HOME` env or `[general].home`.
@@ -415,6 +419,17 @@ agents/
 ---
 
 ## Advanced Features
+
+### Telegram voice notes (Cantonese)
+
+Voice notes (not music/audio files) are downloaded and transcribed with local **SenseVoice** before they enter the same interactive turn as typed text:
+
+```
+[Voice note]:
+{transcript}
+```
+
+If the note has no caption and transcription cannot run, the bot says so instead of ignoring the message. Cloud transcription stays off until `[voice].openrouter_stt = true`. Spoken replies stay off until `[voice].tts = true`; when that is on, the text reply is still sent and an OGG/Opus `sendVoice` is added. Setup, model links, and the privacy default are in [telegram-cantonese-voice.md](telegram-cantonese-voice.md). This is not the device WebSocket and not the ESP32 mic path.
 
 ### File & Image Processing
 

@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod agent_prompt;
 pub mod agents_edit;
+pub mod asr;
 pub mod builtin_tools;
 pub mod cancel_registry;
 pub mod cold_intro;

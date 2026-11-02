@@ -242,6 +242,45 @@ impl MockTelegramApi {
             .collect()
     }
 
+    /// Bot API `getFile` + file bytes for a voice-note fixture (`voice/note.wav`).
+    async fn stub_voice_wav(&self) {
+        Mock::given(method("POST"))
+            .and(path_regex(r"(?i)^/bot[^/]+/getfile$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {
+                    "file_id": "voice-file-1",
+                    "file_unique_id": "voice-uniq-1",
+                    "file_size": 11,
+                    "file_path": "voice/note.wav"
+                }
+            })))
+            .expect(0..)
+            .mount(&self.server)
+            .await;
+
+        // `file_path` is one URL segment, so `voice/note.wav` is `voice%2Fnote.wav`.
+        Mock::given(method("GET"))
+            .and(path_regex(r"(?i)^/file/bot.+note\.wav$"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"RIFFfake-wav"))
+            .expect(0..)
+            .mount(&self.server)
+            .await;
+    }
+
+    async fn stub_send_voice(&self) {
+        let counter = Arc::clone(&self.next_msg_id);
+        Mock::given(method("POST"))
+            .and(path_regex(r"(?i)^/bot[^/]+/sendvoice$"))
+            .respond_with(move |_req: &Request| {
+                let mid = counter.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(ok_message_result(ALLOWED as i64, mid, ""))
+            })
+            .expect(0..)
+            .mount(&self.server)
+            .await;
+    }
+
     fn uri(&self) -> String {
         self.server.uri()
     }
@@ -384,6 +423,12 @@ struct HandleMessageHarness {
 
 impl HandleMessageHarness {
     async fn new(stub_reply: &str) -> Self {
+        Self::with_config_suffix(stub_reply, "").await
+    }
+
+    /// `suffix` is extra TOML appended after the fixture agent section
+    /// (for example a `[voice]` block).
+    async fn with_config_suffix(stub_reply: &str, suffix: &str) -> Self {
         // Env beats [general].home — keep ambient clear for deterministic paths.
         std::env::remove_var("RUSTFOX_HOME");
 
@@ -422,6 +467,8 @@ impl HandleMessageHarness {
             ALLOWED = ALLOWED,
             home = home.display()
         );
+        let mut toml = toml;
+        toml.push_str(suffix);
         std::fs::write(&cfg_path, toml).unwrap();
         let config = Config::load(&cfg_path).expect("load fixture config");
 
@@ -1094,5 +1141,214 @@ async fn max_iterations_sentence_is_saved_to_history() {
                 .as_text()
                 .contains("maximum number of tool call iterations"))),
         "the max-iterations sentence sent to the chat must be in history; saved={saved:?}"
+    );
+}
+
+fn voice_message(caption: Option<&str>) -> teloxide::types::Update {
+    let mut message = json!({
+        "message_id": 50,
+        "date": 1700000000,
+        "from": { "id": ALLOWED, "is_bot": false, "first_name": "QA" },
+        "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+        "voice": {
+            "file_id": "voice-file-1",
+            "file_unique_id": "voice-uniq-1",
+            "duration": 2,
+            "mime_type": "audio/ogg"
+        }
+    });
+    if let Some(caption) = caption {
+        message["caption"] = json!(caption);
+    }
+    UpdateInjector::parse_update_value(&json!({
+        "update_id": 9001,
+        "message": message
+    }))
+    .unwrap()
+}
+
+fn audio_message() -> teloxide::types::Update {
+    UpdateInjector::parse_update_value(&json!({
+        "update_id": 9002,
+        "message": {
+            "message_id": 51,
+            "date": 1700000000,
+            "from": { "id": ALLOWED, "is_bot": false, "first_name": "QA" },
+            "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+            "audio": {
+                "file_id": "audio-file-1",
+                "file_unique_id": "audio-uniq-1",
+                "duration": 3
+            }
+        }
+    }))
+    .unwrap()
+}
+
+fn user_texts(messages: &[rustfox::llm::ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .filter_map(|message| message.content.as_ref().map(|content| content.as_text()))
+        .collect()
+}
+
+/// ADR-0058: a caption-less voice note must not return before any reply.
+#[tokio::test]
+async fn voice_only_download_failure_is_not_silently_dropped() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    assert!(
+        !h.agent.config.voice.openrouter_stt,
+        "OpenRouter STT must default off"
+    );
+    assert!(!h.agent.config.voice.tts, "TTS must default off");
+    assert_eq!(h.agent.config.voice.engine, "sensevoice");
+
+    let upd = voice_message(None);
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("voice note must not error the dispatcher");
+
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| {
+            text.contains("voice note")
+                && text.contains("type your message")
+                && (text.contains("couldn't download")
+                    || text.contains("cloud transcription is off"))
+        }),
+        "voice-only failure must tell the user; got {texts:?}"
+    );
+    assert!(
+        texts.iter().all(|text| !text.contains(STUB_REPLY)),
+        "failed voice note must not enter the LLM; got {texts:?}"
+    );
+    let paths = h.api.received_requests_paths().await;
+    assert!(
+        paths
+            .iter()
+            .all(|path| !path.to_ascii_lowercase().contains("sendvoice")),
+        "TTS is off; paths={paths:?}"
+    );
+}
+
+/// ADR-0058: typed caption still enters the turn when the audio cannot be read.
+#[tokio::test]
+async fn voice_download_failure_still_feeds_the_caption() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    let upd = voice_message(Some("remember this"));
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("captioned voice");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains("voice note")),
+        "user hears that the audio failed; got {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains(STUB_REPLY)),
+        "caption must still reach the model; got {texts:?}"
+    );
+    let users = user_texts(&h.agent.memory.recent_messages(20).await.unwrap());
+    assert!(
+        users.iter().any(|text| text == "remember this"),
+        "caption is the turn text; got {users:?}"
+    );
+    assert!(
+        users.iter().all(|text| !text.starts_with("[Voice note]:")),
+        "no transcript was invented; got {users:?}"
+    );
+}
+
+/// General Audio stays out of this slice (ADR-0058 Voice notes only).
+#[tokio::test]
+async fn general_audio_is_not_a_voice_note() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    let upd = audio_message();
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("audio message");
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.is_empty(),
+        "audio-only messages are not voice notes; got {texts:?}"
+    );
+}
+
+#[cfg(unix)]
+fn write_exec(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Transcript prefix reaches TurnGate, and enabled TTS sends voice plus text.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_transcript_is_prefixed_and_tts_dual_sends() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+    std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+    let stt = write_exec(dir.path(), "stt.sh", "#!/bin/sh\nprintf '%s\\n' '早晨'\n");
+    let tts = write_exec(
+        dir.path(),
+        "tts.sh",
+        "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf 'OggS' > \"$out\"\n",
+    );
+    let suffix = format!(
+        "\n[voice]\nengine = \"sensevoice\"\nmodel_dir = \"{model}\"\nstt_bin = \"{stt}\"\ntts = true\ntts_bin = \"{tts}\"\nopenrouter_stt = false\nlanguage = \"yue\"\n",
+        model = model.display(),
+        stt = stt.display(),
+        tts = tts.display(),
+    );
+    let h = HandleMessageHarness::with_config_suffix(STUB_REPLY, &suffix).await;
+    assert!(!h.agent.config.voice.openrouter_stt);
+    assert!(h.agent.config.voice.tts);
+    h.api.stub_voice_wav().await;
+    h.api.stub_send_voice().await;
+
+    let upd = voice_message(None);
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("voice transcript");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let users = user_texts(&h.agent.memory.recent_messages(20).await.unwrap());
+    let texts = h.api.outbound_texts().await;
+    let paths = h.api.received_requests_paths().await;
+    assert!(
+        users.iter().any(|text| text == "[Voice note]:\n早晨"),
+        "turn text must be the voice prefix plus transcript; users={users:?} texts={texts:?} paths={paths:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains(STUB_REPLY)),
+        "text copy of the reply must be sent; got {texts:?}"
+    );
+    let voice_at = paths
+        .iter()
+        .position(|path| path.to_ascii_lowercase().contains("sendvoice"));
+    let text_at = paths.iter().position(|path| {
+        let lower = path.to_ascii_lowercase();
+        lower.contains("sendmessage") || lower.contains("sendrichmessage")
+    });
+    assert!(
+        voice_at.is_some(),
+        "enabled TTS must sendVoice; paths={paths:?}"
+    );
+    assert!(
+        text_at.unwrap() < voice_at.unwrap(),
+        "text is sent before the voice copy; paths={paths:?}"
     );
 }

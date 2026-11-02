@@ -1,0 +1,1378 @@
+//! Local speech library (ADR-0058).
+//!
+//! Primary engine: **SenseVoice** (`sherpa-onnx-offline`) with a Cantonese
+//! (`yue`) model. OpenRouter `POST /audio/transcriptions` runs only when
+//! `[voice].openrouter_stt` is true. That flag defaults to false, so a missing
+//! local model never sends audio to the network.
+//!
+//! TTS defaults off. When `[voice].tts` is true, a planned reply always keeps
+//! the text and may add an OGG/Opus copy. Synthesis failure leaves the text
+//! in place.
+//!
+//! Bot API download and voice-note ingress are not in this module. They live
+//! in the Telegram adapter. Hardware adapters must not grow a copy of that
+//! download path; they may call this library later for off-device ASR.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use base64::Engine as _;
+use serde::Deserialize;
+use tokio::process::Command;
+
+/// Inbound prefix for a transcribed voice note. The transcript follows on the
+/// next line, with no extra label.
+pub const VOICE_NOTE_PREFIX: &str = "[Voice note]:\n";
+
+/// Spoken-text cap for one OGG/Opus reply. The text copy is never truncated.
+pub const TTS_MAX_CHARS: usize = 3500;
+
+const DEFAULT_STT_BIN: &str = "sherpa-onnx-offline";
+const DEFAULT_TTS_BIN: &str = "sherpa-onnx-offline-tts";
+const DEFAULT_FFMPEG_BIN: &str = "ffmpeg";
+const SENSEVOICE_LANGS: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
+
+fn default_engine() -> String {
+    "sensevoice".to_string()
+}
+
+fn default_language() -> String {
+    "yue".to_string()
+}
+
+fn default_openrouter_stt_model() -> String {
+    "openai/whisper-large-v3".to_string()
+}
+
+fn default_voice_timeout_secs() -> u64 {
+    120
+}
+
+/// `[voice]` config. Absent section matches [`Default`]: SenseVoice, Cantonese,
+/// cloud STT off, TTS off.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct VoiceConfig {
+    /// Primary engine id. Only `sensevoice` is implemented.
+    #[serde(default = "default_engine")]
+    pub engine: String,
+    /// Directory with `model.int8.onnx` (or `model.onnx`) and `tokens.txt`.
+    /// Empty until home resolution fills `<home>/models/sensevoice`.
+    #[serde(default)]
+    pub model_dir: PathBuf,
+    /// Override for `sherpa-onnx-offline`. Empty uses that name on `PATH`.
+    #[serde(default)]
+    pub stt_bin: String,
+    /// Override for `ffmpeg` (OGG/Opus voice notes → 16 kHz mono WAV).
+    #[serde(default)]
+    pub ffmpeg_bin: String,
+    /// SenseVoice language. Default `yue` (Cantonese).
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// Opt-in OpenRouter speech-to-text. Default false.
+    #[serde(default)]
+    pub openrouter_stt: bool,
+    /// Model id used only when `openrouter_stt` is true.
+    #[serde(default = "default_openrouter_stt_model")]
+    pub openrouter_stt_model: String,
+    /// Wall clock for one local (or fallback) transcription. `0` becomes 120.
+    #[serde(default = "default_voice_timeout_secs")]
+    pub stt_timeout_secs: u64,
+    /// Opt-in spoken reply. Default false. Text is still sent when this is on.
+    #[serde(default)]
+    pub tts: bool,
+    /// Override that writes OGG/Opus. Empty uses sherpa-onnx VITS + ffmpeg.
+    /// Contract: `bin --text-file <txt> --output <file.ogg>`.
+    #[serde(default)]
+    pub tts_bin: String,
+    /// Directory with `model.onnx` and `tokens.txt` for local TTS.
+    /// Empty until home resolution fills `<home>/models/tts-cantonese`.
+    #[serde(default)]
+    pub tts_model_dir: PathBuf,
+    /// Wall clock for one synthesis. `0` becomes 120.
+    #[serde(default = "default_voice_timeout_secs")]
+    pub tts_timeout_secs: u64,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            engine: default_engine(),
+            model_dir: PathBuf::new(),
+            stt_bin: String::new(),
+            ffmpeg_bin: String::new(),
+            language: default_language(),
+            openrouter_stt: false,
+            openrouter_stt_model: default_openrouter_stt_model(),
+            stt_timeout_secs: default_voice_timeout_secs(),
+            tts: false,
+            tts_bin: String::new(),
+            tts_model_dir: PathBuf::new(),
+            tts_timeout_secs: default_voice_timeout_secs(),
+        }
+    }
+}
+
+impl VoiceConfig {
+    /// Fill blanks and canonicalize the engine id and SenseVoice language.
+    pub fn normalize(&mut self) {
+        if self.engine.trim().is_empty() {
+            self.engine = default_engine();
+        } else {
+            self.engine = self.engine.trim().to_ascii_lowercase();
+        }
+        self.language = sensevoice_language(&self.language);
+        if self.openrouter_stt_model.trim().is_empty() {
+            self.openrouter_stt_model = default_openrouter_stt_model();
+        } else {
+            self.openrouter_stt_model = self.openrouter_stt_model.trim().to_string();
+        }
+        if self.stt_timeout_secs == 0 {
+            self.stt_timeout_secs = default_voice_timeout_secs();
+        }
+        if self.tts_timeout_secs == 0 {
+            self.tts_timeout_secs = default_voice_timeout_secs();
+        }
+        self.stt_bin = self.stt_bin.trim().to_string();
+        self.tts_bin = self.tts_bin.trim().to_string();
+        self.ffmpeg_bin = self.ffmpeg_bin.trim().to_string();
+    }
+}
+
+/// Where a successful transcript came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttSource {
+    SenseVoice,
+    OpenRouter,
+}
+
+/// Non-empty transcript plus which engine produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    pub text: String,
+    pub source: SttSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrErrorKind {
+    Download,
+    Unavailable,
+    Failed,
+    Empty,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsrError {
+    pub kind: AsrErrorKind,
+    pub message: String,
+    /// True only after an opt-in cloud attempt actually ran (or refused
+    /// because the key was empty while the flag was on and local had failed).
+    pub cloud_attempted: bool,
+}
+
+impl std::fmt::Display for AsrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AsrError {}
+
+impl AsrError {
+    pub fn download(message: impl Into<String>) -> Self {
+        Self {
+            kind: AsrErrorKind::Download,
+            message: message.into(),
+            cloud_attempted: false,
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            kind: AsrErrorKind::Unavailable,
+            message: message.into(),
+            cloud_attempted: false,
+        }
+    }
+
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            kind: AsrErrorKind::Failed,
+            message: message.into(),
+            cloud_attempted: false,
+        }
+    }
+
+    pub fn empty(message: impl Into<String>) -> Self {
+        Self {
+            kind: AsrErrorKind::Empty,
+            message: message.into(),
+            cloud_attempted: false,
+        }
+    }
+
+    pub fn timed_out(message: impl Into<String>) -> Self {
+        Self {
+            kind: AsrErrorKind::TimedOut,
+            message: message.into(),
+            cloud_attempted: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsError {
+    pub message: String,
+}
+
+impl std::fmt::Display for TtsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TtsError {}
+
+impl TtsError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// User-facing line when a voice note cannot enter the turn as text.
+///
+/// Stable phrases: download failures say "couldn't download"; cloud-off
+/// failures say "cloud transcription is off"; a failed opt-in fallback names
+/// "OpenRouter". The internal `AsrError` message stays in the log.
+pub fn voice_note_clarify(err: &AsrError) -> String {
+    if err.kind == AsrErrorKind::Download {
+        return "I got your voice note but couldn't download the audio. Please try again, or type your message.".to_string();
+    }
+    if err.cloud_attempted {
+        return "I got your voice note but couldn't transcribe it. Local SenseVoice and the OpenRouter fallback both failed. Please type your message.".to_string();
+    }
+    "I got your voice note but couldn't transcribe it. Local SenseVoice isn't ready, and cloud transcription is off. Please type your message.".to_string()
+}
+
+/// Exact inbound shape: `[Voice note]:` then the transcript on the next line.
+pub fn shape_voice_note(transcript: &str) -> String {
+    format!("{VOICE_NOTE_PREFIX}{}", transcript.trim())
+}
+
+/// SenseVoice language flag. Unknown or blank values become `yue`.
+pub fn sensevoice_language(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if SENSEVOICE_LANGS.contains(&trimmed.as_str()) {
+        trimmed
+    } else {
+        default_language()
+    }
+}
+
+/// argv for `sherpa-onnx-offline` (or `stt_bin`) excluding the program name.
+pub fn sensevoice_args(tokens: &Path, model: &Path, language: &str, wav: &Path) -> Vec<String> {
+    vec![
+        format!("--tokens={}", tokens.display()),
+        format!("--sense-voice-model={}", model.display()),
+        format!("--sense-voice-language={language}"),
+        "--num-threads=2".to_string(),
+        "--debug=0".to_string(),
+        wav.display().to_string(),
+    ]
+}
+
+/// argv for ffmpeg WAV conversion, excluding the program name.
+pub fn ffmpeg_to_wav_args(input: &Path, output: &Path) -> Vec<String> {
+    vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        input.display().to_string(),
+        "-ar".to_string(),
+        "16000".to_string(),
+        "-ac".to_string(),
+        "1".to_string(),
+        "-f".to_string(),
+        "wav".to_string(),
+        output.display().to_string(),
+    ]
+}
+
+/// argv for ffmpeg OGG/Opus encoding, excluding the program name.
+pub fn ffmpeg_ogg_opus_args(wav: &Path, ogg: &Path) -> Vec<String> {
+    vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        wav.display().to_string(),
+        "-c:a".to_string(),
+        "libopus".to_string(),
+        "-b:a".to_string(),
+        "32k".to_string(),
+        "-vbr".to_string(),
+        "on".to_string(),
+        "-application".to_string(),
+        "voip".to_string(),
+        ogg.display().to_string(),
+    ]
+}
+
+/// argv for `sherpa-onnx-offline-tts`, excluding the program name.
+/// `text` is the final positional argument.
+pub fn vits_tts_args(
+    model: &Path,
+    tokens: &Path,
+    lexicon: Option<&Path>,
+    data_dir: Option<&Path>,
+    wav_out: &Path,
+    text: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        format!("--vits-model={}", model.display()),
+        format!("--vits-tokens={}", tokens.display()),
+    ];
+    if let Some(lexicon) = lexicon {
+        args.push(format!("--vits-lexicon={}", lexicon.display()));
+    }
+    if let Some(data_dir) = data_dir {
+        args.push(format!("--vits-data-dir={}", data_dir.display()));
+    }
+    args.push(format!("--output-filename={}", wav_out.display()));
+    let spoken = if text.starts_with('-') {
+        format!(" {text}")
+    } else {
+        text.to_string()
+    };
+    args.push(spoken);
+    args
+}
+
+/// Last transcript line from sherpa-onnx-offline, with SenseVoice tags removed.
+pub fn parse_sensevoice_output(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let raw = if let Some(pos) = lines.iter().rposition(|line| *line == "----") {
+        if pos == 0 {
+            ""
+        } else {
+            lines[pos - 1]
+        }
+    } else {
+        lines.last().copied().unwrap_or("")
+    };
+    strip_sensevoice_tags(raw)
+}
+
+/// Drop `<|yue|>` / `<|Speech|>` style tags SenseVoice prints around the words.
+pub fn strip_sensevoice_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<|") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("|>") {
+            rest = &rest[start + end + 2..];
+        } else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// Text actually passed to a synthesizer. The chat copy stays full length.
+pub fn tts_spoken_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= TTS_MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(TTS_MAX_CHARS).collect()
+    }
+}
+
+fn audio_format(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wav" => "wav",
+        "mp3" => "mp3",
+        "flac" => "flac",
+        "m4a" => "m4a",
+        "webm" => "webm",
+        "aac" => "aac",
+        "ogg" | "opus" | "oga" => "ogg",
+        _ => "ogg",
+    }
+}
+
+/// ISO-639-1 hint for OpenRouter. Cantonese `yue` is omitted so Whisper is
+/// not forced into Mandarin (`zh`).
+pub fn openrouter_language_hint(sensevoice_lang: &str) -> Option<String> {
+    match sensevoice_language(sensevoice_lang).as_str() {
+        "en" => Some("en".to_string()),
+        "ja" => Some("ja".to_string()),
+        "ko" => Some("ko".to_string()),
+        "zh" => Some("zh".to_string()),
+        _ => None,
+    }
+}
+
+fn bin_path(override_bin: &str, default_name: &str) -> PathBuf {
+    if override_bin.trim().is_empty() {
+        PathBuf::from(default_name)
+    } else {
+        PathBuf::from(override_bin.trim())
+    }
+}
+
+fn resolve_sensevoice_model(model_dir: &Path) -> Result<(PathBuf, PathBuf), AsrError> {
+    let tokens = model_dir.join("tokens.txt");
+    let model = ["model.int8.onnx", "model.onnx"]
+        .into_iter()
+        .map(|name| model_dir.join(name))
+        .find(|path| path.is_file());
+    match model {
+        Some(model) if tokens.is_file() => Ok((model, tokens)),
+        _ => Err(AsrError::unavailable(format!(
+            "SenseVoice model not found in {} (need model.int8.onnx or model.onnx, plus tokens.txt). \
+             Download sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09 and point voice.model_dir at that folder.",
+            model_dir.display()
+        ))),
+    }
+}
+
+struct Captured {
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_capturing(
+    bin: &Path,
+    args: &[String],
+    timeout_secs: u64,
+) -> Result<Captured, AsrError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = cmd.spawn().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            AsrError::unavailable(format!("could not start {}: {err}", bin.display()))
+        } else {
+            AsrError::failed(format!("could not start {}: {err}", bin.display()))
+        }
+    })?;
+    let secs = if timeout_secs == 0 {
+        default_voice_timeout_secs()
+    } else {
+        timeout_secs
+    };
+    let output =
+        match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(err)) => {
+                return Err(AsrError::failed(format!(
+                    "{} failed while waiting: {err}",
+                    bin.display()
+                )))
+            }
+            Err(_) => {
+                return Err(AsrError::timed_out(format!(
+                    "{} timed out after {secs}s",
+                    bin.display()
+                )))
+            }
+        };
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let detail = tail(&format!("{stderr}\n{stdout}"), 500);
+        return Err(AsrError::failed(format!(
+            "{} exited {}: {detail}",
+            bin.display(),
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        )));
+    }
+    Ok(Captured { stdout, stderr })
+}
+
+fn tail(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn is_wav(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+}
+
+/// Convert non-WAV audio to 16 kHz mono WAV. WAV inputs are returned as-is.
+async fn prepare_wav(cfg: &VoiceConfig, input: &Path) -> Result<(PathBuf, bool), AsrError> {
+    if is_wav(input) {
+        return Ok((input.to_path_buf(), false));
+    }
+    let output = input.with_file_name(format!("rustfox-16k-{}.wav", uuid::Uuid::new_v4()));
+    let bin = bin_path(&cfg.ffmpeg_bin, DEFAULT_FFMPEG_BIN);
+    let args = ffmpeg_to_wav_args(input, &output);
+    run_capturing(&bin, &args, cfg.stt_timeout_secs)
+        .await
+        .map_err(|err| {
+            if err.kind == AsrErrorKind::Unavailable {
+                AsrError::unavailable(format!(
+                    "ffmpeg is required to convert Telegram voice notes to WAV ({})",
+                    err.message
+                ))
+            } else {
+                err
+            }
+        })?;
+    if !output.is_file() {
+        return Err(AsrError::failed(
+            "ffmpeg exited 0 but did not write a WAV file",
+        ));
+    }
+    Ok((output, true))
+}
+
+/// Local engine, then optional cloud. `remote == None` never calls cloud.
+#[async_trait]
+pub trait SpeechToText: Send + Sync {
+    async fn transcribe(&self, path: &Path) -> Result<String, AsrError>;
+}
+
+/// Local SenseVoice CLI. Shareable with a later off-device ASR caller.
+pub struct SenseVoiceCli {
+    pub cfg: VoiceConfig,
+}
+
+#[async_trait]
+impl SpeechToText for SenseVoiceCli {
+    async fn transcribe(&self, path: &Path) -> Result<String, AsrError> {
+        if !self.cfg.engine.eq_ignore_ascii_case("sensevoice") {
+            return Err(AsrError::unavailable(format!(
+                "voice.engine is '{}'; the primary engine is SenseVoice",
+                self.cfg.engine
+            )));
+        }
+        if !path.is_file() {
+            return Err(AsrError::failed(format!(
+                "audio file missing: {}",
+                path.display()
+            )));
+        }
+        let (model, tokens) = resolve_sensevoice_model(&self.cfg.model_dir)?;
+        let (wav, cleanup) = prepare_wav(&self.cfg, path).await?;
+        let bin = bin_path(&self.cfg.stt_bin, DEFAULT_STT_BIN);
+        let language = sensevoice_language(&self.cfg.language);
+        let args = sensevoice_args(&tokens, &model, &language, &wav);
+        let captured = run_capturing(&bin, &args, self.cfg.stt_timeout_secs).await;
+        if cleanup {
+            let _ = tokio::fs::remove_file(&wav).await;
+        }
+        let captured = captured?;
+        let combined = format!("{}\n{}", captured.stdout, captured.stderr);
+        let text = parse_sensevoice_output(&combined);
+        if text.is_empty() {
+            Err(AsrError::empty("SenseVoice produced no transcript"))
+        } else {
+            Ok(text)
+        }
+    }
+}
+
+/// Opt-in OpenRouter speech-to-text. Constructed only when the flag is on.
+pub struct OpenRouterStt {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub language: Option<String>,
+    pub timeout: Duration,
+}
+
+#[async_trait]
+impl SpeechToText for OpenRouterStt {
+    async fn transcribe(&self, path: &Path) -> Result<String, AsrError> {
+        if self.api_key.trim().is_empty() {
+            return Err(AsrError {
+                kind: AsrErrorKind::Unavailable,
+                message: "OpenRouter STT is enabled but the API key is empty".to_string(),
+                cloud_attempted: true,
+            });
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|err| AsrError::failed(format!("read audio for OpenRouter STT: {err}")))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let format = audio_format(path);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input_audio": {
+                "data": encoded,
+                "format": format,
+            }
+        });
+        if let Some(language) = &self.language {
+            body["language"] = serde_json::Value::String(language.clone());
+        }
+        let url = format!(
+            "{}/audio/transcriptions",
+            self.base_url.trim_end_matches('/')
+        );
+        let client = reqwest::Client::builder()
+            .timeout(self.timeout)
+            .build()
+            .map_err(|err| AsrError::failed(format!("OpenRouter STT client: {err}")))?;
+        let response = client
+            .post(url)
+            .bearer_auth(self.api_key.trim())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AsrError::failed(format!("OpenRouter STT request failed: {err}")))?;
+        let status = response.status();
+        let payload = response
+            .text()
+            .await
+            .map_err(|err| AsrError::failed(format!("OpenRouter STT body: {err}")))?;
+        if !status.is_success() {
+            return Err(AsrError::failed(format!(
+                "OpenRouter STT HTTP {status}: {}",
+                tail(&payload, 300)
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|err| AsrError::failed(format!("OpenRouter STT JSON: {err}")))?;
+        let text = parsed
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            Err(AsrError::empty(
+                "OpenRouter STT returned an empty transcript",
+            ))
+        } else {
+            Ok(text)
+        }
+    }
+}
+
+pub async fn transcribe_local_first(
+    local: &dyn SpeechToText,
+    remote: Option<&dyn SpeechToText>,
+    path: &Path,
+) -> Result<Transcript, AsrError> {
+    match local.transcribe(path).await {
+        Ok(text) => {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                return Ok(Transcript {
+                    text,
+                    source: SttSource::SenseVoice,
+                });
+            }
+            fallback_or(
+                AsrError::empty("local SenseVoice returned an empty transcript"),
+                remote,
+                path,
+            )
+            .await
+        }
+        Err(err) => fallback_or(err, remote, path).await,
+    }
+}
+
+async fn fallback_or(
+    local_err: AsrError,
+    remote: Option<&dyn SpeechToText>,
+    path: &Path,
+) -> Result<Transcript, AsrError> {
+    let Some(remote) = remote else {
+        return Err(local_err);
+    };
+    tracing::warn!(
+        error = %local_err,
+        "local SenseVoice failed; trying opt-in OpenRouter STT"
+    );
+    match remote.transcribe(path).await {
+        Ok(text) => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                Err(AsrError {
+                    kind: AsrErrorKind::Empty,
+                    message: format!(
+                        "local SenseVoice failed ({local_err}); OpenRouter STT returned an empty transcript"
+                    ),
+                    cloud_attempted: true,
+                })
+            } else {
+                Ok(Transcript {
+                    text,
+                    source: SttSource::OpenRouter,
+                })
+            }
+        }
+        Err(err) => Err(AsrError {
+            kind: err.kind,
+            message: format!(
+                "local SenseVoice failed ({local_err}); OpenRouter STT failed ({err})"
+            ),
+            cloud_attempted: true,
+        }),
+    }
+}
+
+/// Transcribe one audio file. Cloud runs only when `voice.openrouter_stt` is set.
+pub async fn transcribe_file(
+    voice: &VoiceConfig,
+    openrouter_base: &str,
+    openrouter_key: &str,
+    path: &Path,
+) -> Result<Transcript, AsrError> {
+    if !voice.engine.eq_ignore_ascii_case("sensevoice") {
+        return Err(AsrError::unavailable(format!(
+            "voice.engine is '{}'; the primary engine is SenseVoice",
+            voice.engine
+        )));
+    }
+    if !path.is_file() {
+        return Err(AsrError::failed(format!(
+            "audio file missing: {}",
+            path.display()
+        )));
+    }
+    let local = SenseVoiceCli { cfg: voice.clone() };
+    let remote = if voice.openrouter_stt {
+        Some(OpenRouterStt {
+            base_url: openrouter_base.to_string(),
+            api_key: openrouter_key.to_string(),
+            model: if voice.openrouter_stt_model.trim().is_empty() {
+                default_openrouter_stt_model()
+            } else {
+                voice.openrouter_stt_model.trim().to_string()
+            },
+            language: openrouter_language_hint(&voice.language),
+            timeout: Duration::from_secs(voice.stt_timeout_secs.max(1)),
+        })
+    } else {
+        None
+    };
+    transcribe_local_first(&local, remote.as_ref().map(|remote| remote as _), path).await
+}
+
+/// Text plus optional OGG/Opus. `text` is always the original reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyDelivery {
+    pub text: String,
+    pub voice_ogg: Option<Vec<u8>>,
+}
+
+#[async_trait]
+pub trait TextToSpeech: Send + Sync {
+    async fn synthesize_ogg_opus(&self, text: &str) -> Result<Vec<u8>, TtsError>;
+}
+
+/// When `tts_enabled` is false the synthesizer is not called.
+/// When it is true and synthesis fails, `voice_ogg` is `None` and `text` remains.
+pub async fn plan_reply_delivery(
+    tts_enabled: bool,
+    text: &str,
+    synth: Option<&dyn TextToSpeech>,
+) -> ReplyDelivery {
+    if !tts_enabled {
+        return ReplyDelivery {
+            text: text.to_string(),
+            voice_ogg: None,
+        };
+    }
+    let Some(synth) = synth else {
+        return ReplyDelivery {
+            text: text.to_string(),
+            voice_ogg: None,
+        };
+    };
+    if text.trim().is_empty() {
+        return ReplyDelivery {
+            text: text.to_string(),
+            voice_ogg: None,
+        };
+    }
+    match synth.synthesize_ogg_opus(text).await {
+        Ok(ogg) if !ogg.is_empty() => ReplyDelivery {
+            text: text.to_string(),
+            voice_ogg: Some(ogg),
+        },
+        Ok(_) => {
+            tracing::warn!("TTS returned empty audio; text reply is kept");
+            ReplyDelivery {
+                text: text.to_string(),
+                voice_ogg: None,
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "TTS synthesis failed; text reply is kept");
+            ReplyDelivery {
+                text: text.to_string(),
+                voice_ogg: None,
+            }
+        }
+    }
+}
+
+/// Local Cantonese TTS. `tts_bin` overrides sherpa-onnx + ffmpeg.
+pub struct LocalTts {
+    pub cfg: VoiceConfig,
+}
+
+#[async_trait]
+impl TextToSpeech for LocalTts {
+    async fn synthesize_ogg_opus(&self, text: &str) -> Result<Vec<u8>, TtsError> {
+        let spoken = tts_spoken_text(text);
+        if spoken.is_empty() {
+            return Err(TtsError::new("nothing to speak"));
+        }
+        let work = std::env::temp_dir().join(format!("rustfox-tts-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&work)
+            .await
+            .map_err(|err| TtsError::new(format!("tts work dir: {err}")))?;
+        let result = synthesize_in(&self.cfg, &work, &spoken).await;
+        let _ = tokio::fs::remove_dir_all(&work).await;
+        result
+    }
+}
+
+async fn synthesize_in(cfg: &VoiceConfig, work: &Path, spoken: &str) -> Result<Vec<u8>, TtsError> {
+    let ogg_path = work.join("reply.ogg");
+    if !cfg.tts_bin.trim().is_empty() {
+        let text_path = work.join("reply.txt");
+        tokio::fs::write(&text_path, spoken)
+            .await
+            .map_err(|err| TtsError::new(format!("tts text file: {err}")))?;
+        let mut cmd = Command::new(cfg.tts_bin.trim());
+        cmd.arg("--text-file")
+            .arg(&text_path)
+            .arg("--output")
+            .arg(&ogg_path)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd
+            .spawn()
+            .map_err(|err| TtsError::new(format!("could not start {}: {err}", cfg.tts_bin)))?;
+        let secs = cfg.tts_timeout_secs.max(1);
+        let output = tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output())
+            .await
+            .map_err(|_| TtsError::new(format!("TTS timed out after {secs}s")))?
+            .map_err(|err| TtsError::new(format!("TTS wait: {err}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(TtsError::new(format!(
+                "TTS override exited {}: {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                tail(&stderr, 400)
+            )));
+        }
+        return read_ogg(&ogg_path).await;
+    }
+
+    let model = cfg.tts_model_dir.join("model.onnx");
+    let tokens = cfg.tts_model_dir.join("tokens.txt");
+    if !model.is_file() || !tokens.is_file() {
+        return Err(TtsError::new(format!(
+            "Cantonese TTS model not found in {} (need model.onnx and tokens.txt)",
+            cfg.tts_model_dir.display()
+        )));
+    }
+    let lexicon = cfg.tts_model_dir.join("lexicon.txt");
+    let data_dir = cfg.tts_model_dir.join("espeak-ng-data");
+    let wav_path = work.join("reply.wav");
+    let args = vits_tts_args(
+        &model,
+        &tokens,
+        lexicon.is_file().then_some(lexicon.as_path()),
+        data_dir.is_dir().then_some(data_dir.as_path()),
+        &wav_path,
+        spoken,
+    );
+    let bin = bin_path("", DEFAULT_TTS_BIN);
+    run_capturing(&bin, &args, cfg.tts_timeout_secs)
+        .await
+        .map_err(|err| TtsError::new(err.message))?;
+    let ffmpeg = bin_path(&cfg.ffmpeg_bin, DEFAULT_FFMPEG_BIN);
+    let ogg_args = ffmpeg_ogg_opus_args(&wav_path, &ogg_path);
+    run_capturing(&ffmpeg, &ogg_args, cfg.tts_timeout_secs)
+        .await
+        .map_err(|err| TtsError::new(format!("ogg encode: {}", err.message)))?;
+    read_ogg(&ogg_path).await
+}
+
+async fn read_ogg(path: &Path) -> Result<Vec<u8>, TtsError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|err| TtsError::new(format!("read ogg: {err}")))?;
+    if bytes.is_empty() {
+        return Err(TtsError::new("TTS wrote an empty ogg file"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn asr_library_has_no_bot_api_or_device_socket() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("mod tests").next().unwrap();
+        assert!(
+            !prod.contains("teloxide"),
+            "ASR must not link the Telegram client"
+        );
+        assert!(
+            !prod.contains("device_ws"),
+            "ASR must not touch the device socket"
+        );
+        assert!(!prod.contains("get_file"));
+        assert!(!prod.contains("send_voice"));
+        assert!(!prod.contains("sendVoice"));
+    }
+
+    #[test]
+    fn shape_voice_note_is_exact_prefix_plus_transcript() {
+        assert_eq!(shape_voice_note("  早晨  "), "[Voice note]:\n早晨");
+        assert_eq!(
+            shape_voice_note("hello world"),
+            "[Voice note]:\nhello world"
+        );
+    }
+
+    #[test]
+    fn voice_defaults_keep_cloud_stt_and_tts_off() {
+        let cfg = VoiceConfig::default();
+        assert_eq!(cfg.engine, "sensevoice");
+        assert_eq!(cfg.language, "yue");
+        assert!(!cfg.openrouter_stt);
+        assert!(!cfg.tts);
+        assert_eq!(cfg.openrouter_stt_model, "openai/whisper-large-v3");
+
+        let parsed: VoiceConfig = toml::from_str("").unwrap();
+        assert!(!parsed.openrouter_stt);
+        assert!(!parsed.tts);
+        assert_eq!(parsed.engine, "sensevoice");
+        assert_eq!(parsed.language, "yue");
+
+        let partial: VoiceConfig = toml::from_str("tts = true\n").unwrap();
+        assert!(partial.tts);
+        assert!(!partial.openrouter_stt);
+    }
+
+    #[test]
+    fn sensevoice_args_pin_cantonese_and_model() {
+        let args = sensevoice_args(
+            Path::new("/models/tokens.txt"),
+            Path::new("/models/model.int8.onnx"),
+            "yue",
+            Path::new("/tmp/note.wav"),
+        );
+        assert!(args.iter().any(|arg| arg == "--sense-voice-language=yue"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--sense-voice-model=/models/model.int8.onnx"));
+        assert_eq!(args.last().map(String::as_str), Some("/tmp/note.wav"));
+    }
+
+    #[test]
+    fn ffmpeg_ogg_args_use_libopus() {
+        let args = ffmpeg_ogg_opus_args(Path::new("in.wav"), Path::new("out.ogg"));
+        assert!(args.iter().any(|arg| arg == "libopus"));
+        assert_eq!(args.last().map(String::as_str), Some("out.ogg"));
+    }
+
+    #[test]
+    fn parse_sensevoice_output_strips_tags_and_separator() {
+        let raw = "\
+/tmp/note.wav
+<|yue|><|NEUTRAL|><|Speech|>早晨呀
+----
+";
+        assert_eq!(parse_sensevoice_output(raw), "早晨呀");
+        assert_eq!(parse_sensevoice_output("  兩隻小企鵝  \n"), "兩隻小企鵝");
+    }
+
+    #[test]
+    fn yue_is_not_sent_to_openrouter_as_mandarin() {
+        assert_eq!(openrouter_language_hint("yue"), None);
+        assert_eq!(openrouter_language_hint("YUE"), None);
+        assert_eq!(openrouter_language_hint("en").as_deref(), Some("en"));
+        assert_eq!(sensevoice_language("nope"), "yue");
+    }
+
+    #[test]
+    fn clarify_says_cloud_is_off_unless_fallback_ran() {
+        let local = AsrError::unavailable("model missing");
+        let text = voice_note_clarify(&local);
+        assert!(text.contains("voice note"));
+        assert!(text.contains("cloud transcription is off"));
+        assert!(text.contains("type your message"));
+        assert!(!text.contains("model missing"));
+
+        let mut cloud = AsrError::failed("http 500");
+        cloud.cloud_attempted = true;
+        let text = voice_note_clarify(&cloud);
+        assert!(text.contains("OpenRouter"));
+        assert!(!text.contains("cloud transcription is off"));
+
+        let download = voice_note_clarify(&AsrError::download("404"));
+        assert!(download.contains("couldn't download"));
+        assert!(!download.contains("404"));
+    }
+
+    #[test]
+    fn tts_spoken_text_caps_audio_only() {
+        let long = "字".repeat(TTS_MAX_CHARS + 10);
+        assert_eq!(tts_spoken_text(&long).chars().count(), TTS_MAX_CHARS);
+        assert_eq!(tts_spoken_text("  早晨  "), "早晨");
+    }
+
+    struct Scripted {
+        calls: Arc<AtomicUsize>,
+        result: Result<String, AsrError>,
+    }
+
+    #[async_trait]
+    impl SpeechToText for Scripted {
+        async fn transcribe(&self, _path: &Path) -> Result<String, AsrError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_stays_off_when_remote_is_absent() {
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let local = Scripted {
+            calls: Arc::clone(&local_calls),
+            result: Err(AsrError::unavailable("no model")),
+        };
+        let err = transcribe_local_first(&local, None, Path::new("note.ogg"))
+            .await
+            .unwrap_err();
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+        assert!(!err.cloud_attempted);
+        assert_eq!(err.kind, AsrErrorKind::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn local_success_does_not_call_remote_even_if_present() {
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+        let local = Scripted {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Ok("  早晨  ".to_string()),
+        };
+        let remote = Scripted {
+            calls: Arc::clone(&remote_calls),
+            result: Ok("should-not-run".to_string()),
+        };
+        let transcript = transcribe_local_first(&local, Some(&remote), Path::new("note.wav"))
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "早晨");
+        assert_eq!(transcript.source, SttSource::SenseVoice);
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_runs_only_when_passed_and_local_fails() {
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+        let local = Scripted {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Err(AsrError::failed("boom")),
+        };
+        let remote = Scripted {
+            calls: Arc::clone(&remote_calls),
+            result: Ok("雲端".to_string()),
+        };
+        let transcript = transcribe_local_first(&local, Some(&remote), Path::new("note.ogg"))
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "雲端");
+        assert_eq!(transcript.source, SttSource::OpenRouter);
+        assert_eq!(remote_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct CountingSynth {
+        calls: Arc<AtomicUsize>,
+        result: Result<Vec<u8>, TtsError>,
+    }
+
+    #[async_trait]
+    impl TextToSpeech for CountingSynth {
+        async fn synthesize_ogg_opus(&self, _text: &str) -> Result<Vec<u8>, TtsError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn tts_off_does_not_call_synth_and_keeps_text() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let synth = CountingSynth {
+            calls: Arc::clone(&calls),
+            result: Err(TtsError::new("must not run")),
+        };
+        let plan = plan_reply_delivery(false, "hello", Some(&synth)).await;
+        assert_eq!(plan.text, "hello");
+        assert!(plan.voice_ogg.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tts_on_keeps_text_and_attaches_ogg() {
+        let synth = CountingSynth {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Ok(b"OggS-voice".to_vec()),
+        };
+        let plan = plan_reply_delivery(true, "早晨", Some(&synth)).await;
+        assert_eq!(plan.text, "早晨");
+        assert_eq!(plan.voice_ogg.as_deref(), Some(&b"OggS-voice"[..]));
+    }
+
+    #[tokio::test]
+    async fn tts_on_keeps_text_when_synth_fails() {
+        let synth = CountingSynth {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Err(TtsError::new("no model")),
+        };
+        let plan = plan_reply_delivery(true, "still here", Some(&synth)).await;
+        assert_eq!(plan.text, "still here");
+        assert!(plan.voice_ogg.is_none());
+    }
+
+    #[tokio::test]
+    async fn openrouter_flag_off_does_not_hit_the_network() {
+        let server = wiremock::MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("note.ogg");
+        std::fs::write(&audio, b"OggSfake").unwrap();
+        let voice = VoiceConfig {
+            model_dir: PathBuf::from("/no/such/sensevoice-model-dir"),
+            openrouter_stt: false,
+            ..VoiceConfig::default()
+        };
+        let base = format!("{}/api/v1", server.uri());
+        let err = transcribe_file(&voice, &base, "sk-test", &audio)
+            .await
+            .unwrap_err();
+        assert!(!err.cloud_attempted);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "default config must not call OpenRouter STT"
+        );
+        let clarify = voice_note_clarify(&err);
+        assert!(clarify.contains("cloud transcription is off"));
+    }
+
+    #[tokio::test]
+    async fn openrouter_flag_on_posts_transcription_after_local_failure() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/audio/transcriptions"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "text": "雲端轉錄"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("note.ogg");
+        std::fs::write(&audio, b"OggSfake").unwrap();
+        let voice = VoiceConfig {
+            model_dir: dir.path().join("missing-model"),
+            openrouter_stt: true,
+            language: "yue".to_string(),
+            ..VoiceConfig::default()
+        };
+        let base = format!("{}/api/v1", server.uri());
+        let transcript = transcribe_file(&voice, &base, "sk-test", &audio)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "雲端轉錄");
+        assert_eq!(transcript.source, SttSource::OpenRouter);
+        server.verify().await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "openai/whisper-large-v3");
+        assert!(body.get("language").is_none());
+        assert_eq!(body["input_audio"]["format"], "ogg");
+        assert!(body["input_audio"]["data"].as_str().unwrap().len() > 10);
+    }
+
+    #[tokio::test]
+    async fn wrong_engine_does_not_fall_through_to_cloud() {
+        let server = wiremock::MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            engine: "whisper.cpp".to_string(),
+            openrouter_stt: true,
+            ..VoiceConfig::default()
+        };
+        let base = format!("{}/api/v1", server.uri());
+        let err = transcribe_file(&voice, &base, "sk-test", &audio)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AsrErrorKind::Unavailable);
+        assert!(!err.cloud_attempted);
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn enabled_tts_without_a_model_still_returns_the_text() {
+        let cfg = VoiceConfig {
+            tts: true,
+            tts_model_dir: PathBuf::from("/no/such/tts-model"),
+            ..VoiceConfig::default()
+        };
+        let synth = LocalTts { cfg };
+        let plan = plan_reply_delivery(true, "hello", Some(&synth)).await;
+        assert_eq!(plan.text, "hello");
+        assert!(plan.voice_ogg.is_none());
+    }
+
+    #[cfg(unix)]
+    fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_sensevoice_script_wins_over_enabled_openrouter() {
+        let server = wiremock::MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.int8.onnx"), b"not-a-real-model").unwrap();
+        std::fs::write(model.join("tokens.txt"), b"<blank>\n").unwrap();
+        let script = write_exec(
+            dir.path(),
+            "sensevoice.sh",
+            "#!/bin/sh\nprintf '%s\\n' '<|yue|><|Speech|>早晨'\n",
+        );
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+
+        let voice = VoiceConfig {
+            model_dir: model,
+            stt_bin: script.display().to_string(),
+            openrouter_stt: true,
+            ..VoiceConfig::default()
+        };
+        let base = format!("{}/api/v1", server.uri());
+        let transcript = transcribe_file(&voice, &base, "sk-test", &audio)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "早晨");
+        assert_eq!(transcript.source, SttSource::SenseVoice);
+        assert_eq!(shape_voice_note(&transcript.text), "[Voice note]:\n早晨");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tts_bin_override_returns_ogg_and_the_same_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_exec(
+            dir.path(),
+            "tts.sh",
+            "#!/bin/sh\ntext=''\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--text-file\" ]; then text=\"$2\"; shift 2\n  elif [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2\n  else shift; fi\ndone\nprintf 'OggS' > \"$out\"\ncat \"$text\" >> \"$out\"\n",
+        );
+        let cfg = VoiceConfig {
+            tts: true,
+            tts_bin: script.display().to_string(),
+            ..VoiceConfig::default()
+        };
+        let synth = LocalTts { cfg };
+        let plan = plan_reply_delivery(true, "早晨", Some(&synth)).await;
+        assert_eq!(plan.text, "早晨");
+        let ogg = plan.voice_ogg.expect("ogg");
+        assert!(ogg.starts_with(b"OggS"));
+        assert!(ogg
+            .windows("早晨".len())
+            .any(|window| window == "早晨".as_bytes()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hung_stt_binary_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.onnx"), b"x").unwrap();
+        std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+        let script = write_exec(dir.path(), "sleep.sh", "#!/bin/sh\nexec sleep 30\n");
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            model_dir: model,
+            stt_bin: script.display().to_string(),
+            stt_timeout_secs: 1,
+            ..VoiceConfig::default()
+        };
+        let started = std::time::Instant::now();
+        let err = transcribe_file(&voice, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AsrErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout took {:?}",
+            started.elapsed()
+        );
+    }
+}
