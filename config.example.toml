@@ -430,3 +430,42 @@ Be concise and helpful."""
 #
 # [device_ws]
 # enabled = false
+
+# ── Telegram voice notes (ADR-0058) ──────────────────────────────────────────
+# Primary STT is local SenseVoice (sherpa-onnx), Cantonese (`yue`).
+# A voice note becomes:
+#   [Voice note]:
+#   {transcript}
+# and then follows the same interactive lane as typed text.
+#
+# Install:
+#   sherpa-onnx-offline and ffmpeg on PATH
+#   model: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
+#     (model.int8.onnx + tokens.txt in model_dir)
+#   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2
+#
+# Cloud STT is off unless openrouter_stt = true. That posts the audio to
+# OpenRouter /audio/transcriptions with the existing OpenRouter key.
+# Cantonese (`yue`) does not send a Whisper language hint (no ISO-639-1 yue).
+#
+# TTS is off unless tts = true. When on, each interactive reply is the text
+# message plus a sendVoice OGG/Opus note. Text is still sent if synthesis fails.
+# Default TTS is sherpa-onnx-offline-tts (model.onnx + tokens.txt, optional
+# lexicon.txt) then ffmpeg libopus. tts_bin replaces that with:
+#   tts_bin --text-file <txt> --output <file.ogg>
+#
+# This path is Telegram voice notes only. It is not Device WS and not ESP32.
+#
+# [voice]
+# engine = "sensevoice"
+# model_dir = ""                  # empty = <home>/models/sensevoice
+# stt_bin = ""                    # empty = sherpa-onnx-offline on PATH
+# ffmpeg_bin = ""                 # empty = ffmpeg on PATH
+# language = "yue"                # auto | zh | en | ja | ko | yue
+# openrouter_stt = false          # opt-in cloud STT; default off
+# openrouter_stt_model = "openai/whisper-large-v3"
+# stt_timeout_secs = 120
+# tts = false                     # opt-in spoken reply; default off
+# tts_bin = ""                    # empty = sherpa-onnx-offline-tts + ffmpeg
+# tts_model_dir = ""              # empty = <home>/models/tts-cantonese
+# tts_timeout_secs = 120

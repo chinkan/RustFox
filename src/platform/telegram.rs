@@ -1418,7 +1418,7 @@ pub async fn handle_message(
     let mut msg_format = load_message_format(&agent.memory, &user_id.to_string()).await;
 
     // For media messages, use caption as text; for text messages, use msg.text()
-    let text = msg
+    let mut text = msg
         .text()
         .or_else(|| msg.caption())
         .unwrap_or("")
@@ -1462,6 +1462,46 @@ pub async fn handle_message(
                 });
             }
             Err(e) => warn!("Failed to download document: {:#}", e),
+        }
+    }
+
+    // ADR-0058: Voice notes only (not general Audio). Download → local STT →
+    // `[Voice note]:\n{transcript}` on the interactive lane. A caption-less
+    // failure sends an honest clarify instead of returning with nothing.
+    if let Some(voice) = msg.voice() {
+        let file_id = voice.file.id.to_string();
+        let downloaded = match download_telegram_file(&bot, &file_id, &temp_dir, None).await {
+            Ok((path, _)) => crate::platform::telegram_voice::DownloadedVoice::Ready(path),
+            Err(err) => {
+                crate::platform::telegram_voice::DownloadedVoice::Failed(format!("{err:#}"))
+            }
+        };
+        let turn = crate::platform::telegram_voice::decide_voice_turn(
+            downloaded,
+            &text,
+            &agent.config.voice,
+            &agent.config.openrouter.base_url,
+            &agent.config.openrouter.api_key,
+        )
+        .await;
+        match turn {
+            crate::platform::telegram_voice::VoiceTurn::Text(shaped) => {
+                text = shaped;
+            }
+            crate::platform::telegram_voice::VoiceTurn::Clarify(clarify) => {
+                let sent = send_markdown_message(&bot, msg.chat.id, &clarify, msg_format).await;
+                if temp_dir.exists() {
+                    tokio::fs::remove_dir_all(&temp_dir).await.ok();
+                }
+                return sent;
+            }
+            crate::platform::telegram_voice::VoiceTurn::ClarifyThen {
+                clarify,
+                text: caption,
+            } => {
+                let _ = send_markdown_message(&bot, msg.chat.id, &clarify, msg_format).await;
+                text = caption;
+            }
         }
     }
 
@@ -2665,6 +2705,18 @@ async fn run_telegram_user_turn(
                 let _ = send_markdown_message(&bot, chat_id, &outcome.text, msg_format).await;
             }
         }
+    }
+
+    // ADR-0058: TTS is off unless configured. When on, sendVoice is a second
+    // copy — the text above is never dropped if synthesis or sendVoice fails.
+    if let Ok(outcome) = &process_result {
+        crate::platform::telegram_voice::maybe_send_tts_voice(
+            &bot,
+            chat_id,
+            &agent.config.voice,
+            &outcome.text,
+        )
+        .await;
     }
 
     // Check if a self-upgrade tool call requested a restart.

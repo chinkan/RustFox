@@ -194,6 +194,7 @@ rustfox status
 |---------|-------------|
 | `[[bots]]` | Array of Telegram bots, each with `id`, `bot_token`, `allowed_user_ids`, `persona`, and optional `model` / `tools` overrides |
 | `telegram.*` | Legacy single-bot section (deprecated alias when `[[bots]]` is present) |
+| `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese), opt-in OpenRouter STT, opt-in text+voice TTS. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
 | `openrouter.model` | Default LLM model ID (`provider/model`; wizard shortcuts or any typed id; default: `moonshotai/kimi-k2.6`) |
 | `[[provider]]` | Additional LLM providers (Ollama, LM Studio, any OpenAI-compatible endpoint); model strings use `provider/model_id` |

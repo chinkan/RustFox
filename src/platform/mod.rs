@@ -2,6 +2,7 @@ pub mod sender;
 pub mod telegram;
 pub mod telegram_injector;
 pub mod telegram_reply_to;
+pub(crate) mod telegram_voice;
 pub mod tool_notifier;
 
 pub use sender::{PlatformMessageId, PlatformSender};

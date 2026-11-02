@@ -122,6 +122,10 @@ pub struct Config {
     /// Token and secret are `secret:` or advanced `env:` refs, never plaintext.
     #[serde(default)]
     pub switchbot: SwitchBotConfig,
+    /// Telegram Cantonese voice (ADR-0058). Absent section = local SenseVoice,
+    /// cloud STT off, TTS off.
+    #[serde(default)]
+    pub voice: crate::asr::VoiceConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -1081,6 +1085,16 @@ impl Config {
             &self.supervisor.artifacts_dir,
             "artifacts",
         );
+        let voice_model = resolve_one(
+            "voice.model_dir",
+            &self.voice.model_dir,
+            "models/sensevoice",
+        );
+        let tts_model = resolve_one(
+            "voice.tts_model_dir",
+            &self.voice.tts_model_dir,
+            "models/tts-cantonese",
+        );
         // ADR 0011 R7: system_prompt_file is resolved lazily by
         // resolve_prompt_path() (so portal overrides of resolved_home take
         // effect without re-running resolve()).
@@ -1119,6 +1133,9 @@ impl Config {
         self.skills.directory = skills;
         self.agents.directory = agents;
         self.supervisor.artifacts_dir = artifacts;
+        self.voice.model_dir = voice_model;
+        self.voice.tts_model_dir = tts_model;
+        self.voice.normalize();
         self.resolved_home = Some(home);
 
         Ok(warnings)
@@ -1390,6 +1407,34 @@ mod tests {
             cfg.resolved_home().is_none(),
             "resolved_home() should return None before resolve() runs"
         );
+    }
+
+    #[test]
+    fn missing_voice_section_keeps_cloud_stt_and_tts_off() {
+        let cfg: Config = toml::from_str(base_toml()).unwrap();
+        assert!(!cfg.voice.openrouter_stt);
+        assert!(!cfg.voice.tts);
+        assert_eq!(cfg.voice.engine, "sensevoice");
+        assert_eq!(cfg.voice.language, "yue");
+    }
+
+    #[test]
+    fn voice_paths_resolve_under_home() {
+        let _env = isolate_home_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(base_toml()).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+            timezone: None,
+        });
+        cfg.resolve().unwrap();
+        assert!(!cfg.voice.openrouter_stt);
+        assert!(!cfg.voice.tts);
+        assert_eq!(cfg.voice.model_dir, home.join("models/sensevoice"));
+        assert_eq!(cfg.voice.tts_model_dir, home.join("models/tts-cantonese"));
+        assert_eq!(cfg.voice.language, "yue");
     }
 
     /// Tests that assert `[general].home` precedence must not see an ambient
