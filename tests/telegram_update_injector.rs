@@ -1352,3 +1352,171 @@ async fn voice_transcript_is_prefixed_and_tts_dual_sends() {
         "text is sent before the voice copy; paths={paths:?}"
     );
 }
+
+fn reply_to_bot_update(
+    update_id: u32,
+    message_id: i32,
+    user_text: &str,
+    replied_id: i32,
+    quote: Option<&str>,
+) -> String {
+    let mut message = json!({
+        "message_id": message_id,
+        "date": 1700000300,
+        "from": { "id": ALLOWED, "is_bot": false, "first_name": "QA" },
+        "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+        "text": user_text,
+        "reply_to_message": {
+            "message_id": replied_id,
+            "date": 1700000200,
+            "from": { "id": 1, "is_bot": true, "first_name": "Bot" },
+            "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+            "text": ""
+        }
+    });
+    if let Some(q) = quote {
+        message["quote"] = json!({ "text": q, "position": 0 });
+    }
+    json!({ "update_id": update_id, "message": message }).to_string()
+}
+
+async fn outbound_rows(memory: &MemoryStore) -> Vec<(i64, i32, String)> {
+    let conn = memory.connection();
+    let guard = conn.lock().await;
+    let mut stmt = guard
+        .prepare("SELECT chat_id, message_id, body FROM tg_outbound_text")
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i32>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap()
+}
+
+async fn stored_user_texts(agent: &Agent) -> Vec<String> {
+    let saved = agent.memory.recent_messages(40).await.unwrap();
+    saved
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| m.content.as_ref().map(|c| c.as_text()))
+        .collect()
+}
+
+async fn drive_raw(h: &HandleMessageHarness, raw: &str) {
+    let upd = UpdateInjector::parse_update(raw).expect("parse injected update");
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("drive injected update");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+}
+
+/// #358: rich finals are indexed; deleted stream drafts are not. A reply whose
+/// nested body is empty resolves from that map, then from the outer quote.
+/// A miss stays on the locked unavailable template.
+#[tokio::test]
+async fn reply_to_empty_bot_bubble_uses_outbound_map_then_quote() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    let upd = UpdateInjector::parse_update_file(fixture("chat_hello.json")).unwrap();
+    injector()
+        .drive_handle_message(&upd, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("drive chat_hello");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let deleted = h.api.deleted_snapshot();
+    let rows = outbound_rows(&h.agent.memory).await;
+    for id in &deleted {
+        assert!(
+            !rows.iter().any(|(_, mid, _)| mid == id),
+            "deleted id {id} must not be indexed; rows={rows:?} deleted={deleted:?}"
+        );
+    }
+    let finals: Vec<_> = rows
+        .iter()
+        .filter(|(_, _, body)| body.contains(STUB_REPLY))
+        .collect();
+    assert!(
+        !finals.is_empty(),
+        "final bubble text must be stored; rows={rows:?} sent={:?}",
+        h.api.sent_snapshot()
+    );
+    let chat_id = finals[0].0;
+    let final_id = finals[0].1;
+    assert_eq!(chat_id, i64::try_from(ALLOWED).unwrap());
+    assert!(
+        !deleted.contains(&final_id),
+        "indexed final {final_id} was deleted"
+    );
+
+    drive_raw(
+        &h,
+        &reply_to_bot_update(
+            900100,
+            50,
+            "see the quote",
+            final_id,
+            Some("NOT_THE_STORED_BODY"),
+        ),
+    )
+    .await;
+    let users = stored_user_texts(&h.agent).await;
+    let hit = users
+        .iter()
+        .find(|t| t.contains("see the quote"))
+        .unwrap_or_else(|| panic!("missing hit turn; users={users:?}"));
+    assert!(
+        hit.contains(STUB_REPLY),
+        "local map must supply the body; got {hit}"
+    );
+    assert!(
+        hit.contains(&format!("[Reply to bot msg {final_id}]:")),
+        "locked text template; got {hit}"
+    );
+    assert!(
+        !hit.contains("unavailable") && !hit.contains("NOT_THE_STORED_BODY"),
+        "map beats outer quote; got {hit}"
+    );
+
+    drive_raw(
+        &h,
+        &reply_to_bot_update(900101, 51, "missing bubble", 99999, None),
+    )
+    .await;
+    let users = stored_user_texts(&h.agent).await;
+    let miss = users
+        .iter()
+        .find(|t| t.contains("missing bubble"))
+        .unwrap_or_else(|| panic!("missing miss turn; users={users:?}"));
+    assert!(
+        miss.contains("[Reply to bot msg 99999: unavailable]"),
+        "miss stays unavailable; got {miss}"
+    );
+
+    drive_raw(
+        &h,
+        &reply_to_bot_update(
+            900102,
+            52,
+            "outer quote only",
+            88888,
+            Some("OUTER_QUOTE_SLICE"),
+        ),
+    )
+    .await;
+    let users = stored_user_texts(&h.agent).await;
+    let quoted = users
+        .iter()
+        .find(|t| t.contains("outer quote only"))
+        .unwrap_or_else(|| panic!("missing quote turn; users={users:?}"));
+    assert!(
+        quoted.contains("[Reply to bot msg 88888]:\nOUTER_QUOTE_SLICE"),
+        "outer quote before unavailable; got {quoted}"
+    );
+    assert!(!quoted.contains("unavailable"), "got {quoted}");
+}

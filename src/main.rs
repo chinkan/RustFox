@@ -24,12 +24,13 @@ async fn send_schedule_reply(
     chat_id: teloxide::types::ChatId,
     text: &str,
     format: rustfox::platform::telegram::MessageFormat,
+    outbound: &MemoryStore,
 ) -> anyhow::Result<()> {
     let Some(bot) = bot else {
         tracing::info!("schedule reply skipped; this telegram bot does not own the run");
         return Ok(());
     };
-    rustfox::platform::telegram::send_markdown_message(bot, chat_id, text, format)
+    rustfox::platform::telegram::send_markdown_message(bot, chat_id, text, format, outbound)
         .await
         .map_err(|e| anyhow::anyhow!(e))
 }
@@ -105,6 +106,7 @@ async fn record_unverified_schedule_failure(
     response: &str,
     fail_reason: &str,
     transcript: Option<&rustfox::scheduler::checkpoint::TranscriptCheckpoint>,
+    outbound: &MemoryStore,
 ) {
     if let Err(e) = req
         .task_store
@@ -160,6 +162,7 @@ async fn record_unverified_schedule_failure(
             chat,
             response,
             rustfox::platform::telegram::MessageFormat::Auto,
+            outbound,
         )
         .await;
     }
@@ -590,6 +593,7 @@ async fn run_one_scheduled_job(
                         teloxide::types::ChatId(cv),
                         &r,
                         rustfox::platform::telegram::MessageFormat::Auto,
+                        &agent.memory,
                     )
                     .await;
                 }
@@ -622,6 +626,7 @@ async fn run_one_scheduled_job(
                         &r,
                         &fail_reason,
                         if save_cp { transcript.as_ref() } else { None },
+                        &agent.memory,
                     )
                     .await;
                     return Some(stop);
@@ -706,6 +711,7 @@ async fn run_one_scheduled_job(
                                     teloxide::types::ChatId(cv),
                                     &note,
                                     rustfox::platform::telegram::MessageFormat::Auto,
+                                    &agent.memory,
                                 )
                                 .await;
                             }
@@ -750,6 +756,7 @@ async fn run_one_scheduled_job(
                 chat,
                 &error_msg,
                 rustfox::platform::telegram::MessageFormat::Auto,
+                &agent.memory,
             )
             .await;
             return None;
@@ -773,6 +780,7 @@ async fn run_one_scheduled_job(
         chat,
         &response,
         rustfox::platform::telegram::MessageFormat::Auto,
+        &agent.memory,
     )
     .await
     {
@@ -1384,7 +1392,8 @@ async fn main() -> Result<()> {
 
     let cancel_registry = std::sync::Arc::new(rustfox::cancel_registry::CancelRegistry::new());
     let sender: Arc<dyn rustfox::platform::sender::PlatformSender> = Arc::new(
-        rustfox::platform::telegram::TelegramAdapter::new((*bot).clone()),
+        rustfox::platform::telegram::TelegramAdapter::new((*bot).clone())
+            .with_outbound(memory.clone()),
     );
     let skills_rw = Arc::new(tokio::sync::RwLock::new(skills.clone()));
     let agents_rw = Arc::new(tokio::sync::RwLock::new(agents.clone()));
@@ -1533,6 +1542,7 @@ async fn main() -> Result<()> {
                             teloxide::types::ChatId(cv),
                             &rustfox::turn_gate::step_limit_text(n),
                             rustfox::platform::telegram::MessageFormat::Auto,
+                            &agent.memory,
                         )
                         .await;
                     } else {
@@ -1557,6 +1567,7 @@ async fn main() -> Result<()> {
         let tx = job_tx.clone();
         let bots_for_watch = Arc::clone(&telegram_bots);
         let stale_timeout_secs = config.scheduler_run_timeout_secs();
+        let memory_for_watch = memory.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
             interval.tick().await; // skip first immediate tick
@@ -1617,6 +1628,7 @@ async fn main() -> Result<()> {
                                     teloxide::types::ChatId(cv),
                                     &note,
                                     rustfox::platform::telegram::MessageFormat::Auto,
+                                    &memory_for_watch,
                                 )
                                 .await;
                             }
@@ -1662,6 +1674,7 @@ async fn main() -> Result<()> {
                                         teloxide::types::ChatId(cv),
                                         &note,
                                         rustfox::platform::telegram::MessageFormat::Auto,
+                                        &memory_for_watch,
                                     )
                                     .await;
                                 }
@@ -1817,7 +1830,8 @@ async fn main() -> Result<()> {
         > = std::collections::HashMap::new();
         for (id, dispatch_bot, _) in &bot_runtimes {
             let adapter =
-                rustfox::platform::telegram::TelegramAdapter::new(dispatch_bot.as_ref().clone());
+                rustfox::platform::telegram::TelegramAdapter::new(dispatch_bot.as_ref().clone())
+                    .with_outbound(memory.clone());
             senders.insert(id.clone(), std::sync::Arc::new(adapter));
         }
         agent.set_bot_senders(senders).await;
