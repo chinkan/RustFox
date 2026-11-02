@@ -345,6 +345,16 @@ impl MemoryStore {
                 FOREIGN KEY (task_id) REFERENCES sup_tasks(id)
             );
             CREATE INDEX IF NOT EXISTS idx_sup_artifacts_task ON sup_artifacts(task_id, kind);
+
+            -- #358: Telegram outbound bubble text keyed by chat + message id.
+            -- Reply-to cannot call getMessage; this is the local quote source.
+            CREATE TABLE IF NOT EXISTS tg_outbound_text (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (chat_id, message_id)
+            );
             ",
         )?;
 

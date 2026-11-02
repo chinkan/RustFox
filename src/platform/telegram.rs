@@ -418,25 +418,49 @@ pub async fn run(
 }
 
 /// Send entities-only fallback (no rich path).
-async fn send_entities_message(bot: &Bot, chat_id: ChatId, markdown: &str) -> ResponseResult<()> {
+///
+/// Returns `(message_id, plain text)` for each chunk Telegram accepted.
+async fn send_entities_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    markdown: &str,
+) -> ResponseResult<Vec<(i32, String)>> {
     let (text, entities) = markdown_to_entities(markdown);
     let chunks = split_entities(&text, &entities, 4090);
     if chunks.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let mut sent = Vec::new();
     for (i, (chunk_text, chunk_entities)) in chunks.iter().enumerate() {
-        if i == 0 {
-            bot.send_message(chat_id, chunk_text)
-                .entities(chunk_entities.clone())
-                .await?;
+        let req = bot
+            .send_message(chat_id, chunk_text)
+            .entities(chunk_entities.clone());
+        let msg = if i == 0 {
+            req.await?
         } else {
-            bot.send_message(chat_id, chunk_text)
-                .entities(chunk_entities.clone())
-                .await
-                .ok();
+            match req.await {
+                Ok(msg) => msg,
+                Err(_) => continue,
+            }
+        };
+        if !chunk_text.is_empty() {
+            sent.push((msg.id.0, chunk_text.clone()));
         }
     }
-    Ok(())
+    Ok(sent)
+}
+
+async fn index_outbound(
+    memory: &crate::memory::MemoryStore,
+    chat_id: ChatId,
+    rows: &[(i32, String)],
+) {
+    if rows.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::platform::tg_outbound::record_finals(memory, chat_id.0, rows).await {
+        warn!(error = %e, "failed to index outbound Telegram text");
+    }
 }
 
 /// Send a markdown string with the user's preferred format mode.
@@ -472,8 +496,9 @@ pub async fn send_markdown_message(
     chat_id: ChatId,
     markdown: &str,
     format: MessageFormat,
+    outbound: &crate::memory::MemoryStore,
 ) -> ResponseResult<()> {
-    match format {
+    let sent = match format {
         MessageFormat::Rich => {
             let token = bot.token();
             let api_base = bot.api_url();
@@ -482,10 +507,9 @@ pub async fn send_markdown_message(
                 .await
                 .map_err(|e| {
                     teloxide::RequestError::Io(Arc::new(std::io::Error::other(format!("{e}"))))
-                })?;
-            Ok(())
+                })?
         }
-        MessageFormat::Markdown => send_entities_message(bot, chat_id, markdown).await,
+        MessageFormat::Markdown => send_entities_message(bot, chat_id, markdown).await?,
         MessageFormat::Auto => {
             let token = bot.token();
             let api_base = bot.api_url();
@@ -501,16 +525,19 @@ pub async fn send_markdown_message(
             )
             .await
             {
-                Ok(()) => Ok(()),
+                Ok(sent) => sent,
                 Err(e) => {
                     warn!("send_markdown_message all paths failed: {e}");
-                    Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
+                    return Err(teloxide::RequestError::Io(Arc::new(std::io::Error::other(
                         format!("{e}"),
-                    ))))
+                    ))));
                 }
             }
         }
-    }
+    };
+    // Final chunks only — this path does not send streaming drafts.
+    index_outbound(outbound, chat_id, &sent).await;
+    Ok(())
 }
 
 /// ADR-0038: human-gate DM with inline Retry/Cancel (entities + keyboard).
@@ -966,7 +993,7 @@ async fn handle_config_command(
                     }
                 }
             };
-            return send_markdown_message(&bot, chat_id, &reply, msg_format).await;
+            return send_markdown_message(&bot, chat_id, &reply, msg_format, &agent.memory).await;
         }
         "keys" | "help" => {
             return send_markdown_message(
@@ -974,6 +1001,7 @@ async fn handle_config_command(
                 chat_id,
                 &crate::config_edit::slash_map_markdown(),
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -986,6 +1014,7 @@ async fn handle_config_command(
                         chat_id,
                         "Usage: `/config set <key> <value>`\nSee `/config keys`.",
                         msg_format,
+                        &agent.memory,
                     )
                     .await;
                 }
@@ -996,6 +1025,7 @@ async fn handle_config_command(
                     chat_id,
                     "Usage: `/config set <key> <value>`\nSee `/config keys`.",
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -1011,6 +1041,7 @@ async fn handle_config_command(
                     chat_id,
                     &format!("⛔ Denied `{key_norm}`: {reason}"),
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -1035,7 +1066,8 @@ async fn handle_config_command(
                     );
                     // Avoid echoing the raw value for any key.
                     tracing::info!(key = %result.key, restart = result.restart_required, "Telegram /config set ok");
-                    return send_markdown_message(&bot, chat_id, &reply, msg_format).await;
+                    return send_markdown_message(&bot, chat_id, &reply, msg_format, &agent.memory)
+                        .await;
                 }
                 Err(e) => {
                     // Error messages must not include secret values we rejected.
@@ -1045,6 +1077,7 @@ async fn handle_config_command(
                         chat_id,
                         &format!("❌ Config update failed: {e}"),
                         msg_format,
+                        &agent.memory,
                     )
                     .await;
                 }
@@ -1059,6 +1092,7 @@ async fn handle_config_command(
                     crate::config_edit::slash_map_markdown()
                 ),
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -1088,7 +1122,7 @@ async fn handle_agents_command(
             let disk_cfg = crate::config::Config::load(&agent.config_path).ok();
             let cfg = disk_cfg.as_ref().unwrap_or(&agent.config);
             let reply = crate::agents_edit::format_agents_list(cfg);
-            return send_markdown_message(&bot, chat_id, &reply, msg_format).await;
+            return send_markdown_message(&bot, chat_id, &reply, msg_format, &agent.memory).await;
         }
         "help" | "keys" => {
             return send_markdown_message(
@@ -1096,6 +1130,7 @@ async fn handle_agents_command(
                 chat_id,
                 &crate::agents_edit::slash_help_markdown(),
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -1106,6 +1141,7 @@ async fn handle_agents_command(
                     chat_id,
                     "Usage: `/agents show <id>`",
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -1113,11 +1149,18 @@ async fn handle_agents_command(
             let cfg = disk_cfg.as_ref().unwrap_or(&agent.config);
             match crate::agents_edit::format_agent_show(cfg, rest) {
                 Ok(reply) => {
-                    return send_markdown_message(&bot, chat_id, &reply, msg_format).await;
+                    return send_markdown_message(&bot, chat_id, &reply, msg_format, &agent.memory)
+                        .await;
                 }
                 Err(e) => {
-                    return send_markdown_message(&bot, chat_id, &format!("❌ {e}"), msg_format)
-                        .await;
+                    return send_markdown_message(
+                        &bot,
+                        chat_id,
+                        &format!("❌ {e}"),
+                        msg_format,
+                        &agent.memory,
+                    )
+                    .await;
                 }
             }
         }
@@ -1129,6 +1172,7 @@ async fn handle_agents_command(
                 chat_id,
                 "✅ Cancelled pending bot-token bind.",
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -1139,11 +1183,18 @@ async fn handle_agents_command(
                     chat_id,
                     "Usage: `/agents create <id>`\nThen send the BotFather token as your next message.",
                     msg_format,
-                )
+            &agent.memory)
                 .await;
             }
             if let Err(e) = crate::agents_edit::validate_agent_id(rest) {
-                return send_markdown_message(&bot, chat_id, &format!("❌ {e}"), msg_format).await;
+                return send_markdown_message(
+                    &bot,
+                    chat_id,
+                    &format!("❌ {e}"),
+                    msg_format,
+                    &agent.memory,
+                )
+                .await;
             }
             let id = rest.trim();
 
@@ -1156,6 +1207,7 @@ async fn handle_agents_command(
                     chat_id,
                     &format!("❌ Bot id `{id}` already exists in `[[bots]]`."),
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -1182,6 +1234,7 @@ async fn handle_agents_command(
                             chat_id,
                             &format!("❌ Create failed: {e}"),
                             msg_format,
+                            &agent.memory,
                         )
                         .await;
                     }
@@ -1196,6 +1249,7 @@ async fn handle_agents_command(
                     chat_id,
                     &format!("❌ Failed to arm token capture: {e}"),
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -1214,7 +1268,7 @@ async fn handle_agents_command(
 
                  Bind will append `[[bots]]` `{{ id={id}, persona={id}, allowed_user_ids=[{user_id}], bot_token=*** }}` then restart."
             );
-            return send_markdown_message(&bot, chat_id, &reply, msg_format).await;
+            return send_markdown_message(&bot, chat_id, &reply, msg_format, &agent.memory).await;
         }
         _ => {
             return send_markdown_message(
@@ -1225,6 +1279,7 @@ async fn handle_agents_command(
                     crate::agents_edit::slash_help_markdown()
                 ),
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -1264,6 +1319,7 @@ async fn try_handle_pending_agent_token(
                  Send the token as the next message, or `/agents cancel`."
             ),
             msg_format,
+            &agent.memory,
         )
         .await;
         return Ok(true);
@@ -1298,6 +1354,7 @@ async fn try_handle_pending_agent_token(
                 msg.chat.id,
                 &format!("❌ Could not open SecretStore for bind: {e}"),
                 msg_format,
+                &agent.memory,
             )
             .await;
             return Ok(true);
@@ -1322,7 +1379,8 @@ async fn try_handle_pending_agent_token(
                 allow = result.allowed_user_ids,
                 bak = result.bak_path.display()
             );
-            let _ = send_markdown_message(bot, msg.chat.id, &reply, msg_format).await;
+            let _ =
+                send_markdown_message(bot, msg.chat.id, &reply, msg_format, &agent.memory).await;
             // Reuse /restart clean-exit path (TL: write + restart).
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1349,6 +1407,7 @@ async fn try_handle_pending_agent_token(
                      Persona pack `agents/{pending_id}/` was kept."
                 ),
                 msg_format,
+                &agent.memory,
             )
             .await;
             Ok(true)
@@ -1489,7 +1548,9 @@ pub async fn handle_message(
                 text = shaped;
             }
             crate::platform::telegram_voice::VoiceTurn::Clarify(clarify) => {
-                let sent = send_markdown_message(&bot, msg.chat.id, &clarify, msg_format).await;
+                let sent =
+                    send_markdown_message(&bot, msg.chat.id, &clarify, msg_format, &agent.memory)
+                        .await;
                 if temp_dir.exists() {
                     tokio::fs::remove_dir_all(&temp_dir).await.ok();
                 }
@@ -1499,7 +1560,9 @@ pub async fn handle_message(
                 clarify,
                 text: caption,
             } => {
-                let _ = send_markdown_message(&bot, msg.chat.id, &clarify, msg_format).await;
+                let _ =
+                    send_markdown_message(&bot, msg.chat.id, &clarify, msg_format, &agent.memory)
+                        .await;
                 text = caption;
             }
         }
@@ -1565,6 +1628,7 @@ pub async fn handle_message(
             msg.chat.id,
             "Conversation archived. Past messages remain searchable.",
             msg_format,
+            &agent.memory,
         )
         .await;
     }
@@ -1589,7 +1653,7 @@ pub async fn handle_message(
              **/config** — Show/set allowlisted config keys (secrets redacted)
              **/agents** — List/create personas and bind a BotFather token
              **/restart** — Clean restart (exit; service/shell brings it back)";
-        return send_markdown_message(&bot, msg.chat.id, help, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, help, msg_format, &agent.memory).await;
     }
 
     if text == "/tools" {
@@ -1655,20 +1719,29 @@ pub async fn handle_message(
             tool_list.push('\n');
         }
 
-        return send_markdown_message(&bot, msg.chat.id, &tool_list, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, &tool_list, msg_format, &agent.memory)
+            .await;
     }
 
     if text == "/skills" {
         let skills_guard = agent.skills.read().await;
         let skills = skills_guard.list();
         if skills.is_empty() {
-            return send_markdown_message(&bot, msg.chat.id, "No skills loaded.", msg_format).await;
+            return send_markdown_message(
+                &bot,
+                msg.chat.id,
+                "No skills loaded.",
+                msg_format,
+                &agent.memory,
+            )
+            .await;
         }
         let mut skill_list = String::from("**Loaded skills:**\n\n");
         for skill in &skills {
             skill_list.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
         }
-        return send_markdown_message(&bot, msg.chat.id, &skill_list, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, &skill_list, msg_format, &agent.memory)
+            .await;
     }
 
     if text == "/updateskills" || text == "/update-skills" {
@@ -1692,12 +1765,19 @@ pub async fn handle_message(
         let (s, a) = agent.reload_skills_and_agents().await;
         lines.push(format!("Reloaded: {s} skill(s), {a} agent(s) active."));
 
-        return send_markdown_message(&bot, msg.chat.id, &lines.join("\n"), msg_format).await;
+        return send_markdown_message(
+            &bot,
+            msg.chat.id,
+            &lines.join("\n"),
+            msg_format,
+            &agent.memory,
+        )
+        .await;
     }
 
     if text == "/portal" {
         let reply = crate::portal::url::portal_reply(&agent.config.portal).await;
-        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format, &agent.memory).await;
     }
 
     if text == "/verbose" {
@@ -1713,8 +1793,14 @@ pub async fn handle_message(
             )
             .await
             .ok();
-        return send_markdown_message(&bot, msg.chat.id, new_mode.reply_message(), msg_format)
-            .await;
+        return send_markdown_message(
+            &bot,
+            msg.chat.id,
+            new_mode.reply_message(),
+            msg_format,
+            &agent.memory,
+        )
+        .await;
     }
 
     // Accept both the canonical `/queryrewrite` (registered with Telegram —
@@ -1748,7 +1834,7 @@ pub async fn handle_message(
         } else {
             "🔍 **Query rewriting disabled.** Messages will be searched as-is."
         };
-        return send_markdown_message(&bot, msg.chat.id, reply, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, reply, msg_format, &agent.memory).await;
     }
 
     // Handle /btw <text> for context-forked side question
@@ -1766,6 +1852,7 @@ pub async fn handle_message(
             msg.chat.id,
             "⏳ **BTW question sent to subagent...**",
             msg_format,
+            &agent.memory,
         )
         .await;
 
@@ -1798,6 +1885,7 @@ pub async fn handle_message(
                         chat_id,
                         &format!("**BTW error:** {}", e),
                         btw_format,
+                        &agent_clone.memory,
                     )
                     .await;
                     return;
@@ -1827,7 +1915,14 @@ pub async fn handle_message(
                         .as_ref()
                         .map(|c| c.as_text())
                         .unwrap_or_default();
-                    let _ = send_markdown_message(&bot_clone, chat_id, &text, btw_format).await;
+                    let _ = send_markdown_message(
+                        &bot_clone,
+                        chat_id,
+                        &text,
+                        btw_format,
+                        &agent_clone.memory,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     let _ = send_markdown_message(
@@ -1835,6 +1930,7 @@ pub async fn handle_message(
                         chat_id,
                         &format!("**BTW error:** {}", e),
                         btw_format,
+                        &agent_clone.memory,
                     )
                     .await;
                 }
@@ -2120,6 +2216,7 @@ pub async fn handle_message(
                         }
                     ),
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -2136,6 +2233,7 @@ pub async fn handle_message(
                         msg_format.as_str()
                     ),
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -2145,6 +2243,7 @@ pub async fn handle_message(
                     msg.chat.id,
                     "Unknown format. Use `/format rich`, `/format markdown`, or `/format auto`.",
                     msg_format,
+                    &agent.memory,
                 )
                 .await;
             }
@@ -2163,7 +2262,7 @@ pub async fn handle_message(
                 &bot, msg.chat.id,
                 "🔄 **Mode set to steer.** Mid-processing messages will be injected as steering context.",
                 msg_format,
-            ).await;
+            &agent.memory).await;
         } else if sub == "queue" {
             agent
                 .set_mid_run_mode(&bot_id, &user_id.to_string(), MidRunMode::Queue)
@@ -2173,6 +2272,7 @@ pub async fn handle_message(
                 msg.chat.id,
                 "🔄 **Mode set to queue.** Mid-processing messages will wait for the next turn.",
                 msg_format,
+                &agent.memory,
             )
             .await;
         } else if sub.is_empty() {
@@ -2186,6 +2286,7 @@ pub async fn handle_message(
                     mode_str
                 ),
                 msg_format,
+                &agent.memory,
             )
             .await;
         } else {
@@ -2194,6 +2295,7 @@ pub async fn handle_message(
                 msg.chat.id,
                 "Unknown mode. Use `/mode steer` or `/mode queue`.",
                 msg_format,
+                &agent.memory,
             )
             .await;
         }
@@ -2215,12 +2317,14 @@ pub async fn handle_message(
         } else {
             "Nothing is currently processing.".to_string()
         };
-        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format).await;
+        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format, &agent.memory).await;
     }
 
     // ADR-0048: inject reply_to_message quote into this turn's user text before
     // TurnGate so Active messages[], SQLite history, and QueuedInput mid-run all
-    // see the same composed string (no new schema; Continuity untouched).
+    // see the same composed string. Templates stay locked. #358: when parts
+    // would be Unavailable, resolve the body we sent (then outer TextQuote).
+    // teloxide-core 0.13 drops unknown `rich_message`, so that JSON is None here.
     let text = if let Some(replied) = msg.reply_to_message() {
         let role = replied
             .from
@@ -2236,10 +2340,22 @@ pub async fn handle_message(
             || replied.video_note().is_some()
             || replied.animation().is_some()
             || replied.sticker().is_some();
-        let quote = crate::platform::telegram_reply_to::quote_from_reply_parts(
+        let local = crate::platform::tg_outbound::lookup(&agent.memory, msg.chat.id.0, id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "outbound quote lookup failed");
+                None
+            });
+        let outer_quote = msg.quote().map(|q| q.text.as_str());
+        let quote = crate::platform::tg_outbound::resolve_reply_quote(
             replied.text(),
             replied.caption(),
             has_media,
+            crate::platform::tg_outbound::ReplyFallbacks {
+                local_text: local.as_deref(),
+                outer_quote,
+                rich_message: None,
+            },
         );
         crate::platform::telegram_reply_to::compose_reply_to_user_text(role, id, &quote, &text)
     } else {
@@ -2265,7 +2381,14 @@ pub async fn handle_message(
     match agent.turn_gate.submit(&key, input).await {
         Submit::Full(rejected) => {
             rejected.cleanup().await;
-            send_markdown_message(&bot, msg.chat.id, QUEUE_FULL_TEXT, msg_format).await
+            send_markdown_message(
+                &bot,
+                msg.chat.id,
+                QUEUE_FULL_TEXT,
+                msg_format,
+                &agent.memory,
+            )
+            .await
         }
         Submit::Accepted => {
             // Mid-run behind the **interactive** lane: 👀 steer/queue ack
@@ -2340,8 +2463,14 @@ pub fn spawn_telegram_turn_loop(
                     batch = inputs;
                 }
                 Next::StepLimit { n } => {
-                    let _ =
-                        send_markdown_message(&bot, chat_id, &step_limit_text(n), msg_format).await;
+                    let _ = send_markdown_message(
+                        &bot,
+                        chat_id,
+                        &step_limit_text(n),
+                        msg_format,
+                        &agent.memory,
+                    )
+                    .await;
                     break;
                 }
                 Next::Idle | Next::Scheduled => break,
@@ -2455,10 +2584,12 @@ async fn run_telegram_user_turn(
 
     let (stream_token_tx, stream_token_rx) = tokio::sync::mpsc::channel::<String>(128);
 
-    // Spawn receiver task: edits Telegram message as tokens arrive
+    // Spawn receiver task: edits Telegram message as tokens arrive.
+    // Index only the post-delete resend ids (streaming drafts are removed).
     let stream_bot = bot.clone();
     let stream_chat_id = chat_id;
     let stream_format = msg_format;
+    let stream_memory = agent.memory.clone();
     let stream_handle = tokio::spawn(async move {
         use std::time::{Duration, Instant};
 
@@ -2543,9 +2674,11 @@ async fn run_telegram_user_turn(
         // Build the full text from all chunks.
         let full_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
 
-        // Collect all message IDs for cleanup.
+        // Collect all message IDs for cleanup. These drafts are deleted below
+        // and must not be indexed — only the formatted resend ids are.
         let old_ids: Vec<teloxide::types::MessageId> =
             chunks.iter().filter_map(|c| c.msg_id).collect();
+        let deleted_draft_ids: Vec<i32> = old_ids.iter().map(|id| id.0).collect();
 
         const MAX_UTF16: usize = 4090;
 
@@ -2562,55 +2695,83 @@ async fn run_telegram_user_turn(
         let rich_chunks = rich_sender::split_markdown_at_newlines(&processed, MAX_UTF16);
         let token = stream_bot.token();
         let api_base = stream_bot.api_url();
+        let mut resends: Vec<(Option<i32>, String)> = Vec::new();
 
         match stream_format {
             MessageFormat::Rich => {
                 for chunk_md in &rich_chunks {
-                    if rich_sender::send_rich_message(
+                    match rich_sender::send_rich_message(
                         api_base.as_str(),
                         token,
                         stream_chat_id.0,
                         chunk_md,
                     )
                     .await
-                    .is_err()
                     {
-                        // Rich-only mode: one failure stops the chain
-                        tracing::warn!("stream_handle: rich send failed, aborting");
-                        break;
+                        Ok(result) => resends.push((
+                            rich_sender::message_id_from_result(&result),
+                            chunk_md.clone(),
+                        )),
+                        Err(_) => {
+                            // Rich-only mode: one failure stops the chain
+                            tracing::warn!("stream_handle: rich send failed, aborting");
+                            break;
+                        }
                     }
                 }
             }
             MessageFormat::Markdown => {
                 for (ct, ce) in &entity_chunks {
-                    stream_bot
+                    if let Ok(sent) = stream_bot
                         .send_message(stream_chat_id, ct)
                         .entities(ce.clone())
                         .await
-                        .ok();
+                    {
+                        resends.push((Some(sent.id.0), ct.clone()));
+                    }
                 }
             }
             MessageFormat::Auto => {
                 for (i, chunk_md) in rich_chunks.iter().enumerate() {
-                    let result = rich_sender::send_rich_message(
+                    match rich_sender::send_rich_message(
                         api_base.as_str(),
                         token,
                         stream_chat_id.0,
                         chunk_md,
                     )
-                    .await;
-                    if result.is_err() {
-                        // Fallback: use entity chunk i
-                        if let Some((ct, ce)) = entity_chunks.get(i) {
-                            stream_bot
-                                .send_message(stream_chat_id, ct)
-                                .entities(ce.clone())
-                                .await
-                                .ok();
+                    .await
+                    {
+                        Ok(result) => resends.push((
+                            rich_sender::message_id_from_result(&result),
+                            chunk_md.clone(),
+                        )),
+                        Err(_) => {
+                            // Fallback: use entity chunk i
+                            if let Some((ct, ce)) = entity_chunks.get(i) {
+                                if let Ok(sent) = stream_bot
+                                    .send_message(stream_chat_id, ct)
+                                    .entities(ce.clone())
+                                    .await
+                                {
+                                    resends.push((Some(sent.id.0), ct.clone()));
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+        let finals = crate::platform::tg_outbound::ids_to_index(
+            &crate::platform::tg_outbound::SettledOutbound {
+                deleted_draft_ids,
+                resends,
+            },
+        );
+        if let Err(e) =
+            crate::platform::tg_outbound::record_finals(&stream_memory, stream_chat_id.0, &finals)
+                .await
+        {
+            tracing::warn!(error = %e, "stream_handle: outbound text index failed");
         }
         true
     });
@@ -2693,6 +2854,7 @@ async fn run_telegram_user_turn(
             chat_id,
             &format!("**Error:** {}", crate::llm::user_facing_llm_error(e)),
             msg_format,
+            &agent.memory,
         )
         .await;
         return None;
@@ -2702,7 +2864,9 @@ async fn run_telegram_user_turn(
     if !streamed {
         if let Ok(outcome) = &process_result {
             if !outcome.text.is_empty() {
-                let _ = send_markdown_message(&bot, chat_id, &outcome.text, msg_format).await;
+                let _ =
+                    send_markdown_message(&bot, chat_id, &outcome.text, msg_format, &agent.memory)
+                        .await;
             }
         }
     }
@@ -3169,11 +3333,42 @@ fn mime_from_extension(ext: &str) -> &'static str {
 
 pub struct TelegramAdapter {
     bot: Bot,
+    /// Set in production so tool/adapter bubbles can be quoted later.
+    /// `new` leaves this empty so existing tests do not need a store.
+    outbound: Option<crate::memory::MemoryStore>,
+}
+
+fn telegram_message_id(message_id: &str) -> Result<i32> {
+    let (_, id) = message_id
+        .rsplit_once(':')
+        .context("invalid platform message id")?;
+    id.parse::<i32>()
+        .with_context(|| format!("invalid platform message id: {message_id}"))
 }
 
 impl TelegramAdapter {
     pub fn new(bot: Bot) -> Self {
-        Self { bot }
+        Self {
+            bot,
+            outbound: None,
+        }
+    }
+
+    /// Remember `(chat_id, message_id) → text` after sends this adapter makes.
+    pub fn with_outbound(mut self, memory: crate::memory::MemoryStore) -> Self {
+        self.outbound = Some(memory);
+        self
+    }
+
+    async fn index_sent(&self, chat_id: i64, message_id: i32, text: &str) {
+        let Some(memory) = &self.outbound else {
+            return;
+        };
+        if let Err(e) =
+            crate::platform::tg_outbound::record(memory, chat_id, message_id, text).await
+        {
+            warn!(error = %e, "failed to index adapter outbound text");
+        }
     }
 }
 
@@ -3195,6 +3390,7 @@ impl PlatformSender for TelegramAdapter {
             req = req.parse_mode(pm);
         }
         let msg = req.await?;
+        self.index_sent(chat_id.0, msg.id.0, text).await;
         Ok(format!("{}:{}", chat_id.0, msg.id.0))
     }
 
@@ -3207,10 +3403,13 @@ impl PlatformSender for TelegramAdapter {
         let chat_id = parse_chat_id(chat_id_str)?;
         let input_file = teloxide::types::InputFile::file(path);
         let msg = if let Some(cap) = caption {
-            self.bot
+            let msg = self
+                .bot
                 .send_document(chat_id, input_file)
                 .caption(cap)
-                .await?
+                .await?;
+            self.index_sent(chat_id.0, msg.id.0, cap).await;
+            msg
         } else {
             self.bot.send_document(chat_id, input_file).await?
         };
@@ -3233,6 +3432,7 @@ impl PlatformSender for TelegramAdapter {
             .send_message(chat_id, text)
             .reply_markup(keyboard)
             .await?;
+        self.index_sent(chat_id.0, msg.id.0, text).await;
         Ok(format!("{}:{}", chat_id.0, msg.id.0))
     }
 
@@ -3243,11 +3443,14 @@ impl PlatformSender for TelegramAdapter {
         text: &str,
     ) -> Result<()> {
         let chat_id = parse_chat_id(chat_id_str)?;
-        let parts: Vec<&str> = message_id.split(':').collect();
-        let msg_id: i32 = parts.get(1).unwrap_or(&"0").parse()?;
+        // `chat_id:message_id` — rsplit so a negative chat id keeps its sign.
+        let msg_id = telegram_message_id(message_id)?;
         self.bot
             .edit_message_text(chat_id, MessageId(msg_id), text)
             .await?;
+        // Upsert: a later reply should see the edited body. Deletes do not
+        // drop the row; a reply can still arrive after the bubble is gone.
+        self.index_sent(chat_id.0, msg_id, text).await;
         Ok(())
     }
 
@@ -3257,11 +3460,7 @@ impl PlatformSender for TelegramAdapter {
         message_id: &PlatformMessageId,
     ) -> Result<()> {
         let chat_id = parse_chat_id(chat_id_str)?;
-        let parts: Vec<&str> = message_id.split(':').collect();
-        let Some(msg_id_str) = parts.get(1) else {
-            anyhow::bail!("invalid message id format: {message_id}");
-        };
-        let msg_id: i32 = msg_id_str.parse()?;
+        let msg_id = telegram_message_id(message_id)?;
         self.bot.delete_message(chat_id, MessageId(msg_id)).await?;
         Ok(())
     }
@@ -3296,6 +3495,13 @@ impl PlatformSender for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_message_id_keeps_negative_chat() {
+        assert_eq!(telegram_message_id("-100123:42").unwrap(), 42);
+        assert_eq!(telegram_message_id("111001:7").unwrap(), 7);
+        assert!(telegram_message_id("no-colon").is_err());
+    }
 
     #[tokio::test]
     async fn not_started_hint_only_for_unstarted_chats() {

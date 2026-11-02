@@ -165,33 +165,54 @@ pub async fn edit_rich_message(
     parse_response(response).await
 }
 
+/// `message_id` from a successful `sendRichMessage` / `sendMessage` result object.
+pub(crate) fn message_id_from_result(result: &serde_json::Value) -> Option<i32> {
+    let n = result.get("message_id")?.as_i64()?;
+    i32::try_from(n).ok()
+}
+
+fn indexed_chunk(result: &serde_json::Value, text: &str) -> Option<(i32, String)> {
+    let id = message_id_from_result(result)?;
+    if text.is_empty() {
+        None
+    } else {
+        Some((id, text.to_string()))
+    }
+}
+
 /// Send potentially-long markdown split at newline boundaries (max 4090 UTF-16).
-/// Returns error only if the FIRST chunk fails (subsequent errors logged only).
+///
+/// Returns `(message_id, chunk_text)` for each chunk Telegram accepted.
+/// Error only if the FIRST chunk fails (subsequent errors logged only).
 pub async fn send_rich_messages(
     api_base: &str,
     token: &str,
     chat_id: i64,
     markdown: &str,
-) -> Result<(), RichSenderError> {
+) -> Result<Vec<(i32, String)>, RichSenderError> {
     const MAX_UTF16: usize = 4090;
 
     let total_utf16 = markdown.encode_utf16().count();
     if total_utf16 <= MAX_UTF16 {
-        return send_rich_message(api_base, token, chat_id, markdown)
-            .await
-            .map(|_| ());
+        let result = send_rich_message(api_base, token, chat_id, markdown).await?;
+        return Ok(indexed_chunk(&result, markdown).into_iter().collect());
     }
 
     let chunks = split_markdown_at_newlines(markdown, MAX_UTF16);
+    let mut sent = Vec::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
         if i == 0 {
-            send_rich_message(api_base, token, chat_id, chunk).await?;
-        } else if let Err(e) = send_rich_message(api_base, token, chat_id, chunk).await {
-            warn!("send_rich_message trailing chunk {i} failed: {e}");
+            let result = send_rich_message(api_base, token, chat_id, chunk).await?;
+            sent.extend(indexed_chunk(&result, chunk));
+        } else {
+            match send_rich_message(api_base, token, chat_id, chunk).await {
+                Ok(result) => sent.extend(indexed_chunk(&result, chunk)),
+                Err(e) => warn!("send_rich_message trailing chunk {i} failed: {e}"),
+            }
         }
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// Split markdown at newline boundaries so each chunk fits within `max_utf16`.
@@ -236,21 +257,23 @@ fn char_boundary_from_utf16(text: &str, utf16_offset: usize) -> usize {
 }
 
 /// Try sending via sendRichMessage; on BadMarkdown, call `entity_sender` as fallback.
+///
+/// The `Ok` vec is the bubbles that actually landed (rich, or entity fallback).
 pub async fn try_send_rich_fallback<F, Fut, E>(
     api_base: &str,
     token: &str,
     chat_id: i64,
     markdown: &str,
     entity_sender: F,
-) -> Result<(), RichSenderError>
+) -> Result<Vec<(i32, String)>, RichSenderError>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(), E>>,
+    Fut: Future<Output = Result<Vec<(i32, String)>, E>>,
     E: std::fmt::Display,
 {
     let processed = crate::utils::markdown_entities::preprocess_markdown(markdown);
     match send_rich_messages(api_base, token, chat_id, &processed).await {
-        Ok(()) => Ok(()),
+        Ok(sent) => Ok(sent),
         Err(RichSenderError::BadMarkdown(msg)) => {
             warn!("sendRichMessage failed (bad markdown), falling back to entities: {msg}");
             entity_sender()
@@ -330,6 +353,17 @@ mod tests {
         assert!(matches!(net, RichSenderError::Network(_)));
         assert!(!matches!(bad_md, RichSenderError::Network(_)));
         assert!(!matches!(net, RichSenderError::BadMarkdown(_)));
+    }
+
+    #[test]
+    fn message_id_from_send_result() {
+        let hit = serde_json::json!({"message_id": 32886, "text": ""});
+        assert_eq!(message_id_from_result(&hit), Some(32886));
+        assert_eq!(message_id_from_result(&serde_json::json!({})), None);
+        assert_eq!(
+            message_id_from_result(&serde_json::json!({"message_id": true})),
+            None
+        );
     }
 
     #[test]
