@@ -186,6 +186,7 @@ fn transcript_from_loop(
             crate::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
                 container.messages_snapshot(),
                 iteration,
+                crate::scheduler::checkpoint::stop_kind_from_scheduled(stop),
             )
         },
     )
@@ -1769,31 +1770,44 @@ impl Agent {
                 )
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                let cap = self.config.max_iterations();
+                // Fresh run (and a missing-checkpoint replay) was granted the
+                // full cap, then exhausted it.
+                let accounting =
+                    crate::scheduler::checkpoint::accounting_after_max_iterations(cap, None);
                 warn!(
                     user_id = %user_id,
-                    max_iterations = self.config.max_iterations(),
+                    used = accounting.used,
+                    remaining = accounting.remaining,
+                    cap = accounting.cap,
                     "Reached max iterations without final text response"
                 );
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
                     outputs: None,
-                    error: Some(format!(
-                        "Reached max iterations ({})",
-                        self.config.max_iterations()
+                    error: Some(crate::scheduler::checkpoint::max_iterations_run_reason(
+                        accounting.used,
+                        accounting.remaining,
+                        accounting.cap,
                     )),
                     end_time: Self::now_iso8601_static(),
                 });
                 // ADR-0054: max-iterations is a continuable gate, same snapshot
-                // shape as the timeout path. Chat stays None.
+                // shape as the timeout path. Chat stays None. #360 tags the
+                // snapshot so Retry grants a fresh full budget.
                 let transcript = transcript_from_loop(
                     incoming.schedule_id.is_some(),
                     crate::scheduler::checkpoint::ScheduledLoopStop::MaxIterations {
-                        iterations: self.config.max_iterations(),
+                        iterations: cap,
                     },
                     &container,
                 );
                 (
-                    "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
+                    crate::scheduler::checkpoint::max_iterations_user_text(
+                        accounting.used,
+                        accounting.remaining,
+                        accounting.cap,
+                    ),
                     RunStop::MaxIterations,
                     transcript,
                     None,
@@ -1837,9 +1851,11 @@ impl Agent {
         })
     }
 
-    /// ADR-0039: resume a scheduled run from a timeout transcript checkpoint.
-    /// Restores messages (with interrupted stubs for dangling tools), then
-    /// runs the agent loop with the remaining iteration budget.
+    /// ADR-0039 / #360: resume a scheduled run from a transcript checkpoint.
+    /// Restores messages (with interrupted stubs for dangling tools). An
+    /// IterationStall / max-iterations checkpoint gets a fresh full
+    /// `max_iterations`. Timeout and guard-rewrite keep
+    /// `max(cap − used, 1)`.
     async fn process_continue_from_checkpoint(
         &self,
         incoming: &IncomingMessage,
@@ -1852,7 +1868,16 @@ impl Agent {
         let user_id = &incoming.user_id;
         let used = checkpoint.iteration;
         let messages = checkpoint.messages_for_continue();
-        let remaining = self.config.max_iterations().saturating_sub(used).max(1);
+        // #360: only an IterationStall / max-iterations checkpoint resets the
+        // loop budget to the full configured cap. Timeout and guard-rewrite
+        // keep max(cap − used, 1). The transcript (messages + dangling stubs)
+        // is unchanged either way.
+        let cap = self.config.max_iterations();
+        let budget = crate::scheduler::checkpoint::continue_iteration_budget(
+            cap,
+            used,
+            checkpoint.stop_kind,
+        );
 
         let lane = cancel_lane_for_schedule(incoming.schedule_id.as_deref());
         let cancel_token = self.register_cancel_token(bot_id, user_id, lane).await;
@@ -1914,7 +1939,7 @@ impl Agent {
         });
 
         let loop_config = crate::loop_runner::LoopConfig {
-            max_iterations: remaining,
+            max_iterations: budget,
             empty_response_retry_limit: self.config.empty_response_retry_limit(),
             context_window,
             loop_detection_enabled: ld.enabled,
@@ -2052,21 +2077,33 @@ impl Agent {
                 )
             }
             Ok(crate::loop_runner::LoopOutcome::MaxIterations) => {
+                let accounting = crate::scheduler::checkpoint::accounting_after_max_iterations(
+                    cap,
+                    Some(&checkpoint),
+                );
                 self.langsmith.end_run(crate::langsmith::EndRunParams {
                     id: chain_run_id,
                     outputs: None,
-                    error: Some("max iterations on continue".to_string()),
+                    error: Some(crate::scheduler::checkpoint::max_iterations_run_reason(
+                        accounting.used,
+                        accounting.remaining,
+                        accounting.cap,
+                    )),
                     end_time: Self::now_iso8601_static(),
                 });
                 let transcript = transcript_from_loop(
                     incoming.schedule_id.is_some(),
                     crate::scheduler::checkpoint::ScheduledLoopStop::MaxIterations {
-                        iterations: used.saturating_add(remaining),
+                        iterations: used.saturating_add(budget),
                     },
                     &container,
                 );
                 (
-                    "I've reached the maximum number of tool call iterations. Please try rephrasing your request.".to_string(),
+                    crate::scheduler::checkpoint::max_iterations_user_text(
+                        accounting.used,
+                        accounting.remaining,
+                        accounting.cap,
+                    ),
                     RunStop::MaxIterations,
                     transcript,
                     None,
@@ -4379,7 +4416,9 @@ mod tests {
     #[tokio::test]
     async fn human_retry_kick_continues_when_checkpoint_present() {
         use crate::llm::{ChatMessage, MessageContent};
-        use crate::scheduler::checkpoint::{CheckpointStore, TranscriptCheckpoint};
+        use crate::scheduler::checkpoint::{
+            continue_iteration_budget, CheckpointStopKind, CheckpointStore, TranscriptCheckpoint,
+        };
         use crate::scheduler::reminders::ScheduledTaskStore;
         use crate::scheduler::reruns::RerunQueue;
         use rusqlite::Connection;
@@ -4433,8 +4472,9 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
             }],
-            iteration: 4,
+            iteration: 100,
             dangling_tool_ids: vec![],
+            stop_kind: CheckpointStopKind::MaxIterations,
         };
         cps.save(&id, Some("run-1"), &snap).await.unwrap();
         assert!(queue.retry(&id).await.unwrap());
@@ -4449,8 +4489,14 @@ mod tests {
         let cp = req
             .continue_from
             .expect("checkpoint must attach for continue");
-        assert_eq!(cp.iteration, 4);
+        assert_eq!(cp.iteration, 100);
+        assert_eq!(cp.stop_kind, CheckpointStopKind::MaxIterations);
         assert_eq!(cp.messages.len(), 1);
+        assert_eq!(
+            continue_iteration_budget(100, cp.iteration, cp.stop_kind),
+            100,
+            "IterationStall retry dispatches a checkpoint whose loop budget is the full cap"
+        );
         assert!(
             cps.get(&id).await.unwrap().is_none(),
             "kick must clear checkpoint after successful dispatch"

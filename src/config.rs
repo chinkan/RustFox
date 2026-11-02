@@ -1941,6 +1941,27 @@ mod tests {
     }
 
     #[test]
+    fn default_max_iterations_stays_25() {
+        assert_eq!(super::default_max_iterations(), 25);
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "key"
+            [sandbox]
+            allowed_directory = "/tmp"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.max_iterations(), 25);
+        let example = include_str!("../config.example.toml");
+        assert!(
+            example.contains("# max_iterations = 25"),
+            "example default must stay 25"
+        );
+    }
+
+    #[test]
     fn test_agent_empty_response_retry_limit_defaults_to_three() {
         let toml = r#"
             [telegram]

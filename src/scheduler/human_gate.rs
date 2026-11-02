@@ -93,7 +93,7 @@ fn reason_for(kind: HumanGateKind, detail: &str) -> String {
             "The re-run hit the wall-clock limit ({detail}) and didn't finish. I did **not** retry automatically, because some work may already have happened."
         ),
         HumanGateKind::IterationStall => format!(
-            "It hit the iteration cap ({detail}) without finishing. I did **not** retry automatically, because some work may already have happened."
+            "It hit the iteration limit ({detail}) without finishing. I did **not** retry automatically, because some work may already have happened."
         ),
         HumanGateKind::FailedTwice => format!(
             "It failed again on re-run. I did **not** retry automatically, because some work may already have happened.\n\nLast error: {detail}"
@@ -102,6 +102,12 @@ fn reason_for(kind: HumanGateKind, detail: &str) -> String {
             "The run was not marked completed ({detail}). I did **not** retry automatically, because some work may already have happened."
         ),
     }
+}
+
+/// IterationStall gate. `detail` is used / remaining / cap, not the bare cap.
+pub fn iteration_stall_gate_message(used: u32, remaining: u32, cap: u32, queue_id: &str) -> String {
+    let detail = crate::scheduler::checkpoint::format_iteration_stall_detail(used, remaining, cap);
+    format_human_gate_message(HumanGateKind::IterationStall, &detail, queue_id)
 }
 
 /// PO skeleton (ADR-0038 Q1–Q5) with `/retry` `/cancel` text backup (Q10).
@@ -264,8 +270,21 @@ mod tests {
     }
 
     #[test]
+    fn iteration_stall_gate_shows_used_remaining_and_cap() {
+        let msg = iteration_stall_gate_message(1, 0, 100, "qid");
+        assert!(msg.contains("iteration limit reached"), "{msg}");
+        assert!(msg.contains("used 1"), "{msg}");
+        assert!(msg.contains("remaining 0"), "{msg}");
+        assert!(msg.contains("cap 100"), "{msg}");
+        assert!(!msg.contains("cap (100)"), "{msg}");
+        assert!(!msg.contains("(100)"), "{msg}");
+        assert!(msg.contains("`/retry qid`"));
+        assert!(msg.contains("did **not** retry automatically"));
+    }
+
+    #[test]
     fn siblings_swap_title_only_keep_skeleton() {
-        let stall = format_human_gate_message(HumanGateKind::IterationStall, "25", "qid");
+        let stall = iteration_stall_gate_message(25, 0, 25, "qid");
         assert!(stall.contains("iteration limit reached"));
         assert!(stall.contains("did **not** retry automatically"));
         assert!(stall.contains("run it once more"));
@@ -408,6 +427,7 @@ mod tests {
             messages: vec![],
             iteration: 1,
             dangling_tool_ids: vec![],
+            stop_kind: crate::scheduler::checkpoint::CheckpointStopKind::Timeout,
         };
         cps.save(&id, Some("run-1"), &snap).await.unwrap();
         assert!(cps.get(&id).await.unwrap().is_some());

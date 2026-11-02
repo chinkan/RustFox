@@ -982,7 +982,11 @@ mod tests {
         }
 
         let snap = messages.messages_snapshot();
-        let cp = TranscriptCheckpoint::from_messages(snap, 1);
+        let cp = TranscriptCheckpoint::from_messages(
+            snap,
+            1,
+            crate::scheduler::checkpoint::CheckpointStopKind::Timeout,
+        );
         assert!(
             cp.dangling_tool_ids.contains(&"call_sleep".to_string()),
             "in-flight tool must be dangling so timeout gate can checkpoint: {:?}",
@@ -993,6 +997,91 @@ mod tests {
             crate::scheduler::checkpoint::find_dangling_tool_ids(&cont).is_empty(),
             "continue synthesis must close dangling ids"
         );
+    }
+
+    /// #360: the number [`continue_iteration_budget`] returns is the loop bound.
+    /// A max-iterations checkpoint already at the cap runs `cap` model turns.
+    /// A timeout checkpoint already at the cap still runs one.
+    #[tokio::test]
+    async fn continue_budget_is_the_loop_bound() {
+        use crate::scheduler::checkpoint::{continue_iteration_budget, CheckpointStopKind};
+
+        async fn burn(kind: CheckpointStopKind, expect_calls: usize) {
+            let server = MockServer::start().await;
+            let tool_body = r#"{
+              "choices":[{
+                "message":{
+                  "role":"assistant",
+                  "content":"",
+                  "tool_calls":[{
+                    "id":"call_spin",
+                    "type":"function",
+                    "function":{"name":"spin_tool","arguments":"{}"}
+                  }]
+                },
+                "finish_reason":"tool_calls"
+              }]
+            }"#;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(tool_body))
+                .mount(&server)
+                .await;
+
+            let cap = 3u32;
+            let budget = continue_iteration_budget(cap, cap, kind);
+            let mut config = test_loop_config();
+            config.max_iterations = budget;
+            let llm = test_llm(server.uri());
+            let tools = ToolRegistry::new();
+            let mcp = McpManager::new();
+            let sender = NopSender;
+            let agentic = AgenticLoop::new(
+                &llm,
+                &tools,
+                &mcp,
+                &config,
+                None,
+                None,
+                None,
+                &sender,
+                Box::new(|_u, _c| crate::tool_registry::ToolContext {
+                    sandbox_dir: std::env::temp_dir(),
+                    home_dir: None,
+                    sender: Arc::new(NopSender),
+                    cancel_registry: Arc::new(CancelRegistry::new()),
+                    user_id: "u".into(),
+                    chat_id: "1".into(),
+                    bot_id: "default".into(),
+                    tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+                }),
+                None,
+            );
+            let mut messages = MessageContainer::Plain(vec![ChatMessage {
+                role: "user".into(),
+                content: Some(MessageContent::from_text("partial")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }]);
+            let outcome = agentic
+                .run(&mut messages, "u", "1")
+                .await
+                .expect("loop must not error");
+            assert!(
+                matches!(outcome, LoopOutcome::MaxIterations),
+                "expected MaxIterations, got {outcome:?}"
+            );
+            let hits = server.received_requests().await.unwrap().len();
+            assert_eq!(
+                hits, expect_calls,
+                "kind {kind:?} budget {budget} must be the model-turn count"
+            );
+        }
+
+        burn(CheckpointStopKind::MaxIterations, 3).await;
+        burn(CheckpointStopKind::Timeout, 1).await;
+        burn(CheckpointStopKind::GuardRewrite, 1).await;
     }
 
     #[tokio::test]
