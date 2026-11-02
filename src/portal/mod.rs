@@ -323,6 +323,9 @@ pub struct PortalState {
     pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
     /// Live `[sandbox] mode` shared with CommandTool (ADR-0025).
     pub sandbox_mode: std::sync::Arc<std::sync::RwLock<crate::sandbox::SandboxMode>>,
+    /// SwitchBot Open API tools (ADR-0057). Same `Arc` as the ToolRegistry
+    /// so Portal Settings enable without a restart.
+    pub switchbot: crate::switchbot::SwitchBotTools,
 }
 
 impl PortalState {
@@ -367,7 +370,14 @@ impl PortalState {
             sandbox_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::sandbox::SandboxMode::Trusted,
             )),
+            switchbot: crate::switchbot::SwitchBotTools::disconnected(),
         }
+    }
+
+    /// Share the process SwitchBot connector (vault + live enable flag).
+    pub fn with_switchbot(mut self, tools: crate::switchbot::SwitchBotTools) -> Self {
+        self.switchbot = tools;
+        self
     }
 
     pub fn with_schedule_tz(mut self, tz: crate::scheduler::timezone::ScheduleTimezone) -> Self {

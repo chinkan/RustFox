@@ -375,6 +375,21 @@ Be concise and helpful."""
 # user_model_cron = "0 0 3 * * SUN"           # Weekly user model refresh (6-field cron)
 # compaction_model = "qwen/qwen3-8b"          # Cheaper model for compaction summary + USER.md flush (default: current model)
 
+# ── SwitchBot Open API (optional; ADR-0057) ────────────────────────────────
+# Enable, token, and secret in Portal Settings. The file keeps secret refs
+# only — never paste the token or secret here.
+# Get both in the SwitchBot app: Profile → Developer Options (app 6.14+).
+# Tools: switchbot_list_devices, switchbot_get_status, switchbot_command,
+# switchbot_list_scenes, switchbot_execute_scene. They stay hidden until
+# enabled and both values resolve. Daily Open API budget is about 10,000 calls.
+# Advanced (not the portal form): api_token = "env:SWITCHBOT_API_TOKEN"
+# and api_secret = "env:SWITCHBOT_API_SECRET".
+#
+# [switchbot]
+# enabled = false
+# api_token = "secret:switchbot.api_token"
+# api_secret = "secret:switchbot.api_secret"
+
 # ── Web Portal (optional; disabled unless the section exists AND enabled = true) ──
 # Opt-in embedded web UI + REST/SSE API (ADR 0004). When enabled, the same
 # binary serves the portal (chat, agents, memory, settings) over HTTP.

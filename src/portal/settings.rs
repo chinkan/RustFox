@@ -30,6 +30,15 @@ pub struct SettingsPatch {
     pub default_autonomy_mode: Option<String>,
     #[serde(default)]
     pub portal_port: Option<u16>,
+    /// ADR-0057. `true` requires both vault secrets (or already-configured refs).
+    #[serde(default)]
+    pub switchbot_enabled: Option<bool>,
+    /// Write-only Open Token. Sealed as `secret:switchbot.api_token`.
+    #[serde(default)]
+    pub switchbot_token: Option<String>,
+    /// Write-only secret key. Sealed as `secret:switchbot.api_secret`.
+    #[serde(default)]
+    pub switchbot_secret: Option<String>,
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -73,6 +82,7 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
     let live_mode = *state.sandbox_mode.read().unwrap_or_else(|e| e.into_inner());
     let workspace = cfg.sandbox.allowed_directory.clone();
     let sandbox_info = sandbox_status_json(live_mode, workspace).await;
+    let switchbot = state.switchbot.view();
 
     Ok(Json(json!({
         "editable": {
@@ -115,6 +125,11 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             }),
         },
         "sandbox": sandbox_info,
+        "switchbot": {
+            "enabled": switchbot.enabled,
+            "tokenMasked": switchbot.token_masked,
+            "secretMasked": switchbot.secret_masked,
+        },
         "restartRequired": ["portalPort", "portalEnabled", "portalBind", "portalToken"],
     })))
 }
@@ -224,6 +239,42 @@ pub async fn patch_settings(
         dirty = true;
         updated.push("portalPort".to_string());
         restart_required.push("portalPort".to_string());
+    }
+    if patch.switchbot_enabled.is_some()
+        || patch.switchbot_token.is_some()
+        || patch.switchbot_secret.is_some()
+    {
+        let applied = crate::switchbot::apply_patch(
+            &state.switchbot,
+            crate::switchbot::SwitchBotPatch {
+                enabled: patch.switchbot_enabled,
+                token: patch.switchbot_token,
+                secret: patch.switchbot_secret,
+            },
+        )
+        .map_err(|e| match e {
+            crate::switchbot::SwitchBotPatchError::EmptyCredential(which) => {
+                PortalError::bad_request(
+                    "empty_switchbot_credential",
+                    format!("SwitchBot {which} is empty"),
+                )
+            }
+            crate::switchbot::SwitchBotPatchError::CredentialsRequired => PortalError::bad_request(
+                "switchbot_credentials_required",
+                "Enable needs both a token and a secret in Portal Settings",
+            ),
+            crate::switchbot::SwitchBotPatchError::Store(msg) => PortalError::internal(msg),
+        })?;
+        let table = doc_table(&mut doc, "switchbot");
+        table.insert("enabled".to_string(), toml::Value::Boolean(applied.enabled));
+        if let Some(token) = applied.api_token {
+            table.insert("api_token".to_string(), toml::Value::String(token));
+        }
+        if let Some(secret) = applied.api_secret {
+            table.insert("api_secret".to_string(), toml::Value::String(secret));
+        }
+        dirty = true;
+        updated.push("switchbot".to_string());
     }
 
     if dirty {

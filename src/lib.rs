@@ -42,6 +42,7 @@ pub mod setup;
 pub mod skill_tools;
 pub mod skills;
 pub mod supervisor;
+pub mod switchbot;
 pub mod tool_registry;
 pub mod tools;
 pub mod turn_gate;

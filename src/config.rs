@@ -118,6 +118,10 @@ pub struct Config {
     /// Scheduled-run wall-clock timeout (ADR-0024 / #175).
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    /// SwitchBot Open API (ADR-0057). Absent section = off.
+    /// Token and secret are `secret:` or advanced `env:` refs, never plaintext.
+    #[serde(default)]
+    pub switchbot: SwitchBotConfig,
     /// Absolute home root resolved at load time (not read from TOML).
     #[serde(skip)]
     pub resolved_home: Option<PathBuf>,
@@ -172,6 +176,20 @@ impl Default for SchedulerConfig {
             run_timeout_secs: default_run_timeout_secs(),
         }
     }
+}
+
+/// SwitchBot Open API connector (ADR-0057).
+///
+/// `api_token` and `api_secret` hold `secret:` refs (Portal Settings) or
+/// advanced `env:NAME` refs. Plaintext in this file is refused at call time.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SwitchBotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default)]
+    pub api_secret: Option<String>,
 }
 
 impl SchedulerConfig {
