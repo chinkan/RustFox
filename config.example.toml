@@ -438,9 +438,12 @@ Be concise and helpful."""
 #   {transcript}
 # and then follows the same interactive lane as typed text.
 #
-# Install:
-#   sherpa-onnx-offline and ffmpeg on PATH
-#   model: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
+# Install (linux x64 binaries that include TTS — not a *-no-tts* asset):
+#   https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2
+#   Extract so sherpa-onnx-offline and sherpa-onnx-offline-tts are on PATH.
+#   That shared build also needs its lib/ directory on LD_LIBRARY_PATH.
+#   ffmpeg stays on PATH (voice-note WAV and TTS OGG/Opus).
+#   SenseVoice model: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
 #     (model.int8.onnx + tokens.txt in model_dir)
 #   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2
 #
@@ -450,8 +453,14 @@ Be concise and helpful."""
 #
 # TTS is off unless tts = true. When on, each interactive reply is the text
 # message plus a sendVoice OGG/Opus note. Text is still sent if synthesis fails.
-# Default TTS is sherpa-onnx-offline-tts (model.onnx + tokens.txt, optional
-# lexicon.txt) then ffmpeg libopus. tts_bin replaces that with:
+# Default TTS is sherpa-onnx-offline-tts. tts_model_dir needs model.onnx and
+# tokens.txt. lexicon.txt is optional. When rule.fst exists, the command passes
+# --tts-rule-fsts=<tts_model_dir>/rule.fst.
+# Canonical Cantonese pack (download into <home>/models/tts-cantonese, then symlink):
+#   https://huggingface.co/csukuangfj/vits-cantonese-hf-xiaomaiiwn
+#   files: vits-cantonese-hf-xiaomaiiwn.onnx (~114MB), tokens.txt, lexicon.txt, rule.fst
+#   ln -sf vits-cantonese-hf-xiaomaiiwn.onnx model.onnx
+# tts_bin replaces sherpa + ffmpeg with:
 #   tts_bin --text-file <txt> --output <file.ogg>
 #
 # This path is Telegram voice notes only. It is not Device WS and not ESP32.

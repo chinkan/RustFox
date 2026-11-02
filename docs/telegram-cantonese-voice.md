@@ -38,7 +38,22 @@ Model tarball:
 
 Unpack it so `model_dir` contains `model.int8.onnx` and `tokens.txt`. The default directory is `<home>/models/sensevoice` (`RUSTFOX_HOME`, then `[general].home`, then `~/.rustfox`).
 
-Sherpa is invoked as a process. RustFox does not link onnxruntime, so CI does not download the model. Tests substitute a script for `stt_bin`.
+Binaries (linux x64, build **with** TTS — not a `*-no-tts*` asset):
+
+<https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2>
+
+Extract that archive and put `sherpa-onnx-offline` and `sherpa-onnx-offline-tts` on `PATH`. The shared build also needs its `lib/` directory on `LD_LIBRARY_PATH` (`libonnxruntime.so`, `libsherpa-onnx-c-api.so`). `ffmpeg` is still required: voice notes become 16 kHz WAV, and TTS WAV becomes OGG/Opus.
+
+```bash
+curl -fsSL -o /tmp/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2 \
+&& mkdir -p "$HOME/.local" \
+&& tar -xjf /tmp/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2 -C "$HOME/.local" \
+&& export PATH="$HOME/.local/sherpa-onnx-v2.0.1-linux-x64-shared/bin:$PATH" \
+&& export LD_LIBRARY_PATH="$HOME/.local/sherpa-onnx-v2.0.1-linux-x64-shared/lib:${LD_LIBRARY_PATH:-}"
+```
+
+Sherpa is invoked as a process. RustFox does not link onnxruntime, so the model and these binaries stay outside CI. Tests substitute a script for `stt_bin`.
 
 CLI shape (the wav path is last):
 
@@ -71,7 +86,25 @@ The flag defaults to **false**. An unknown `engine` value fails before any cloud
 tts = true
 ```
 
-Default synthesis is `sherpa-onnx-offline-tts` (VITS: `model.onnx` and `tokens.txt` in `tts_model_dir`, optional `lexicon.txt` or `espeak-ng-data`) and then `ffmpeg` with `libopus` to OGG/Opus. The default directory is `<home>/models/tts-cantonese`.
+Default synthesis is `sherpa-onnx-offline-tts`, then `ffmpeg` with `libopus` to OGG/Opus. RustFox requires `model.onnx` and `tokens.txt` in `tts_model_dir`. `lexicon.txt` is optional (`--vits-lexicon` only when that file exists). `espeak-ng-data/` is optional. When `rule.fst` exists, the command adds `--tts-rule-fsts=<tts_model_dir>/rule.fst`. The default directory is `<home>/models/tts-cantonese`.
+
+Canonical Cantonese pack: <https://huggingface.co/csukuangfj/vits-cantonese-hf-xiaomaiiwn>
+
+Download these files into `<home>/models/tts-cantonese/` (`RUSTFOX_HOME`, then `[general].home`, then `~/.rustfox`):
+
+| File | Role |
+|------|------|
+| `vits-cantonese-hf-xiaomaiiwn.onnx` | Weights, about 114MB. Symlink this file to `model.onnx`. |
+| `tokens.txt` | Required. |
+| `lexicon.txt` | Optional. Passed as `--vits-lexicon` when present. |
+| `rule.fst` | Required by this pack. Passed as `--tts-rule-fsts` when present. |
+
+Then symlink the weights to the name the loader checks:
+
+```bash
+cd <home>/models/tts-cantonese
+ln -sf vits-cantonese-hf-xiaomaiiwn.onnx model.onnx
+```
 
 Spoken text is capped at 3500 characters. The chat text is not truncated.
 
@@ -99,7 +132,7 @@ See the commented `[voice]` block in [`config.example.toml`](../config.example.t
 | `stt_timeout_secs` | `120` | Wall clock for one transcription. `0` becomes 120. |
 | `tts` | `false` | Spoken reply in addition to text. |
 | `tts_bin` | empty | When set, this binary writes the OGG instead of sherpa + ffmpeg. |
-| `tts_model_dir` | `<home>/models/tts-cantonese` | VITS `model.onnx` and `tokens.txt`. |
+| `tts_model_dir` | `<home>/models/tts-cantonese` | VITS `model.onnx` and `tokens.txt`. Optional `lexicon.txt`. `rule.fst` is passed as `--tts-rule-fsts` when the file exists. |
 | `tts_timeout_secs` | `120` | Wall clock for one synthesis. `0` becomes 120. |
 
 Missing model files do not stop startup. The next voice note gets the clarify (or the caption, if you typed one).

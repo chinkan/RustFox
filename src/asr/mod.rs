@@ -87,6 +87,7 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub tts_bin: String,
     /// Directory with `model.onnx` and `tokens.txt` for local TTS.
+    /// Optional `lexicon.txt` and `rule.fst` are passed when those files exist.
     /// Empty until home resolution fills `<home>/models/tts-cantonese`.
     #[serde(default)]
     pub tts_model_dir: PathBuf,
@@ -321,11 +322,14 @@ pub fn ffmpeg_ogg_opus_args(wav: &Path, ogg: &Path) -> Vec<String> {
 
 /// argv for `sherpa-onnx-offline-tts`, excluding the program name.
 /// `text` is the final positional argument.
+///
+/// Optional files under `tts_model_dir` are added only when they exist:
+/// `lexicon.txt` (`--vits-lexicon`), `rule.fst` (`--tts-rule-fsts`), and
+/// `espeak-ng-data/` (`--vits-data-dir`).
 pub fn vits_tts_args(
     model: &Path,
     tokens: &Path,
-    lexicon: Option<&Path>,
-    data_dir: Option<&Path>,
+    tts_model_dir: &Path,
     wav_out: &Path,
     text: &str,
 ) -> Vec<String> {
@@ -333,10 +337,16 @@ pub fn vits_tts_args(
         format!("--vits-model={}", model.display()),
         format!("--vits-tokens={}", tokens.display()),
     ];
-    if let Some(lexicon) = lexicon {
+    let lexicon = tts_model_dir.join("lexicon.txt");
+    if lexicon.is_file() {
         args.push(format!("--vits-lexicon={}", lexicon.display()));
     }
-    if let Some(data_dir) = data_dir {
+    let rule_fst = tts_model_dir.join("rule.fst");
+    if rule_fst.is_file() {
+        args.push(format!("--tts-rule-fsts={}", rule_fst.display()));
+    }
+    let data_dir = tts_model_dir.join("espeak-ng-data");
+    if data_dir.is_dir() {
         args.push(format!("--vits-data-dir={}", data_dir.display()));
     }
     args.push(format!("--output-filename={}", wav_out.display()));
@@ -914,17 +924,8 @@ async fn synthesize_in(cfg: &VoiceConfig, work: &Path, spoken: &str) -> Result<V
             cfg.tts_model_dir.display()
         )));
     }
-    let lexicon = cfg.tts_model_dir.join("lexicon.txt");
-    let data_dir = cfg.tts_model_dir.join("espeak-ng-data");
     let wav_path = work.join("reply.wav");
-    let args = vits_tts_args(
-        &model,
-        &tokens,
-        lexicon.is_file().then_some(lexicon.as_path()),
-        data_dir.is_dir().then_some(data_dir.as_path()),
-        &wav_path,
-        spoken,
-    );
+    let args = vits_tts_args(&model, &tokens, &cfg.tts_model_dir, &wav_path, spoken);
     let bin = bin_path("", DEFAULT_TTS_BIN);
     run_capturing(&bin, &args, cfg.tts_timeout_secs)
         .await
@@ -1019,6 +1020,46 @@ mod tests {
         let args = ffmpeg_ogg_opus_args(Path::new("in.wav"), Path::new("out.ogg"));
         assert!(args.iter().any(|arg| arg == "libopus"));
         assert_eq!(args.last().map(String::as_str), Some("out.ogg"));
+    }
+
+    #[test]
+    fn vits_tts_args_pass_rule_fsts_only_when_rule_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        let tokens = dir.path().join("tokens.txt");
+        let wav = dir.path().join("out.wav");
+
+        let absent = vits_tts_args(&model, &tokens, dir.path(), &wav, "hello");
+        assert!(
+            absent.iter().all(|arg| !arg.starts_with("--tts-rule-fsts")),
+            "missing rule.fst must omit --tts-rule-fsts, got {absent:?}"
+        );
+        assert!(
+            absent.iter().all(|arg| !arg.starts_with("--vits-lexicon")),
+            "missing lexicon.txt must omit --vits-lexicon, got {absent:?}"
+        );
+
+        let rule = dir.path().join("rule.fst");
+        std::fs::write(&rule, b"fst").unwrap();
+        let present = vits_tts_args(&model, &tokens, dir.path(), &wav, "hello");
+        let flag = format!("--tts-rule-fsts={}", rule.display());
+        assert!(
+            present.iter().any(|arg| arg == &flag),
+            "expected {flag} in {present:?}"
+        );
+
+        let lexicon = dir.path().join("lexicon.txt");
+        std::fs::write(&lexicon, "你 nei\n").unwrap();
+        let with_lexicon = vits_tts_args(&model, &tokens, dir.path(), &wav, "hello");
+        let lexicon_flag = format!("--vits-lexicon={}", lexicon.display());
+        assert!(
+            with_lexicon.iter().any(|arg| arg == &lexicon_flag),
+            "expected {lexicon_flag} in {with_lexicon:?}"
+        );
+        assert!(
+            with_lexicon.iter().any(|arg| arg == &flag),
+            "rule.fst must stay set after lexicon.txt is added, got {with_lexicon:?}"
+        );
     }
 
     #[test]
