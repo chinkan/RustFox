@@ -492,9 +492,17 @@ async fn run_one_scheduled_job(
             } = outcome;
             let hit_iteration_cap = stop == rustfox::agent::RunStop::MaxIterations;
             if hit_iteration_cap {
-                let reason = format!(
-                    "Reached max iterations ({}) without a final response",
-                    agent.config.max_iterations()
+                // #360: this run's grant (full cap, or the continue budget),
+                // not the bare configured cap. A 1-turn timeout continue that
+                // then stalls must not read as "hit cap (100)" again.
+                let accounting = rustfox::scheduler::checkpoint::accounting_after_max_iterations(
+                    agent.config.max_iterations(),
+                    req.continue_from.as_ref(),
+                );
+                let reason = rustfox::scheduler::checkpoint::max_iterations_run_reason(
+                    accounting.used,
+                    accounting.remaining,
+                    accounting.cap,
                 );
                 tracing::warn!(
                     "Scheduled task {} exhausted its iteration budget: {}",
@@ -530,9 +538,10 @@ async fn run_one_scheduled_job(
                             .await;
                         }
                         if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                            let ask = rustfox::scheduler::human_gate::format_human_gate_message(
-                                rustfox::scheduler::human_gate::HumanGateKind::IterationStall,
-                                &agent.config.max_iterations().to_string(),
+                            let ask = rustfox::scheduler::human_gate::iteration_stall_gate_message(
+                                accounting.used,
+                                accounting.remaining,
+                                accounting.cap,
                                 rid,
                             );
                             let _ = send_human_gate_reply(
@@ -564,9 +573,10 @@ async fn run_one_scheduled_job(
                                     .await;
                                 }
                                 if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                                    let note = rustfox::scheduler::human_gate::format_human_gate_message(
-                                        rustfox::scheduler::human_gate::HumanGateKind::IterationStall,
-                                        &agent.config.max_iterations().to_string(),
+                                    let note = rustfox::scheduler::human_gate::iteration_stall_gate_message(
+                                        accounting.used,
+                                        accounting.remaining,
+                                        accounting.cap,
                                         &qid,
                                     );
                                     let _ = send_human_gate_reply(

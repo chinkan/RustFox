@@ -2,10 +2,11 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-01
-- **Issue:** Closes #331
+- **Amended:** 2026-11-02 (#360) — Decision 4 continue budget for max-iterations Retry
+- **Issue:** Closes #331. Decision 4 amended by #360.
 - **Amends:** [ADR-0039](./0039-scheduler-timeout-transcript-continue.md) Decision 7 and Decision 11 (checkpoint write timing)
 - **Related:** [ADR-0022](./0022-schedule-local-timezone.md) (calendar day), [ADR-0024](./0024-scheduler-run-timeout.md) (timeout gate), [ADR-0053](./0053-scheduler-completion-not-model-speech.md) (guard rewrite is not `completed`)
-- **Does not block:** v1.0.8 tag. No version bump. No tag.
+- **Does not block:** v1.0.8 tag. The #360 amend is for v1.0.9. No version bump in this note. No tag.
 
 ## Context
 
@@ -33,7 +34,11 @@ Product lock (2026-11-01): do A and B from #331. Do not do C (plan read-back). D
 
    Upsert keeps `last_phase` / `next_phase` already on disk, appends one evidence line, and increments `attempt`. Rust does not invent a phase name. Failed-twice stays full replay (no new checkpoint).
 
-4. **Checkpoint shape is unchanged.** Messages, iteration, dangling tool ids. Retry still continues when a row exists and full-replays when it does not. The stored iteration is the real loop count. Continue budget stays `max(max_iterations - iteration, 1)`. This ADR does not raise `max_iterations`. A cap-exhausted checkpoint therefore resumes with one model turn; the daily file is what the next fresh scheduled run uses, with a full budget.
+4. **Checkpoint records the stop kind.** Messages, iteration, and dangling tool ids stay. The row also stores why it was written: `max_iterations`, `timeout`, `guard_rewrite`, or `other` (older rows and unknown values). Retry still continues when a row exists and full-replays when it does not (ADR-0013). The stored iteration is the cumulative loop count.
+
+   **Continue budget depends on that kind (#360).** Human Retry of a max-iterations / IterationStall checkpoint — slash or inline — sets the next loop's `max_iterations` to the full configured cap. The saved transcript is kept; only the budget resets. Timeout, guard-rewrite, and other checkpoints keep `max(configured cap − stored iteration, 1)`. This ADR does not raise the default `max_iterations` (25). A fresh scheduled run, and a Retry with no checkpoint, still get that full cap. The daily file is what the next fresh scheduled run reads.
+
+   The IterationStall gate and the max-iterations reply state used, remaining, and cap. They do not print the configured cap alone.
 
 5. **Out of scope.** Plan read-back and archiving `.plans/` (#331 C). Idempotent-tool registry. Portal UI for these files. Deleting progress files from other days.
 
@@ -42,4 +47,4 @@ Product lock (2026-11-01): do A and B from #331. Do not do C (plan read-back). D
 - The next fresh run of the same task on the same calendar day is told where the previous run left off, including when the agent never called a tool to write the file itself (timeout, max-iterations, guard rewrite).
 - Human Retry on a max-iterations or guard-rewrite gate continues from the transcript instead of replaying the scheduled prompt from scratch.
 - A verified completion or a hard error removes today's file so a later run is not told to resume a finished or crashed attempt.
-- Operators who Retry a max-iterations gate still get only the remaining iteration budget (at least one turn), not a higher cap.
+- Operators who Retry a max-iterations / IterationStall gate continue the saved transcript with a fresh full configured iteration budget. Timeout and guard-rewrite continues still get only the remaining budget (at least one turn). The default cap is not raised.

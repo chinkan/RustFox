@@ -112,7 +112,7 @@ Decision: the agent loop now reports a **typed stop reason** (`RunStop::{FinalRe
 Cancelled, MaxIterations, Llm}` via `RunOutcome`), and the runner treats `MaxIterations` as a
 failure:
 
-- run row → `failed` with reason `Reached max iterations (N) without a final response`;
+- run row → `failed` with reason `Reached max iterations (used U / remaining R / cap C) without a final response` (#360; not the bare configured cap);
 - queue row → **`enqueue_manual`**: born `awaiting_user` with `attempts=1`, so the watchdog can
   **never** auto-fire it (a budget-exhausted run may already have side effects);
 - DM explains *why* it was not retried, and offers the same `retry` / `cancel` gate.
