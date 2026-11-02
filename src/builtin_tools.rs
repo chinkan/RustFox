@@ -213,7 +213,7 @@ impl ToolHandler for BuiltinTools {
                 tool_type: "function".to_string(),
                 function: FunctionDefinition {
                     name: "update_soul_file".to_string(),
-                    description: "Update a soul file (SOUL.md, AGENTS.md, or USER.md) by appending or replacing content.".to_string(),
+                    description: "Update a soul file (SOUL.md, AGENTS.md, or USER.md) by appending or replacing content. A successful write still warns when the new text falls outside the prompt's visible window or the file is very large; consolidate or use mode=replace when it does.".to_string(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -623,11 +623,25 @@ impl ToolHandler for BuiltinTools {
                     Ok(read_back) if read_back == new_content => {
                         self.soul_updated
                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                        Ok(format!(
+                        // Append: only the new span. Replace and a new file:
+                        // the whole result is what was just written (ADR-0055).
+                        let added_char_start = if mode == "append" && !existing.trim().is_empty() {
+                            learning::soul_append_char_start(&existing)
+                        } else {
+                            0
+                        };
+                        let mut msg = format!(
                             "{} updated successfully. Backup at {}.bak",
                             file_name,
                             path.display()
-                        ))
+                        );
+                        if let Some(warning) =
+                            learning::soul_write_warning(&new_content, added_char_start)
+                        {
+                            msg.push_str("\n\n");
+                            msg.push_str(&warning);
+                        }
+                        Ok(msg)
                     }
                     Ok(_) => {
                         let bak = bak_path(&path, ".bak");
@@ -1178,6 +1192,19 @@ mod tests {
         }
     }
 
+    fn soul_home(home: &std::path::Path) -> ToolContext {
+        ToolContext {
+            sandbox_dir: home.to_path_buf(),
+            home_dir: Some(home.to_path_buf()),
+            sender: Arc::new(NopSender),
+            cancel_registry: Arc::new(crate::cancel_registry::CancelRegistry::new()),
+            user_id: "u".into(),
+            chat_id: "1".into(),
+            bot_id: crate::platform::DEFAULT_BOT_ID.into(),
+            tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+        }
+    }
+
     fn plan_ctx(sandbox: &std::path::Path) -> ToolContext {
         ToolContext {
             sandbox_dir: sandbox.to_path_buf(),
@@ -1391,6 +1418,138 @@ mod tests {
             assert!(allowed_strs.contains(&"AGENTS.md"));
             assert!(allowed_strs.contains(&"USER.md"));
         }
+    }
+
+    /// ADR-0055: over-budget appends and threshold crossings still write, and
+    /// the tool result says so. The 100KB per-call limit still rejects.
+    #[tokio::test]
+    async fn update_soul_file_soft_warns_and_still_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools();
+        let rejected = tools
+            .execute(
+                "update_soul_file",
+                json!({
+                    "file_name": "AGENTS.md",
+                    "mode": "append",
+                    "content": "x".repeat(100_001),
+                }),
+                soul_home(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(rejected.contains("too large"), "{rejected}");
+        assert!(!rejected.contains("updated successfully"));
+        assert!(!tools.soul_updated.load(std::sync::atomic::Ordering::SeqCst));
+
+        let outside = dir.path().join("AGENTS.md");
+        let mut seed = String::from("---\nname: AGENTS\nversion: 1\n---\n\n## Only\n");
+        seed.push_str(&"A".repeat(20_000));
+        tokio::fs::write(&outside, &seed).await.unwrap();
+        let wrote = tools
+            .execute(
+                "update_soul_file",
+                json!({
+                    "file_name": "AGENTS.md",
+                    "mode": "append",
+                    "content": "OUTSIDE_TOKEN",
+                }),
+                soul_home(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(wrote.contains("updated successfully"), "{wrote}");
+        assert!(wrote.contains("WARNING"), "{wrote}");
+        assert!(
+            wrote.contains("outside the prompt visible window"),
+            "{wrote}"
+        );
+        assert!(wrote.contains("mode=replace"), "{wrote}");
+        let disk = tokio::fs::read_to_string(&outside).await.unwrap();
+        assert!(disk.contains("OUTSIDE_TOKEN"));
+        assert!(tools.soul_updated.load(std::sync::atomic::Ordering::SeqCst));
+
+        let quiet_dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            quiet_dir.path().join("USER.md"),
+            "---\nname: USER\nversion: 1\n---\n\n## Prefs\nshort\n",
+        )
+        .await
+        .unwrap();
+        let tools = make_tools();
+        let quiet = tools
+            .execute(
+                "update_soul_file",
+                json!({
+                    "file_name": "USER.md",
+                    "mode": "append",
+                    "content": "## New\nvisible-lesson\n",
+                }),
+                soul_home(quiet_dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(quiet.contains("updated successfully"), "{quiet}");
+        assert!(!quiet.contains("WARNING"), "{quiet}");
+
+        let section_dir = tempfile::tempdir().unwrap();
+        let section_path = section_dir.path().join("AGENTS.md");
+        let mut body = String::from("---\nname: AGENTS\nversion: 1\n---\n\n");
+        for i in 0..200 {
+            body.push_str(&format!("## s{i}\n\n"));
+        }
+        tokio::fs::write(&section_path, &body).await.unwrap();
+        let tools = make_tools();
+        let sections = tools
+            .execute(
+                "update_soul_file",
+                json!({
+                    "file_name": "AGENTS.md",
+                    "mode": "append",
+                    "content": "## s200\nnew-lesson\n",
+                }),
+                soul_home(section_dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(sections.contains("updated successfully"), "{sections}");
+        assert!(sections.contains("WARNING"), "{sections}");
+        assert!(sections.contains("## sections"), "{sections}");
+        assert!(sections.contains("mode=replace"), "{sections}");
+        assert!(
+            !sections.contains("outside the prompt visible window"),
+            "{sections}"
+        );
+        let disk = tokio::fs::read_to_string(&section_path).await.unwrap();
+        assert!(disk.contains("new-lesson"));
+
+        let char_dir = tempfile::tempdir().unwrap();
+        let char_path = char_dir.path().join("AGENTS.md");
+        let mut huge = String::from("---\nname: AGENTS\nversion: 1\n---\n");
+        huge.push_str(&"n".repeat(crate::learning::SOUL_FILE_WARN_CHARS));
+        tokio::fs::write(&char_path, &huge).await.unwrap();
+        let tools = make_tools();
+        let chars = tools
+            .execute(
+                "update_soul_file",
+                json!({
+                    "file_name": "AGENTS.md",
+                    "mode": "append",
+                    "content": "Z",
+                }),
+                soul_home(char_dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(chars.contains("updated successfully"), "{chars}");
+        assert!(chars.contains("WARNING"), "{chars}");
+        assert!(chars.contains("characters"), "{chars}");
+        assert!(
+            !chars.contains("outside the prompt visible window"),
+            "{chars}"
+        );
+        let disk = tokio::fs::read_to_string(&char_path).await.unwrap();
+        assert!(disk.ends_with('Z'));
     }
 
     /// Test-only inverse of `plan_file_name` (non-truncated names).

@@ -618,6 +618,253 @@ pub fn truncate_to(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// Character budget for one soul file inside the system prompt (ADR-0055).
+/// The window shape changed; this budget did not. Do not raise it.
+pub const SOUL_PROMPT_CHAR_BUDGET: usize = 8_000;
+
+/// Soft-warn when a soul file grows past this many characters. Not a hard cap.
+pub const SOUL_FILE_WARN_CHARS: usize = 200_000;
+
+/// Soft-warn when a soul file grows past this many line-start `## ` sections.
+pub const SOUL_FILE_WARN_SECTIONS: usize = 200;
+
+const SOUL_GAP_MARKER: &str = "\n\n[Visible window: preamble plus the most recent ## sections. Earlier text omitted — use read_soul_file for the full file, or consolidate with update_soul_file mode=replace.]\n\n";
+
+const SOUL_SECTION_TRUNCATED_MARKER: &str =
+    "\n\n[Section truncated to fit the visible window.]\n\n";
+
+const SOUL_HEAD_TAIL_MARKER: &str = "\n\n[Visible window: first 25% and last 75% of the character budget (no ## sections). Middle omitted — use read_soul_file for the full file, or consolidate with update_soul_file mode=replace.]\n\n";
+
+/// Prompt-sized view of a soul file. `text` may include omission markers.
+/// Markers are not part of the file and do not count against the budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoulVisibleWindow {
+    pub text: String,
+    /// False when `text` is the whole file (the file fits in the budget).
+    pub omitted: bool,
+    /// Source char ranges `[start, end)` copied into `text`, in file order.
+    kept: Vec<(usize, usize)>,
+}
+
+impl SoulVisibleWindow {
+    fn covers_char_range(&self, start: usize, end: usize) -> bool {
+        if start >= end {
+            return true;
+        }
+        let mut cursor = start;
+        for &(from, to) in &self.kept {
+            if to <= cursor {
+                continue;
+            }
+            if from > cursor {
+                return false;
+            }
+            cursor = to;
+            if cursor >= end {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Visible slice of a soul file for the system prompt (ADR-0055).
+///
+/// Files within [`SOUL_PROMPT_CHAR_BUDGET`] are returned whole, so a short
+/// SOUL.md stays complete. Over budget, line-start `## ` sections are chosen
+/// from the end and assembled in file order after a preamble capped at 25%
+/// of the budget. USER.md and AGENTS.md are recent-tail primary; the preamble
+/// keeps identity and standing preferences. A file with no `## ` headings uses
+/// the first 25% and last 75% of the budget. This does not summarize, and it
+/// does not raise the budget.
+pub fn soul_visible_window(content: &str) -> SoulVisibleWindow {
+    soul_visible_window_with_budget(content, SOUL_PROMPT_CHAR_BUDGET)
+}
+
+fn soul_visible_window_with_budget(content: &str, budget: usize) -> SoulVisibleWindow {
+    let scan = scan_soul(content);
+    let total = scan.chars;
+    if total <= budget {
+        return SoulVisibleWindow {
+            text: content.to_string(),
+            omitted: false,
+            kept: if total == 0 {
+                Vec::new()
+            } else {
+                vec![(0, total)]
+            },
+        };
+    }
+
+    if scan.h2_starts.is_empty() {
+        return head_tail_window(content, budget, total);
+    }
+
+    let preamble_len = scan.h2_starts[0];
+    let preamble_kept = preamble_len.min(budget / 4);
+    let mut remaining = budget - preamble_kept;
+    let mut picked: Vec<(usize, usize, bool)> = Vec::new();
+    for (i, &start) in scan.h2_starts.iter().enumerate().rev() {
+        let end = scan.h2_starts.get(i + 1).copied().unwrap_or(total);
+        let len = end - start;
+        if len <= remaining {
+            picked.push((start, end, false));
+            remaining -= len;
+        } else if remaining > 0 {
+            picked.push((start, start + remaining, true));
+            break;
+        } else {
+            break;
+        }
+    }
+    picked.reverse();
+
+    let ends = char_byte_ends(content);
+    let mut text = String::new();
+    let mut kept = Vec::new();
+    if preamble_kept > 0 {
+        text.push_str(&content[ends[0]..ends[preamble_kept]]);
+        kept.push((0, preamble_kept));
+    }
+    let gap = match picked.first() {
+        Some(&(start, _, _)) => start > preamble_kept,
+        None => preamble_kept < total,
+    };
+    if gap {
+        text.push_str(SOUL_GAP_MARKER);
+    }
+    for (start, end, truncated) in picked {
+        if end > start {
+            text.push_str(&content[ends[start]..ends[end]]);
+            kept.push((start, end));
+        }
+        if truncated {
+            text.push_str(SOUL_SECTION_TRUNCATED_MARKER);
+        }
+    }
+
+    debug_assert!(kept_char_len(&kept) <= budget);
+    SoulVisibleWindow {
+        text,
+        omitted: true,
+        kept,
+    }
+}
+
+/// Char index where appended `content` begins in
+/// `format!("{trimmed}\\n{content}")` with `trimmed = existing.trim_end()`.
+pub fn soul_append_char_start(existing: &str) -> usize {
+    existing.trim_end().chars().count() + 1
+}
+
+/// Soft warning after a successful soul-file write (ADR-0055).
+///
+/// `added_char_start` is the char index of the newly written span. Append
+/// passes [`soul_append_char_start`]; replace and a brand-new file pass `0`
+/// because the whole result is new. `None` means the new span is inside the
+/// visible window and the file is within the warn thresholds. The caller
+/// still keeps the write either way.
+pub fn soul_write_warning(file_content: &str, added_char_start: usize) -> Option<String> {
+    let scan = scan_soul(file_content);
+    let chars = scan.chars;
+    let window = soul_visible_window(file_content);
+    let start = added_char_start.min(chars);
+    let outside = !window.covers_char_range(start, chars);
+    let sections = scan.h2_starts.len();
+    let over_chars = chars > SOUL_FILE_WARN_CHARS;
+    let over_sections = sections > SOUL_FILE_WARN_SECTIONS;
+    if !outside && !over_chars && !over_sections {
+        return None;
+    }
+
+    let mut reasons = Vec::new();
+    if outside {
+        reasons.push("the new content is outside the prompt visible window".to_string());
+    }
+    if over_chars {
+        reasons.push(format!(
+            "the file is {chars} characters (warn threshold {SOUL_FILE_WARN_CHARS})"
+        ));
+    }
+    if over_sections {
+        reasons.push(format!(
+            "the file has {sections} ## sections (warn threshold {SOUL_FILE_WARN_SECTIONS})"
+        ));
+    }
+    Some(format!(
+        "WARNING: {}. The write succeeded, but the prompt only receives the visible window (preamble plus the most recent ## sections, {SOUL_PROMPT_CHAR_BUDGET} characters). Consolidate this file, or call update_soul_file with mode=replace.",
+        reasons.join("; ")
+    ))
+}
+
+struct SoulScan {
+    chars: usize,
+    h2_starts: Vec<usize>,
+}
+
+fn scan_soul(content: &str) -> SoulScan {
+    let mut h2_starts = Vec::new();
+    let mut chars = 0usize;
+    let mut at_line_start = true;
+    let bytes = content.as_bytes();
+    for (byte_i, ch) in content.char_indices() {
+        if at_line_start && bytes[byte_i..].starts_with(b"## ") {
+            h2_starts.push(chars);
+        }
+        at_line_start = ch == '\n' || ch == '\r';
+        chars += 1;
+    }
+    SoulScan { chars, h2_starts }
+}
+
+fn char_byte_ends(content: &str) -> Vec<usize> {
+    let mut ends = Vec::with_capacity(content.len() + 1);
+    ends.push(0);
+    for (byte_i, ch) in content.char_indices() {
+        ends.push(byte_i + ch.len_utf8());
+    }
+    ends
+}
+
+fn char_tail(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        value.to_string()
+    } else {
+        value.chars().skip(count - max_chars).collect()
+    }
+}
+
+fn head_tail_window(content: &str, budget: usize, total: usize) -> SoulVisibleWindow {
+    let head_n = budget / 4;
+    let tail_n = budget - head_n;
+    let head = truncate_to(content, head_n);
+    let tail = char_tail(content, tail_n);
+    let mut text = String::new();
+    let mut kept = Vec::new();
+    if !head.is_empty() {
+        let n = head.chars().count();
+        text.push_str(&head);
+        kept.push((0, n));
+    }
+    text.push_str(SOUL_HEAD_TAIL_MARKER);
+    if !tail.is_empty() {
+        let n = tail.chars().count();
+        text.push_str(&tail);
+        kept.push((total - n, total));
+    }
+    debug_assert!(kept_char_len(&kept) <= budget);
+    SoulVisibleWindow {
+        text,
+        omitted: true,
+        kept,
+    }
+}
+
+fn kept_char_len(kept: &[(usize, usize)]) -> usize {
+    kept.iter().map(|(start, end)| end - start).sum()
+}
+
 /// Shared: format message excerpts for the user-model update prompt.
 fn format_snippets(messages: &[&ChatMessage]) -> String {
     messages
@@ -1639,4 +1886,231 @@ mod tests {
     }
 
     static GITHUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn kept_chars(window: &SoulVisibleWindow) -> usize {
+        kept_char_len(&window.kept)
+    }
+
+    #[test]
+    fn soul_visible_window_short_file_unchanged() {
+        assert_eq!(SOUL_PROMPT_CHAR_BUDGET, 8_000);
+        let plain = "---\nname: SOUL\nversion: 1\n---\n\n# Identity\n\nBe brief.\n";
+        let window = soul_visible_window(plain);
+        assert_eq!(window.text, plain);
+        assert!(!window.omitted);
+        assert!(!window.text.contains("Visible window"));
+
+        let sectioned = format!("{plain}\n## One\nlesson\n## Two\nlater\n");
+        let window = soul_visible_window(&sectioned);
+        assert_eq!(window.text, sectioned);
+        assert!(!window.omitted);
+
+        // Budget is characters, including CJK.
+        let exact = "あ".repeat(SOUL_PROMPT_CHAR_BUDGET);
+        let window = soul_visible_window(&exact);
+        assert_eq!(window.text, exact);
+        assert!(!window.omitted);
+    }
+
+    #[test]
+    fn soul_visible_window_long_sectioned_file_keeps_late_section_in_order() {
+        let mut file = String::from("PREAMBLE standing prefs\n");
+        for i in 0..40 {
+            file.push_str(&format!("## Lesson {i:02}\nTOKEN_{i:02}\n"));
+            file.push_str(&"x".repeat(300));
+            file.push('\n');
+        }
+        assert!(file.chars().count() > SOUL_PROMPT_CHAR_BUDGET);
+        let window = soul_visible_window(&file);
+        assert!(window.omitted);
+        assert!(window.text.contains("TOKEN_39"));
+        assert!(window.text.contains("TOKEN_38"));
+        assert!(!window.text.contains("TOKEN_00"));
+        assert!(window.text.starts_with("PREAMBLE standing prefs"));
+        let older = window.text.find("TOKEN_30").expect("recent section");
+        let newer = window.text.find("TOKEN_39").expect("newest section");
+        assert!(older < newer, "sections must stay in file order");
+        assert!(window.text.find("PREAMBLE").unwrap() < newer);
+        assert!(window.text.contains("most recent ## sections"));
+
+        let head = truncate_to(&file, SOUL_PROMPT_CHAR_BUDGET);
+        assert!(head.contains("TOKEN_00"));
+        assert!(!head.contains("TOKEN_39"));
+        assert!(kept_chars(&window) <= SOUL_PROMPT_CHAR_BUDGET);
+    }
+
+    #[test]
+    fn soul_visible_window_assembles_selected_sections_oldest_to_newest() {
+        let preamble = "PRE\n";
+        let older = "## B\nTOKEN_B\n";
+        let newer = "## C\nTOKEN_C\n";
+        // Trailing newline so `## B` stays a line-start heading.
+        let dropped = format!("## A\nTOKEN_A\n{}\n", "a".repeat(40));
+        let budget = preamble.chars().count() + older.chars().count() + newer.chars().count();
+        assert!(budget / 4 >= preamble.chars().count());
+        let content = format!("{preamble}{dropped}{older}{newer}");
+        let window = soul_visible_window_with_budget(&content, budget);
+        assert!(window.omitted);
+        assert!(window.text.starts_with(preamble));
+        assert!(!window.text.contains("TOKEN_A"));
+        let b = window.text.find("TOKEN_B").expect("older selected");
+        let c = window.text.find("TOKEN_C").expect("newer selected");
+        assert!(b < c, "do not reverse-dump sections");
+        assert!(kept_chars(&window) <= budget);
+    }
+
+    #[test]
+    fn soul_visible_window_no_headings_uses_head_and_tail() {
+        let budget = 40;
+        let content = format!("### Only\n{}MID{}END", "m".repeat(30), "m".repeat(30));
+        let window = soul_visible_window_with_budget(&content, budget);
+        assert!(window.omitted);
+        assert!(window.text.contains("no ## sections"));
+        assert!(window
+            .text
+            .starts_with(&content.chars().take(budget / 4).collect::<String>()));
+        assert!(window.text.ends_with(
+            &content
+                .chars()
+                .skip(content.chars().count() - (budget - budget / 4))
+                .collect::<String>()
+        ));
+        assert!(!window.text.contains("MID"));
+        assert_eq!(kept_chars(&window), budget);
+
+        // Real 8_000 budget, char indexes (CJK is one char, three bytes).
+        let mut over = "あ".repeat(SOUL_PROMPT_CHAR_BUDGET);
+        over.push('尾');
+        let window = soul_visible_window(&over);
+        assert!(window.omitted);
+        assert!(window.text.ends_with('尾'));
+        assert_eq!(
+            window.kept,
+            vec![(0, 2_000), (2_001, SOUL_PROMPT_CHAR_BUDGET + 1)]
+        );
+        assert!(!window.text.contains("## sections. Earlier"));
+    }
+
+    #[test]
+    fn soul_visible_window_oversized_section_truncates_tail() {
+        let budget = 50;
+        let content = format!("PRE\n## Big\n{}ENDTOKEN", "x".repeat(80));
+        let window = soul_visible_window_with_budget(&content, budget);
+        assert!(window.omitted);
+        assert!(window.text.starts_with("PRE\n"));
+        assert!(window.text.contains("## Big"));
+        assert!(!window.text.contains("ENDTOKEN"));
+        assert!(window.text.contains("Section truncated"));
+        assert!(kept_chars(&window) <= budget);
+        assert!(kept_chars(&window) > 0);
+    }
+
+    #[test]
+    fn soul_visible_window_caps_preamble_at_quarter() {
+        let budget = 48;
+        let preamble = format!("{}Q\n", "P".repeat(40));
+        let content = format!("{preamble}## Recent\nRECENT_TAIL\n");
+        assert!(content.chars().count() > budget);
+        assert!(preamble.contains('Q'));
+        let window = soul_visible_window_with_budget(&content, budget);
+        let cap = budget / 4;
+        assert!(window.omitted);
+        assert!(window.text.starts_with(&"P".repeat(cap)));
+        assert!(!window.text.contains('Q'));
+        assert!(window.text.contains("RECENT_TAIL"));
+        assert!(window.text.find("RECENT_TAIL").unwrap() > cap);
+        assert_eq!(window.kept[0], (0, cap));
+        assert!(kept_chars(&window) <= budget);
+    }
+
+    #[test]
+    fn soul_append_char_start_matches_join() {
+        let existing = "---\nname: A\nversion: 1\n---\n\nkeep  \n";
+        let content = "## New\nlesson";
+        let file = format!("{}\n{content}", existing.trim_end());
+        let start = soul_append_char_start(existing);
+        assert_eq!(file.chars().skip(start).collect::<String>(), content);
+    }
+
+    #[test]
+    fn soul_write_warning_when_append_falls_outside_window() {
+        let mut existing = String::from("---\nname: AGENTS\nversion: 1\n---\n\n## Only\n");
+        existing.push_str(&"A".repeat(20_000));
+        let content = "OUTSIDE_TOKEN";
+        let file = format!("{}\n{content}", existing.trim_end());
+        let window = soul_visible_window(&file);
+        assert!(!window.text.contains("OUTSIDE_TOKEN"));
+        let warning = soul_write_warning(&file, soul_append_char_start(&existing))
+            .expect("append past the truncated section tail");
+        assert!(warning.contains("WARNING"));
+        assert!(warning.contains("outside the prompt visible window"));
+        assert!(warning.contains("Consolidate"));
+        assert!(warning.contains("mode=replace"));
+        assert!(file.chars().count() < SOUL_FILE_WARN_CHARS);
+        assert!(scan_soul(&file).h2_starts.len() < SOUL_FILE_WARN_SECTIONS);
+
+        // Replace (whole file is the new span) of an over-budget file warns too.
+        let replaced = soul_write_warning(&file, 0).unwrap();
+        assert!(replaced.contains("outside the prompt visible window"));
+    }
+
+    #[test]
+    fn soul_write_warning_over_char_threshold_even_when_tail_is_visible() {
+        let at_limit = soul_chars_no_headings(SOUL_FILE_WARN_CHARS);
+        assert!(
+            soul_write_warning(&at_limit, at_limit.chars().count() - 1).is_none(),
+            "exactly the threshold stays quiet when the tail is in the window"
+        );
+        let over = soul_chars_no_headings(SOUL_FILE_WARN_CHARS + 1);
+        let warning = soul_write_warning(&over, over.chars().count() - 1).unwrap();
+        assert!(warning.contains("WARNING"));
+        assert!(warning.contains("characters"));
+        assert!(warning.contains("Consolidate"));
+        assert!(warning.contains("mode=replace"));
+        assert!(
+            !warning.contains("outside the prompt visible window"),
+            "the new tail char is inside the 75% tail: {warning}"
+        );
+    }
+
+    #[test]
+    fn soul_write_warning_over_section_threshold_even_when_newest_is_visible() {
+        let at_limit = numbered_sections(SOUL_FILE_WARN_SECTIONS);
+        assert!(at_limit.chars().count() <= SOUL_PROMPT_CHAR_BUDGET);
+        assert!(soul_write_warning(&at_limit, 0).is_none());
+
+        let over = numbered_sections(SOUL_FILE_WARN_SECTIONS + 1);
+        assert!(soul_visible_window(&over).text.contains("## s200"));
+        let warning = soul_write_warning(&over, 0).unwrap();
+        assert!(warning.contains("WARNING"));
+        assert!(warning.contains("## sections"));
+        assert!(warning.contains("Consolidate"));
+        assert!(warning.contains("mode=replace"));
+        assert!(!warning.contains("outside the prompt visible window"));
+    }
+
+    #[test]
+    fn soul_write_warning_quiet_when_append_is_visible_and_under_thresholds() {
+        let existing = "---\nname: AGENTS\nversion: 1\n---\n\n## Old\nkeep\n";
+        let content = "## New\nvisible-lesson\n";
+        let file = format!("{}\n{content}", existing.trim_end());
+        assert!(soul_visible_window(&file).text.contains("visible-lesson"));
+        assert!(soul_write_warning(&file, soul_append_char_start(existing)).is_none());
+        assert!(soul_write_warning(existing, 0).is_none());
+    }
+
+    fn soul_chars_no_headings(total_chars: usize) -> String {
+        let prefix = "---\nname: AGENTS\nversion: 1\n---\n";
+        let prefix_chars = prefix.chars().count();
+        assert!(total_chars >= prefix_chars);
+        format!("{prefix}{}", "x".repeat(total_chars - prefix_chars))
+    }
+
+    fn numbered_sections(n: usize) -> String {
+        let mut s = String::from("---\nname: AGENTS\nversion: 1\n---\n\n");
+        for i in 0..n {
+            s.push_str(&format!("## s{i}\n\n"));
+        }
+        s
+    }
 }

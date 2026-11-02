@@ -399,6 +399,40 @@ fn format_agent_lines_excluding(
     lines.join("\n")
 }
 
+/// Inject one soul file through the ADR-0055 visible window.
+///
+/// A file that fits in the budget is copied whole. Over budget, the block is
+/// the preamble plus the most recent `##` sections, not a head slice.
+fn push_soul_prompt_block(
+    ctx: &mut String,
+    heading: &str,
+    tag: &str,
+    file_name: &str,
+    content: &str,
+) {
+    if content.is_empty() {
+        return;
+    }
+    let window = crate::learning::soul_visible_window(content);
+    ctx.push_str("\n\n");
+    ctx.push_str(heading);
+    ctx.push('\n');
+    ctx.push('<');
+    ctx.push_str(tag);
+    ctx.push_str(">\n");
+    ctx.push_str(&window.text);
+    ctx.push_str("\n</");
+    ctx.push_str(tag);
+    ctx.push('>');
+    if window.omitted {
+        ctx.push_str(
+            "\n[Visible window: preamble plus the most recent sections — use read_soul_file(\"",
+        );
+        ctx.push_str(file_name);
+        ctx.push_str("\") for the full file]");
+    }
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -611,6 +645,10 @@ impl Agent {
     /// always the shared home copies (PO/TL lock). Subagents pass `None` to
     /// keep home-only soul files. Unlike build_system_prompt, this does NOT
     /// include skills/agents listings.
+    ///
+    /// Each non-empty soul file goes through
+    /// [`crate::learning::soul_visible_window`] (ADR-0055). Path selection is
+    /// unchanged: persona SOUL, home AGENTS.md, home USER.md.
     async fn build_system_context(&self, persona: Option<&str>) -> String {
         let mut ctx = String::new();
 
@@ -624,47 +662,32 @@ impl Agent {
                 None => crate::persona_prompt::PersonaSoulFiles::home_only(home),
             };
 
-            // Inject SOUL.md (persona overlay or home)
+            // ADR-0055 window only. Persona SOUL vs home AGENTS.md / USER.md
+            // is still `files` from `resolve_persona_soul_files` above.
             let soul_content = crate::learning::read_soul_file(&files.soul).await;
-            if !soul_content.is_empty() {
-                let truncated = crate::learning::truncate_to(&soul_content, 8_000);
-                ctx.push_str("\n\n# My Identity\n<identity>\n");
-                ctx.push_str(&truncated);
-                ctx.push_str("\n</identity>");
-                if truncated.len() < soul_content.len() {
-                    ctx.push_str(
-                        "\n[File truncated — use read_soul_file(\"SOUL.md\") for full content]",
-                    );
-                }
-            }
-
-            // Inject AGENTS.md — always home learned memory (PO/TL lock)
+            push_soul_prompt_block(
+                &mut ctx,
+                "# My Identity",
+                "identity",
+                "SOUL.md",
+                &soul_content,
+            );
             let agents_content = crate::learning::read_soul_file(&files.agents_md).await;
-            if !agents_content.is_empty() {
-                let truncated = crate::learning::truncate_to(&agents_content, 8_000);
-                ctx.push_str("\n\n# What I've Learned\n<agent_memory>\n");
-                ctx.push_str(&truncated);
-                ctx.push_str("\n</agent_memory>");
-                if truncated.len() < agents_content.len() {
-                    ctx.push_str(
-                        "\n[File truncated — use read_soul_file(\"AGENTS.md\") for full content]",
-                    );
-                }
-            }
-
-            // Inject USER.md — always shared home (PO lock: do not split)
+            push_soul_prompt_block(
+                &mut ctx,
+                "# What I've Learned",
+                "agent_memory",
+                "AGENTS.md",
+                &agents_content,
+            );
             let user_content = crate::learning::read_soul_file(&files.user).await;
-            if !user_content.is_empty() {
-                let truncated = crate::learning::truncate_to(&user_content, 8_000);
-                ctx.push_str("\n\n# User Model\n<user_model>\n");
-                ctx.push_str(&truncated);
-                ctx.push_str("\n</user_model>");
-                if truncated.len() < user_content.len() {
-                    ctx.push_str(
-                        "\n[File truncated — use read_soul_file(\"USER.md\") for full content]",
-                    );
-                }
-            }
+            push_soul_prompt_block(
+                &mut ctx,
+                "# User Model",
+                "user_model",
+                "USER.md",
+                &user_content,
+            );
         }
 
         {
