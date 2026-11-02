@@ -164,11 +164,14 @@ Session-gated on portal (wizard exposes the same path publicly as `/api/opencode
 ## Settings (ADR 0006 — whitelisted projection, never raw TOML)
 
 ### GET /api/settings
-→ `200 {"editable": {"model","generalLocation","defaultAutonomyMode","portalPort"}, "masked": {"openrouterApiKey":"sk-or-…abcd","telegramBotToken":"123…456","providers":[{"name","model","baseUrl","apiKeyMasked":true}], "embeddingApiKey"?}, "restartRequired": ["portalPort"]}`
+→ `200 {"editable": {"model","generalLocation","defaultAutonomyMode","portalPort"}, "masked": {"openrouterApiKey":"sk-or-…abcd","telegramBotToken":"123…456","providers":[{"name","model","baseUrl","apiKeyMasked":true}], "embeddingApiKey"?}, "switchbot": {"enabled":false,"tokenMasked":null,"secretMasked":null}, "restartRequired": ["portalPort"]}`
+
+`switchbot.tokenMasked` / `secretMasked` are masks or null. The raw token and secret never appear.
 
 ### PATCH /api/settings
-Body may contain any subset of `{"model","generalLocation","defaultAutonomyMode","portalPort"}`.
+Body may contain any subset of `{"model","generalLocation","defaultAutonomyMode","portalPort","switchbotEnabled","switchbotToken","switchbotSecret"}`.
 Validation: `model` non-empty → `Agent::set_model` (live, no restart); `portalPort` 1–65535; `defaultAutonomyMode` ∈ {`default`,`autopilot`,`plan`}.
+`switchbotToken` / `switchbotSecret` are write-only plaintext. The server seals them into SecretStore as `secret:switchbot.api_token` and `secret:switchbot.api_secret` and writes only those refs plus `enabled` under `[switchbot]`. `switchbotEnabled: true` without both secrets resolvable → `400 switchbot_credentials_required`. Empty token or secret → `400 empty_switchbot_credential`. SwitchBot changes are live (not listed in `restartRequired`). Advanced `env:NAME` refs are not written by this PATCH; an operator can set them in `config.toml`.
 Before write: copy current file to `config.toml.bak`. Response:
 `200 {"updated":["model","portalPort"], "restartRequired":["portalPort"], "applied":{"model":"<new>"}}`
 

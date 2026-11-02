@@ -118,6 +118,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         ],
       },
       restartRequired: ['portalPort'],
+      switchbot: { enabled: false, tokenMasked: null, secretMasked: null },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
       sandbox: {
         mode: 'trusted' as const,

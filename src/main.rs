@@ -1448,6 +1448,11 @@ async fn main() -> Result<()> {
             config.sandbox.secret_env.clone(),
         ),
     ));
+    let switchbot_tools = rustfox::switchbot::SwitchBotTools::from_config(
+        config.switchbot.clone(),
+        secret_bridge.store(),
+    );
+    tool_registry.register(Box::new(switchbot_tools.clone()));
 
     // Arc::new_cyclic so Agent can store Weak<Self> for job closure captures (breaks Arc cycle)
     let agent = Arc::new_cyclic(|weak| {
@@ -1784,7 +1789,8 @@ async fn main() -> Result<()> {
         )
         .with_secret_store(secret_bridge.store())
         .with_pending_secrets(secret_bridge.pending())
-        .with_sandbox_mode(std::sync::Arc::clone(&sandbox_mode_handle));
+        .with_sandbox_mode(std::sync::Arc::clone(&sandbox_mode_handle))
+        .with_switchbot(switchbot_tools);
         if portal_on {
             rustfox::portal::auth::ensure_startup_token(&portal_state);
         }

@@ -25,7 +25,8 @@ use rustfox::portal::{
 };
 use rustfox::scheduler::reminders::{ScheduledTask, ScheduledTaskStore};
 use rustfox::seat_run::SeatRunSignal;
-use rustfox::tool_registry::ToolUiMode;
+use rustfox::secret_store::SecretStore;
+use rustfox::tool_registry::{ToolHandler, ToolUiMode};
 
 // ---------------------------------------------------------------------------
 // Fake agent
@@ -240,6 +241,14 @@ async fn fixture(portal: PortalConfig) -> Fixture {
 /// Same fixture, but lets a test tweak the loaded `Config` before the fake
 /// agent is built (e.g. set `system_prompt_file` for ADR 0011 R7 tests).
 async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> Fixture {
+    assemble(portal, tweak, None).await
+}
+
+async fn assemble(
+    portal: PortalConfig,
+    tweak: impl FnOnce(&mut Config),
+    switchbot: Option<rustfox::switchbot::SwitchBotTools>,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -252,7 +261,7 @@ async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> 
     let memory = MemoryStore::open_in_memory().unwrap();
     let task_store = ScheduledTaskStore::new(memory.connection());
     let fake = Arc::new(FakeAgent::new(config));
-    let state = PortalState::new(
+    let mut state = PortalState::new(
         fake.clone(),
         memory,
         task_store,
@@ -260,6 +269,9 @@ async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> 
         config_path,
         Some(home),
     );
+    if let Some(tools) = switchbot {
+        state = state.with_switchbot(tools);
+    }
     Fixture {
         app: rustfox::portal::router(state.clone()),
         state,
@@ -845,6 +857,112 @@ async fn settings_patch_rejects_port_zero() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = body_json(res).await;
     assert_eq!(body["error"]["code"], "invalid_portal_port");
+}
+
+#[tokio::test]
+async fn settings_patch_switchbot_seals_secrets_and_enables_live_tools() {
+    let store = Arc::new(rustfox::secret_store::FakeSecretStore::new());
+    let switchbot = rustfox::switchbot::SwitchBotTools::from_config(
+        rustfox::config::SwitchBotConfig::default(),
+        store.clone(),
+    );
+    let f = assemble(with_token_token(), |_| {}, Some(switchbot)).await;
+    let token = "sb-token-PLAINTEXT-should-not-hit-disk";
+    let secret = "sb-secret-PLAINTEXT-should-not-hit-disk";
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "switchbotEnabled": true,
+                    "switchbotToken": token,
+                    "switchbotSecret": secret
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert!(body["updated"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("switchbot")));
+    assert!(body["restartRequired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| v != "switchbot"));
+
+    let content = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert!(content.contains("[switchbot]"), "{content}");
+    assert!(content.contains("secret:switchbot.api_token"), "{content}");
+    assert!(content.contains("secret:switchbot.api_secret"), "{content}");
+    assert!(
+        content.contains("enabled = true"),
+        "switchbot section must record enabled: {content}"
+    );
+    assert!(
+        !content.contains(token),
+        "plaintext token hit config.toml: {content}"
+    );
+    assert!(
+        !content.contains(secret),
+        "plaintext secret hit config.toml: {content}"
+    );
+    assert_eq!(
+        store.get("switchbot.api_token").unwrap().unwrap().expose(),
+        token
+    );
+    assert_eq!(
+        store.get("switchbot.api_secret").unwrap().unwrap().expose(),
+        secret
+    );
+
+    let names = f
+        .state
+        .switchbot
+        .define()
+        .into_iter()
+        .map(|d| d.function.name)
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&"switchbot_list_devices".to_string()),
+        "{names:?}"
+    );
+
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    let raw = body.to_string();
+    assert_eq!(body["switchbot"]["enabled"], true);
+    assert!(!raw.contains(token), "{raw}");
+    assert!(!raw.contains(secret), "{raw}");
+    assert!(body["switchbot"]["tokenMasked"].is_string());
+}
+
+#[tokio::test]
+async fn settings_patch_switchbot_enable_without_secrets_is_rejected() {
+    let f = fixture(with_token_token()).await;
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "switchbotEnabled": true }).to_string()))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "switchbot_credentials_required");
+    let content = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert!(!content.contains("[switchbot]"), "{content}");
 }
 
 #[tokio::test]

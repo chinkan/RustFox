@@ -423,6 +423,13 @@ export interface SettingsEditable {
   portalPort: number
 }
 
+/** ADR-0057 — Enable is editable; token and secret are write-only masks. */
+export interface SwitchBotSettings {
+  enabled: boolean
+  tokenMasked: string | null
+  secretMasked: string | null
+}
+
 export interface ProviderInfo {
   name: string
   model: string
@@ -582,6 +589,7 @@ export interface Settings {
   restartRequired: string[]
   systemPrompt: SystemPromptInfo
   sandbox: SandboxStatus
+  switchbot: SwitchBotSettings
 }
 
 export type AutonomyMode = 'default' | 'autopilot' | 'plan'
@@ -591,6 +599,9 @@ export interface SettingsPatch {
   generalLocation?: string
   defaultAutonomyMode?: AutonomyMode
   portalPort?: number
+  switchbotEnabled?: boolean
+  switchbotToken?: string
+  switchbotSecret?: string
 }
 
 export interface SettingsPatchResult {
