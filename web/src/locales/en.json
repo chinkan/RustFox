@@ -260,7 +260,22 @@
     "mcpEditCustom": "Edit",
     "mcpNewCustom": "New custom server",
     "mcpStdioNote": "Stdio servers ({{names}}) are managed in config.toml.",
-    "mcpKeylessOk": "Keyless is allowed (default)."
+    "mcpKeylessOk": "Keyless is allowed (default).",
+    "devicesTitle": "Devices",
+    "devicesHint": "Hardware text channel at /api/device/v1/ws. Tokens are not the portal login and are shown once. Bare public WebSocket is not recommended — use loopback, Tailscale, or a trusted LAN, and terminate TLS on a reverse proxy. Set [device_ws] enabled = true (shares this bind and port) and restart.",
+    "devicesOff": "The device socket is off. Tokens you create here start working after [device_ws] enabled = true and a restart.",
+    "devicesLabel": "Name",
+    "devicesRoom": "Room",
+    "devicesCreate": "Create",
+    "devicesRotate": "Rotate",
+    "devicesRevoke": "Revoke",
+    "devicesRevokeConfirm": "Revoke “{{label}}”? The board will be rejected until it gets a new token.",
+    "devicesEmpty": "No devices yet.",
+    "devicesTokenOnce": "Copy this token now. It will not be shown again.",
+    "devicesFailed": "{{message}}",
+    "devicesCreated": "Device created.",
+    "devicesRotated": "Token rotated. The previous token no longer works.",
+    "devicesRevoked": "Device revoked."
   },
   "notFound": {
     "title": "404 — Route not found",

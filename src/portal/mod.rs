@@ -2,12 +2,16 @@
 //!
 //! Serves the React SPA (`web/dist`, embedded via `include_dir`) and a
 //! REST+SSE API (`docs/portal-api.md`) from inside the main RustFox
-//! runtime. Spawned from `main.rs` only when `[portal] enabled = true`.
+//! runtime. Spawned from `main.rs` when `[portal] enabled = true`.
+//!
+//! ADR-0056: `[device_ws]` shares this bind and port. When only the device
+//! socket is on, [`serve_device_api_only`] binds the same address without the SPA.
 
 pub mod auth;
 pub mod chat;
 pub mod control;
 pub mod data;
+pub mod devices;
 pub mod error;
 pub mod google;
 pub mod install;
@@ -20,6 +24,7 @@ pub mod url;
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio_util::sync::CancellationToken;
@@ -79,6 +84,14 @@ pub trait AgentOps: Send + Sync {
     /// used by the agents editor to gate `tools:` frontmatter (ADR 0011).
     fn tool_names(&self) -> Vec<String>;
     fn config(&self) -> &Config;
+    /// ADR-0056: device `user_text` joins the owner interactive TurnGate.
+    fn submit_device_turn(
+        &self,
+        turn: crate::device_ws::DeviceUserText,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<crate::device_ws::DeviceTurnOutcome>> {
+        let _ = turn;
+        Box::pin(async { anyhow::bail!("device inbound is not wired on this agent") })
+    }
     /// Start the built-in Google HTTP MCP connector. Default is a no-op so
     /// test fakes do not need a live MCP client.
     fn start_google_connector(
@@ -217,6 +230,16 @@ impl AgentOps for Agent {
     }
     fn config(&self) -> &Config {
         &self.config
+    }
+    fn submit_device_turn(
+        &self,
+        turn: crate::device_ws::DeviceUserText,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<crate::device_ws::DeviceTurnOutcome>> {
+        let agent = self.self_weak.upgrade();
+        Box::pin(async move {
+            let agent = agent.context("agent dropped")?;
+            crate::device_ws::submit_on_agent(&agent, turn).await
+        })
     }
     fn start_google_connector(
         &self,
@@ -380,10 +403,24 @@ impl PortalState {
     pub fn web_user_id(&self) -> String {
         self.config.user_name.clone()
     }
+
+    /// Device token catalog (ADR-0056) on the shared SQLite connection.
+    pub async fn device_registry(&self) -> anyhow::Result<crate::device_ws::DeviceRegistry> {
+        crate::device_ws::DeviceRegistry::open(
+            self.memory.connection(),
+            Arc::clone(&self.secret_store),
+        )
+        .await
+    }
 }
 
 /// Build the portal router (auth middleware applied to the API group).
 pub fn router(state: PortalState) -> Router {
+    let device_ws_on = state.agent.config().device_ws.enabled;
+    router_with(state, device_ws_on)
+}
+
+fn router_with(state: PortalState, device_ws_on: bool) -> Router {
     // Public: login/logout/me (me reports anonymous as unauthenticated).
     // Public: login/logout/me + health. `/health` must stay unauthenticated
     // (ADR 0008B): it is the SPA's restart detector — it polls bootId every
@@ -494,6 +531,18 @@ pub fn router(state: PortalState) -> Router {
         .route(
             "/secrets/pending/{id}",
             axum::routing::delete(secrets::cancel_pending_by_id),
+        )
+        .route(
+            "/settings/devices",
+            get(devices::list_devices).post(devices::create_device),
+        )
+        .route(
+            "/settings/devices/{id}/rotate",
+            post(devices::rotate_device),
+        )
+        .route(
+            "/settings/devices/{id}",
+            axum::routing::delete(devices::revoke_device),
         );
     let protected = protected.layer(axum::middleware::from_fn_with_state(
         state.clone(),
@@ -502,6 +551,11 @@ pub fn router(state: PortalState) -> Router {
 
     // Unmatched /api/* paths must 404 as JSON, not leak the SPA index.html
     // via the static fallback (clients branch on the error envelope).
+    let mut public = public;
+    if device_ws_on {
+        public = public.route("/device/v1/ws", get(devices::ws));
+    }
+
     let api = public.merge(protected).fallback(|| async {
         (
             axum::http::StatusCode::NOT_FOUND,
@@ -520,12 +574,18 @@ pub fn router(state: PortalState) -> Router {
 /// Bind and serve the portal. Returns after binding; the accept loop runs in
 /// a spawned task until `shutdown` fires.
 pub async fn serve(state: PortalState, shutdown: CancellationToken) -> anyhow::Result<()> {
+    let device_on = state.agent.config().device_ws.enabled;
+    let bind = state.config.bind.clone();
     let addr = format!("{}:{}", state.config.bind, state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         anyhow::anyhow!("Portal failed to bind {addr}: {e} (privileged port? try port > 1024)")
     })?;
     let local = listener.local_addr().map(|a| a.to_string()).unwrap_or(addr);
     tracing::info!("Portal: serving on http://{local}/");
+    if device_on {
+        crate::device_ws::warn_if_public_bind(&bind);
+        crate::device_ws::log_listening(&local);
+    }
 
     let app = router(state);
     tokio::spawn(async move {
@@ -537,4 +597,50 @@ pub async fn serve(state: PortalState, shutdown: CancellationToken) -> anyhow::R
         }
     });
     Ok(())
+}
+
+/// API-only Axum on the portal bind/port when `[device_ws]` is on and the
+/// portal UI is off. No SPA. Device tokens still come from Settings, so
+/// issue them with the portal enabled first (or with both flags on).
+pub async fn serve_device_api_only(
+    state: PortalState,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let bind = state.config.bind.clone();
+    crate::device_ws::warn_if_public_bind(&bind);
+    let addr = format!("{}:{}", state.config.bind, state.config.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Device WebSocket failed to bind {addr}: {e} (privileged port? try port > 1024)"
+        )
+    })?;
+    let local = listener.local_addr().map(|a| a.to_string()).unwrap_or(addr);
+    crate::device_ws::log_listening(&local);
+    tracing::info!("Device WebSocket: portal UI is off; serving the device API only");
+
+    let app = device_api_router(state);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown.cancelled().await })
+            .await
+        {
+            tracing::error!("Device WebSocket: server error: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Router used when the portal SPA is off: the device socket and nothing else.
+pub fn device_api_router(state: PortalState) -> Router {
+    Router::new()
+        .route(crate::device_ws::WS_PATH, get(devices::ws))
+        .fallback(|| async {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({
+                    "error": { "code": "not_found", "message": "unknown API endpoint" }
+                })),
+            )
+        })
+        .with_state(state)
 }

@@ -90,6 +90,12 @@ pub struct IncomingMessage {
     /// the turn; the job runner writes the prompt and the result (success,
     /// failure, cancel, and max-iterations) with this id on the segment.
     pub schedule_id: Option<String>,
+    /// Hardware adapter id (ADR-0056). `None` for Telegram, portal, and schedules.
+    pub device_id: Option<String>,
+    /// Room label from the device hello or the issued device record.
+    pub device_room: Option<String>,
+    /// Firmware version from `device_hello`, when the board sent one.
+    pub device_fw: Option<String>,
 }
 
 #[cfg(test)]

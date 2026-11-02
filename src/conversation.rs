@@ -147,9 +147,17 @@ impl ConversationManager {
         config: &Config,
         supports_vision: bool,
     ) -> Result<(String, Vec<ContentPart>)> {
+        // ADR-0056: device turns keep the owner's text and append id/room/fw
+        // so the shared chat shows which board spoke. Absent metadata is a no-op.
+        let text = crate::device_ws::annotate_user_text(
+            &incoming.text,
+            incoming.device_id.as_deref(),
+            incoming.device_room.as_deref(),
+            incoming.device_fw.as_deref(),
+        );
         let (attachment_text, image_parts) = crate::file_processor::process_attachments(
             &incoming.attachments,
-            &incoming.text,
+            &text,
             config,
             &self.memory,
             supports_vision,
@@ -158,7 +166,7 @@ impl ConversationManager {
 
         // Persist the same text the model will see (user text + attachment/OCR),
         // not the bare process_attachments return (empty when there is no attachment).
-        let combined = Self::combine_user_and_attachment_text(&incoming.text, &attachment_text);
+        let combined = Self::combine_user_and_attachment_text(&text, &attachment_text);
 
         let user_msg = ChatMessage {
             role: "user".to_string(),
@@ -1345,6 +1353,9 @@ allowed_directory = "."
             text: "Hi".to_string(),
             attachments: vec![],
             schedule_id: None,
+            device_id: None,
+            device_room: None,
+            device_fw: None,
         };
 
         let (combined, image_parts) = cm.add_incoming(&msg, &config, false).await.unwrap();
@@ -1404,6 +1415,9 @@ allowed_directory = "."
             text: composed.clone(),
             attachments: vec![],
             schedule_id: None,
+            device_id: None,
+            device_room: None,
+            device_fw: None,
         };
 
         let (combined, _) = cm.add_incoming(&msg, &config, false).await.unwrap();
@@ -1462,6 +1476,9 @@ allowed_directory = "."
                 file_name: Some("note.pdf".to_string()),
             }],
             schedule_id: None,
+            device_id: None,
+            device_room: None,
+            device_fw: None,
         };
 
         let (combined, image_parts) = cm.add_incoming(&msg, &config, false).await.unwrap();

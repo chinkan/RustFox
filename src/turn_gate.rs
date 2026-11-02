@@ -44,6 +44,10 @@ pub struct QueuedInput {
     pub platform_msg_id: Option<i32>,
     /// Owned download dir; removed once the input has been consumed or cleared.
     pub temp_dir: Option<PathBuf>,
+    /// ADR-0056 device adapter metadata. `None` for Telegram-originated input.
+    pub device_id: Option<String>,
+    pub device_room: Option<String>,
+    pub device_fw: Option<String>,
 }
 
 impl QueuedInput {

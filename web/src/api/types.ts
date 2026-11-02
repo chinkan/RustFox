@@ -556,6 +556,25 @@ export interface OpenCodeStatus {
 }
 
 
+/** GET /api/settings/devices (ADR-0056). Token plaintext is never listed. */
+export interface DeviceRecord {
+  id: string
+  label: string
+  room: string | null
+  createdAt: string
+}
+
+export interface DeviceList {
+  enabled: boolean
+  path: string
+  devices: DeviceRecord[]
+}
+
+/** Create / rotate response. `token` is shown once. */
+export interface IssuedDevice extends DeviceRecord {
+  token: string
+}
+
 export interface Settings {
   editable: SettingsEditable
   masked: SettingsMasked

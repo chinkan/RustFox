@@ -400,3 +400,18 @@ Be concise and helpful."""
 #
 # token_sha256 = "sha256-hex-of-your-token"
 # token = "your-plaintext-dev-token"
+
+# ── Device WebSocket (optional; ADR-0056) ────────────────────────────────────
+# Opt-in JSON text duplex for a hardware text adapter (ESP32 firmware lives in
+# a separate repo). Default enabled = false. Shares the portal bind and port
+# above. Path: /api/device/v1/ws. If the portal UI is off and this is on,
+# RustFox still binds that address and serves only the device API (no SPA).
+# Issue tokens in Portal Settings → Devices first (shown once). They are not
+# the portal login token.
+#
+# Network: loopback, Tailscale, or a trusted LAN. Bare public WebSocket is
+# not recommended. This server does not speak TLS — terminate TLS on an
+# external reverse proxy.
+#
+# [device_ws]
+# enabled = false

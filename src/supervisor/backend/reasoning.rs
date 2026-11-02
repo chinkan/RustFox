@@ -35,6 +35,9 @@ impl ReasoningBackend {
                     text: prompt,
                     attachments: Vec::new(),
                     schedule_id: None,
+                    device_id: None,
+                    device_room: None,
+                    device_fw: None,
                 };
                 agent
                     .process_message(&incoming, None, None, ToolUiMode::Minimal)

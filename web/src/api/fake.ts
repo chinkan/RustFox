@@ -303,6 +303,26 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       stored: true,
     }),
     cancelSecretClaim: async () => ({ cancelled: true }),
+    listDevices: async () => ({
+      enabled: false,
+      path: '/api/device/v1/ws',
+      devices: [],
+    }),
+    createDevice: async (body: { label: string; room?: string }) => ({
+      id: 'dev-1',
+      label: body.label,
+      room: body.room ?? null,
+      token: 'shown-once',
+      createdAt: '2026-11-02T00:00:00Z',
+    }),
+    rotateDevice: async (id: string) => ({
+      id,
+      label: 'device',
+      room: null,
+      token: 'rotated-once',
+      createdAt: '2026-11-02T00:00:00Z',
+    }),
+    revokeDevice: async () => ({ revoked: true }),
     listPendingSecrets: async () => [],
     createPendingSecret: async (name: string) => ({
       id: 'pend-1',

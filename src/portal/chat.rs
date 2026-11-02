@@ -79,6 +79,9 @@ pub async fn send(
         text: text.clone(),
         attachments: vec![],
         schedule_id: None,
+        device_id: None,
+        device_room: None,
+        device_fw: None,
     };
 
     // Bridge: agent output channels → single SSE event channel.
