@@ -15,6 +15,7 @@ use super::{Skill, SkillRegistry};
 /// ---
 /// name: my-skill
 /// description: What this skill does
+/// trigger: Short catalog line (optional; see ADR-0060)
 /// tags: [coding, review]
 /// ---
 /// # Instructions here...
@@ -94,6 +95,7 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
             return Ok(Skill {
                 name: skill_name,
                 description: description.unwrap_or_else(|| first_line_or_heading(&body)),
+                trigger: extract_field(frontmatter, "trigger"),
                 content: body,
                 tags,
                 model: extract_field(frontmatter, "model"),
@@ -117,6 +119,7 @@ async fn load_skill_file(path: &Path) -> Result<Skill> {
     Ok(Skill {
         name,
         description,
+        trigger: None,
         content: content.to_string(),
         tags: Vec::new(),
         model: None,
@@ -411,5 +414,34 @@ mod tests {
         let s = skills.get("research-pack").unwrap();
         assert_eq!(s.supervisor_workflow.as_deref(), Some("research"));
         assert_eq!(s.supervisor_required_caps, vec!["research".to_string()]);
+        assert_eq!(s.trigger, None);
+    }
+
+    #[tokio::test]
+    async fn trigger_frontmatter_is_optional_and_does_not_replace_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("rain-alerts");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ntrigger: \"Rain alerts\"\nname: rain-alerts\n\
+             description: Full portal description that is longer than a catalog trigger.\n\
+             ---\n# Title\nBODY_STAYS_ON_DISK\n",
+        )
+        .await
+        .unwrap();
+        let skills = load_skills_from_dir(dir.path(), dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let s = skills.get("rain-alerts").unwrap();
+        assert_eq!(s.trigger.as_deref(), Some("Rain alerts"));
+        assert!(s.description.starts_with("Full portal description"));
+        assert!(s.content.contains("BODY_STAYS_ON_DISK"));
+        assert!(!s.content.contains("Rain alerts"));
+        let section = skills.available_skills_section();
+        assert!(section.contains("Rain alerts"), "{section}");
+        assert!(!section.contains("Full portal description"), "{section}");
+        assert!(!section.contains("BODY_STAYS_ON_DISK"), "{section}");
+        assert_eq!(section.matches("Load with:").count(), 1, "{section}");
     }
 }
