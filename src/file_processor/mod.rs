@@ -515,6 +515,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_docx_text_reads_paragraph_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("note.docx");
+        let file = std::fs::File::create(&path).expect("create docx");
+        docx_rs::Docx::new()
+            .add_paragraph(
+                docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text("hello zip")),
+            )
+            .pack(file)
+            .expect("pack docx");
+        let text = extract_docx_text(&path).expect("extract docx");
+        assert!(
+            text.contains("hello zip"),
+            "patched docx-rs/zip 9 reader dropped paragraph text: {text:?}"
+        );
+    }
+
+    #[test]
     fn test_chunk_text_short_returns_one_chunk() {
         let text = "hello world";
         let chunks = chunk_text(text, 1000, 100);

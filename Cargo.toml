@@ -14,8 +14,16 @@ teloxide = { version = "0.17", features = ["macros"] }
 # HTTP client for OpenRouter
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy", "json", "stream", "form"] }
 
-# Self-update for release binary upgrades
-self_update = { version = "0.44", features = ["archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
+# Release binary upgrades. 1.3.1+ is the first line that depends on zip ^9.
+# GHSA-m665-v7pm-7grj needs zip >= 9.0.5; the direct `zip` dep below is that floor
+# (`^9` still allows the vulnerable 9.0.0–9.0.4 releases).
+# default-features = false keeps 0.44's native-tls. On 1.x, rustls is the default
+# and wins when both TLS features are enabled. `compression-flate2` was renamed
+# `compression-tar-gz`. The github backend is now an explicit feature.
+self_update = { version = "1.3.3", default-features = false, features = ["reqwest", "native-tls", "github", "archive-tar", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
+
+# Security floor for every zip edge in this graph (self_update `^9`, patched docx-rs `^9.0.4`).
+zip = { version = "9.0.5", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -80,6 +88,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 # Document processing
 pdf-extract = "0.12"
+# crates.io 0.4.22 requires zip ^8.6.0, which cannot reach the 9.0.5 fix.
+# [patch.crates-io] replaces it with upstream main's zip 9 port.
 docx-rs = "0.4"
 
 # MIME type detection
@@ -115,6 +125,14 @@ aes-gcm = "0.10"
 # Direct libc for O_NOFOLLOW sandbox file opens (ADR-0025)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# crates.io docx-rs 0.4.22 pins zip ^8.6.0 (Dependabot #21–#25). No published
+# release depends on zip 9. This rev is bokuweb/docx-rs main @ ad7fede
+# ("upgrading zip version to 9.0.4 and fixing breaking changes", PR #944),
+# which requires zip ^9.0.4. The direct `zip` 9.0.5 dependency raises the
+# resolved crate to >= 9.0.5 (GHSA-m665-v7pm-7grj).
+[patch.crates-io]
+docx-rs = { git = "https://github.com/bokuweb/docx-rs", rev = "ad7fede6a7f3b61a097c28d0c39dd04626e44701" }
 
 [lib]
 name = "rustfox"

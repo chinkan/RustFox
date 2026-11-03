@@ -1180,7 +1180,7 @@ pub async fn self_upgrade(
             .context("self_update failed")
             .map_err(map_self_update_error)?;
 
-            if update_result.updated() {
+            if update_result.is_updated() {
                 log.push_str(&format!(
                     "→ Updated to version: {}\n",
                     update_result.version()
