@@ -48,6 +48,9 @@ pub struct QueuedInput {
     pub device_id: Option<String>,
     pub device_room: Option<String>,
     pub device_fw: Option<String>,
+    /// True when this input is a successfully transcribed Telegram voice note.
+    /// Survives the queue so the turn that starts from it is voice-origin.
+    pub voice_origin: bool,
 }
 
 impl QueuedInput {

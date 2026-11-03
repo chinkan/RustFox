@@ -15,11 +15,13 @@ Voice notes are Telegram `voice` messages only. Music and other `audio` files ar
 {transcript}
 ```
 
-A typed caption is kept after a blank line. If the note has no caption and download or transcription fails, the bot sends a short clarify and asks you to type the message. It does not return without saying anything.
+4. Mark that turn voice-origin and add a voice-mode instruction to the model for this turn only. The default sentence (empty soul/user files, or any CJK in those files) is: 「你而家用語音回覆：答案要短、口語、適合直接講出嚟；唔好長篇工具報告。」 A Latin-only soul or user file uses the same instruction in English. The English `SOUL.md` created on first run is only a template, so the Cantonese sentence stays until you edit `SOUL.md` or `USER.md`. The model is given the transcript as text. It is not asked to transcribe or synthesize with a shell or by writing code. RustFox code already did STT and, when enabled, does TTS.
+
+A typed caption is kept after a blank line. If the note has no caption and download or transcription fails, the bot sends a short clarify and asks you to type the message. It does not return without saying anything. A failed note that keeps a typed caption is ordinary typed text: no voice-mode prompt and no spoken reply.
 
 OpenRouter speech-to-text does not run unless you set `openrouter_stt = true`. A missing local model with the flag left at the default never posts audio to the network.
 
-TTS does not run unless you set `tts = true`. When it is on, the reply is the usual text message **and** a `sendVoice` OGG/Opus note. Synthesis or `sendVoice` failure leaves the text in the chat.
+TTS does not run unless you set `tts = true`, and then only for a voice-origin reply. Typed chat stays text even when `tts` is true. When a voice reply is spoken, the chat still gets the usual text message **and** a `sendVoice` OGG/Opus note. Synthesis or `sendVoice` failure leaves the text in the chat.
 
 ## Primary engine
 
@@ -130,7 +132,7 @@ See the commented `[voice]` block in [`config.example.toml`](../config.example.t
 | `openrouter_stt` | `false` | Cloud transcription. Off means no network STT. |
 | `openrouter_stt_model` | `openai/whisper-large-v3` | Used only when `openrouter_stt` is true. |
 | `stt_timeout_secs` | `120` | Wall clock for one transcription. `0` becomes 120. |
-| `tts` | `false` | Spoken reply in addition to text. |
+| `tts` | `false` | Spoken copy of a voice-origin reply, in addition to text. Typed chat is not spoken. |
 | `tts_bin` | empty | When set, this binary writes the OGG instead of sherpa + ffmpeg. |
 | `tts_model_dir` | `<home>/models/tts-cantonese` | VITS `model.onnx` and `tokens.txt`. Optional `lexicon.txt`. `rule.fst` is passed as `--tts-rule-fsts` when the file exists. |
 | `tts_timeout_secs` | `120` | Wall clock for one synthesis. `0` becomes 120. |

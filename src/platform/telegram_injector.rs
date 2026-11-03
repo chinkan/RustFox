@@ -312,6 +312,8 @@ pub struct FixtureLlm {
     config: ProviderConfig,
     reply: String,
     models_seen: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Full message lists passed to `chat_completion`, in call order.
+    messages_seen: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
 }
 
 impl FixtureLlm {
@@ -343,6 +345,7 @@ impl FixtureLlm {
             },
             reply: reply.into(),
             models_seen,
+            messages_seen: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -353,6 +356,11 @@ impl FixtureLlm {
     /// Shared list of stripped model ids passed to `chat_completion`.
     pub fn models_seen(&self) -> Arc<std::sync::Mutex<Vec<String>>> {
         Arc::clone(&self.models_seen)
+    }
+
+    /// Shared record of messages passed to `chat_completion`.
+    pub fn messages_seen(&self) -> Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>> {
+        Arc::clone(&self.messages_seen)
     }
 
     /// Wrap as a one-entry [`crate::provider::ProviderRegistry`] (default = `fixture`).
@@ -381,13 +389,16 @@ impl Provider for FixtureLlm {
     async fn chat_completion(
         &self,
         _client: &reqwest::Client,
-        _messages: &[ChatMessage],
+        messages: &[ChatMessage],
         _tools: &[ToolDefinition],
         model: &str,
         _max_tokens: u32,
     ) -> anyhow::Result<ChatCompletion> {
         if let Ok(mut seen) = self.models_seen.lock() {
             seen.push(model.to_string());
+        }
+        if let Ok(mut seen) = self.messages_seen.lock() {
+            seen.push(messages.to_vec());
         }
         Ok(ChatCompletion {
             message: ChatMessage {

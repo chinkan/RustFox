@@ -474,7 +474,7 @@ Be concise and helpful."""
 # openrouter_stt = false          # opt-in cloud STT; default off
 # openrouter_stt_model = "openai/whisper-large-v3"
 # stt_timeout_secs = 120
-# tts = false                     # opt-in spoken reply; default off
+# tts = false                     # opt-in spoken copy of a voice-note reply; typed chat stays text
 # tts_bin = ""                    # empty = sherpa-onnx-offline-tts + ffmpeg
 # tts_model_dir = ""              # empty = <home>/models/tts-cantonese
 # tts_timeout_secs = 120

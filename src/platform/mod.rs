@@ -98,6 +98,11 @@ pub struct IncomingMessage {
     pub device_room: Option<String>,
     /// Firmware version from `device_hello`, when the board sent one.
     pub device_fw: Option<String>,
+    /// Set by Telegram voice ingress after code STT succeeds (#363).
+    /// Typed chat, captions kept after a failed note, schedules, portal, and
+    /// device text stay false. The agent injects the voice-mode prompt only
+    /// when this is true, and TTS is limited to that reply.
+    pub voice_origin: bool,
 }
 
 #[cfg(test)]

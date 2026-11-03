@@ -551,6 +551,7 @@ fn incoming_from_owner(owner: &OwnerChat, queued: &QueuedInput) -> IncomingMessa
         device_id: queued.device_id.clone(),
         device_room: queued.device_room.clone(),
         device_fw: queued.device_fw.clone(),
+        voice_origin: false,
     }
 }
 

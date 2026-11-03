@@ -1524,9 +1524,13 @@ pub async fn handle_message(
         }
     }
 
-    // ADR-0058: Voice notes only (not general Audio). Download → local STT →
-    // `[Voice note]:\n{transcript}` on the interactive lane. A caption-less
+    // ADR-0058 / #363: Voice notes only (not general Audio). Download → local
+    // STT → `[Voice note]:\n{transcript}` on the interactive lane. A successful
+    // transcript marks the turn voice-origin so the agent gets the voice-mode
+    // prompt and, when `[voice].tts` is on, a spoken copy. A caption-less
     // failure sends an honest clarify instead of returning with nothing.
+    // Failed audio that keeps a typed caption is not voice-origin.
+    let mut voice_origin = false;
     if let Some(voice) = msg.voice() {
         let file_id = voice.file.id.to_string();
         let downloaded = match download_telegram_file(&bot, &file_id, &temp_dir, None).await {
@@ -1543,6 +1547,7 @@ pub async fn handle_message(
             &agent.config.openrouter.api_key,
         )
         .await;
+        voice_origin = crate::platform::telegram_voice::voice_origin_from_turn(&turn);
         match turn {
             crate::platform::telegram_voice::VoiceTurn::Text(shaped) => {
                 text = shaped;
@@ -2375,6 +2380,7 @@ pub async fn handle_message(
         } else {
             None
         },
+        voice_origin,
         ..Default::default()
     };
 
@@ -2789,6 +2795,7 @@ async fn run_telegram_user_turn(
         device_id: input.device_id.clone(),
         device_room: input.device_room.clone(),
         device_fw: input.device_fw.clone(),
+        voice_origin: input.voice_origin,
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
@@ -2871,14 +2878,17 @@ async fn run_telegram_user_turn(
         }
     }
 
-    // ADR-0058: TTS is off unless configured. When on, sendVoice is a second
-    // copy — the text above is never dropped if synthesis or sendVoice fails.
+    // ADR-0058 / #363: TTS is off unless configured, and only a voice-origin
+    // reply is spoken. Typed chat stays text even when `[voice].tts` is true.
+    // When on, sendVoice is a second copy — the text above is never dropped
+    // if synthesis or sendVoice fails.
     if let Ok(outcome) = &process_result {
         crate::platform::telegram_voice::maybe_send_tts_voice(
             &bot,
             chat_id,
             &agent.config.voice,
             &outcome.text,
+            input.voice_origin,
         )
         .await;
     }

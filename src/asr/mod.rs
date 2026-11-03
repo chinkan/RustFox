@@ -5,9 +5,11 @@
 //! `[voice].openrouter_stt` is true. That flag defaults to false, so a missing
 //! local model never sends audio to the network.
 //!
-//! TTS defaults off. When `[voice].tts` is true, a planned reply always keeps
-//! the text and may add an OGG/Opus copy. Synthesis failure leaves the text
-//! in place.
+//! TTS defaults off. When `[voice].tts` is true, a voice-origin reply keeps
+//! the text and may add an OGG/Opus copy. Typed chat is not spoken. Synthesis
+//! failure leaves the text in place. The voice-mode sentence
+//! ([`VOICE_MODE_PROMPT_YUE`]) is prompt text only: this library does not ask
+//! the model to shell out for transcription or synthesis.
 //!
 //! Bot API download and voice-note ingress are not in this module. They live
 //! in the Telegram adapter. Hardware adapters must not grow a copy of that
@@ -257,6 +259,44 @@ pub fn voice_note_clarify(err: &AsrError) -> String {
         return "I got your voice note but couldn't transcribe it. Local SenseVoice and the OpenRouter fallback both failed. Please type your message.".to_string();
     }
     "I got your voice note but couldn't transcribe it. Local SenseVoice isn't ready, and cloud transcription is off. Please type your message.".to_string()
+}
+
+/// Product lock (#363). Spoken-reply instruction for a voice-origin turn.
+/// Default Cantonese. Latin-only soul/user text uses [`VOICE_MODE_PROMPT_EN`].
+pub const VOICE_MODE_PROMPT_YUE: &str =
+    "你而家用語音回覆：答案要短、口語、適合直接講出嚟；唔好長篇工具報告。";
+
+/// English adaptation of [`VOICE_MODE_PROMPT_YUE`] when soul and user files
+/// have Latin letters and no CJK.
+pub const VOICE_MODE_PROMPT_EN: &str = "You are replying by voice: keep the answer short, spoken, and ready to say aloud. Do not write a long tool report.";
+
+/// Voice-mode sentence for this turn.
+///
+/// Empty soul and user text stay Cantonese. Any CJK ideograph in those files
+/// stays Cantonese. Latin letters and no CJK adapt to English.
+pub fn voice_mode_instruction(soul: &str, user_model: &str) -> &'static str {
+    let has_cjk = soul.chars().chain(user_model.chars()).any(is_cjk_ideograph);
+    let has_latin = soul
+        .chars()
+        .chain(user_model.chars())
+        .any(|c| c.is_ascii_alphabetic());
+    if !has_cjk && has_latin {
+        VOICE_MODE_PROMPT_EN
+    } else {
+        VOICE_MODE_PROMPT_YUE
+    }
+}
+
+/// System-prompt suffix inserted only for a voice-origin turn.
+pub fn voice_mode_system_suffix(soul: &str, user_model: &str) -> String {
+    format!(
+        "\n\n# Voice reply\n\n{}",
+        voice_mode_instruction(soul, user_model)
+    )
+}
+
+fn is_cjk_ideograph(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
 }
 
 /// Exact inbound shape: `[Voice note]:` then the transcript on the next line.
@@ -1029,6 +1069,69 @@ mod tests {
         assert!(!prod.contains("get_file"));
         assert!(!prod.contains("send_voice"));
         assert!(!prod.contains("sendVoice"));
+    }
+
+    fn voice_payload_requests_shell_speech(user_text: &str, voice_mode: &str) -> bool {
+        let blob = format!("{user_text}\n{voice_mode}").to_ascii_lowercase();
+        [
+            "execute_command",
+            "sherpa-onnx",
+            "whisper",
+            "ffmpeg",
+            ".wav",
+            ".ogg",
+        ]
+        .iter()
+        .any(|cue| blob.contains(cue))
+    }
+
+    #[test]
+    fn default_voice_mode_is_the_cantonese_product_sentence() {
+        let mode = voice_mode_instruction("", "");
+        assert_eq!(
+            mode,
+            "你而家用語音回覆：答案要短、口語、適合直接講出嚟；唔好長篇工具報告。"
+        );
+        let suffix = voice_mode_system_suffix("  ", "\n");
+        assert!(suffix.contains(mode), "{suffix}");
+        assert!(suffix.contains("# Voice reply"), "{suffix}");
+    }
+
+    #[test]
+    fn latin_only_soul_adapts_voice_mode_and_cjk_stays_cantonese() {
+        assert_eq!(
+            voice_mode_instruction("Be brief and kind.", ""),
+            VOICE_MODE_PROMPT_EN
+        );
+        assert!(VOICE_MODE_PROMPT_EN.to_lowercase().contains("voice"));
+        assert_eq!(
+            voice_mode_instruction("Be brief.", "用戶想用廣東話"),
+            VOICE_MODE_PROMPT_YUE
+        );
+        assert_eq!(
+            voice_mode_instruction("", "Speak English"),
+            VOICE_MODE_PROMPT_EN
+        );
+    }
+
+    #[test]
+    fn normal_transcript_voice_mode_does_not_ask_for_shell_speech() {
+        let user = shape_voice_note("早晨");
+        let mode = voice_mode_system_suffix("", "");
+        assert_eq!(user, "[Voice note]:\n早晨");
+        assert!(
+            mode.contains("你而家用語音回覆：答案要短、口語、適合直接講出嚟；唔好長篇工具報告。"),
+            "normal transcript must carry the voice-mode sentence, got {mode}"
+        );
+        assert!(
+            !voice_payload_requests_shell_speech(&user, &mode),
+            "voice-origin payload must not steer shell STT/TTS: {user}\n{mode}"
+        );
+        let english = voice_mode_system_suffix("Reply in English, short sentences.", "");
+        assert!(
+            !voice_payload_requests_shell_speech(&user, &english),
+            "english voice-mode must not steer shell STT/TTS: {english}"
+        );
     }
 
     #[test]

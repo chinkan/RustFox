@@ -38,6 +38,7 @@ impl ReasoningBackend {
                     device_id: None,
                     device_room: None,
                     device_fw: None,
+                    voice_origin: false,
                 };
                 agent
                     .process_message(&incoming, None, None, ToolUiMode::Minimal)
