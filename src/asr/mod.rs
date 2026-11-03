@@ -359,23 +359,79 @@ pub fn vits_tts_args(
     args
 }
 
-/// Last transcript line from sherpa-onnx-offline, with SenseVoice tags removed.
+/// Transcript from `sherpa-onnx-offline`, with SenseVoice tags removed.
+///
+/// v2.0.1 writes one JSON object per file on stdout (`"text"` is the
+/// transcript) and the wav path plus `----` on stderr. Older builds put a
+/// tagged line immediately before `----`. JSON `text` wins, including when
+/// it is empty, so a path-only line before `----` is not the transcript.
 pub fn parse_sensevoice_output(text: &str) -> String {
+    if let Some(from_json) = first_json_text(text) {
+        return strip_sensevoice_tags(&from_json);
+    }
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
     let raw = if let Some(pos) = lines.iter().rposition(|line| *line == "----") {
-        if pos == 0 {
-            ""
-        } else {
-            lines[pos - 1]
-        }
+        lines[..pos]
+            .iter()
+            .rev()
+            .copied()
+            .find(|line| !is_audio_path_line(line))
+            .unwrap_or("")
     } else {
-        lines.last().copied().unwrap_or("")
+        lines
+            .iter()
+            .rev()
+            .copied()
+            .find(|line| !is_audio_path_line(line))
+            .unwrap_or("")
     };
     strip_sensevoice_tags(raw)
+}
+
+/// First JSON object line that has a string `text` field.
+///
+/// The CLI caller joins stdout ahead of stderr, and v2.0.1 prints the
+/// recognizer result as that first object. An empty string is still a hit.
+fn first_json_text(blob: &str) -> Option<String> {
+    blob.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        value.get("text")?.as_str().map(str::to_string)
+    })
+}
+
+/// Sherpa prints the input wav path on its own stderr line. That line is
+/// not speech. A sentence that merely mentions a filename is left alone.
+fn is_audio_path_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.contains('<') || line.contains('{') {
+        return false;
+    }
+    let Some((_, ext)) = line.rsplit_once('.') else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    let audio = matches!(
+        ext.as_str(),
+        "wav" | "ogg" | "mp3" | "flac" | "m4a" | "opus" | "oga" | "aac" | "webm"
+    );
+    if !audio {
+        return false;
+    }
+    line.contains('/') || line.contains('\\') || !line.contains(char::is_whitespace)
+}
+
+const TRANSCRIPT_LOG_CHARS: usize = 80;
+
+fn transcript_preview(text: &str) -> String {
+    text.chars().take(TRANSCRIPT_LOG_CHARS).collect()
 }
 
 /// Drop `<|yue|>` / `<|Speech|>` style tags SenseVoice prints around the words.
@@ -611,6 +667,10 @@ impl SpeechToText for SenseVoiceCli {
         if text.is_empty() {
             Err(AsrError::empty("SenseVoice produced no transcript"))
         } else {
+            tracing::info!(
+                preview = %transcript_preview(&text),
+                "SenseVoice transcript"
+            );
             Ok(text)
         }
     }
@@ -1073,6 +1133,93 @@ mod tests {
         assert_eq!(parse_sensevoice_output("  兩隻小企鵝  \n"), "兩隻小企鵝");
     }
 
+    /// Live `sherpa-onnx` v2.0.1 (`sherpa-onnx-offline.cc`): one
+    /// `AsJsonString()` object on stdout, and the wav path immediately
+    /// before `----` on stderr. The caller joins stdout then stderr.
+    #[test]
+    fn parse_sensevoice_output_prefers_v2_json_text_over_wav_path() {
+        let stdout = concat!(
+            r#"{"lang": "yue", "emotion": "NEUTRAL", "event": "Speech", "text": "早晨呀", "#,
+            r#""timestamps": [0.18], "durations": [0.24], "tokens":["早", "晨", "呀"], "#,
+            r#""ys_log_probs": [], "words": []}"#,
+        );
+        let stderr = "\
+Started
+Done!
+
+/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav
+----
+num threads: 2
+decoding method: greedy_search
+Elapsed seconds: 0.210 s
+";
+        let combined = format!("{stdout}\n{stderr}");
+        assert_eq!(parse_sensevoice_output(&combined), "早晨呀");
+        assert!(
+            !parse_sensevoice_output(&combined).contains("/tmp/"),
+            "wav path must not become the transcript"
+        );
+    }
+
+    #[test]
+    fn parse_sensevoice_output_ignores_path_only_line_before_separator() {
+        let raw = "\
+/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav
+----
+num threads: 2
+";
+        assert_eq!(parse_sensevoice_output(raw), "");
+        assert_eq!(
+            parse_sensevoice_output("/tmp/note.wav\n----\n"),
+            "",
+            "a wav path before ---- is not a transcript"
+        );
+        assert_eq!(
+            parse_sensevoice_output("/tmp/my note.wav\n----\n"),
+            "",
+            "a path with spaces before ---- is not a transcript"
+        );
+        assert_eq!(
+            parse_sensevoice_output("please save note.wav\n----\n"),
+            "please save note.wav"
+        );
+    }
+
+    #[test]
+    fn parse_sensevoice_output_unescapes_json_text() {
+        let stdout = r#"{"lang": "en", "emotion": "", "event": "", "text": "say \"hi\"", "timestamps": [], "tokens":["say", "\"", "hi"], "words": []}"#;
+        let stderr = "/tmp/note.wav\n----\n";
+        assert_eq!(
+            parse_sensevoice_output(&format!("{stdout}\n{stderr}")),
+            "say \"hi\""
+        );
+    }
+
+    #[test]
+    fn parse_sensevoice_output_empty_json_text_does_not_fall_back_to_wav_path() {
+        let raw = "{\"text\": \"\"}\n/tmp/note.wav\n----\n";
+        assert_eq!(parse_sensevoice_output(raw), "");
+    }
+
+    #[test]
+    fn transcript_preview_keeps_the_first_80_chars() {
+        let text = "字".repeat(100);
+        let preview = transcript_preview(&text);
+        assert_eq!(preview.chars().count(), TRANSCRIPT_LOG_CHARS);
+        assert!(text.starts_with(&preview));
+        assert_eq!(transcript_preview("早晨呀"), "早晨呀");
+    }
+
+    #[test]
+    fn parse_sensevoice_output_strips_tags_inside_json_text() {
+        let stdout = r#"{"text": "<|yue|><|Speech|>兩隻小企鵝", "timestamps": []}"#;
+        let stderr = "/tmp/note.wav\n----\n";
+        assert_eq!(
+            parse_sensevoice_output(&format!("{stdout}\n{stderr}")),
+            "兩隻小企鵝"
+        );
+    }
+
     #[test]
     fn yue_is_not_sent_to_openrouter_as_mandarin() {
         assert_eq!(openrouter_language_hint("yue"), None);
@@ -1362,6 +1509,37 @@ mod tests {
         assert_eq!(transcript.source, SttSource::SenseVoice);
         assert_eq!(shape_voice_note(&transcript.text), "[Voice note]:\n早晨");
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v2_sensevoice_script_returns_json_text_not_wav_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.int8.onnx"), b"not-a-real-model").unwrap();
+        std::fs::write(model.join("tokens.txt"), b"<blank>\n").unwrap();
+        let script = write_exec(
+            dir.path(),
+            "sensevoice-v2.sh",
+            r#"#!/bin/sh
+printf '%s\n' '{"lang": "yue", "emotion": "NEUTRAL", "event": "Speech", "text": "早晨呀", "timestamps": [0.18], "tokens":["早", "晨", "呀"], "words": []}'
+printf '%s\n' '/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav' '----' 'num threads: 2' >&2
+"#,
+        );
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            model_dir: model,
+            stt_bin: script.display().to_string(),
+            ..VoiceConfig::default()
+        };
+        let transcript = transcribe_file(&voice, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "早晨呀");
+        assert!(!transcript.text.contains("/tmp/"));
+        assert_eq!(shape_voice_note(&transcript.text), "[Voice note]:\n早晨呀");
     }
 
     #[cfg(unix)]
