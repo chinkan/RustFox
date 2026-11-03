@@ -1286,19 +1286,32 @@ impl Agent {
             .map(ChatId)
             .unwrap_or(ChatId(0));
 
-        // Get or create persistent conversation (isolated by bot_id).
-        // Sole-custom-id installs claim legacy default rows; multi-bot §7.3.
-        let claim_legacy =
-            crate::config::Config::bot_claims_legacy_default(&self.config.bots, bot_id);
+        // Interactive history stays on this bot+user. A scheduled turn loads a
+        // fresh row (ADR-0059) and does not read this chat. Cancel and TurnGate
+        // still use `bot_id` / `user_id` above — the lanes do not move.
+        let hist = crate::scheduler::history::llm_conversation_key(
+            platform,
+            bot_id,
+            user_id,
+            incoming.schedule_id.as_deref(),
+        );
+        let claim_legacy = incoming.schedule_id.is_none()
+            && crate::config::Config::bot_claims_legacy_default(&self.config.bots, bot_id);
         let conversation_id = self
             .memory
-            .get_or_create_conversation_with_claim(platform, bot_id, user_id, claim_legacy)
+            .get_or_create_conversation_with_claim(
+                &hist.platform,
+                &hist.bot_id,
+                &hist.user_id,
+                claim_legacy,
+            )
             .await?;
 
         // Always build the system prompt from the live registry, scoped to
-        // this bot's persona (§7.4). A voice-origin turn appends the
-        // voice-mode sentence for this call only (#363). It is not written
-        // into SQLite, so the next typed turn does not keep it.
+        // this bot's persona (§7.4). The schedule row does not change persona.
+        // A voice-origin turn appends the voice-mode sentence for this call
+        // only (#363). It is not written into SQLite, so the next typed turn
+        // does not keep it.
         let mut current_system_prompt = self.build_system_prompt(bot_id).await;
         if incoming.voice_origin {
             let (soul, user_model) = self.soul_and_user_text(bot_id).await;
@@ -1310,9 +1323,9 @@ impl Agent {
         let skills = self.skills.read().await;
         let mut cmgr = crate::conversation::ConversationManager::new(
             &self.memory,
-            platform,
-            bot_id,
-            user_id,
+            &hist.platform,
+            &hist.bot_id,
+            &hist.user_id,
             current_system_prompt.clone(),
             &skills,
             &self.config,
@@ -1856,10 +1869,9 @@ impl Agent {
         };
         self.clear_cancel_token(bot_id, user_id, lane).await;
 
-        // Every Ok reply is sent to the chat, so history keeps it too
-        // (final, cancelled, or max iterations). A scheduled run's prompt and
-        // result are written by the job runner's `write_schedule_segment`, so
-        // skip it here to avoid a double write.
+        // Every Ok reply is sent to the chat, so interactive history keeps it
+        // too (final, cancelled, or max iterations). A scheduled run does not
+        // persist this turn onto the interactive conversation (ADR-0059).
         if incoming.schedule_id.is_none() {
             let save_msg = ChatMessage {
                 role: "assistant".to_string(),
@@ -2159,15 +2171,14 @@ impl Agent {
         })
     }
 
-    /// Conversation a schedule run reads: the owning bot's chat with the user
-    /// stored on the row. Not another bot, and not a shared cron thread.
+    /// Routing identity for a schedule fire: the owning bot and the user stored
+    /// on the row. Not another bot, and not a shared cron thread.
     ///
-    /// The prompt is tagged with the schedule id. Persistence of the prompt
-    /// and the result (including failure, cancel, and max-iterations) is the
-    /// job runner's [`crate::scheduler::history::write_schedule_segment`],
-    /// which also copies a portal-origin run into the owning bot's Telegram
-    /// conversation. This incoming stays on the row so cancel keys do not
-    /// move onto the Telegram user.
+    /// The prompt is tagged with the schedule id. LLM history for this turn is
+    /// a fresh schedule conversation ([`crate::scheduler::history::llm_conversation_key`]),
+    /// not this chat. Cancel keys stay on this `bot_id` / `user_id` (ADR-0052).
+    /// The prompt and the result are not written back into the interactive
+    /// conversation. Telegram notify is the runner's reply, not this identity.
     pub fn scheduled_incoming(task: &ScheduledTask) -> crate::platform::IncomingMessage {
         crate::platform::IncomingMessage {
             platform: task.platform.clone(),
@@ -3209,6 +3220,14 @@ impl Agent {
 ///
 /// This is a free function (not a method) because it only uses its arguments.
 pub fn build_btw_context(messages: &[ChatMessage], question: &str) -> Vec<ChatMessage> {
+    // ADR-0059: a side question forks the interactive window, not schedule
+    // segments that happen to sit on the same SQLite row.
+    let messages: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|message| !crate::scheduler::history::is_schedule_segment_message(message))
+        .cloned()
+        .collect();
+    let messages = messages.as_slice();
     // 1. Collect all tool_call_ids that have a matching tool_result.
     let mut resolved_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for msg in messages.iter().rev() {
@@ -4332,6 +4351,40 @@ mod tests {
             .map(|c| c.as_text())
             .unwrap_or_default()
             .contains("question"));
+    }
+
+    #[test]
+    fn test_build_btw_context_drops_schedule_segment() {
+        let msgs = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::from_text("earlier chat")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::from_text(
+                    "[schedule:sched-1]\ninbox is quiet",
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        let result = build_btw_context(&msgs, "question");
+        let blob = result
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(blob.contains("earlier chat"), "{blob}");
+        assert!(blob.contains("question"), "{blob}");
+        assert!(
+            !blob.contains("[schedule:sched-1]") && !blob.contains("inbox is quiet"),
+            "btw fork must not carry the schedule segment: {blob}"
+        );
     }
 
     // ---------------------------------------------------------------

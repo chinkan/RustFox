@@ -1543,8 +1543,10 @@ mod tests {
         );
     }
 
+    /// Routing identity stays on the owning bot (cancel / TurnGate). LLM
+    /// history for the fire is a separate schedule conversation (ADR-0059).
     #[tokio::test]
-    async fn run_records_on_the_owning_bots_conversation() {
+    async fn scheduled_incoming_stays_on_the_owning_bot() {
         let memory = MemoryStore::open_in_memory().unwrap();
         let mut task = make_task("run-1", "owner", "recurring");
         task.bot_id = "researcher".into();
