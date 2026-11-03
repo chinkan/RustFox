@@ -246,7 +246,7 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 
 | Tool | Description |
 |------|-------------|
-| `read_skill_file` | Read a file from a skill's directory |
+| `read_skill_file` | Read a file from a skill directory. `offset` is a 1-based line and `limit` is how many lines to return; the slice is prefixed with `[path lines X-Y of N]`. Omit both to return the full file. |
 | `write_skill_file` | Write new or update existing skill files |
 | `patch_skill` | Patch an existing skill's SKILL.md (`mode`: `append` default, or `replace`; append strips patch frontmatter) |
 | `reload_skills` | Hot-reload the skill registry without restarting |
@@ -383,8 +383,16 @@ Before any upgrade or `cargo install` that replaces the running binary:
 
 Skills are folder-based natural-language instructions loaded at startup and injected into the LLM's system prompt. Each skill has its own folder with a `SKILL.md` file containing YAML frontmatter and instruction body.
 
-- **Instruction skills** (no `model` in frontmatter): loaded by the agent via `read_skill_file` when relevant
+- **Instruction skills** (no `model` in frontmatter): loaded on demand with `read_skill_file`
 - **Subagent skills** (`model` set): invoked via `invoke_agent` with their own model and tool whitelist
+
+When the skill has an `INDEX.md` phase table, load one phase at a time:
+
+```
+read_skill_file(skill_name="<skill>", relative_path="SKILL.md", offset=<first line>, limit=<line count>)
+```
+
+`offset` is 1-based. `limit` is `last - first + 1` for an inclusive range in that table. The result starts with `[SKILL.md lines X-Y of N]`. Recompute `offset` and `limit` when `SKILL.md` line numbers move. Omit both arguments when the whole file is required.
 
 ```
 skills/

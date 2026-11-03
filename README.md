@@ -254,7 +254,7 @@ python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t);
 | `read_soul_file` / `update_soul_file` / `revert_soul_file` | Read, update (append/replace, `.bak` backup), or restore SOUL.md / AGENTS.md / USER.md |
 | `remember` / `recall` / `search_memory` | Store, look up, and search long-term user knowledge |
 | `plan_create` / `plan_update` / `plan_view` | Create and track a structured execution plan |
-| `read_skill_file` / `write_skill_file` / `reload_skills` | Read, write, and hot-reload skills |
+| `read_skill_file` / `write_skill_file` / `reload_skills` | Read (full file, or a 1-based `offset` / `limit` line slice), write, and hot-reload skills |
 | `read_agent_file` / `write_agent_file` / `reload_agents` | Read, write, and hot-reload sub-agent definitions |
 | `invoke_agent` | Run a predefined agent from `agents/` (or a `[[bots]]` persona via `bot=`) |
 | `spawn_agents` | Spawn ad-hoc subagents with inline system prompts (parallel batch supported) |
