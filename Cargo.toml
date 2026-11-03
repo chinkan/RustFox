@@ -60,7 +60,7 @@ croner = "4"
 tokio-cron-scheduler = "0.15"
 
 # Markdown parser for entity-based Telegram message formatting
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 
 # SQLite vector search extension
 sqlite-vec = "0.1"
