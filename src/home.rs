@@ -26,6 +26,14 @@ Each session I wake up fresh. These files _are_ my memory.
 I read them at start, update them at end.
 ";
 
+/// True when `text` is the install-written English soul template.
+///
+/// That template is not a language choice. Voice-mode stays Cantonese until
+/// SOUL.md or USER.md is customized (#363).
+pub fn is_stock_soul(text: &str) -> bool {
+    text.trim() == DEFAULT_SOUL.trim()
+}
+
 const DEFAULT_AGENTS: &str = "\
 ---
 name: agents
@@ -399,6 +407,15 @@ mod tests {
         );
         assert_eq!(path, PathBuf::from(abs("/h/.rustfox/sub/data/skills")));
         assert_eq!(origin, PathOrigin::RebasedRelative);
+    }
+
+    #[test]
+    fn stock_soul_template_is_not_a_language_choice() {
+        assert!(is_stock_soul(DEFAULT_SOUL));
+        assert!(is_stock_soul(&format!("\n{DEFAULT_SOUL}\n")));
+        assert!(!is_stock_soul(""));
+        assert!(!is_stock_soul("Be brief and kind."));
+        assert!(!is_stock_soul("用廣東話"));
     }
 
     #[test]

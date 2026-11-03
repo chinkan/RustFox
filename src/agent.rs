@@ -639,6 +639,29 @@ impl Agent {
         prompt
     }
 
+    /// Raw persona SOUL.md and install-wide USER.md for voice-mode language.
+    /// Missing files are empty, which keeps the Cantonese product sentence.
+    async fn soul_and_user_text(&self, bot_id: &str) -> (String, String) {
+        let Some(home) = &self.config.resolved_home else {
+            return (String::new(), String::new());
+        };
+        let bot = crate::persona_prompt::bot_for_prompt(&self.config, bot_id);
+        let files = crate::persona_prompt::resolve_persona_soul_files(
+            home,
+            &self.config.agents.directory,
+            &bot.persona,
+        );
+        let soul = crate::learning::read_soul_file(&files.soul).await;
+        // The install template is English prose, not a request for English speech.
+        let soul = if crate::home::is_stock_soul(&soul) {
+            String::new()
+        } else {
+            soul
+        };
+        let user_model = crate::learning::read_soul_file(&files.user).await;
+        (soul, user_model)
+    }
+
     /// Build ambient system context (soul files, timestamp, location).
     ///
     /// When `persona` is `Some`, SOUL prefers `agents/<persona>/SOUL.md`
@@ -1273,8 +1296,15 @@ impl Agent {
             .await?;
 
         // Always build the system prompt from the live registry, scoped to
-        // this bot's persona (§7.4).
-        let current_system_prompt = self.build_system_prompt(bot_id).await;
+        // this bot's persona (§7.4). A voice-origin turn appends the
+        // voice-mode sentence for this call only (#363). It is not written
+        // into SQLite, so the next typed turn does not keep it.
+        let mut current_system_prompt = self.build_system_prompt(bot_id).await;
+        if incoming.voice_origin {
+            let (soul, user_model) = self.soul_and_user_text(bot_id).await;
+            current_system_prompt
+                .push_str(&crate::asr::voice_mode_system_suffix(&soul, &user_model));
+        }
 
         // Use ConversationManager for message construction and management
         let skills = self.skills.read().await;
@@ -2151,6 +2181,7 @@ impl Agent {
             device_id: None,
             device_room: None,
             device_fw: None,
+            voice_origin: false,
         }
     }
 

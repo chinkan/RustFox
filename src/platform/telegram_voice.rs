@@ -4,6 +4,10 @@
 //! platform adapter. The shareable ASR library does not import it. Device
 //! WebSocket and ESP32 capture must not call [`decide_voice_turn`] or
 //! [`maybe_send_tts_voice`].
+//!
+//! A transcribed note is voice-origin ([`voice_origin_from_turn`]). The agent
+//! then injects the voice-mode prompt. [`maybe_send_tts_voice`] speaks only
+//! that reply. The model is not asked to run STT or TTS.
 
 use std::path::PathBuf;
 
@@ -33,6 +37,18 @@ pub(crate) enum VoiceTurn {
 pub(crate) enum DownloadedVoice {
     Ready(PathBuf),
     Failed(String),
+}
+
+/// Successful transcription is the only voice-origin turn. A clarify, including
+/// one that keeps a typed caption, is not.
+pub(crate) fn voice_origin_from_turn(turn: &VoiceTurn) -> bool {
+    matches!(turn, VoiceTurn::Text(_))
+}
+
+/// Spoken copy is for a voice-origin reply when TTS is enabled.
+/// Typed chat stays text-only even if `tts` is true.
+pub(crate) fn tts_for_turn(voice_origin: bool, tts_enabled: bool) -> bool {
+    voice_origin && tts_enabled
 }
 
 /// `[Voice note]:` plus the transcript. A non-empty caption is kept after a
@@ -106,8 +122,9 @@ pub(crate) async fn maybe_send_tts_voice(
     chat_id: ChatId,
     voice: &VoiceConfig,
     text: &str,
+    voice_origin: bool,
 ) {
-    if !voice.tts || text.trim().is_empty() {
+    if !tts_for_turn(voice_origin, voice.tts) || text.trim().is_empty() {
         return;
     }
     let synth = LocalTts { cfg: voice.clone() };
@@ -141,6 +158,28 @@ async fn send_ogg_voice(bot: &Bot, chat_id: ChatId, ogg: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::asr::VoiceConfig;
+
+    #[test]
+    fn only_a_transcribed_voice_turn_is_voice_origin() {
+        assert!(voice_origin_from_turn(&VoiceTurn::Text(
+            "[Voice note]:\n早晨".into()
+        )));
+        assert!(!voice_origin_from_turn(&VoiceTurn::Clarify(
+            "couldn't download".into()
+        )));
+        assert!(!voice_origin_from_turn(&VoiceTurn::ClarifyThen {
+            clarify: "couldn't download".into(),
+            text: "remember this".into(),
+        }));
+    }
+
+    #[test]
+    fn tts_applies_only_to_voice_origin_replies() {
+        assert!(tts_for_turn(true, true));
+        assert!(!tts_for_turn(false, true), "typed chat must not sendVoice");
+        assert!(!tts_for_turn(true, false));
+        assert!(!tts_for_turn(false, false));
+    }
 
     #[test]
     fn voice_turn_text_shapes_the_transcript_and_keeps_a_caption() {

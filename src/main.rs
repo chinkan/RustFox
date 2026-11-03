@@ -909,6 +909,7 @@ fn spawn_bare_user_turns(
                 device_id: first.device_id.clone(),
                 device_room: first.device_room.clone(),
                 device_fw: first.device_fw.clone(),
+                voice_origin: first.voice_origin,
             };
             let stop = match agent
                 .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None)

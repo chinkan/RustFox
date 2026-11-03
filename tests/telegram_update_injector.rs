@@ -419,6 +419,8 @@ struct HandleMessageHarness {
     api: MockTelegramApi,
     /// Stripped model ids seen by FixtureLlm::chat_completion (ADR-0036).
     models_seen: Arc<Mutex<Vec<String>>>,
+    /// Message lists passed to FixtureLlm::chat_completion, in call order.
+    messages_seen: Arc<Mutex<Vec<Vec<rustfox::llm::ChatMessage>>>>,
 }
 
 impl HandleMessageHarness {
@@ -478,9 +480,9 @@ impl HandleMessageHarness {
         let bot_arc = Arc::new(bot.clone());
 
         let models_seen = Arc::new(Mutex::new(Vec::new()));
-        let registry = Arc::new(
-            FixtureLlm::with_models_seen(stub_reply, Arc::clone(&models_seen)).into_registry(),
-        );
+        let llm = FixtureLlm::with_models_seen(stub_reply, Arc::clone(&models_seen));
+        let messages_seen = llm.messages_seen();
+        let registry = Arc::new(llm.into_registry());
         let memory = MemoryStore::open_in_memory().expect("in-memory sqlite");
         let task_store = ScheduledTaskStore::new(memory.connection());
         let scheduler = Arc::new(Scheduler::new().await.expect("scheduler"));
@@ -539,6 +541,7 @@ impl HandleMessageHarness {
             bot,
             api,
             models_seen,
+            messages_seen,
         }
     }
 
@@ -658,6 +661,7 @@ impl HandleMessageHarness {
             bot,
             api,
             models_seen: Arc::new(Mutex::new(Vec::new())),
+            messages_seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -1262,6 +1266,16 @@ async fn voice_download_failure_still_feeds_the_caption() {
         users.iter().all(|text| !text.starts_with("[Voice note]:")),
         "no transcript was invented; got {users:?}"
     );
+    let seen = h.messages_seen.lock().expect("messages").clone();
+    let system = seen
+        .last()
+        .and_then(|call| call.iter().find(|message| message.role == "system"))
+        .and_then(|message| message.content.as_ref().map(|content| content.as_text()))
+        .unwrap_or_default();
+    assert!(
+        !system.contains(rustfox::asr::VOICE_MODE_PROMPT_YUE) && !system.contains("# Voice reply"),
+        "a failed note kept as typed caption is not voice-origin; system={system}"
+    );
 }
 
 /// General Audio stays out of this slice (ADR-0058 Voice notes only).
@@ -1351,6 +1365,274 @@ async fn voice_transcript_is_prefixed_and_tts_dual_sends() {
         text_at.unwrap() < voice_at.unwrap(),
         "text is sent before the voice copy; paths={paths:?}"
     );
+}
+
+fn plain_text_message(text: &str) -> teloxide::types::Update {
+    UpdateInjector::parse_update_value(&json!({
+        "update_id": 9100,
+        "message": {
+            "message_id": 60,
+            "date": 1700000100,
+            "from": { "id": ALLOWED, "is_bot": false, "first_name": "QA" },
+            "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+            "text": text
+        }
+    }))
+    .unwrap()
+}
+
+fn voice_block_requests_shell_speech(system: &str, user: &str) -> bool {
+    let mode = system.split("# Voice reply").nth(1).unwrap_or("");
+    let blob = format!("{user}\n{mode}").to_ascii_lowercase();
+    [
+        "execute_command",
+        "sherpa-onnx",
+        "whisper",
+        "ffmpeg",
+        ".wav",
+        ".ogg",
+    ]
+    .iter()
+    .any(|cue| blob.contains(cue))
+}
+
+fn last_system_and_users(seen: &[Vec<rustfox::llm::ChatMessage>]) -> (String, Vec<String>) {
+    let call = seen.last().expect("llm was called");
+    let system = call
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_ref().map(|content| content.as_text()))
+        .unwrap_or_default();
+    (system, user_texts(call))
+}
+
+/// Voice note → code STT → voice-mode prompt → short text → code TTS → sendVoice.
+/// The prompt must not steer the model into shell STT/TTS.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_origin_injects_voice_mode_and_speaks_without_shell_stt() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+    std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+    let stt = write_exec(dir.path(), "stt.sh", "#!/bin/sh\nprintf '%s\\n' '早晨'\n");
+    let tts = write_exec(
+        dir.path(),
+        "tts.sh",
+        "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf 'OggS' > \"$out\"\n",
+    );
+    let suffix = format!(
+        "\n[voice]\nengine = \"sensevoice\"\nmodel_dir = \"{model}\"\nstt_bin = \"{stt}\"\ntts = true\ntts_bin = \"{tts}\"\nopenrouter_stt = false\nlanguage = \"yue\"\n",
+        model = model.display(),
+        stt = stt.display(),
+        tts = tts.display(),
+    );
+    let h = HandleMessageHarness::with_config_suffix("短答", &suffix).await;
+    h.api.stub_voice_wav().await;
+    h.api.stub_send_voice().await;
+
+    injector()
+        .drive_handle_message(&voice_message(None), h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("voice note");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let seen = h.messages_seen.lock().expect("messages").clone();
+    let (system, users) = last_system_and_users(&seen);
+    let user = users
+        .iter()
+        .find(|text| text.contains("[Voice note]:"))
+        .expect("transcript must reach the model");
+    assert_eq!(user, "[Voice note]:\n早晨");
+    assert!(
+        system.contains(rustfox::asr::VOICE_MODE_PROMPT_YUE),
+        "empty soul stays Cantonese; system tail={}",
+        system.chars().rev().take(80).collect::<String>()
+    );
+    assert!(
+        !voice_block_requests_shell_speech(&system, user),
+        "normal transcript must not steer shell STT/TTS"
+    );
+    assert!(
+        !user.contains("note.wav") && !user.contains("sherpa"),
+        "the model sees text, not the audio file; user={user}"
+    );
+
+    let texts = h.api.outbound_texts().await;
+    let paths = h.api.received_requests_paths().await;
+    assert!(
+        texts.iter().any(|text| text.contains("短答")),
+        "text copy is still sent; got {texts:?}"
+    );
+    let voice_at = paths
+        .iter()
+        .position(|path| path.to_ascii_lowercase().contains("sendvoice"));
+    let text_at = paths.iter().position(|path| {
+        let lower = path.to_ascii_lowercase();
+        lower.contains("sendmessage") || lower.contains("sendrichmessage")
+    });
+    assert!(
+        voice_at.is_some(),
+        "code TTS must sendVoice; paths={paths:?}"
+    );
+    assert!(
+        text_at.unwrap() < voice_at.unwrap(),
+        "text is sent before the voice copy; paths={paths:?}"
+    );
+    let voice_sends = paths
+        .iter()
+        .filter(|path| path.to_ascii_lowercase().contains("sendvoice"))
+        .count();
+
+    injector()
+        .drive_handle_message(
+            &plain_text_message("and typed"),
+            h.bot.clone(),
+            Arc::clone(&h.agent),
+        )
+        .await
+        .expect("typed follow-up");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let seen = h.messages_seen.lock().expect("messages").clone();
+    let (system, users) = last_system_and_users(&seen);
+    assert!(
+        users.iter().any(|text| text == "and typed"),
+        "typed follow-up is unchanged; users={users:?}"
+    );
+    assert!(
+        !system.contains(rustfox::asr::VOICE_MODE_PROMPT_YUE) && !system.contains("# Voice reply"),
+        "voice-mode prompt is only for the voice-origin turn"
+    );
+    let paths = h.api.received_requests_paths().await;
+    let voice_sends_after = paths
+        .iter()
+        .filter(|path| path.to_ascii_lowercase().contains("sendvoice"))
+        .count();
+    assert_eq!(
+        voice_sends, voice_sends_after,
+        "typed follow-up must not sendVoice; paths={paths:?}"
+    );
+}
+
+/// Typed chat keeps its text reply and does not auto-sendVoice when TTS is on.
+#[cfg(unix)]
+#[tokio::test]
+async fn typed_chat_does_not_send_voice_when_tts_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+    std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+    let stt = write_exec(dir.path(), "stt.sh", "#!/bin/sh\nprintf '%s\\n' '早晨'\n");
+    let tts = write_exec(
+        dir.path(),
+        "tts.sh",
+        "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf 'OggS' > \"$out\"\n",
+    );
+    let suffix = format!(
+        "\n[voice]\nengine = \"sensevoice\"\nmodel_dir = \"{model}\"\nstt_bin = \"{stt}\"\ntts = true\ntts_bin = \"{tts}\"\nopenrouter_stt = false\nlanguage = \"yue\"\n",
+        model = model.display(),
+        stt = stt.display(),
+        tts = tts.display(),
+    );
+    let h = HandleMessageHarness::with_config_suffix(STUB_REPLY, &suffix).await;
+    h.api.stub_send_voice().await;
+
+    injector()
+        .drive_handle_message(
+            &plain_text_message("hello there"),
+            h.bot.clone(),
+            Arc::clone(&h.agent),
+        )
+        .await
+        .expect("typed chat");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let seen = h.messages_seen.lock().expect("messages").clone();
+    let (system, users) = last_system_and_users(&seen);
+    assert!(
+        users.iter().any(|text| text == "hello there"),
+        "typed text is unchanged; users={users:?}"
+    );
+    assert!(
+        !system.contains(rustfox::asr::VOICE_MODE_PROMPT_YUE)
+            && !system.contains(rustfox::asr::VOICE_MODE_PROMPT_EN)
+            && !system.contains("# Voice reply"),
+        "typed chat must not get the voice-mode prompt"
+    );
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains(STUB_REPLY)),
+        "typed reply text is still sent; got {texts:?}"
+    );
+    let paths = h.api.received_requests_paths().await;
+    assert!(
+        paths
+            .iter()
+            .all(|path| !path.to_ascii_lowercase().contains("sendvoice")),
+        "tts=true must not sendVoice for typed chat; paths={paths:?}"
+    );
+}
+
+/// Latin-only SOUL.md adapts the voice-mode sentence. CJK is covered by the
+/// empty-soul default above.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_mode_follows_latin_only_soul() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+    std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+    let stt = write_exec(
+        dir.path(),
+        "stt.sh",
+        "#!/bin/sh\nprintf '%s\\n' 'morning'\n",
+    );
+    let tts = write_exec(
+        dir.path(),
+        "tts.sh",
+        "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf 'OggS' > \"$out\"\n",
+    );
+    let suffix = format!(
+        "\n[voice]\nengine = \"sensevoice\"\nmodel_dir = \"{model}\"\nstt_bin = \"{stt}\"\ntts = true\ntts_bin = \"{tts}\"\nopenrouter_stt = false\nlanguage = \"yue\"\n",
+        model = model.display(),
+        stt = stt.display(),
+        tts = tts.display(),
+    );
+    let h = HandleMessageHarness::with_config_suffix("Short answer.", &suffix).await;
+    let home = h.agent.config.resolved_home.clone().expect("fixture home");
+    std::fs::write(home.join("SOUL.md"), "Be brief and kind.\n").unwrap();
+    h.api.stub_voice_wav().await;
+    h.api.stub_send_voice().await;
+
+    injector()
+        .drive_handle_message(&voice_message(None), h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("voice note");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let seen = h.messages_seen.lock().expect("messages").clone();
+    let (system, users) = last_system_and_users(&seen);
+    assert!(
+        users.iter().any(|text| text == "[Voice note]:\nmorning"),
+        "code STT still supplies the transcript; users={users:?}"
+    );
+    assert!(
+        system.contains(rustfox::asr::VOICE_MODE_PROMPT_EN),
+        "latin-only soul adapts the voice-mode sentence"
+    );
+    assert!(
+        !system.contains(rustfox::asr::VOICE_MODE_PROMPT_YUE),
+        "english soul must not also keep the Cantonese sentence"
+    );
+    let user = users
+        .iter()
+        .find(|text| text.contains("[Voice note]:"))
+        .unwrap();
+    assert!(!voice_block_requests_shell_speech(&system, user));
 }
 
 fn reply_to_bot_update(
