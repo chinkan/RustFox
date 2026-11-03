@@ -49,6 +49,10 @@ _Avoid_: unbounded schedule, forever cron
 Same-day file `workspace/_runs/<task_id>-YYYY-MM-DD.json` for one scheduled task. The next fresh run that day is told to continue from `next_phase` and not redo completed work. Deleted when the run is verified complete or hits an explicit hard failure (ADR-0054).
 _Avoid_: transcript checkpoint, plan file
 
+**Schedule segment**:
+The prompt and result of one scheduled run. It is not part of the main interactive LLM history. A later interactive turn sees that result only when the user reply-quotes the schedule Telegram message (ADR-0048, ADR-0059). The run itself uses a fresh conversation, not the prior interactive chat. Durable evidence stays in `scheduled_task_runs`.
+_Avoid_: chat history, steer
+
 **Zombie running row**:
 A `scheduled_task_runs` row left `status=running` after the process died or a run was abandoned. Cleared to `failed` on startup and by the stale-run watchdog (ADR-0024).
 _Avoid_: stuck run, orphan status
