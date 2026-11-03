@@ -185,6 +185,7 @@ mod tests {
             crate::skills::Skill {
                 name: "sup-research".into(),
                 description: "research".into(),
+                trigger: None,
                 content: "".into(),
                 tags: vec![],
                 model: None,

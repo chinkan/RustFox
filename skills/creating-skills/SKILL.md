@@ -1,6 +1,7 @@
 ---
 name: creating-skills
 description: Use when the user asks to create, add, or write a new bot skill, or wants to teach the bot a new behavior, capability, or workflow.
+trigger: Create or edit a skill
 tags: [skills, meta]
 ---
 
@@ -14,7 +15,7 @@ Writes high-performance, token-efficient skill directories in `skills/` and acti
 
 Ask the user (one question at a time if unclear):
 - **Name**: Slug — lowercase, numbers, hyphens only, e.g. `processing-reports`
-- **Trigger**: When should this activate? (→ becomes the `description` field)
+- **Trigger**: When should this activate? (→ `description`, and optionally a short `trigger:` catalog line)
 - **Behavior**: What should the agent do step-by-step?
 - **Files**: Heavy reference content? Templates? Scripts?
 
@@ -76,7 +77,8 @@ Imperative instructions. No fluff.
 
 **Frontmatter rules:**
 - `name`: lowercase, numbers, hyphens; max 64 chars; avoid "anthropic" / "claude"
-- `description`: "Use when..."; triggers only; no how/what summary; third person; max 1024 chars
+- `description`: "Use when..."; triggers only; no how/what summary; third person; max 1024 chars. Stored in full (the portal reads this). The system prompt does not paste it whole.
+- `trigger` (optional, single line): the `# Available Skills` catalog blurb, at most 24 UTF-8 bytes. When set, that line is the name plus this blurb plus one `Load with: read_skill_file(skill_name="…", relative_path="SKILL.md")`. When omitted, `description` is truncated to that same cap for the catalog only. If the text already contains `Load with:`, a second one is not added.
 - A bad description causes the agent to skip reading the body — be precise about triggers
 
 **Body performance rules:**

@@ -568,10 +568,10 @@ impl Agent {
         let mut prompt = crate::persona_prompt::resolve_bot_base_prompt(&self.config, bot).0;
 
         let skills = self.skills.read().await;
-        let skill_context = skills.build_context();
-        if !skill_context.is_empty() {
-            prompt.push_str("\n\n# Available Skills\n\n");
-            prompt.push_str(&skill_context);
+        let skill_section = skills.available_skills_section();
+        if !skill_section.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&skill_section);
         }
 
         // Build unified "Available Agents" section: subagent skills + agents/
@@ -4162,6 +4162,7 @@ mod tests {
         Skill {
             name: name.to_string(),
             description: description.to_string(),
+            trigger: None,
             content: String::new(),
             tags: vec![],
             model: None,

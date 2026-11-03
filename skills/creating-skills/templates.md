@@ -2,6 +2,8 @@
 
 Copy the matching archetype and fill in the placeholders.
 
+Optional frontmatter `trigger:` is the short `# Available Skills` line (at most 24 UTF-8 bytes). `description` stays the full when-to-use text. The skill body is not copied into the system prompt; the catalog tells the agent to `read_skill_file` it.
+
 ---
 
 ## Archetype 1: Workflow
