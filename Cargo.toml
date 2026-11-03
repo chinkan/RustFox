@@ -107,7 +107,7 @@ sha2 = "0.11"
 regex = "1"
 
 # OS home-directory resolution for the persistent home dir (~/.rustfox)
-dirs = "5"
+dirs = "7"
 
 # Exclusive single-instance flock on fox-home (ADR-0046 / #289)
 fs2 = "0.4"
