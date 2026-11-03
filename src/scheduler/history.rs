@@ -1,19 +1,20 @@
-//! Conversation segment for one scheduled run.
+//! Schedule runs and interactive chat do not share an LLM history window
+//! (ADR-0059).
 //!
-//! A successful Telegram-origin run already persisted a user turn (the prompt)
-//! and an assistant turn (the result) on the owning bot's chat. Three gaps:
-//! portal rows are keyed `user_id = web` / `platform = portal`, so that write
-//! is not the Telegram thread; failure, cancel, and max-iterations kept only
-//! the prompt; the segment did not name the schedule.
+//! A scheduled turn loads a fresh conversation, not the owner's interactive
+//! chat. The prompt and the result are not appended to that chat.
+//! `scheduled_task_runs` remains the durable record. Telegram delivery stays
+//! on `send_schedule_reply` / the human-gate. The owner pulls a result into
+//! a later interactive turn by reply-quoting that Telegram message (ADR-0048).
 //!
-//! The job runner calls [`write_schedule_segment`] for every outcome.
-//! `process_message` skips its own save when [`crate::platform::IncomingMessage::schedule_id`]
-//! is set, so the segment is written once.
+//! `process_message` still skips its own save when
+//! [`crate::platform::IncomingMessage::schedule_id`] is set, so a schedule
+//! turn does not write its prompt into whichever row it loaded.
 
 use anyhow::Result;
 
-use crate::config::{BotConfig, Config};
-use crate::llm::{ChatMessage, MessageContent};
+use crate::config::BotConfig;
+use crate::llm::ChatMessage;
 use crate::memory::MemoryStore;
 use crate::platform::normalize_bot_id;
 use crate::scheduler::reminders::ScheduledTask;
@@ -35,14 +36,7 @@ pub fn with_schedule_id(schedule_id: &str, body: &str) -> String {
     }
 }
 
-/// Portal create stores `platform = portal` and `user_id` = the portal
-/// account name (`web` by default). That pair is not a Telegram thread.
-pub fn is_portal_origin(task: &ScheduledTask) -> bool {
-    let platform = task.platform.trim();
-    platform.eq_ignore_ascii_case("portal") || platform.eq_ignore_ascii_case("web")
-}
-
-/// Where one copy of the segment is appended.
+/// SQLite address of one conversation the LLM history is loaded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentConversation {
     pub platform: String,
@@ -50,120 +44,80 @@ pub struct SegmentConversation {
     pub user_id: String,
 }
 
-/// Conversations that receive the prompt and the result for this run.
+/// Platform of a scheduled turn's private conversation. Not telegram, portal,
+/// or web, so it cannot be the interactive row.
+pub const SCHEDULE_CONVERSATION_PLATFORM: &str = "schedule";
+
+/// True when `text` is a schedule segment body (`[schedule:{id}]` …).
 ///
-/// Telegram-origin: the row's own `(platform, bot_id, user_id)` — the same
-/// chat a successful run already wrote.
+/// Reply-quote turns start with `[Reply to` and are not segments, even when
+/// the quoted Telegram result mentions a schedule.
+pub fn is_schedule_segment_text(text: &str) -> bool {
+    text.trim_start().starts_with("[schedule:")
+}
+
+/// True when this stored turn is a schedule segment (ADR-0059).
+pub fn is_schedule_segment_message(message: &ChatMessage) -> bool {
+    message
+        .content
+        .as_ref()
+        .is_some_and(|content| is_schedule_segment_text(&content.as_text()))
+}
+
+/// History window for an interactive prompt. Schedule segments are omitted.
 ///
-/// Portal-origin: that portal/web conversation **and** the owning bot's
-/// Telegram conversation, so the write is not only `web`/`portal`.
-pub fn schedule_conversations(
+/// Rows already stored before this change stay in SQLite. They are left out
+/// of `messages[]` here instead of being rewritten.
+pub fn without_schedule_segments(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .filter(|message| !is_schedule_segment_message(message))
+        .collect()
+}
+
+/// Conversation a turn's LLM history is loaded from.
+///
+/// Interactive turns stay on `(platform, bot_id, user_id)`. A scheduled turn
+/// gets a new row every call so it does not read that chat or a previous
+/// fire. Checkpoint resume does not use this row (ADR-0054 restores the
+/// saved transcript).
+pub fn llm_conversation_key(
+    platform: &str,
+    bot_id: &str,
+    user_id: &str,
+    schedule_id: Option<&str>,
+) -> SegmentConversation {
+    if let Some(schedule_id) = schedule_id.map(str::trim).filter(|id| !id.is_empty()) {
+        return SegmentConversation {
+            platform: SCHEDULE_CONVERSATION_PLATFORM.to_string(),
+            bot_id: SCHEDULE_CONVERSATION_PLATFORM.to_string(),
+            user_id: format!("{schedule_id}:{}", uuid::Uuid::new_v4()),
+        };
+    }
+    SegmentConversation {
+        platform: platform.to_string(),
+        bot_id: normalize_bot_id(bot_id).to_string(),
+        user_id: user_id.to_string(),
+    }
+}
+
+/// Do not copy the prompt or the result into the interactive conversation.
+///
+/// The job runner still calls this for every outcome (success, failure,
+/// cancel, timeout, max-iterations). Durable evidence is `scheduled_task_runs`.
+/// Telegram notify is unchanged. `bots` is retained so callers keep the same
+/// signature they used when the segment was written onto the owning chat.
+pub fn write_schedule_segment(
+    _memory: &MemoryStore,
     task: &ScheduledTask,
-    bots: &[BotConfig],
-) -> Vec<SegmentConversation> {
-    let owner = normalize_bot_id(&task.bot_id).to_string();
-    let mut out = Vec::new();
-    if is_portal_origin(task) {
-        if let Some(tg_user) = portal_telegram_user_id(task) {
-            out.push(SegmentConversation {
-                platform: "telegram".to_string(),
-                bot_id: portal_telegram_bot_id(&owner, bots),
-                user_id: tg_user,
-            });
-        }
-    }
-    out.push(SegmentConversation {
-        platform: task.platform.clone(),
-        bot_id: owner,
-        user_id: task.user_id.clone(),
-    });
-    dedup_conversations(out)
-}
-
-/// Telegram user id for a portal row.
-///
-/// Portal create copies the shim allowlist's first id into `chat_id`.
-/// A private Telegram turn uses that same id as `IncomingMessage::user_id`
-/// (`from.id`, which equals `chat.id` in a DM). `user_id` on the row is the
-/// portal account (`web`), so it is not the lookup key.
-pub fn portal_telegram_user_id(task: &ScheduledTask) -> Option<String> {
-    let chat = task.chat_id.trim();
-    if chat.is_empty() {
-        None
-    } else {
-        Some(chat.to_string())
-    }
-}
-
-/// Bot id of the Telegram thread a portal task joins.
-///
-/// The row's `bot_id` is the owner. Portal create always stores `default`.
-/// The dispatcher the owner actually replies on is the shim (`main`, else
-/// `default`, else the only `[[bots]]` entry). A non-default owner is kept
-/// as-is so a bot-scoped row is not redirected onto the shim.
-fn portal_telegram_bot_id(owner_bot_id: &str, bots: &[BotConfig]) -> String {
-    if owner_bot_id != crate::platform::DEFAULT_BOT_ID || bots.is_empty() {
-        return owner_bot_id.to_string();
-    }
-    normalize_bot_id(Config::shim_bot(bots).id.as_str()).to_string()
-}
-
-fn dedup_conversations(addrs: Vec<SegmentConversation>) -> Vec<SegmentConversation> {
-    let mut out = Vec::new();
-    for addr in addrs {
-        let seen = out.iter().any(|e: &SegmentConversation| {
-            e.platform == addr.platform && e.bot_id == addr.bot_id && e.user_id == addr.user_id
-        });
-        if !seen {
-            out.push(addr);
-        }
-    }
-    out
-}
-
-fn turn(role: &str, text: &str) -> ChatMessage {
-    ChatMessage {
-        role: role.to_string(),
-        content: Some(MessageContent::from_text(text)),
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-    }
-}
-
-/// Append the prompt and the result to every conversation this run should
-/// update. `result` is the assistant text for a clean finish, a cancel, a
-/// max-iterations stop, or a failure. Both turns include the schedule id.
-///
-/// Opens each thread with [`Config::bot_claims_legacy_default`], the same
-/// claim a live Telegram turn uses, so a portal task lands on the conversation
-/// the next reply will load (including a legacy `default` row claimed by
-/// `main` or a sole custom bot id).
-pub async fn write_schedule_segment(
-    memory: &MemoryStore,
-    task: &ScheduledTask,
-    bots: &[BotConfig],
+    _bots: &[BotConfig],
     result: &str,
 ) -> Result<()> {
-    let prompt = with_schedule_id(&task.id, &task.prompt);
-    let assistant = with_schedule_id(&task.id, result);
-    let user_msg = turn("user", &prompt);
-    let assistant_msg = turn("assistant", &assistant);
-    for addr in schedule_conversations(task, bots) {
-        let claim = Config::bot_claims_legacy_default(bots, &addr.bot_id);
-        let conversation_id = memory
-            .get_or_create_conversation_with_claim(
-                &addr.platform,
-                &addr.bot_id,
-                &addr.user_id,
-                claim,
-            )
-            .await?;
-        memory.save_message(&conversation_id, &user_msg).await?;
-        memory
-            .save_message(&conversation_id, &assistant_msg)
-            .await?;
-    }
+    tracing::debug!(
+        schedule_id = %task.id,
+        result_bytes = result.len(),
+        "schedule segment stays out of the interactive conversation"
+    );
     Ok(())
 }
 
@@ -239,64 +193,28 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn portal_target_is_the_owning_bots_telegram_conversation() {
-        let task = portal_task("sched-portal");
-        let bots = vec![bot("main"), bot("researcher")];
-        let convs = schedule_conversations(&task, &bots);
-        assert!(
-            convs
-                .iter()
-                .any(|c| { c.platform == "telegram" && c.bot_id == "main" && c.user_id == "555" }),
-            "portal row must join the shim Telegram thread the owner replies on: {convs:?}"
-        );
-        assert!(
-            convs.iter().any(|c| {
-                c.platform == "portal"
-                    && c.bot_id == crate::platform::DEFAULT_BOT_ID
-                    && c.user_id == "web"
-            }),
-            "portal/web conversation is still written, not replaced: {convs:?}"
-        );
-        assert!(
-            !convs
-                .iter()
-                .any(|c| c.platform == "telegram" && c.user_id == "web"),
-            "user web is not a Telegram identity: {convs:?}"
-        );
+    fn turn(role: &str, text: &str) -> crate::llm::ChatMessage {
+        crate::llm::ChatMessage {
+            role: role.to_string(),
+            content: Some(crate::llm::MessageContent::from_text(text)),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
     }
 
-    #[test]
-    fn portal_nondefault_owner_stays_on_that_bot() {
-        let mut task = portal_task("sched-own");
-        task.bot_id = "researcher".to_string();
-        let convs = schedule_conversations(&task, &[bot("main"), bot("researcher")]);
-        assert!(convs.iter().any(|c| {
-            c.platform == "telegram" && c.bot_id == "researcher" && c.user_id == "555"
-        }));
-        assert!(!convs.iter().any(|c| c.bot_id == "main"));
-    }
-
-    #[test]
-    fn telegram_origin_stays_on_the_row_conversation() {
-        let task = task("sched-tg");
-        let convs = schedule_conversations(&task, &[bot("main"), bot("researcher")]);
-        assert_eq!(
-            convs,
-            vec![SegmentConversation {
-                platform: "telegram".to_string(),
-                bot_id: "researcher".to_string(),
-                user_id: "owner".to_string(),
-            }]
-        );
+    fn joined(rows: &[(String, String)]) -> String {
+        rows.iter()
+            .map(|(role, text)| format!("{role}: {text}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[tokio::test]
-    async fn portal_run_lands_in_telegram_and_segment_has_schedule_id() {
+    async fn interactive_prompt_without_reply_excludes_schedule_run_body() {
         let memory = MemoryStore::open_in_memory().unwrap();
         let task = portal_task("sched-1");
         let bots = vec![bot("main")];
-        // The owner already has a Telegram thread on the shim bot.
         let existing = memory
             .get_or_create_conversation("telegram", "main", "555")
             .await
@@ -305,43 +223,200 @@ mod tests {
             .save_message(&existing, &turn("user", "earlier telegram note"))
             .await
             .unwrap();
-
-        write_schedule_segment(&memory, &task, &bots, "inbox is quiet")
+        // A row already stored the old way must also stay out of the prompt.
+        memory
+            .save_message(
+                &existing,
+                &turn("assistant", "[schedule:sched-old]\nstale vault sync"),
+            )
             .await
             .unwrap();
 
+        write_schedule_segment(&memory, &task, &bots, "inbox is quiet").unwrap();
+
         let tg = roles(&memory, "telegram", "main", "555").await;
+        let stored = joined(&tg);
         assert!(
-            tg.iter()
-                .any(|(r, t)| r == "user" && t.contains("earlier telegram note")),
-            "must append onto the existing Telegram conversation, not a new one"
+            stored.contains("earlier telegram note"),
+            "interactive chat stays: {stored}"
         );
         assert!(
-            tg.iter().any(|(r, t)| {
-                r == "user"
-                    && t.contains("summarize overnight mail")
-                    && t.contains("[schedule:sched-1]")
-            }),
-            "prompt must be visible to the next Telegram reply: {tg:?}"
+            !stored.contains("inbox is quiet") && !stored.contains("[schedule:sched-1]"),
+            "a finished schedule segment must not be written into the interactive chat: {stored}"
         );
         assert!(
-            tg.iter().any(|(r, t)| {
-                r == "assistant" && t.contains("inbox is quiet") && t.contains("[schedule:sched-1]")
-            }),
-            "result must be visible to the next Telegram reply: {tg:?}"
+            !stored.contains("summarize overnight mail"),
+            "schedule prompt must not be written into the interactive chat: {stored}"
         );
 
         let portal = roles(&memory, "portal", crate::platform::DEFAULT_BOT_ID, "web").await;
+        let portal_blob = joined(&portal);
         assert!(
-            portal
-                .iter()
-                .any(|(r, t)| r == "assistant" && t.contains("[schedule:sched-1]")),
-            "portal conversation still receives the segment: {portal:?}"
+            !portal_blob.contains("[schedule:sched-1]") && !portal_blob.contains("inbox is quiet"),
+            "portal chat must not receive the segment either: {portal_blob}"
         );
+
+        let window = without_schedule_segments(memory.load_messages(&existing).await.unwrap());
+        let prompt = window
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("earlier telegram note"), "{prompt}");
+        assert!(
+            !prompt.contains("[schedule:") && !prompt.contains("stale vault sync"),
+            "interactive prompt without a reply must omit schedule bodies: {prompt}"
+        );
+        assert!(!prompt.contains("inbox is quiet"), "{prompt}");
+    }
+
+    #[test]
+    fn reply_quote_pulls_schedule_result_for_this_turn_only() {
+        let history = vec![
+            turn("user", "earlier chat"),
+            turn("user", "[schedule:sched-1]\ncheck the calendar"),
+            turn("assistant", "[schedule:sched-1]\ninbox is quiet"),
+        ];
+        let window = without_schedule_segments(history);
+        let blob = window
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(blob.contains("earlier chat"), "{blob}");
+        assert!(
+            !blob.contains("[schedule:sched-1]")
+                && !blob.contains("inbox is quiet")
+                && !blob.contains("check the calendar"),
+            "no reply → schedule result is not in the history window: {blob}"
+        );
+
+        let this_turn = crate::platform::telegram_reply_to::compose_reply_to_user_text(
+            "bot",
+            42,
+            &crate::platform::telegram_reply_to::ReplyQuote::Text("inbox is quiet".into()),
+            "what did the schedule find?",
+        );
+        assert!(this_turn.starts_with("[Reply to bot msg 42]:"));
+        assert!(
+            this_turn.contains("inbox is quiet"),
+            "reply-quote injects the Telegram result on this turn: {this_turn}"
+        );
+        assert!(
+            !blob.contains("inbox is quiet"),
+            "the quote is not copied into the prior history window"
+        );
+
+        let kept = without_schedule_segments(vec![turn("user", &this_turn)]);
+        assert_eq!(
+            kept.len(),
+            1,
+            "a reply-quote turn is not a schedule segment"
+        );
+        assert!(kept[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text()
+            .contains("inbox is quiet"));
+
+        let next = without_schedule_segments(vec![
+            turn("user", "earlier chat"),
+            turn("user", "a different question"),
+        ]);
+        let next_blob = next
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!next_blob.contains("inbox is quiet"));
+        assert!(!next_blob.contains("[schedule:"));
+        assert!(next_blob.contains("a different question"));
     }
 
     #[tokio::test]
-    async fn portal_run_claims_legacy_default_telegram_row() {
+    async fn schedule_fire_does_not_see_prior_interactive_chat() {
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let row = task("sched-iso");
+        let interactive = memory
+            .get_or_create_conversation("telegram", "researcher", "owner")
+            .await
+            .unwrap();
+        memory
+            .save_message(&interactive, &turn("user", "unrelated birthday plan"))
+            .await
+            .unwrap();
+        memory
+            .save_message(
+                &interactive,
+                &turn("assistant", "[schedule:old]\nold vault sync"),
+            )
+            .await
+            .unwrap();
+
+        let incoming = crate::agent::Agent::scheduled_incoming(&row);
+        assert_eq!(incoming.platform, "telegram");
+        assert_eq!(incoming.user_id, "owner");
+        assert_eq!(incoming.bot_id, "researcher");
+        assert_eq!(incoming.schedule_id.as_deref(), Some("sched-iso"));
+
+        let key = llm_conversation_key(
+            &incoming.platform,
+            &incoming.bot_id,
+            &incoming.user_id,
+            incoming.schedule_id.as_deref(),
+        );
+        assert_ne!(
+            (
+                key.platform.as_str(),
+                key.bot_id.as_str(),
+                key.user_id.as_str()
+            ),
+            (
+                incoming.platform.as_str(),
+                incoming.bot_id.as_str(),
+                incoming.user_id.as_str()
+            ),
+            "schedule fire must not load the interactive chat"
+        );
+        let sched = memory
+            .get_or_create_conversation(&key.platform, &key.bot_id, &key.user_id)
+            .await
+            .unwrap();
+        assert_ne!(sched, interactive);
+        let loaded = memory.load_messages(&sched).await.unwrap();
+        let blob = loaded
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !blob.contains("unrelated birthday plan") && !blob.contains("old vault sync"),
+            "schedule conversation must not contain prior user chat: {blob}"
+        );
+
+        let again = llm_conversation_key(
+            &incoming.platform,
+            &incoming.bot_id,
+            &incoming.user_id,
+            incoming.schedule_id.as_deref(),
+        );
+        assert_ne!(
+            again.user_id, key.user_id,
+            "each schedule fire gets a fresh conversation"
+        );
+    }
+
+    #[test]
+    fn interactive_llm_key_stays_on_the_owning_chat() {
+        let key = llm_conversation_key("telegram", " researcher ", "owner", None);
+        assert_eq!(key.platform, "telegram");
+        assert_eq!(key.bot_id, "researcher");
+        assert_eq!(key.user_id, "owner");
+    }
+
+    #[tokio::test]
+    async fn portal_run_does_not_claim_legacy_telegram_history() {
         let memory = MemoryStore::open_in_memory().unwrap();
         let task = portal_task("sched-claim");
         let bots = vec![bot("main"), bot("researcher")];
@@ -354,16 +429,13 @@ mod tests {
             .await
             .unwrap();
 
-        write_schedule_segment(&memory, &task, &bots, "claimed result")
-            .await
-            .unwrap();
+        write_schedule_segment(&memory, &task, &bots, "claimed result").unwrap();
 
-        // The next main reply opens this same row via the legacy claim.
         let opened = memory
             .get_or_create_conversation_with_claim("telegram", "main", "555", true)
             .await
             .unwrap();
-        assert_eq!(opened, legacy, "must reuse the row the next reply claims");
+        assert_eq!(opened, legacy, "the next reply still claims the legacy row");
         let msgs = memory.load_messages(&opened).await.unwrap();
         let blob = msgs
             .iter()
@@ -371,13 +443,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(blob.contains("legacy history"));
-        assert!(blob.contains("summarize overnight mail"));
-        assert!(blob.contains("claimed result"));
-        assert!(blob.contains("[schedule:sched-claim]"));
+        assert!(!blob.contains("claimed result"));
+        assert!(!blob.contains("[schedule:sched-claim]"));
+        assert!(!blob.contains("summarize overnight mail"));
     }
 
     #[tokio::test]
-    async fn failure_cancel_and_max_iterations_write_a_result() {
+    async fn failure_cancel_and_max_iterations_stay_out_of_owning_chat() {
         let memory = MemoryStore::open_in_memory().unwrap();
         let bots = vec![bot("researcher")];
         let cases = [
@@ -391,54 +463,29 @@ mod tests {
         for (id, result) in cases {
             let mut row = task(id);
             row.prompt = format!("prompt for {id}");
-            write_schedule_segment(&memory, &row, &bots, result)
-                .await
-                .unwrap();
+            write_schedule_segment(&memory, &row, &bots, result).unwrap();
             let msgs = roles(&memory, "telegram", "researcher", "owner").await;
             assert!(
                 msgs.iter()
-                    .any(|(r, t)| r == "user" && t.contains(&format!("[schedule:{id}]"))),
-                "prompt segment missing schedule id for {id}: {msgs:?}"
-            );
-            assert!(
-                msgs.iter().any(|(r, t)| {
-                    r == "assistant"
-                        && t.contains(result)
-                        && t.contains(&format!("[schedule:{id}]"))
-                }),
-                "result turn missing for {id}: {msgs:?}"
+                    .all(|(_, t)| !t.contains(&format!("[schedule:{id}]")) && !t.contains(result)),
+                "failure segment must not enter the owning chat for {id}: {msgs:?}"
             );
         }
     }
 
     #[tokio::test]
-    async fn telegram_success_still_writes_the_owning_conversation() {
+    async fn telegram_success_does_not_write_the_owning_conversation() {
         let memory = MemoryStore::open_in_memory().unwrap();
         let row = task("sched-ok");
         let bots = vec![bot("main"), bot("researcher")];
-        write_schedule_segment(&memory, &row, &bots, "calendar is clear")
-            .await
-            .unwrap();
+        write_schedule_segment(&memory, &row, &bots, "calendar is clear").unwrap();
 
         let own = roles(&memory, "telegram", "researcher", "owner").await;
-        assert!(own.iter().any(|(r, t)| {
-            r == "user" && t.contains("check the calendar") && t.contains("[schedule:sched-ok]")
-        }));
-        assert!(own.iter().any(|(r, t)| {
-            r == "assistant" && t.contains("calendar is clear") && t.contains("[schedule:sched-ok]")
-        }));
-
-        let other = roles(&memory, "telegram", "main", "owner").await;
         assert!(
-            other.iter().all(|(_, t)| !t.contains("calendar is clear")),
-            "a telegram-origin run must not move onto another bot: {other:?}"
-        );
-        let portal = roles(&memory, "portal", "researcher", "web").await;
-        assert!(
-            portal
-                .iter()
-                .all(|(_, t)| t.is_empty() || !t.contains("sched-ok")),
-            "telegram-origin must not also invent a portal thread: {portal:?}"
+            own.iter().all(|(_, t)| !t.contains("calendar is clear")
+                && !t.contains("[schedule:sched-ok]")
+                && !t.contains("check the calendar")),
+            "telegram-origin result must stay out of the owning chat: {own:?}"
         );
     }
 

@@ -88,9 +88,9 @@ pub struct IncomingMessage {
     pub attachments: Vec<Attachment>,
     /// Schedule that produced this turn, when the message is a scheduled run.
     ///
-    /// `None` for ordinary chat. When set, `process_message` does not persist
-    /// the turn; the job runner writes the prompt and the result (success,
-    /// failure, cancel, and max-iterations) with this id on the segment.
+    /// `None` for ordinary chat. When set, the turn loads a fresh schedule
+    /// conversation and does not persist into the interactive chat (ADR-0059).
+    /// Cancel and TurnGate still use `bot_id` / `user_id`.
     pub schedule_id: Option<String>,
     /// Hardware adapter id (ADR-0056). `None` for Telegram, portal, and schedules.
     pub device_id: Option<String>,

@@ -356,7 +356,8 @@ async fn run_one_scheduled_job(
                 tracing::warn!("Failed to update run record on timeout: {e}");
             }
 
-            // History segment so the hang is visible in conversation.
+            // ADR-0059: do not copy this outcome into the interactive chat.
+            // The human-gate below is the Telegram notify. The run row is the audit.
             if let Ok(Some(task)) = req.task_store.get_by_id(&req.task_id).await {
                 let body = format!("Scheduled task timed out after {timeout_secs}s (cancelled).");
                 if let Err(e) = rustfox::scheduler::history::write_schedule_segment(
@@ -364,9 +365,7 @@ async fn run_one_scheduled_job(
                     &task,
                     &agent.config.bots,
                     &body,
-                )
-                .await
-                {
+                ) {
                     tracing::warn!(
                         "Failed to write schedule {} timeout segment: {e:#}",
                         req.task_id
@@ -459,9 +458,9 @@ async fn run_one_scheduled_job(
         }
     };
 
-    // Prompt + result, including failure / cancel / max-iterations,
-    // with the schedule id. Portal rows also land in the owning bot's
-    // Telegram conversation. No approval gate: the run already finished.
+    // Do not append the prompt or the result to the interactive conversation
+    // (ADR-0059). Telegram notify below is unchanged. No approval gate: the
+    // run already finished.
     if let Ok(Some(task)) = req.task_store.get_by_id(&req.task_id).await {
         let result_body = match &processed {
             Ok(outcome) => outcome.text.clone(),
@@ -472,9 +471,7 @@ async fn run_one_scheduled_job(
             &task,
             &agent.config.bots,
             &result_body,
-        )
-        .await
-        {
+        ) {
             tracing::warn!(
                 "Failed to write schedule {} conversation segment: {e:#}",
                 req.task_id

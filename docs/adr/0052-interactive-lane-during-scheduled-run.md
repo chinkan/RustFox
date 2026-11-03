@@ -4,6 +4,7 @@
 - **Date:** 2026-10-31
 - **Issue:** #338 (regression / incomplete isolation of #275)
 - **Amends:** [ADR-0020](./0020-mid-run-message-queue.md) Decision 8 (inbound during a scheduled run); [ADR-0024](./0024-scheduler-run-timeout.md) timeout cancel target
+- **Amended by:** [ADR-0059](./0059-schedule-run-not-in-interactive-context.md) (#369). Decision 6 no longer keeps schedule segments on the owning chat for the next reply. Lanes, `Submit::Deferred` removal, and per-lane cancel stay.
 - **Related:** #275, #170, #171, ADR-0020 Q8, ADR-0024 Decision 2–3
 
 ## Context
@@ -33,7 +34,7 @@ That hold is the production bug. While a long scheduled job runs (same bot and u
 
 5. **Cancel tokens are per lane.** Interactive keeps `session_key`. Scheduled uses `{session_key}:sched`. Each `process_message` registers and clears only its lane. Tool cancels (`execute_command`) record the lane scope via a task-local set around the agent loop. A schedule timeout calls `cancel_scheduled_run` (scheduled token + that scope). `/stop` still cancels both tokens and `cancel_all` tools (ADR-0024 Decision 3).
 
-6. **Out of scope.** Supervisor tasks stay on the shared session key, so a schedule timeout can still cancel supervisor work for that key. Conversation rows stay on the owning chat (schedule segments are not moved to a second thread). #330 / #333 are not this change.
+6. **Out of scope for the lane split.** Supervisor tasks stay on the shared session key, so a schedule timeout can still cancel supervisor work for that key. #330 / #333 are not this change. **Amended by ADR-0059:** schedule prompt and result are not written into the owning interactive conversation, and a scheduled turn does not load that chat as its LLM history. Reply-quote of the schedule Telegram message is how a later interactive turn sees the result.
 
 ## Consequences
 

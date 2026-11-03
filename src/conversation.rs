@@ -52,6 +52,11 @@ impl ConversationManager {
         let mut folded_summary: Vec<String> = Vec::new();
         let mut raw: Vec<ChatMessage> = Vec::new();
         for m in history {
+            // ADR-0059: schedule segments stay in SQLite but are not interactive
+            // LLM continuity. Reply-quote text does not use this prefix.
+            if crate::scheduler::history::is_schedule_segment_message(&m) {
+                continue;
+            }
             if m.role == "system" {
                 if let Some(text) = m.content.as_ref().map(|c| c.as_text()) {
                     if let Some(rest) = text.strip_prefix("[SUMMARY]") {
@@ -175,8 +180,9 @@ impl ConversationManager {
             tool_call_id: None,
             reasoning_content: None,
         };
-        // Scheduled runs persist the prompt and the result together, once,
-        // from the job runner (failure / cancel / max-iterations included).
+        // Scheduled runs do not persist into the conversation they loaded.
+        // That row is a fresh schedule conversation (ADR-0059), not the
+        // interactive chat, and the result stays out of interactive history.
         if incoming.schedule_id.is_none() {
             self.memory
                 .save_message(&self.conversation_id, &user_msg)
@@ -1520,6 +1526,68 @@ allowed_directory = "."
             user_rows[0].content.as_ref().unwrap().as_text(),
             combined,
             "DB row must match the combined content the model sees"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_manager_omits_schedule_segment_from_prompt() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cid = store
+            .get_or_create_conversation("telegram", "default", "sched_prompt")
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "user".into(),
+                    content: Some(MessageContent::from_text("earlier chat")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .save_message(
+                &cid,
+                &ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(MessageContent::from_text(
+                        "[schedule:sched-1]\ninbox is quiet",
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let cm = ConversationManager::new(
+            &store,
+            "telegram",
+            "default",
+            "sched_prompt",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let blob = cm
+            .messages()
+            .iter()
+            .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(blob.contains("earlier chat"), "{blob}");
+        assert!(
+            !blob.contains("[schedule:sched-1]") && !blob.contains("inbox is quiet"),
+            "interactive prompt must omit the schedule segment: {blob}"
         );
     }
 }
