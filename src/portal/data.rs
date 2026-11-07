@@ -166,6 +166,8 @@ fn push_knowledge_items(
             "text": format!("{}: {} — {}", e.category, e.key, e.value),
             "score": 1.0 - (rank as f64 / (limit.max(1) as f64 + 1.0)),
             "createdAt": null,
+            "evidence": crate::memory::evidence::evidence_json_value(e.evidence.as_deref()),
+            "evidenceText": crate::memory::evidence::format_evidence_suffix(e.evidence.as_deref()),
         }));
     }
 }
@@ -238,6 +240,48 @@ pub async fn memory_search(
         push_conversation_items(&mut items, msgs, limit);
     }
     Ok(Json(serde_json::Value::Array(items)))
+}
+
+#[cfg(test)]
+mod memory_evidence_tests {
+    use super::push_knowledge_items;
+    use crate::memory::evidence::UNTRUSTED_EVIDENCE_MARK;
+    use crate::memory::knowledge::KnowledgeEntry;
+
+    #[test]
+    fn knowledge_items_include_evidence_and_the_untrusted_mark() {
+        let mut items = Vec::new();
+        push_knowledge_items(
+            &mut items,
+            vec![
+                KnowledgeEntry {
+                    id: "1".into(),
+                    category: "fact".into(),
+                    key: "city".into(),
+                    value: "beta".into(),
+                    source: None,
+                    evidence: Some(r#"{"kind":"unknown"}"#.into()),
+                },
+                KnowledgeEntry {
+                    id: "2".into(),
+                    category: "project".into(),
+                    key: "doc".into(),
+                    value: "notes".into(),
+                    source: Some("a.pdf".into()),
+                    evidence: Some(r#"{"kind":"file","ref":"a.pdf"}"#.into()),
+                },
+            ],
+            None,
+            10,
+        );
+        assert_eq!(items[0]["evidenceText"], UNTRUSTED_EVIDENCE_MARK);
+        assert_eq!(items[0]["evidence"]["kind"], "unknown");
+        assert_eq!(items[1]["evidence"]["kind"], "file");
+        assert_eq!(items[1]["evidence"]["ref"], "a.pdf");
+        let trusted = items[1]["evidenceText"].as_str().unwrap();
+        assert!(trusted.contains("a.pdf"), "{trusted}");
+        assert!(!trusted.contains("無來源"), "{trusted}");
+    }
 }
 
 // ---------------------------------------------------------------------------

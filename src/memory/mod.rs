@@ -1,5 +1,6 @@
 pub mod conversations;
 pub mod embeddings;
+pub mod evidence;
 pub mod knowledge;
 pub mod query_rewriter;
 pub mod rag;
@@ -145,6 +146,7 @@ impl MemoryStore {
                 key TEXT NOT NULL,
                 value TEXT NOT NULL,
                 source TEXT,
+                evidence TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -357,6 +359,10 @@ impl MemoryStore {
             );
             ",
         )?;
+
+        // ADR-0061: knowledge.evidence on databases created before the column
+        // existed. Fresh databases already have it from CREATE TABLE above.
+        crate::memory::evidence::migrate_knowledge_evidence(conn)?;
 
         // Migration: add is_summarized column (safe no-op if column already exists)
         conn.execute_batch("ALTER TABLE messages ADD COLUMN is_summarized BOOLEAN DEFAULT 0;")

@@ -298,8 +298,15 @@ async fn route_native_pdf<R: PdfPageRenderer>(
         for chunk in chunk_text(page_text, CHUNK_SIZE, CHUNK_OVERLAP) {
             let key = format!("{filename}::p{page_no}::chunk_{chunk_i}");
             chunk_i += 1;
+            let evidence = crate::memory::evidence::file_evidence(filename);
             if let Err(e) = memory
-                .remember("document_chunk", &key, &chunk, Some(filename))
+                .remember_with_evidence(
+                    "document_chunk",
+                    &key,
+                    &chunk,
+                    Some(filename),
+                    Some(&evidence),
+                )
                 .await
             {
                 tracing::warn!("Failed to store document chunk {}: {}", chunk_i - 1, e);
@@ -486,8 +493,15 @@ async fn handle_context_length(
 
     for (i, chunk) in chunks.iter().enumerate() {
         let key = format!("{}::chunk_{}", filename, i);
+        let evidence = crate::memory::evidence::file_evidence(filename);
         if let Err(e) = memory
-            .remember("document_chunk", &key, chunk, Some(filename))
+            .remember_with_evidence(
+                "document_chunk",
+                &key,
+                chunk,
+                Some(filename),
+                Some(&evidence),
+            )
             .await
         {
             tracing::warn!("Failed to store document chunk {}: {}", i, e);
@@ -513,6 +527,7 @@ async fn handle_context_length(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::evidence::{EvidenceKind, StoredEvidence};
 
     #[test]
     fn extract_docx_text_reads_paragraph_text() {
@@ -530,6 +545,33 @@ mod tests {
             text.contains("hello zip"),
             "patched docx-rs/zip 9 reader dropped paragraph text: {text:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn long_document_chunks_record_file_evidence() {
+        let memory = MemoryStore::open_in_memory().expect("memory");
+        let text = "alpha ".repeat(1200);
+        let rendered = handle_context_length(&text, "notes.txt", "alpha", &memory).await;
+        assert!(
+            rendered.contains("notes.txt"),
+            "long text should be indexed: {rendered}"
+        );
+        let entry = memory
+            .recall_entry("document_chunk", "notes.txt::chunk_0")
+            .await
+            .expect("recall")
+            .expect("chunk row");
+        assert_eq!(entry.source.as_deref(), Some("notes.txt"));
+        let parsed: StoredEvidence =
+            serde_json::from_str(entry.evidence.as_deref().expect("evidence")).expect("json");
+        match parsed {
+            StoredEvidence::One(pointer) => {
+                assert_eq!(pointer.kind, EvidenceKind::File);
+                assert_eq!(pointer.reference.as_deref(), Some("notes.txt"));
+                assert!(pointer.captured_at.is_some());
+            }
+            other => panic!("expected one file pointer, got {other:?}"),
+        }
     }
 
     #[test]
