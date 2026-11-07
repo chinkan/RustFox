@@ -278,9 +278,9 @@ mod memory_evidence_tests {
         assert_eq!(items[0]["evidence"]["kind"], "unknown");
         assert_eq!(items[1]["evidence"]["kind"], "file");
         assert_eq!(items[1]["evidence"]["ref"], "a.pdf");
-        let trusted = items[1]["evidenceText"].as_str().unwrap();
-        assert!(trusted.contains("a.pdf"), "{trusted}");
-        assert!(!trusted.contains("無來源"), "{trusted}");
+        let evidence_text = items[1]["evidenceText"].as_str().unwrap();
+        assert!(evidence_text.contains("a.pdf"), "{evidence_text}");
+        assert!(!evidence_text.contains("無來源"), "{evidence_text}");
     }
 }
 
