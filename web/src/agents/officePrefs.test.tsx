@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import {
   __resetOfficePrefsForTests,
+  effectiveOfficeVisualize,
   OFFICE_PREFS_KEY,
   readOfficePrefs,
   useOfficeMotion,
@@ -18,19 +19,29 @@ describe('office prefs', () => {
     expect(readOfficePrefs()).toEqual({
       reduceMotion: false,
       disableOfficeAnimations: false,
+      office_visualize: 'svg',
     })
   })
 
-  it('round-trips both settings through localStorage', () => {
-    writeOfficePrefs({ reduceMotion: true, disableOfficeAnimations: false })
+  it('round-trips settings including office_visualize through localStorage', () => {
+    writeOfficePrefs({ reduceMotion: true, disableOfficeAnimations: false, office_visualize: 'svg' })
     expect(localStorage.getItem(OFFICE_PREFS_KEY)).toContain('"reduceMotion":true')
     expect(readOfficePrefs()).toEqual({
       reduceMotion: true,
       disableOfficeAnimations: false,
+      office_visualize: 'svg',
     })
-    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: true })
+    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: true, office_visualize: 'webgl' })
     expect(readOfficePrefs().disableOfficeAnimations).toBe(true)
     expect(readOfficePrefs().reduceMotion).toBe(false)
+    expect(readOfficePrefs().office_visualize).toBe('webgl')
+    expect(localStorage.getItem(OFFICE_PREFS_KEY)).toContain('"office_visualize":"webgl"')
+  })
+
+  it('persists office_visualize across reload from storage', () => {
+    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: false, office_visualize: 'webgl' })
+    __resetOfficePrefsForTests()
+    expect(readOfficePrefs().office_visualize).toBe('webgl')
   })
 
   it('ignores corrupt storage', () => {
@@ -39,7 +50,15 @@ describe('office prefs', () => {
     expect(readOfficePrefs()).toEqual({
       reduceMotion: false,
       disableOfficeAnimations: false,
+      office_visualize: 'svg',
     })
+  })
+})
+
+describe('effectiveOfficeVisualize', () => {
+  it('forces svg when office motion is off', () => {
+    expect(effectiveOfficeVisualize('webgl', false)).toBe('svg')
+    expect(effectiveOfficeVisualize('webgl', true)).toBe('webgl')
   })
 })
 
@@ -66,7 +85,7 @@ describe('useOfficeMotion', () => {
   })
 
   it('turns motion off when Disable office animations is stored', () => {
-    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: true })
+    writeOfficePrefs({ reduceMotion: false, disableOfficeAnimations: true, office_visualize: 'svg' })
     const { result } = renderHook(() => useOfficeMotion())
     expect(result.current).toBe(false)
   })
