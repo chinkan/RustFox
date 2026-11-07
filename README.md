@@ -257,7 +257,7 @@ python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t);
 | `read_skill_file` / `write_skill_file` / `reload_skills` | Read (full file, or a 1-based `offset` / `limit` line slice), write, and hot-reload skills |
 | `read_agent_file` / `write_agent_file` / `reload_agents` | Read, write, and hot-reload sub-agent definitions |
 | `invoke_agent` | Run a predefined agent from `agents/` (or a `[[bots]]` persona via `bot=`) |
-| `spawn_agents` | Spawn ad-hoc subagents with inline system prompts (parallel batch supported) |
+| `spawn_agents` | Spawn subagents in parallel. A resolvable `agent` or `name` loads that pack and whitelist (same as `invoke_agent`); an unknown name errors. Omit the name for an ad-hoc subagent with `system_prompt`. |
 | `try_new_tech` | Sandboxed experiment — run Rust/JS code and check results |
 | `schedule_task` / `list_scheduled_tasks` / `get_scheduled_task_history` / `cancel_scheduled_task` | Create, list, inspect, and cancel cron/one-shot tasks |
 | `task_reruns` | Inspect and resolve the dead-letter rerun queue |

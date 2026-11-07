@@ -132,7 +132,7 @@ persona = "researcher"
 
 ### Peer invoke + slash commands
 
-- **`invoke_agent` / `spawn_agents`** — resolve `agents/`, subagent skills, or a `[[bots]]` persona id (`bot=` synonym). Nested peer depth max **2**; cycles rejected; user-visible peer summaries prepend `via <persona>:`. Reply stays in the **caller’s** chat. Details: [Agent Tools](#agent-tools).
+- **`invoke_agent` / `spawn_agents`** — a resolvable name loads `agents/`, a subagent skill, or a `[[bots]]` persona id (`invoke_agent` also accepts `bot=`). Named `spawn_agents` uses that same resolve, whitelist, depth, and cycle guard. Ad-hoc `spawn_agents` (no `agent` / `name`) keeps an inline `system_prompt`. Nested peer depth max **2**; cycles rejected; user-visible `invoke_agent` summaries prepend `via <persona>:`. Reply stays in the **caller’s** chat. Details: [Agent Tools](#agent-tools).
 - **`/agents`** — list / show / create + bind token (`bot_token=***`). Details: [`/agents`](#agents-create-persona--bind-token).
 - **`/config`** — allowlisted `config.toml` edits with the same bak path (secrets denied). Details: [`/config` slash map](#config-slash-map-allowlist).
 
@@ -255,7 +255,7 @@ MCP tools are namespaced as `mcp_<server-name>_<tool-name>` (e.g. `mcp_git_git_l
 
 | Tool | Description |
 |------|-------------|
-| `spawn_agents` | Spawn ad-hoc subagents with inline system prompts (supports parallel batch) |
+| `spawn_agents` | Spawn subagents in parallel. A resolvable `agent` or `name` loads that pack and whitelist (same depth, cycle, and stack key as `invoke_agent`); an unknown name errors. Omit the name for an ad-hoc subagent (`system_prompt` required). |
 | `invoke_agent` | Run a predefined agent from `agents/`, a subagent skill, or a `[[bots]]` persona id (optional `bot=` synonym). Nested peer depth max 2; cycles rejected; results prepend `via <persona>:` |
 | `read_agent_file` | Read a file from within an agent's directory |
 | `write_agent_file` | Write a file into an agent's directory |
