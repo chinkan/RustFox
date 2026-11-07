@@ -268,27 +268,11 @@ pub struct Agent {
     pub seat_run: crate::seat_run::SeatRunSignal,
 }
 
-/// A task parsed from the spawn_agents tool arguments, after validation.
-#[allow(dead_code)]
-struct AdHocTask {
-    system_prompt: String,
-    prompt: String,
-    model: Option<String>,
-    tools: Option<Vec<String>>,
-    /// Optional seat←run tag (`agent` / `name` on the task object). Ad-hoc
-    /// spawn still runs with `skill_name = None`; the tag only lights a seat.
-    seat_name: Option<String>,
-}
-
-/// Optional seat name from spawn_agents task/args (`agent` or `name`).
-fn spawn_seat_name(v: &Value) -> Option<String> {
-    v["agent"]
-        .as_str()
-        .or_else(|| v["name"].as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
+/// Follow-up under `# Available Agents`. A name passed to `spawn_agents` loads
+/// the pack (ADR-0062); it is not a seat label.
+const AVAILABLE_AGENTS_FOLLOWUP: &str = "\
+Delegate these tasks with `invoke_agent(agent=\"<name>\", prompt=\"<task>\")`. \
+A `spawn_agents` task may pass the same `agent` (or `name`): that loads the pack and its tool whitelist, the same as `invoke_agent`. The name is not a seat label. An unknown name is an error. Omit `agent` only for an ad-hoc subagent, which requires its own `system_prompt`.";
 
 /// Build the unified `# Available Agents` section from line sources
 /// (subagent-style skills, agents directory, and `[[bots]]` ids). Returns
@@ -305,10 +289,7 @@ fn format_available_agents_section(
     }
 
     let mut section = String::from("\n\n# Available Agents\n\n");
-    section.push_str(&format_listed_section(
-        "agent",
-        "Delegate these tasks to specialized agents using `invoke_agent`:",
-    ));
+    section.push_str(&format_listed_section("agent", AVAILABLE_AGENTS_FOLLOWUP));
 
     let mut parts: Vec<&str> = Vec::new();
     if !subagent_lines.is_empty() {
@@ -1570,142 +1551,22 @@ impl Agent {
                             )
                         }
                         "spawn_agents" => {
-                            // Parse tasks inline (same shape as subagent handler).
-                            let parsed_tasks: Vec<AdHocTask> = if let Some(tasks) =
-                                args_owned["tasks"].as_array()
-                            {
-                                if tasks.is_empty() {
-                                    return Some("tasks array is empty".to_string());
-                                }
-                                let mut parsed = Vec::with_capacity(tasks.len());
-                                for (i, task) in tasks.iter().enumerate() {
-                                    let system_prompt = match task["system_prompt"].as_str() {
-                                        Some(s) => s.to_string(),
-                                        None => {
-                                            return Some(format!(
-                                                "Task at index {}: missing system_prompt",
-                                                i
-                                            ))
-                                        }
-                                    };
-                                    let prompt = match task["prompt"].as_str() {
-                                        Some(p) => p.to_string(),
-                                        None => {
-                                            return Some(format!(
-                                                "Task at index {}: missing prompt",
-                                                i
-                                            ))
-                                        }
-                                    };
-                                    parsed.push(AdHocTask {
-                                        system_prompt,
-                                        prompt,
-                                        model: task["model"].as_str().map(str::to_string),
-                                        tools: task["tools"].as_array().map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str().map(str::to_string))
-                                                .collect()
-                                        }),
-                                        seat_name: spawn_seat_name(task),
-                                    });
-                                }
-                                parsed
-                            } else {
-                                let system_prompt = match args_owned["system_prompt"].as_str() {
-                                    Some(s) => s.to_string(),
-                                    None => {
-                                        return Some("Missing system_prompt or tasks".to_string())
-                                    }
-                                };
-                                let prompt = match args_owned["prompt"].as_str() {
-                                    Some(p) => p.to_string(),
-                                    None => return Some("Missing prompt".to_string()),
-                                };
-                                vec![AdHocTask {
-                                    system_prompt,
-                                    prompt,
-                                    model: args_owned["model"].as_str().map(str::to_string),
-                                    tools: args_owned["tools"].as_array().map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(str::to_string))
-                                            .collect()
-                                    }),
-                                    seat_name: spawn_seat_name(&args_owned),
-                                }]
-                            };
-                            // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
-                            let child_stacks: Vec<Vec<String>> = match (0..parsed_tasks.len())
-                                .map(|i| {
-                                    crate::peer_invoke::spawn_agents_child_stack(&parent_stack, i)
-                                })
-                                .collect::<Result<_, _>>()
-                            {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    warn!(stack = ?parent_stack, "spawn_agents rejected: {e}");
-                                    return Some(e);
-                                }
-                            };
                             let agent = match self_weak.upgrade() {
                                 Some(a) => a,
                                 None => return Some("Agent is shutting down".to_string()),
                             };
-                            let futures: Vec<_> = parsed_tasks
-                                .into_iter()
-                                .zip(child_stacks)
-                                .map(|(task, stack)| {
-                                    let sp = task.system_prompt.clone();
-                                    let p = task.prompt.clone();
-                                    let m = task.model.clone();
-                                    let t = task.tools.clone();
-                                    let seat = task.seat_name.clone();
-                                    let a = agent.clone();
-                                    let user_id = user_id.clone();
-                                    let chat_id = chat_id.clone();
-                                    let turn_trace = turn_trace.clone();
-                                    let parent_tools = parent_tools.clone();
-                                    Box::pin(async move {
-                                        let caller = stack
-                                            .first()
-                                            .map(|s| s.as_str())
-                                            .unwrap_or(crate::platform::DEFAULT_BOT_ID);
-                                        let delivery = crate::peer_invoke::tool_delivery_for_invoke(
-                                            caller, None, &user_id, &chat_id,
-                                        );
-                                        // ADR-0050: optional agent/name tags a seat for ad-hoc spawn.
-                                        let _seat = seat.as_deref().map(|n| a.seat_run.enter(n));
-                                        a.run_subagent(
-                                            None,
-                                            &sp,
-                                            &p,
-                                            m.as_deref(),
-                                            t,
-                                            stack,
-                                            delivery,
-                                            Some(turn_trace),
-                                            parent_tools,
-                                        )
-                                        .await
-                                    })
-                                })
-                                .collect();
-                            let results = futures::future::join_all(futures).await;
-                            let mut output = String::from(
-                                "Spawned agents results:
-
-",
-                            );
-                            for (i, result) in results.iter().enumerate() {
-                                output.push_str(&format!(
-                                    "--- Agent {} ---
-{}
-
-",
-                                    i + 1,
-                                    result
-                                ));
-                            }
-                            Some(output)
+                            Some(
+                                agent
+                                    .execute_spawn_agents(
+                                        &args_owned,
+                                        parent_stack,
+                                        &user_id,
+                                        &chat_id,
+                                        Some(turn_trace),
+                                        parent_tools,
+                                    )
+                                    .await,
+                            )
                         }
                         _ => None,
                     }
@@ -2523,6 +2384,98 @@ impl Agent {
         crate::llm::dedupe_tool_definitions_keep_first(all)
     }
 
+    /// Run `spawn_agents`. A resolvable `agent` / `name` loads that pack
+    /// (ADR-0062). An unknown name errors. No name stays ad-hoc.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_spawn_agents(
+        self: &Arc<Self>,
+        args: &Value,
+        parent_stack: Vec<String>,
+        user_id: &str,
+        chat_id: &str,
+        trace: Option<crate::loop_runner::TurnTrace>,
+        parent_tools: Option<Vec<String>>,
+    ) -> String {
+        let agents = self.agents.read().await.clone();
+        let skills = self.skills.read().await.clone();
+        let catalog = crate::spawn_plan::SpawnCatalog {
+            agents: &agents,
+            skills: &skills,
+            bots: &self.config.bots,
+            adhoc_default_tools: self.config.subagents.default_tools.as_deref(),
+        };
+        let plans = match crate::spawn_plan::plan_spawn_agents(
+            args,
+            &parent_stack,
+            parent_tools.as_deref(),
+            &catalog,
+        ) {
+            Ok(plans) => plans,
+            Err(err) => {
+                warn!(stack = ?parent_stack, "spawn_agents rejected: {err}");
+                return err;
+            }
+        };
+
+        let caller = parent_stack
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::platform::DEFAULT_BOT_ID.to_string());
+        let user_id = user_id.to_string();
+        let chat_id = chat_id.to_string();
+        let futures = plans.into_iter().map(|plan| {
+            let agent = Arc::clone(self);
+            let user_id = user_id.clone();
+            let chat_id = chat_id.clone();
+            let trace = trace.clone();
+            let parent_tools = parent_tools.clone();
+            let caller = caller.clone();
+            async move {
+                info!(
+                    agent = plan.skill_name().unwrap_or("_ad_hoc_"),
+                    tools = ?plan.allowed_tools,
+                    "planned spawn_agents child"
+                );
+                let skill_name = plan.skill_name().map(str::to_string);
+                let source = plan.invoke_source().cloned();
+                let crate::spawn_plan::PlannedSpawn {
+                    system_prompt,
+                    prompt,
+                    model,
+                    tools_override,
+                    child_stack,
+                    ..
+                } = plan;
+                let delivery = crate::peer_invoke::tool_delivery_for_invoke(
+                    &caller,
+                    source.as_ref(),
+                    &user_id,
+                    &chat_id,
+                );
+                // Named: run_subagent enters the real seat (ADR-0050). Ad-hoc has no name.
+                agent
+                    .run_subagent(
+                        skill_name.as_deref(),
+                        &system_prompt,
+                        &prompt,
+                        model.as_deref(),
+                        tools_override,
+                        child_stack,
+                        delivery,
+                        trace,
+                        parent_tools,
+                    )
+                    .await
+            }
+        });
+        let results = futures::future::join_all(futures).await;
+        let mut output = String::from("Spawned agents results:\n\n");
+        for (i, result) in results.iter().enumerate() {
+            output.push_str(&format!("--- Agent {} ---\n{}\n\n", i + 1, result));
+        }
+        output
+    }
+
     /// Handle `invoke_agent` tool args with §7.5 peer depth/cycle guards and
     /// `via <persona>:` attribution. Shared by the main loop and nested subagent loops.
     pub(crate) async fn handle_invoke_agent_tool(
@@ -2651,7 +2604,7 @@ impl Agent {
         trace: Option<crate::loop_runner::TurnTrace>,
         parent_tools: Option<Vec<String>>,
     ) -> String {
-        // ADR-0050 seat←run: named invoke_agent (and named skill/agent packs)
+        // ADR-0050 seat←run: named invoke_agent and named spawn_agents
         // light the matching Portal seat until this call returns/cancels.
         let _seat_run = skill_name.map(|n| self.seat_run.enter(n));
 
@@ -2661,24 +2614,17 @@ impl Agent {
             let active_model = self.current_model.read().await.clone();
             let model = resolve_invoke_model(model_override, None, &active_model);
 
-            let resolved_today = tools_override
+            let defaults = self
+                .config
+                .subagents
+                .default_tools
                 .clone()
-                .or_else(|| self.config.subagents.default_tools.clone())
-                .unwrap_or_else(|| {
-                    vec![
-                        "read_file".to_string(),
-                        "write_file".to_string(),
-                        "list_files".to_string(),
-                        "execute_command".to_string(),
-                    ]
-                });
+                .unwrap_or_else(crate::spawn_plan::builtin_adhoc_tools);
             // Ad-hoc: no declared list; cap = parent tools. No read_skill_file inject.
-            let allowed_tools = match resolve_capped_subagent_tools(
+            let allowed_tools = match crate::spawn_plan::adhoc_subagent_tools(
                 parent_tools.as_deref(),
                 tools_override.as_deref(),
-                &resolved_today,
-                None,
-                false,
+                &defaults,
             ) {
                 Ok(t) => t,
                 Err(msg) => return msg,
@@ -2777,20 +2723,10 @@ impl Agent {
                 .map(|s| s.tools.clone())
                 .or_else(|| bot_peer.and_then(|b| b.tools.clone()))
                 .unwrap_or_default();
-            let resolved_today = tools_override
-                .clone()
-                .unwrap_or_else(|| agent_declared.clone());
-            let declared_for_cap = if agent_declared.is_empty() {
-                None
-            } else {
-                Some(agent_declared)
-            };
-            let capped = match resolve_capped_subagent_tools(
+            let capped = match crate::spawn_plan::named_subagent_tools(
                 parent_tools.as_deref(),
                 tools_override.as_deref(),
-                &resolved_today,
-                declared_for_cap.as_deref(),
-                true,
+                &agent_declared,
             ) {
                 Ok(t) => t,
                 Err(msg) => return msg,
@@ -2973,141 +2909,22 @@ impl Agent {
                                 )
                             }
                             "spawn_agents" => {
-                                let parsed_tasks: Vec<AdHocTask> = if let Some(tasks) =
-                                    args_owned["tasks"].as_array()
-                                {
-                                    if tasks.is_empty() {
-                                        return Some("tasks array is empty".to_string());
-                                    }
-                                    let mut parsed = Vec::with_capacity(tasks.len());
-                                    for (i, task) in tasks.iter().enumerate() {
-                                        let system_prompt = match task["system_prompt"].as_str() {
-                                            Some(s) => s.to_string(),
-                                            None => {
-                                                return Some(format!(
-                                                    "Task at index {}: missing system_prompt",
-                                                    i
-                                                ))
-                                            }
-                                        };
-                                        let prompt = match task["prompt"].as_str() {
-                                            Some(p) => p.to_string(),
-                                            None => {
-                                                return Some(format!(
-                                                    "Task at index {}: missing prompt",
-                                                    i
-                                                ))
-                                            }
-                                        };
-                                        parsed.push(AdHocTask {
-                                            system_prompt,
-                                            prompt,
-                                            model: task["model"].as_str().map(str::to_string),
-                                            tools: task["tools"].as_array().map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|v| v.as_str().map(str::to_string))
-                                                    .collect()
-                                            }),
-                                            seat_name: spawn_seat_name(task),
-                                        });
-                                    }
-                                    parsed
-                                } else {
-                                    let system_prompt = match args_owned["system_prompt"].as_str() {
-                                        Some(s) => s.to_string(),
-                                        None => {
-                                            return Some(
-                                                "Missing system_prompt or tasks".to_string(),
-                                            )
-                                        }
-                                    };
-                                    let prompt = match args_owned["prompt"].as_str() {
-                                        Some(p) => p.to_string(),
-                                        None => return Some("Missing prompt".to_string()),
-                                    };
-                                    vec![AdHocTask {
-                                        system_prompt,
-                                        prompt,
-                                        model: args_owned["model"].as_str().map(str::to_string),
-                                        tools: args_owned["tools"].as_array().map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str().map(str::to_string))
-                                                .collect()
-                                        }),
-                                        seat_name: spawn_seat_name(&args_owned),
-                                    }]
-                                };
-                                // Nested spawns share the invoke_agent depth budget (MAX_PEER_DEPTH).
-                                let child_stacks: Vec<Vec<String>> = match (0..parsed_tasks.len())
-                                    .map(|i| {
-                                        crate::peer_invoke::spawn_agents_child_stack(
-                                            &parent_stack,
-                                            i,
-                                        )
-                                    })
-                                    .collect::<Result<_, _>>()
-                                {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        warn!(stack = ?parent_stack, "spawn_agents rejected: {e}");
-                                        return Some(e);
-                                    }
-                                };
                                 let agent = match self_weak.upgrade() {
                                     Some(a) => a,
                                     None => return Some("Agent is shutting down".to_string()),
                                 };
-                                let futures: Vec<_> = parsed_tasks
-                                    .into_iter()
-                                    .zip(child_stacks)
-                                    .map(|(task, stack)| {
-                                        let sp = task.system_prompt.clone();
-                                        let p = task.prompt.clone();
-                                        let m = task.model.clone();
-                                        let t = task.tools.clone();
-                                        let seat = task.seat_name.clone();
-                                        let a = agent.clone();
-                                        let user_id = user_id.clone();
-                                        let chat_id = chat_id.clone();
-                                        let turn_trace = turn_trace.clone();
-                                        let parent_tools = parent_tools.clone();
-                                        Box::pin(async move {
-                                            let caller = stack
-                                                .first()
-                                                .map(|s| s.as_str())
-                                                .unwrap_or(crate::platform::DEFAULT_BOT_ID);
-                                            let delivery =
-                                                crate::peer_invoke::tool_delivery_for_invoke(
-                                                    caller, None, &user_id, &chat_id,
-                                                );
-                                            // ADR-0050: optional agent/name tags a seat for ad-hoc spawn.
-                                            let _seat =
-                                                seat.as_deref().map(|n| a.seat_run.enter(n));
-                                            a.run_subagent(
-                                                None,
-                                                &sp,
-                                                &p,
-                                                m.as_deref(),
-                                                t,
-                                                stack,
-                                                delivery,
-                                                turn_trace,
-                                                parent_tools,
-                                            )
-                                            .await
-                                        })
-                                    })
-                                    .collect();
-                                let results = futures::future::join_all(futures).await;
-                                let mut output = String::from("Spawned agents results:\n\n");
-                                for (i, result) in results.iter().enumerate() {
-                                    output.push_str(&format!(
-                                        "--- Agent {} ---\n{}\n\n",
-                                        i + 1,
-                                        result
-                                    ));
-                                }
-                                Some(output)
+                                Some(
+                                    agent
+                                        .execute_spawn_agents(
+                                            &args_owned,
+                                            parent_stack,
+                                            &user_id,
+                                            &chat_id,
+                                            turn_trace,
+                                            parent_tools,
+                                        )
+                                        .await,
+                                )
                             }
                             _ => None,
                         }
@@ -4137,13 +3954,47 @@ mod tests {
     fn test_format_available_agents_section_uses_shared_preamble() {
         // The preamble should come from `format_listed_section("agent", ...)`.
         let section = format_available_agents_section("- sub", "- ag", "").expect("expected Some");
-        let shared = format_listed_section(
-            "agent",
-            "Delegate these tasks to specialized agents using `invoke_agent`:",
-        );
+        let shared = format_listed_section("agent", AVAILABLE_AGENTS_FOLLOWUP);
         assert!(
             section.contains(&shared),
             "section should embed the shared preamble exactly"
+        );
+    }
+
+    #[test]
+    fn available_agents_spawn_name_loads_pack_not_a_label() {
+        assert!(
+            AVAILABLE_AGENTS_FOLLOWUP.contains("spawn_agents"),
+            "catalog must name spawn_agents"
+        );
+        assert!(
+            AVAILABLE_AGENTS_FOLLOWUP.contains("whitelist"),
+            "catalog must say a spawn name applies the tool whitelist"
+        );
+        assert!(
+            AVAILABLE_AGENTS_FOLLOWUP.contains("not a seat label"),
+            "catalog must not leave the spawn name as a decorative seat tag"
+        );
+        let lower = AVAILABLE_AGENTS_FOLLOWUP.to_lowercase();
+        assert!(!lower.contains("decorative"));
+        assert!(!lower.contains("only lights"));
+        let section =
+            format_available_agents_section("- **verifier**: Zero-trust", "", "").expect("section");
+        assert!(
+            section.contains(AVAILABLE_AGENTS_FOLLOWUP),
+            "section must use the spawn-name follow-up: {section}"
+        );
+    }
+
+    #[test]
+    fn both_spawn_handlers_delegate_to_execute_spawn_agents() {
+        let src = include_str!("agent.rs");
+        // Split so this assertion does not count itself.
+        let needle = [".execute_spawn", "_agents("].concat();
+        assert_eq!(
+            src.matches(&needle).count(),
+            2,
+            "the main loop and the nested subagent loop must both delegate"
         );
     }
 

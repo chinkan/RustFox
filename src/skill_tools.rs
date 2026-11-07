@@ -286,10 +286,16 @@ impl ToolHandler for SkillTools {
                 function: FunctionDefinition {
                     name: "spawn_agents".to_string(),
                     description: concat!(
-                        "Spawn one or more isolated ad-hoc subagents. ",
-                        "Each gets its own agentic loop with system context auto-injected. ",
-                        "When multiple tasks are provided via the 'tasks' array, they run concurrently. ",
-                        "For a single subagent, use shorthand fields (system_prompt+prompt)."
+                        "Spawn one or more isolated subagents. ",
+                        "Named: set agent (synonym: name) to an agent, skill, or bot persona. ",
+                        "That loads the same pack as invoke_agent (agents, then skills, then bots) ",
+                        "and applies its tool whitelist, capped by the parent tools. ",
+                        "system_prompt is not required for a named spawn and does not replace the pack. ",
+                        "An unknown name is an error and does not fall back to ad-hoc tools. ",
+                        "Ad-hoc: omit agent and name, and pass system_prompt plus prompt. ",
+                        "Ad-hoc tools default to the sandbox set, still parent-capped. ",
+                        "Tasks in the tasks array run concurrently. ",
+                        "Shorthand fields (no tasks array) spawn a single subagent."
                     )
                     .to_string(),
                     parameters: json!({
@@ -300,9 +306,17 @@ impl ToolHandler for SkillTools {
                                 "items": {
                                     "type": "object",
                                     "properties": {
+                                        "agent": {
+                                            "type": "string",
+                                            "description": "Optional. Resolvable agent, skill, or bot persona. Loads that pack and whitelist (same as invoke_agent). An unknown name is an error. Omit for an ad-hoc subagent."
+                                        },
+                                        "name": {
+                                            "type": "string",
+                                            "description": "Optional synonym for agent."
+                                        },
                                         "system_prompt": {
                                             "type": "string",
-                                            "description": "Instructions for this subagent"
+                                            "description": "Required for an ad-hoc spawn when agent and name are omitted; not required for a named spawn. The pack is used and this field does not replace it."
                                         },
                                         "prompt": {
                                             "type": "string",
@@ -315,15 +329,23 @@ impl ToolHandler for SkillTools {
                                         "tools": {
                                             "type": "array",
                                             "items": { "type": "string" },
-                                            "description": "Optional tool whitelist"
+                                            "description": "Optional tool whitelist, capped by the parent and, for a named spawn, by the pack"
                                         }
                                     },
-                                    "required": ["system_prompt", "prompt"]
+                                    "required": ["prompt"]
                                 }
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Shorthand: optional resolvable agent, skill, or bot persona. Loads that pack and whitelist. An unknown name is an error. Omit for an ad-hoc subagent."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Shorthand: optional synonym for agent."
                             },
                             "system_prompt": {
                                 "type": "string",
-                                "description": "Shorthand: system prompt for a single subagent"
+                                "description": "Shorthand: required for an ad-hoc spawn when agent and name are omitted; not required for a named spawn."
                             },
                             "prompt": {
                                 "type": "string",
@@ -336,7 +358,7 @@ impl ToolHandler for SkillTools {
                             "tools": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "description": "Shorthand: optional tool whitelist"
+                                "description": "Shorthand: optional tool whitelist, capped by the parent and, for a named spawn, by the pack"
                             }
                         }
                     }),
@@ -639,6 +661,55 @@ mod tests {
             .into_iter()
             .find(|d| d.function.name == "read_skill_file")
             .expect("read_skill_file definition")
+    }
+
+    #[test]
+    fn spawn_agents_schema_documents_named_versus_adhoc() {
+        let dir = tempfile::tempdir().unwrap();
+        let def = skill_tools(dir.path())
+            .define()
+            .into_iter()
+            .find(|d| d.function.name == "spawn_agents")
+            .expect("spawn_agents definition");
+        let desc = def.function.description.to_lowercase();
+        assert!(
+            desc.contains("ad-hoc") || desc.contains("adhoc"),
+            "description must document ad-hoc spawn: {desc}"
+        );
+        assert!(
+            desc.contains("whitelist") || desc.contains("pack"),
+            "description must document named pack/whitelist: {desc}"
+        );
+        assert!(
+            desc.contains("unknown"),
+            "description must say an unknown name is an error: {desc}"
+        );
+        let params = &def.function.parameters;
+        assert_eq!(params["properties"]["agent"]["type"], "string");
+        assert_eq!(params["properties"]["name"]["type"], "string");
+        let item_props = &params["properties"]["tasks"]["items"]["properties"];
+        assert_eq!(item_props["agent"]["type"], "string");
+        assert_eq!(item_props["name"]["type"], "string");
+        let required: Vec<&str> = params["properties"]["tasks"]["items"]["required"]
+            .as_array()
+            .expect("task required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"prompt"));
+        assert!(
+            !required.contains(&"system_prompt"),
+            "named spawn must not require system_prompt in the schema: {required:?}"
+        );
+        let prompt_desc = item_props["system_prompt"]["description"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            prompt_desc.contains("ad-hoc")
+                || prompt_desc.contains("Omit")
+                || prompt_desc.contains("not required"),
+            "system_prompt description must distinguish named vs ad-hoc: {prompt_desc}"
+        );
     }
 
     #[test]
