@@ -497,3 +497,13 @@ describe('tasks page (T5)', () => {
     expect(screen.getByText('Trigger type cannot be changed after creation.')).toBeTruthy()
   })
 })
+
+describe('memory evidence', () => {
+  it('shows unknown as untrusted and a trusted pointer on the card', async () => {
+    await signIn()
+    renderAt('/memory', makeContext())
+    expect(await screen.findByText(/Kan prefers HKT/)).toBeTruthy()
+    expect(screen.getByText('⚠️ 無來源')).toBeTruthy()
+    expect(screen.getByText(/data\.weather\.gov\.hk/)).toBeTruthy()
+  })
+})
