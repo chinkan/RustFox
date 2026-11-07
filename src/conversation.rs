@@ -362,6 +362,8 @@ impl ConversationManager {
         let layer = match self.summarize_with_llm(ctx, &range).await {
             Ok(text) => text,
             Err(e) => {
+                // Distinct from `PROMPT_HARD_CAP_MARKER`. A failed summary
+                // defers this pass and does not truncate (ADR 0003 Q7 / #376).
                 tracing::warn!(
                     error = %format!("{e:#}"),
                     range = range.len(),
@@ -979,6 +981,14 @@ mod tests {
                 .iter()
                 .all(|t| t.len() >= 200 || !t.contains("UNIQUE_KEYWORD_A")),
             "no 200-char truncation anywhere"
+        );
+        assert!(
+            texts.iter().all(|t| {
+                t != crate::agent_prompt::PROMPT_HARD_CAP_MARKER
+                    && !t.contains("memory compaction failed")
+                    && !t.contains("hard-cap truncation")
+            }),
+            "summary failure must not insert the hard-cap marker"
         );
 
         // Second attempt: protected tail must include both user turns.
