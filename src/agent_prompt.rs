@@ -95,18 +95,25 @@ impl CompressedMessage {
     }
 }
 
-/// Percentage of context_window that triggers Tier 1 (observation masking).
+/// Percentage of `context_window` tokens that triggers Tier 1 (observation masking).
 const OBSERVATION_MASK_PCT: f64 = 0.70;
-/// Percentage that triggers Tier 2 (context collapse).
+/// Percentage of `context_window` tokens that triggers Tier 2 (context collapse).
 const COLLAPSE_PCT: f64 = 0.75;
 /// Utilization fraction (estimated tokens / context_window) at which the
 /// unified compaction pipeline begins summarizing the oldest messages.
 pub const COMPACT_TRIGGER_PCT: f64 = 0.85;
 /// Minimum turns between Tier 3/4 compactions.
 pub const PRESERVED_TOOL_GROUPS: usize = 2;
-/// Absolute hard cap safety net (applied regardless of context_window).
-const PROMPT_HARD_CAP_BYTES: usize = 100_000;
-/// Minimum message count to consider Tier 3 compact.
+/// Safety-net cap as a fraction of `context_window` tokens. Must stay
+/// ≥ 0.90 and above [`COLLAPSE_PCT`]. Tier 3 summary failure does not use
+/// this cap; it defers (ADR 0003 Q7).
+const PROMPT_HARD_CAP_PCT: f64 = 0.90;
+/// Inserted when the token hard cap drops oldest non-protected messages.
+/// A safety-net truncation, not a failed summary.
+pub(crate) const PROMPT_HARD_CAP_MARKER: &str =
+    "★ earlier conversation dropped — prompt hard-cap truncation ★";
+/// Floor message count for the Tier 1/2 gate in [`prepare_messages_for_llm`].
+/// Not the Tier 3 summarizer trigger.
 const COMPACT_MIN_MESSAGE_COUNT: usize = 15;
 
 /// Keep for backward compat — `is_compacted_regurgitation` references this.
@@ -129,7 +136,10 @@ pub struct PreparedPrompt {
     pub stats: PromptStats,
 }
 
-/// Estimate the byte size of a prompt from its messages.
+/// Estimate the UTF-8 byte size of a prompt from its messages.
+///
+/// Budget checks use [`estimate_tokens`]. This remains for logs and for
+/// callers that want the raw size.
 pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
@@ -154,7 +164,8 @@ pub fn estimate_prompt_bytes(messages: &[ChatMessage]) -> usize {
 ///
 /// CJK characters cost ~1 token each; Latin/other characters ~1/4 token.
 /// Tool-call arguments count toward the total. This is the single token
-/// estimate used for the compaction trigger (ADR 0003 Q3).
+/// estimate for the Tier 3 trigger and the Tier 1/2/hard-cap prompt budget
+/// (ADR 0003 Q3).
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     let mut latin_chars = 0usize;
     let mut cjk_chars = 0usize;
@@ -314,11 +325,11 @@ pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
 /// knows it made the call but the bulky payload is gone. Also neutralize
 /// any old [RustFox compacted:...] markers in tool call arguments.
 ///
-/// Trigger: estimated bytes > context_window * OBSERVATION_MASK_PCT
+/// Trigger: estimated tokens > context_window * OBSERVATION_MASK_PCT.
 /// Applies to: tool results older than PRESERVED_TOOL_GROUPS.
 pub fn observation_mask(messages: &[ChatMessage], context_window: usize) -> Vec<ChatMessage> {
-    let threshold = (context_window as f64 * OBSERVATION_MASK_PCT) as usize;
-    if estimate_prompt_bytes(messages) <= threshold {
+    let threshold = token_threshold(context_window, OBSERVATION_MASK_PCT);
+    if estimate_tokens(messages) <= threshold {
         return messages.to_vec();
     }
 
@@ -384,10 +395,10 @@ pub fn observation_mask(messages: &[ChatMessage], context_window: usize) -> Vec<
 /// messages). Insert a structural boundary marker at the collapse point
 /// so the LLM doesn't perceive a confusing jump.
 ///
-/// Trigger: still > context_window * COLLAPSE_PCT after Tier 1.
+/// Trigger: estimated tokens > context_window * COLLAPSE_PCT.
 pub fn collapse_context(messages: &[ChatMessage], context_window: usize) -> Vec<ChatMessage> {
-    let threshold = (context_window as f64 * COLLAPSE_PCT) as usize;
-    if estimate_prompt_bytes(messages) <= threshold {
+    let threshold = token_threshold(context_window, COLLAPSE_PCT);
+    if estimate_tokens(messages) <= threshold {
         return messages.to_vec();
     }
 
@@ -526,64 +537,77 @@ pub fn find_tool_groups(messages: &[ChatMessage]) -> Vec<ToolGroup> {
 /// - Tier 1: observation masking (replace old tool results with placeholder)
 /// - Tier 2: context collapse (remove oldest tool groups, insert boundary marker)
 ///
-/// If still over PROMPT_HARD_CAP_BYTES after both tiers, reduce preserved
-/// groups to 1 as a last resort.
+/// If still over `PROMPT_HARD_CAP_PCT` * `context_window` tokens after both
+/// tiers, drop the oldest non-protected messages and insert
+/// `PROMPT_HARD_CAP_MARKER`. The protected tail is never trimmed here.
 pub fn prepare_messages_for_llm(messages: &[ChatMessage], context_window: usize) -> PreparedPrompt {
     let original_message_count = messages.len();
     let original_prompt_bytes = estimate_prompt_bytes(messages);
+    let original_tokens = estimate_tokens(messages);
 
-    let obs_threshold = (context_window as f64 * OBSERVATION_MASK_PCT) as usize;
-    let coll_threshold = (context_window as f64 * COLLAPSE_PCT) as usize;
+    let obs_threshold = token_threshold(context_window, OBSERVATION_MASK_PCT);
+    let coll_threshold = token_threshold(context_window, COLLAPSE_PCT);
+    let hard_cap_tokens = token_threshold(context_window, PROMPT_HARD_CAP_PCT);
 
-    let should_compact = original_prompt_bytes > obs_threshold
+    let should_compact = original_tokens > obs_threshold
         && original_message_count > compact_min_message_count(context_window);
 
-    let prepared_messages = if should_compact {
+    let (prepared_messages, tier) = if should_compact {
         // Tier 1: observation masking
         let after_tier1 = observation_mask(messages, context_window);
 
         // Tier 2: context collapse if still over COLLAPSE_PCT
-        let after_tier2 = if estimate_prompt_bytes(&after_tier1) > coll_threshold {
+        let tier2 = estimate_tokens(&after_tier1) > coll_threshold;
+        let after_tier2 = if tier2 {
             collapse_context(&after_tier1, context_window)
         } else {
             after_tier1
         };
 
-        // Safety net (ADR 0003 Q7 step 3): if still over the hard cap after
-        // Tiers 1-2, drop the OLDEST non-protected traffic only — the last two
-        // user turns + active exchange always survive.
-        if estimate_prompt_bytes(&after_tier2) > PROMPT_HARD_CAP_BYTES {
-            let tail_start = protected_tail_start(&after_tier2, context_window).max(1);
-            let mut hard_cap_messages: Vec<ChatMessage> =
-                Vec::with_capacity(after_tier2.len().saturating_sub(tail_start) + 2);
-            if let Some(system) = after_tier2.first() {
-                hard_cap_messages.push(system.clone());
-            }
-            if tail_start < after_tier2.len() {
-                if tail_start > 1 {
-                    hard_cap_messages.push(ChatMessage {
-                        role: "system".to_string(),
-                        content: Some(MessageContent::Text(
-                            "★ earlier conversation dropped — memory compaction failed ★"
-                                .to_string(),
-                        )),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
-                hard_cap_messages.extend(after_tier2.iter().skip(tail_start).cloned());
-            }
-            hard_cap_messages
+        // Safety net (ADR 0003 Q7 step 3): if still over the token hard cap
+        // after Tiers 1-2, drop the OLDEST non-protected traffic only — the
+        // last two user turns + active exchange always survive. Summary
+        // failure does not reach this branch; it defers without truncating.
+        let hard_cap = estimate_tokens(&after_tier2) > hard_cap_tokens;
+        let tier = match (tier2, hard_cap) {
+            (false, false) => "tier1",
+            (true, false) => "tier1+tier2",
+            (false, true) => "tier1+hard-cap",
+            (true, true) => "tier1+tier2+hard-cap",
+        };
+        let prepared = if hard_cap {
+            truncate_to_hard_cap(&after_tier2, context_window)
         } else {
             after_tier2
-        }
+        };
+        (prepared, tier)
     } else {
-        messages.to_vec()
+        (messages.to_vec(), "none")
     };
 
     let prepared_message_count = prepared_messages.len();
     let prepared_prompt_bytes = estimate_prompt_bytes(&prepared_messages);
+    let prepared_tokens = estimate_tokens(&prepared_messages);
+
+    if tier == "none" {
+        tracing::debug!(
+            tokens = original_tokens,
+            bytes = original_prompt_bytes,
+            context_window,
+            tier,
+            "prepare_messages_for_llm budget"
+        );
+    } else {
+        tracing::info!(
+            tokens = original_tokens,
+            bytes = original_prompt_bytes,
+            prepared_tokens,
+            prepared_bytes = prepared_prompt_bytes,
+            context_window,
+            tier,
+            "prepare_messages_for_llm budget"
+        );
+    }
 
     PreparedPrompt {
         messages: prepared_messages,
@@ -597,13 +621,46 @@ pub fn prepare_messages_for_llm(messages: &[ChatMessage], context_window: usize)
     }
 }
 
-/// Returns minimum message count to consider compaction, scaled by
-/// context_window size. Larger windows need more messages to justify
-/// the LLM cost of Tier 3.
+fn token_threshold(context_window: usize, pct: f64) -> usize {
+    (context_window as f64 * pct) as usize
+}
+
+/// Drop messages before the protected tail. The first message (system prompt)
+/// is kept, and a hard-cap marker is inserted when anything between it and
+/// the tail is removed.
+fn truncate_to_hard_cap(messages: &[ChatMessage], context_window: usize) -> Vec<ChatMessage> {
+    let tail_start = protected_tail_start(messages, context_window).max(1);
+    let mut hard_cap_messages: Vec<ChatMessage> =
+        Vec::with_capacity(messages.len().saturating_sub(tail_start) + 2);
+    if let Some(system) = messages.first() {
+        hard_cap_messages.push(system.clone());
+    }
+    if tail_start < messages.len() {
+        if tail_start > 1 {
+            hard_cap_messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::Text(PROMPT_HARD_CAP_MARKER.to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+        hard_cap_messages.extend(messages.iter().skip(tail_start).cloned());
+    }
+    hard_cap_messages
+}
+
+/// Message-count floor for Tier 1/2 in [`prepare_messages_for_llm`].
+///
+/// Short transcripts skip the sync emergency tiers even when the token
+/// estimate is over the percentage thresholds. The floor is
+/// [`COMPACT_MIN_MESSAGE_COUNT`] below a 512_000-token window, then half
+/// that base again for every further 512_000 tokens (15, then 22 at
+/// 512_000, 30 at 1_024_000). Tier 3 does not consult this floor; it
+/// triggers only on [`COMPACT_TRIGGER_PCT`].
 fn compact_min_message_count(context_window: usize) -> usize {
-    // Base: 15 messages. Scale linearly: 15 for 128K, 30 for 1M, etc.
     let base = COMPACT_MIN_MESSAGE_COUNT;
-    let window_k = context_window / 512_000; // 512K = 128K tokens
+    let window_k = context_window / 512_000;
     base + (base / 2) * window_k
 }
 
@@ -774,7 +831,8 @@ mod tests {
 
     #[test]
     fn observation_mask_replaces_old_tool_results_and_keeps_recent() {
-        let ctx = 1000;
+        // Latin payload is ~335 tokens; threshold is 0.70 * ctx.
+        let ctx = 400;
         let mut messages = Vec::new();
 
         messages.push(ChatMessage {
@@ -882,7 +940,8 @@ mod tests {
 
     #[test]
     fn collapse_context_removes_oldest_tool_groups_and_inserts_boundary_marker() {
-        let ctx = 5000;
+        // Latin payload is ~1_300 tokens; threshold is 0.75 * ctx.
+        let ctx = 1_000;
         let mut messages = Vec::new();
 
         messages.push(ChatMessage {
@@ -1018,7 +1077,10 @@ mod tests {
 
     #[test]
     fn prepare_messages_applies_tier2_when_tier1_not_enough() {
-        let ctx = 50000;
+        // ~24_000 tokens before Tier 1, ~12_000 after masking, ~6_000 after
+        // collapse. Window keeps Tier 2 above the 0.75 line and the result
+        // under the 0.90 hard cap.
+        let ctx = 10_000;
         let mut messages = Vec::new();
         messages.push(ChatMessage {
             role: "system".to_string(),
@@ -1095,8 +1157,8 @@ mod tests {
         let mut msgs = vec![chat_msg("system", "sys")];
         msgs.push(chat_msg("user", "request 0"));
         // 7 tool groups (16 msgs + sys + last user = 17 > compact_min_message_count(15)).
-        // Preserved tool groups alone exceed PROMPT_HARD_CAP_BYTES, so the
-        // obs/coll tiers cannot reduce below the cap → the hard-cap branch fires.
+        // Preserved tool groups alone exceed PROMPT_HARD_CAP_PCT * window, so
+        // the obs/coll tiers cannot reduce below the cap → the hard-cap branch fires.
         for i in 0..7 {
             msgs.push(ChatMessage {
                 role: "assistant".to_string(),
@@ -1137,6 +1199,13 @@ mod tests {
                 .map(|c| c.as_text() == "request 0")
                 .unwrap_or(false)),
             "oldest traffic dropped"
+        );
+        assert!(
+            prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text() == PROMPT_HARD_CAP_MARKER)),
+            "hard-cap marker names the truncation"
         );
     }
 
@@ -1275,7 +1344,7 @@ mod tests {
         msgs.push(chat_msg("user", "request 0"));
         msgs.push(chat_msg("assistant", "reply 0"));
         msgs.push(chat_msg("user", "request last"));
-        // Enough oversized groups that T1/T2 cannot shrink under the hard cap.
+        // Enough oversized groups that T1/T2 cannot shrink under the token hard cap.
         for i in 0..7 {
             msgs.push(ChatMessage {
                 role: "assistant".to_string(),
@@ -1315,6 +1384,13 @@ mod tests {
                 .map(|c| c.as_text() == "request 0")
                 .unwrap_or(false)),
             "oldest traffic still dropped"
+        );
+        assert!(
+            prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text() == PROMPT_HARD_CAP_MARKER)),
+            "hard-cap marker names the truncation"
         );
     }
 
@@ -1440,6 +1516,209 @@ mod tests {
             3,
             "tool args count (12 latin chars)"
         );
+    }
+
+    /// CJK is ~3 UTF-8 bytes per token. A prompt whose bytes exceed
+    /// `context_window * OBSERVATION_MASK_PCT` but whose `estimate_tokens`
+    /// does not must not enter Tier 1/2 or the hard cap.
+    #[test]
+    fn cjk_bytes_over_token_threshold_does_not_false_trigger() {
+        let window = 10_000usize;
+        let obs = (window as f64 * OBSERVATION_MASK_PCT) as usize;
+        // 24 × 150 CJK = 3_600 tokens and 10_800 bytes.
+        let text = "文".repeat(150);
+        let messages: Vec<ChatMessage> = (0..24).map(|_| chat_msg("user", &text)).collect();
+        let tokens = estimate_tokens(&messages);
+        let bytes = estimate_prompt_bytes(&messages);
+        assert!(
+            bytes > obs,
+            "fixture bytes must clear the old byte-vs-token comparison: bytes={bytes} obs={obs}"
+        );
+        assert!(
+            tokens <= obs,
+            "fixture tokens must sit under the Tier 1 budget: tokens={tokens} obs={obs}"
+        );
+        assert!(messages.len() > compact_min_message_count(window));
+        // Retired absolute cap was 100_000 bytes. Stay under it so a pass
+        // here is about the unit mismatch, not that cap.
+        assert!(bytes < 100_000, "bytes={bytes}");
+
+        let prepared = prepare_messages_for_llm(&messages, window);
+        assert!(
+            !prepared.stats.compaction_applied,
+            "CJK under the token budget must not compact (tokens={tokens} bytes={bytes} window={window})"
+        );
+        assert_eq!(prepared.messages.len(), messages.len());
+        assert!(
+            prepared.messages.iter().all(|m| {
+                m.content
+                    .as_ref()
+                    .is_none_or(|c| !c.as_text().contains("earlier conversation"))
+            }),
+            "no drop/collapse marker"
+        );
+    }
+
+    /// Same false-trigger, with latin (÷4) and CJK (×1) in one prompt.
+    #[test]
+    fn mixed_latin_and_cjk_under_token_budget_does_not_false_trigger() {
+        let window = 10_000usize;
+        let obs = (window as f64 * OBSERVATION_MASK_PCT) as usize;
+        // Per message: 400 latin → 100 tokens / 400 bytes, 100 CJK → 100 tokens / 300 bytes.
+        let text = format!("{}{}", "a".repeat(400), "文".repeat(100));
+        let messages: Vec<ChatMessage> = (0..24).map(|_| chat_msg("user", &text)).collect();
+        let tokens = estimate_tokens(&messages);
+        let bytes = estimate_prompt_bytes(&messages);
+        assert_eq!(estimate_tokens(&messages[..1]), 200, "latin/4 + cjk");
+        assert!(
+            bytes > obs,
+            "mixed bytes must clear the old comparison: bytes={bytes} obs={obs}"
+        );
+        assert!(
+            tokens <= obs,
+            "mixed tokens must sit under the Tier 1 budget: tokens={tokens} obs={obs}"
+        );
+        assert!(messages.len() > compact_min_message_count(window));
+
+        let prepared = prepare_messages_for_llm(&messages, window);
+        assert!(
+            !prepared.stats.compaction_applied,
+            "latin+CJK under the token budget must not compact (tokens={tokens} bytes={bytes})"
+        );
+        assert_eq!(prepared.messages.len(), messages.len());
+        assert!(prepared.messages.iter().all(|m| {
+            m.content.as_ref().is_some_and(|c| {
+                !c.as_text().contains("memory compaction failed")
+                    && !c.as_text().contains("hard-cap truncation")
+            })
+        }));
+    }
+
+    /// Tokens over 90% of the window must hard-cap even when UTF-8 bytes stay
+    /// under the retired 100_000 cap. Oldest traffic drops; the last user
+    /// turn stays; the marker names the cap, not a failed summary.
+    #[test]
+    fn scaled_hard_cap_keeps_last_user_and_uses_truncation_marker() {
+        let window = 10_000usize;
+        let hard_cap_tokens = (window as f64 * 0.90) as usize;
+        let mut msgs = vec![chat_msg("system", "sys")];
+        msgs.push(chat_msg("user", "request 0"));
+        for i in 0..6 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("s{i}"),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+            msgs.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("ok".to_string())),
+                tool_calls: None,
+                tool_call_id: Some(format!("s{i}")),
+                reasoning_content: None,
+            });
+        }
+        msgs.push(chat_msg("user", "request last"));
+        // Preserved tool groups (last two) hold the token mass so Tier 1/2
+        // cannot shrink the prompt under the scaled cap. 80_000 latin bytes
+        // is under the retired 100_000 byte cap and is 20_000 tokens.
+        for i in 0..2 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("h{i}"),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "tool".to_string(),
+                        arguments: "x".repeat(20_000),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+            msgs.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("y".repeat(20_000))),
+                tool_calls: None,
+                tool_call_id: Some(format!("h{i}")),
+                reasoning_content: None,
+            });
+        }
+
+        let tokens = estimate_tokens(&msgs);
+        let bytes = estimate_prompt_bytes(&msgs);
+        assert!(
+            tokens > hard_cap_tokens,
+            "fixture must exceed 90% of the window: tokens={tokens} cap={hard_cap_tokens}"
+        );
+        assert!(
+            bytes < 100_000,
+            "fixture must stay under the retired byte cap so only the scaled cap fires: bytes={bytes}"
+        );
+        assert!(msgs.len() > compact_min_message_count(window));
+
+        let prepared = prepare_messages_for_llm(&msgs, window);
+        assert!(
+            prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text() == "request last")),
+            "last user turn survives the hard cap"
+        );
+        assert!(
+            !prepared.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text() == "request 0")),
+            "oldest user turn is dropped"
+        );
+        let marker = "★ earlier conversation dropped — prompt hard-cap truncation ★";
+        assert!(
+            prepared.messages.iter().any(|m| {
+                m.role == "system" && m.content.as_ref().is_some_and(|c| c.as_text() == marker)
+            }),
+            "hard-cap marker must name the truncation, got: {:?}",
+            prepared
+                .messages
+                .iter()
+                .filter(|m| m.role == "system")
+                .map(|m| m.content.as_ref().map(|c| c.as_text()).unwrap_or_default())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            prepared.messages.iter().all(|m| m
+                .content
+                .as_ref()
+                .is_none_or(|c| !c.as_text().contains("memory compaction failed"))),
+            "hard-cap must not claim memory compaction failed"
+        );
+    }
+
+    #[test]
+    fn hard_cap_pct_is_at_least_90_and_above_collapse() {
+        assert!(
+            PROMPT_HARD_CAP_PCT >= 0.90,
+            "hard cap must be at least 90% of the window"
+        );
+        assert!(
+            PROMPT_HARD_CAP_PCT > COLLAPSE_PCT,
+            "hard cap must sit above Tier 2"
+        );
+        assert_eq!(
+            PROMPT_HARD_CAP_MARKER,
+            "★ earlier conversation dropped — prompt hard-cap truncation ★"
+        );
+        assert!(!PROMPT_HARD_CAP_MARKER.contains("memory compaction failed"));
+        assert!(!PROMPT_HARD_CAP_MARKER.contains("deferring"));
     }
 
     #[test]

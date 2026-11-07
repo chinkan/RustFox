@@ -5,6 +5,8 @@ Accepted (implemented)
 
 **Amendment (2026-10-28):** Product lock **Option A** — RustFox always owns compaction for all Active peers (including OpenCode Go); no provider skip; target harness UX/invariants; cold-intro removal sequencing after P0 #326/#327 and harness parity — see [ADR-0051](./0051-compaction-ownership-option-a-and-harness-target.md). Q1–Q9 below remain authoritative for the compact pipeline; ADR-0051 does not reopen them.
 
+**Amendment (2026-11-07, #376):** Q3 landing — Tier 1, Tier 2, and the hard cap compare `estimate_tokens` to `context_window`, the same metric as the Tier 3 trigger. The fixed `PROMPT_HARD_CAP_BYTES = 100_000` is retired. The hard cap is `PROMPT_HARD_CAP_PCT` (0.90) × `context_window` (≥ 0.90 and above `COLLAPSE_PCT`). The hard-cap marker is `★ earlier conversation dropped — prompt hard-cap truncation ★`. Summary failure still defers with `Compaction summary failed; deferring (no truncation)` and does not truncate (Q7). The protected tail (Q4 / #326 / #327 / ADR-0051) is unchanged.
+
 ## Date
 2026-08-06
 
@@ -66,6 +68,18 @@ current_model)`, replacing the hardcoded `128_000`. Estimation unifies with
 `COMPACT_TRIGGER_PCT 0.70` / `OBSERVATION_MASK_PCT` / `COLLAPSE_PCT` char
 ladder is removed.
 
+**Landing (#376, 2026-11-07).** Tier 3 already compared `estimate_tokens` to
+`context_window * COMPACT_TRIGGER_PCT` (0.85). Tier 1
+(`OBSERVATION_MASK_PCT` 0.70), Tier 2 (`COLLAPSE_PCT` 0.75), and the hard
+cap were still comparing `estimate_prompt_bytes` (UTF-8 bytes) to those
+token counts, and the hard cap was a fixed 100_000 bytes. Those checks now
+use `estimate_tokens` against the same window. The 0.70 / 0.75 figures stay
+as token fractions for the sync emergency tiers; they are not a character
+ladder. `estimate_prompt_bytes` is for logs and diagnostics. The hard cap is
+`PROMPT_HARD_CAP_PCT` (0.90) × `context_window` (at least 0.90, and above
+`COLLAPSE_PCT`). Its marker is `★ earlier conversation dropped — prompt
+hard-cap truncation ★`.
+
 ### Q4 — Preserve policy (Accepted)
 The protected verbatim zone is the **latest user intent**: the last **two**
 user turns' user messages verbatim plus the active exchange (last user
@@ -105,6 +119,12 @@ chain:
    non-protected messages only** — the protected tail (last 2 user turns +
    active exchange) is never touched; dropped traffic is replaced by a
    one-line marker (precedent: Codex v0.118 no-LLM session-memory compact).
+
+**Landing (#376).** That hard-ceiling marker reads `★ earlier conversation
+dropped — prompt hard-cap truncation ★`, replacing the earlier wording that
+called the drop a failed memory compaction. Summary failure still logs
+`Compaction summary failed; deferring (no truncation)` and leaves the
+transcript intact. The two copies stay distinct.
 
 Every summary failure is logged (`warn!`) with reason, model, and message
 range so failures are visible without being user-facing noise.
