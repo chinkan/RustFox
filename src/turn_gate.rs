@@ -51,6 +51,9 @@ pub struct QueuedInput {
     /// True when this input is a successfully transcribed Telegram voice note.
     /// Survives the queue so the turn that starts from it is voice-origin.
     pub voice_origin: bool,
+    /// `yue` or `en` when this voice-origin reply may `sendVoice`. Absent for
+    /// typed chat, `zh` / `ja` / `ko`, and unresolved `auto`.
+    pub voice_spoken_lang: Option<String>,
 }
 
 impl QueuedInput {
@@ -79,7 +82,8 @@ pub enum Submit {
     /// A scheduled lane running beside it does not change this (#338).
     Accepted,
     /// Queue full: not stored (Q4 refusal). The input is handed back.
-    Full(QueuedInput),
+    /// Boxed so the refusal variant does not inflate every `Submit`.
+    Full(Box<QueuedInput>),
 }
 
 /// What runs after one lane ends ([`TurnGate::finish_user`] /
@@ -152,7 +156,7 @@ impl TurnGate {
             return Submit::Start(inputs);
         }
         if st.pending.len() >= QUEUE_CAP {
-            return Submit::Full(input);
+            return Submit::Full(Box::new(input));
         }
         st.pending.push_back(input);
         Submit::Accepted

@@ -83,6 +83,7 @@ pub async fn send(
         device_room: None,
         device_fw: None,
         voice_origin: false,
+        voice_spoken_lang: None,
     };
 
     // Bridge: agent output channels → single SSE event channel.

@@ -14,6 +14,19 @@
 //! Bot API download and voice-note ingress are not in this module. They live
 //! in the Telegram adapter. Hardware adapters must not grow a copy of that
 //! download path; they may call this library later for off-device ASR.
+//!
+//! ADR-0063: `enabled` gates the pipeline (absent means on). `languages`
+//! selects from `{yue, zh, en, ja, ko}` and becomes the SenseVoice flag
+//! (one id, or `auto`). Spoken replies are Cantonese or English only.
+//! English weights are the local Piper pack in [`packs::EN_TTS_PACK_ID`].
+
+mod packs;
+
+pub use packs::{
+    merge_voice_settings, PackStatus, VoiceDownloadView, VoicePack, VoicePackFetcher, VoiceRuntime,
+    VoiceSettingsPatch, EN_TTS_PACK_ID, EN_TTS_PACK_URL, EN_TTS_REL_DIR, SENSEVOICE_PACK_ID,
+    SENSEVOICE_PACK_URL, YUE_TTS_PACK_ID,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,6 +34,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use serde::Deserialize;
+use serde::Deserializer;
 use tokio::process::Command;
 
 /// Inbound prefix for a transcribed voice note. The transcript follows on the
@@ -35,12 +49,26 @@ const DEFAULT_TTS_BIN: &str = "sherpa-onnx-offline-tts";
 const DEFAULT_FFMPEG_BIN: &str = "ffmpeg";
 const SENSEVOICE_LANGS: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 
+/// Selection order for `[voice].languages`. `auto` is a CLI flag, not an id.
+pub const VOICE_LANG_ORDER: [&str; 5] = ["yue", "zh", "en", "ja", "ko"];
+
+/// Caption-less note when `[voice].enabled` is false. Not a silent drop.
+pub const VOICE_OFF_CLARIFY: &str = "Voice notes are turned off. Please type your message.";
+
 fn default_engine() -> String {
     "sensevoice".to_string()
 }
 
 fn default_language() -> String {
     "yue".to_string()
+}
+
+fn default_voice_enabled() -> bool {
+    true
+}
+
+fn default_voice_languages() -> Vec<String> {
+    vec!["yue".to_string(), "en".to_string()]
 }
 
 fn default_openrouter_stt_model() -> String {
@@ -51,81 +79,187 @@ fn default_voice_timeout_secs() -> u64 {
     120
 }
 
-/// `[voice]` config. Absent section matches [`Default`]: SenseVoice, Cantonese,
-/// cloud STT off, TTS off.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+/// `[voice]` config. Absent section matches [`Default`]: SenseVoice on,
+/// languages `yue` + `en` (CLI `auto`), cloud STT off, TTS off.
+///
+/// `language` is the legacy single-id key. It is the selection only when
+/// `languages` is absent. `languages` wins once Settings (or the file) sets it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceConfig {
+    /// Master gate for STT and TTS. Absent in the file means true.
+    pub enabled: bool,
     /// Primary engine id. Only `sensevoice` is implemented.
-    #[serde(default = "default_engine")]
     pub engine: String,
     /// Directory with `model.int8.onnx` (or `model.onnx`) and `tokens.txt`.
     /// Empty until home resolution fills `<home>/models/sensevoice`.
-    #[serde(default)]
     pub model_dir: PathBuf,
     /// Override for `sherpa-onnx-offline`. Empty uses that name on `PATH`.
-    #[serde(default)]
     pub stt_bin: String,
     /// Override for `ffmpeg` (OGG/Opus voice notes → 16 kHz mono WAV).
-    #[serde(default)]
     pub ffmpeg_bin: String,
-    /// SenseVoice language. Default `yue` (Cantonese).
-    #[serde(default = "default_language")]
+    /// SenseVoice CLI flag derived from [`VoiceConfig::languages`]: one id,
+    /// or `auto` when two or more are selected.
     pub language: String,
-    /// Opt-in OpenRouter speech-to-text. Default false.
-    #[serde(default)]
+    /// Selected SenseVoice languages, ordered `yue, zh, en, ja, ko`.
+    pub languages: Vec<String>,
+    /// Opt-in OpenRouter speech-to-text. Default false. Not a Settings field.
     pub openrouter_stt: bool,
     /// Model id used only when `openrouter_stt` is true.
-    #[serde(default = "default_openrouter_stt_model")]
     pub openrouter_stt_model: String,
     /// Wall clock for one local (or fallback) transcription. `0` becomes 120.
-    #[serde(default = "default_voice_timeout_secs")]
     pub stt_timeout_secs: u64,
     /// Opt-in spoken reply. Default false. Text is still sent when this is on.
-    #[serde(default)]
     pub tts: bool,
     /// Override that writes OGG/Opus. Empty uses sherpa-onnx VITS + ffmpeg.
     /// Contract: `bin --text-file <txt> --output <file.ogg>`.
-    #[serde(default)]
     pub tts_bin: String,
-    /// Directory with `model.onnx` and `tokens.txt` for local TTS.
+    /// Directory with `model.onnx` and `tokens.txt` for Cantonese TTS.
     /// Optional `lexicon.txt` and `rule.fst` are passed when those files exist.
     /// Empty until home resolution fills `<home>/models/tts-cantonese`.
-    #[serde(default)]
     pub tts_model_dir: PathBuf,
+    /// Directory for [`EN_TTS_PACK_ID`]. Empty until home resolution fills
+    /// `<home>/models/tts-en`.
+    pub tts_en_model_dir: PathBuf,
     /// Wall clock for one synthesis. `0` becomes 120.
-    #[serde(default = "default_voice_timeout_secs")]
     pub tts_timeout_secs: u64,
 }
 
-impl Default for VoiceConfig {
+/// File shape. `languages` and legacy `language` stay optional so an absent
+/// key is not the same as an empty list or the old default `yue`.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct VoiceConfigFile {
+    #[serde(default = "default_voice_enabled")]
+    enabled: bool,
+    #[serde(default = "default_engine")]
+    engine: String,
+    #[serde(default)]
+    model_dir: PathBuf,
+    #[serde(default)]
+    stt_bin: String,
+    #[serde(default)]
+    ffmpeg_bin: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    languages: Option<Vec<String>>,
+    #[serde(default)]
+    openrouter_stt: bool,
+    #[serde(default = "default_openrouter_stt_model")]
+    openrouter_stt_model: String,
+    #[serde(default = "default_voice_timeout_secs")]
+    stt_timeout_secs: u64,
+    #[serde(default)]
+    tts: bool,
+    #[serde(default)]
+    tts_bin: String,
+    #[serde(default)]
+    tts_model_dir: PathBuf,
+    #[serde(default)]
+    tts_en_model_dir: PathBuf,
+    #[serde(default = "default_voice_timeout_secs")]
+    tts_timeout_secs: u64,
+}
+
+impl Default for VoiceConfigFile {
     fn default() -> Self {
         Self {
+            enabled: default_voice_enabled(),
             engine: default_engine(),
             model_dir: PathBuf::new(),
             stt_bin: String::new(),
             ffmpeg_bin: String::new(),
-            language: default_language(),
+            language: None,
+            languages: None,
             openrouter_stt: false,
             openrouter_stt_model: default_openrouter_stt_model(),
             stt_timeout_secs: default_voice_timeout_secs(),
             tts: false,
             tts_bin: String::new(),
             tts_model_dir: PathBuf::new(),
+            tts_en_model_dir: PathBuf::new(),
             tts_timeout_secs: default_voice_timeout_secs(),
         }
     }
 }
 
+impl<'de> Deserialize<'de> for VoiceConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = VoiceConfigFile::deserialize(deserializer)?;
+        raw.into_voice().map_err(serde::de::Error::custom)
+    }
+}
+
+impl VoiceConfigFile {
+    fn into_voice(self) -> Result<VoiceConfig, String> {
+        let languages = match self.languages {
+            Some(languages) => order_voice_languages(&languages)?,
+            None => match self.language.as_deref() {
+                Some(language) => selection_from_legacy(language),
+                None => default_voice_languages(),
+            },
+        };
+        let mut cfg = VoiceConfig {
+            enabled: self.enabled,
+            engine: self.engine,
+            model_dir: self.model_dir,
+            stt_bin: self.stt_bin,
+            ffmpeg_bin: self.ffmpeg_bin,
+            language: String::new(),
+            languages,
+            openrouter_stt: self.openrouter_stt,
+            openrouter_stt_model: self.openrouter_stt_model,
+            stt_timeout_secs: self.stt_timeout_secs,
+            tts: self.tts,
+            tts_bin: self.tts_bin,
+            tts_model_dir: self.tts_model_dir,
+            tts_en_model_dir: self.tts_en_model_dir,
+            tts_timeout_secs: self.tts_timeout_secs,
+        };
+        cfg.normalize();
+        Ok(cfg)
+    }
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        let mut cfg = Self {
+            enabled: true,
+            engine: default_engine(),
+            model_dir: PathBuf::new(),
+            stt_bin: String::new(),
+            ffmpeg_bin: String::new(),
+            language: String::new(),
+            languages: default_voice_languages(),
+            openrouter_stt: false,
+            openrouter_stt_model: default_openrouter_stt_model(),
+            stt_timeout_secs: default_voice_timeout_secs(),
+            tts: false,
+            tts_bin: String::new(),
+            tts_model_dir: PathBuf::new(),
+            tts_en_model_dir: PathBuf::new(),
+            tts_timeout_secs: default_voice_timeout_secs(),
+        };
+        cfg.normalize();
+        cfg
+    }
+}
+
 impl VoiceConfig {
-    /// Fill blanks and canonicalize the engine id and SenseVoice language.
+    /// Fill blanks and derive the SenseVoice CLI flag from `languages`.
     pub fn normalize(&mut self) {
         if self.engine.trim().is_empty() {
             self.engine = default_engine();
         } else {
             self.engine = self.engine.trim().to_ascii_lowercase();
         }
-        self.language = sensevoice_language(&self.language);
+        if self.languages.is_empty() {
+            self.languages = default_voice_languages();
+        }
+        if let Ok(ordered) = order_voice_languages(&self.languages) {
+            self.languages = ordered;
+        }
+        self.language = stt_language_flag(&self.languages);
         if self.openrouter_stt_model.trim().is_empty() {
             self.openrouter_stt_model = default_openrouter_stt_model();
         } else {
@@ -141,6 +275,67 @@ impl VoiceConfig {
         self.tts_bin = self.tts_bin.trim().to_string();
         self.ffmpeg_bin = self.ffmpeg_bin.trim().to_string();
     }
+
+    /// `--sense-voice-language` value for this selection.
+    pub fn stt_language_flag(&self) -> String {
+        stt_language_flag(&self.languages)
+    }
+}
+
+/// Reject an empty list or any id outside `{yue, zh, en, ja, ko}`.
+/// Duplicates collapse. Stored order is [`VOICE_LANG_ORDER`].
+pub fn order_voice_languages(ids: &[String]) -> Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Err("voice languages must not be empty (allowed: yue, zh, en, ja, ko)".to_string());
+    }
+    let mut chosen = [false; 5];
+    for raw in ids {
+        let id = raw.trim().to_ascii_lowercase();
+        if id.is_empty() {
+            return Err(
+                "voice languages must not be empty (allowed: yue, zh, en, ja, ko)".to_string(),
+            );
+        }
+        let Some(index) = VOICE_LANG_ORDER.iter().position(|lang| *lang == id) else {
+            return Err(format!(
+                "unknown voice language '{id}' (allowed: yue, zh, en, ja, ko)"
+            ));
+        };
+        chosen[index] = true;
+    }
+    Ok(VOICE_LANG_ORDER
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| chosen[*index])
+        .map(|(_, lang)| (*lang).to_string())
+        .collect())
+}
+
+/// One selected id is that id. Two or more is `auto`.
+pub fn stt_language_flag(languages: &[String]) -> String {
+    if languages.len() == 1 {
+        languages[0].clone()
+    } else {
+        "auto".to_string()
+    }
+}
+
+/// Legacy `language = "yue"` (and the other ids) stays a one-id selection.
+/// Legacy `auto` keeps every id so the CLI flag stays `auto`. An unknown
+/// legacy value stays Cantonese, matching [`sensevoice_language`].
+fn selection_from_legacy(language: &str) -> Vec<String> {
+    let id = language.trim().to_ascii_lowercase();
+    if id == "auto" {
+        return VOICE_LANG_ORDER
+            .iter()
+            .map(|lang| (*lang).to_string())
+            .collect();
+    }
+    if VOICE_LANG_ORDER.contains(&id.as_str()) {
+        vec![id]
+    } else {
+        vec![default_language()]
+    }
 }
 
 /// Where a successful transcript came from.
@@ -155,6 +350,24 @@ pub enum SttSource {
 pub struct Transcript {
     pub text: String,
     pub source: SttSource,
+    /// SenseVoice `lang` or language tag. OpenRouter leaves this empty.
+    pub detected_lang: Option<String>,
+}
+
+/// Text from one engine, plus a language report when the engine has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recognized {
+    text: String,
+    detected_lang: Option<String>,
+}
+
+impl Recognized {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            detected_lang: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +527,52 @@ pub fn sensevoice_language(raw: &str) -> String {
     }
 }
 
+/// Language SenseVoice reported, before tags are stripped.
+///
+/// JSON `lang` wins. Otherwise the first `<|yue|>` / `<|zh|>` / `<|en|>` /
+/// `<|ja|>` / `<|ko|>` tag. Emotion and event tags are ignored.
+pub fn sensevoice_reported_language(raw: &str) -> Option<String> {
+    if let Some(lang) = first_json_string_field(raw, "lang") {
+        return canonical_voice_id(&lang);
+    }
+    let mut rest = raw;
+    while let Some(start) = rest.find("<|") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("|>") else {
+            break;
+        };
+        if let Some(id) = canonical_voice_id(&after[..end]) {
+            return Some(id);
+        }
+        rest = &after[end + 2..];
+    }
+    None
+}
+
+fn canonical_voice_id(raw: &str) -> Option<String> {
+    let id = raw.trim().to_ascii_lowercase();
+    VOICE_LANG_ORDER.contains(&id.as_str()).then_some(id)
+}
+
+/// Spoken reply language. `yue` and `en` speak. `zh`, `ja`, `ko`, and an
+/// `auto` result that is not `yue` or `en` stay text-only.
+///
+/// A single CLI id of `yue` or `en` speaks even when SenseVoice did not
+/// report a language. `auto` speaks only when the report is `yue` or `en`.
+pub fn spoken_reply_language(cli_flag: &str, reported: Option<&str>) -> Option<String> {
+    let cli = cli_flag.trim().to_ascii_lowercase();
+    if cli == "yue" || cli == "en" {
+        return Some(cli);
+    }
+    if matches!(cli.as_str(), "zh" | "ja" | "ko") {
+        return None;
+    }
+    match reported.map(|lang| lang.trim().to_ascii_lowercase()) {
+        Some(id) if id == "yue" || id == "en" => Some(id),
+        _ => None,
+    }
+}
+
 /// argv for `sherpa-onnx-offline` (or `stt_bin`) excluding the program name.
 pub fn sensevoice_args(tokens: &Path, model: &Path, language: &str, wav: &Path) -> Vec<String> {
     vec![
@@ -437,13 +696,17 @@ pub fn parse_sensevoice_output(text: &str) -> String {
 /// The CLI caller joins stdout ahead of stderr, and v2.0.1 prints the
 /// recognizer result as that first object. An empty string is still a hit.
 fn first_json_text(blob: &str) -> Option<String> {
+    first_json_string_field(blob, "text")
+}
+
+fn first_json_string_field(blob: &str, field: &str) -> Option<String> {
     blob.lines().find_map(|line| {
         let line = line.trim();
         if !line.starts_with('{') {
             return None;
         }
         let value: serde_json::Value = serde_json::from_str(line).ok()?;
-        value.get("text")?.as_str().map(str::to_string)
+        value.get(field)?.as_str().map(str::to_string)
     })
 }
 
@@ -669,7 +932,7 @@ async fn prepare_wav(cfg: &VoiceConfig, input: &Path) -> Result<(PathBuf, bool),
 /// Local engine, then optional cloud. `remote == None` never calls cloud.
 #[async_trait]
 pub trait SpeechToText: Send + Sync {
-    async fn transcribe(&self, path: &Path) -> Result<String, AsrError>;
+    async fn transcribe(&self, path: &Path) -> Result<Recognized, AsrError>;
 }
 
 /// Local SenseVoice CLI. Shareable with a later off-device ASR caller.
@@ -679,7 +942,7 @@ pub struct SenseVoiceCli {
 
 #[async_trait]
 impl SpeechToText for SenseVoiceCli {
-    async fn transcribe(&self, path: &Path) -> Result<String, AsrError> {
+    async fn transcribe(&self, path: &Path) -> Result<Recognized, AsrError> {
         if !self.cfg.engine.eq_ignore_ascii_case("sensevoice") {
             return Err(AsrError::unavailable(format!(
                 "voice.engine is '{}'; the primary engine is SenseVoice",
@@ -695,7 +958,7 @@ impl SpeechToText for SenseVoiceCli {
         let (model, tokens) = resolve_sensevoice_model(&self.cfg.model_dir)?;
         let (wav, cleanup) = prepare_wav(&self.cfg, path).await?;
         let bin = bin_path(&self.cfg.stt_bin, DEFAULT_STT_BIN);
-        let language = sensevoice_language(&self.cfg.language);
+        let language = self.cfg.stt_language_flag();
         let args = sensevoice_args(&tokens, &model, &language, &wav);
         let captured = run_capturing(&bin, &args, self.cfg.stt_timeout_secs).await;
         if cleanup {
@@ -703,15 +966,20 @@ impl SpeechToText for SenseVoiceCli {
         }
         let captured = captured?;
         let combined = format!("{}\n{}", captured.stdout, captured.stderr);
+        let detected_lang = sensevoice_reported_language(&combined);
         let text = parse_sensevoice_output(&combined);
         if text.is_empty() {
             Err(AsrError::empty("SenseVoice produced no transcript"))
         } else {
             tracing::info!(
                 preview = %transcript_preview(&text),
+                lang = detected_lang.as_deref().unwrap_or(""),
                 "SenseVoice transcript"
             );
-            Ok(text)
+            Ok(Recognized {
+                text,
+                detected_lang,
+            })
         }
     }
 }
@@ -727,7 +995,7 @@ pub struct OpenRouterStt {
 
 #[async_trait]
 impl SpeechToText for OpenRouterStt {
-    async fn transcribe(&self, path: &Path) -> Result<String, AsrError> {
+    async fn transcribe(&self, path: &Path) -> Result<Recognized, AsrError> {
         if self.api_key.trim().is_empty() {
             return Err(AsrError {
                 kind: AsrErrorKind::Unavailable,
@@ -789,7 +1057,7 @@ impl SpeechToText for OpenRouterStt {
                 "OpenRouter STT returned an empty transcript",
             ))
         } else {
-            Ok(text)
+            Ok(Recognized::text(text))
         }
     }
 }
@@ -800,12 +1068,13 @@ pub async fn transcribe_local_first(
     path: &Path,
 ) -> Result<Transcript, AsrError> {
     match local.transcribe(path).await {
-        Ok(text) => {
-            let text = text.trim().to_string();
+        Ok(recognized) => {
+            let text = recognized.text.trim().to_string();
             if !text.is_empty() {
                 return Ok(Transcript {
                     text,
                     source: SttSource::SenseVoice,
+                    detected_lang: recognized.detected_lang,
                 });
             }
             fallback_or(
@@ -832,8 +1101,8 @@ async fn fallback_or(
         "local SenseVoice failed; trying opt-in OpenRouter STT"
     );
     match remote.transcribe(path).await {
-        Ok(text) => {
-            let text = text.trim().to_string();
+        Ok(recognized) => {
+            let text = recognized.text.trim().to_string();
             if text.is_empty() {
                 Err(AsrError {
                     kind: AsrErrorKind::Empty,
@@ -846,6 +1115,7 @@ async fn fallback_or(
                 Ok(Transcript {
                     text,
                     source: SttSource::OpenRouter,
+                    detected_lang: None,
                 })
             }
         }
@@ -888,7 +1158,7 @@ pub async fn transcribe_file(
             } else {
                 voice.openrouter_stt_model.trim().to_string()
             },
-            language: openrouter_language_hint(&voice.language),
+            language: openrouter_language_hint(&voice.stt_language_flag()),
             timeout: Duration::from_secs(voice.stt_timeout_secs.max(1)),
         })
     } else {
@@ -956,9 +1226,13 @@ pub async fn plan_reply_delivery(
     }
 }
 
-/// Local Cantonese TTS. `tts_bin` overrides sherpa-onnx + ffmpeg.
+/// Local VITS TTS. `spoken_lang` picks Cantonese (`yue`) or English (`en`).
+/// `tts_bin` overrides sherpa-onnx + ffmpeg for either language.
 pub struct LocalTts {
     pub cfg: VoiceConfig,
+    /// `Some("en")` uses [`VoiceConfig::tts_en_model_dir`]. Anything else uses
+    /// the Cantonese directory.
+    pub spoken_lang: Option<String>,
 }
 
 #[async_trait]
@@ -972,13 +1246,18 @@ impl TextToSpeech for LocalTts {
         tokio::fs::create_dir_all(&work)
             .await
             .map_err(|err| TtsError::new(format!("tts work dir: {err}")))?;
-        let result = synthesize_in(&self.cfg, &work, &spoken).await;
+        let result = synthesize_in(&self.cfg, self.spoken_lang.as_deref(), &work, &spoken).await;
         let _ = tokio::fs::remove_dir_all(&work).await;
         result
     }
 }
 
-async fn synthesize_in(cfg: &VoiceConfig, work: &Path, spoken: &str) -> Result<Vec<u8>, TtsError> {
+async fn synthesize_in(
+    cfg: &VoiceConfig,
+    spoken_lang: Option<&str>,
+    work: &Path,
+    spoken: &str,
+) -> Result<Vec<u8>, TtsError> {
     let ogg_path = work.join("reply.ogg");
     if !cfg.tts_bin.trim().is_empty() {
         let text_path = work.join("reply.txt");
@@ -1016,16 +1295,23 @@ async fn synthesize_in(cfg: &VoiceConfig, work: &Path, spoken: &str) -> Result<V
         return read_ogg(&ogg_path).await;
     }
 
-    let model = cfg.tts_model_dir.join("model.onnx");
-    let tokens = cfg.tts_model_dir.join("tokens.txt");
+    let english = spoken_lang == Some("en");
+    let model_dir = if english {
+        &cfg.tts_en_model_dir
+    } else {
+        &cfg.tts_model_dir
+    };
+    let label = if english { "English" } else { "Cantonese" };
+    let model = model_dir.join("model.onnx");
+    let tokens = model_dir.join("tokens.txt");
     if !model.is_file() || !tokens.is_file() {
         return Err(TtsError::new(format!(
-            "Cantonese TTS model not found in {} (need model.onnx and tokens.txt)",
-            cfg.tts_model_dir.display()
+            "{label} TTS model not found in {} (need model.onnx and tokens.txt)",
+            model_dir.display()
         )));
     }
     let wav_path = work.join("reply.wav");
-    let args = vits_tts_args(&model, &tokens, &cfg.tts_model_dir, &wav_path, spoken);
+    let args = vits_tts_args(&model, &tokens, model_dir, &wav_path, spoken);
     let bin = bin_path("", DEFAULT_TTS_BIN);
     run_capturing(&bin, &args, cfg.tts_timeout_secs)
         .await
@@ -1146,21 +1432,104 @@ mod tests {
     #[test]
     fn voice_defaults_keep_cloud_stt_and_tts_off() {
         let cfg = VoiceConfig::default();
+        assert!(cfg.enabled);
         assert_eq!(cfg.engine, "sensevoice");
-        assert_eq!(cfg.language, "yue");
+        assert_eq!(cfg.languages, vec!["yue".to_string(), "en".to_string()]);
+        assert_eq!(cfg.stt_language_flag(), "auto");
         assert!(!cfg.openrouter_stt);
         assert!(!cfg.tts);
         assert_eq!(cfg.openrouter_stt_model, "openai/whisper-large-v3");
 
         let parsed: VoiceConfig = toml::from_str("").unwrap();
+        assert!(parsed.enabled);
         assert!(!parsed.openrouter_stt);
         assert!(!parsed.tts);
         assert_eq!(parsed.engine, "sensevoice");
-        assert_eq!(parsed.language, "yue");
+        assert_eq!(parsed.languages, vec!["yue".to_string(), "en".to_string()]);
+        assert_eq!(parsed.stt_language_flag(), "auto");
 
         let partial: VoiceConfig = toml::from_str("tts = true\n").unwrap();
         assert!(partial.tts);
+        assert!(partial.enabled);
         assert!(!partial.openrouter_stt);
+        assert_eq!(partial.languages, vec!["yue".to_string(), "en".to_string()]);
+    }
+
+    #[test]
+    fn legacy_language_is_one_id_until_languages_are_written() {
+        let yue: VoiceConfig = toml::from_str("language = \"yue\"\n").unwrap();
+        assert_eq!(yue.languages, vec!["yue".to_string()]);
+        assert_eq!(yue.stt_language_flag(), "yue");
+        assert!(yue.enabled);
+
+        let ja: VoiceConfig = toml::from_str("language = \"JA\"\n").unwrap();
+        assert_eq!(ja.languages, vec!["ja".to_string()]);
+        assert_eq!(ja.stt_language_flag(), "ja");
+
+        let auto: VoiceConfig = toml::from_str("language = \"auto\"\n").unwrap();
+        assert_eq!(auto.languages.len(), 5);
+        assert_eq!(auto.stt_language_flag(), "auto");
+    }
+
+    #[test]
+    fn languages_keep_canonical_order_and_reject_empty_or_unknown() {
+        let cfg: VoiceConfig =
+            toml::from_str("languages = [\"ko\", \"yue\", \"en\", \"yue\"]\nlanguage = \"zh\"\n")
+                .unwrap();
+        assert_eq!(
+            cfg.languages,
+            vec!["yue".to_string(), "en".to_string(), "ko".to_string()]
+        );
+        assert_eq!(cfg.stt_language_flag(), "auto");
+        assert_eq!(stt_language_flag(&["zh".to_string()]), "zh");
+
+        assert!(toml::from_str::<VoiceConfig>("languages = []\n").is_err());
+        assert!(toml::from_str::<VoiceConfig>("languages = [\"fr\"]\n").is_err());
+        assert!(toml::from_str::<VoiceConfig>("languages = [\"\"]\n").is_err());
+
+        let off: VoiceConfig = toml::from_str("enabled = false\n").unwrap();
+        assert!(!off.enabled);
+        assert_eq!(off.languages, vec!["yue".to_string(), "en".to_string()]);
+    }
+
+    #[test]
+    fn spoken_reply_is_yue_or_en_and_other_languages_stay_text() {
+        assert_eq!(spoken_reply_language("yue", None).as_deref(), Some("yue"));
+        assert_eq!(
+            spoken_reply_language("en", Some("zh")).as_deref(),
+            Some("en")
+        );
+        assert_eq!(spoken_reply_language("zh", Some("en")), None);
+        assert_eq!(spoken_reply_language("ja", None), None);
+        assert_eq!(spoken_reply_language("ko", Some("en")), None);
+        assert_eq!(
+            spoken_reply_language("auto", Some("yue")).as_deref(),
+            Some("yue")
+        );
+        assert_eq!(
+            spoken_reply_language("auto", Some("EN")).as_deref(),
+            Some("en")
+        );
+        assert_eq!(spoken_reply_language("auto", Some("zh")), None);
+        assert_eq!(spoken_reply_language("auto", Some("ja")), None);
+        assert_eq!(spoken_reply_language("auto", None), None);
+    }
+
+    #[test]
+    fn sensevoice_report_prefers_json_lang_then_a_language_tag() {
+        assert_eq!(
+            sensevoice_reported_language(r#"{"lang":"en","text":"<|zh|>hi"}"#).as_deref(),
+            Some("en")
+        );
+        assert_eq!(
+            sensevoice_reported_language("<|yue|><|Speech|>早晨").as_deref(),
+            Some("yue")
+        );
+        assert_eq!(
+            sensevoice_reported_language("<|NEUTRAL|><|Speech|>hi"),
+            None
+        );
+        assert_eq!(sensevoice_reported_language("hello"), None);
     }
 
     #[test]
@@ -1360,12 +1729,12 @@ num threads: 2
 
     struct Scripted {
         calls: Arc<AtomicUsize>,
-        result: Result<String, AsrError>,
+        result: Result<Recognized, AsrError>,
     }
 
     #[async_trait]
     impl SpeechToText for Scripted {
-        async fn transcribe(&self, _path: &Path) -> Result<String, AsrError> {
+        async fn transcribe(&self, _path: &Path) -> Result<Recognized, AsrError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.clone()
         }
@@ -1391,11 +1760,11 @@ num threads: 2
         let remote_calls = Arc::new(AtomicUsize::new(0));
         let local = Scripted {
             calls: Arc::new(AtomicUsize::new(0)),
-            result: Ok("  早晨  ".to_string()),
+            result: Ok(Recognized::text("  早晨  ")),
         };
         let remote = Scripted {
             calls: Arc::clone(&remote_calls),
-            result: Ok("should-not-run".to_string()),
+            result: Ok(Recognized::text("should-not-run")),
         };
         let transcript = transcribe_local_first(&local, Some(&remote), Path::new("note.wav"))
             .await
@@ -1414,7 +1783,7 @@ num threads: 2
         };
         let remote = Scripted {
             calls: Arc::clone(&remote_calls),
-            result: Ok("雲端".to_string()),
+            result: Ok(Recognized::text("雲端")),
         };
         let transcript = transcribe_local_first(&local, Some(&remote), Path::new("note.ogg"))
             .await
@@ -1564,7 +1933,31 @@ num threads: 2
             tts_model_dir: PathBuf::from("/no/such/tts-model"),
             ..VoiceConfig::default()
         };
-        let synth = LocalTts { cfg };
+        let synth = LocalTts {
+            cfg,
+            spoken_lang: Some("yue".to_string()),
+        };
+        let plan = plan_reply_delivery(true, "hello", Some(&synth)).await;
+        assert_eq!(plan.text, "hello");
+        assert!(plan.voice_ogg.is_none());
+    }
+
+    #[tokio::test]
+    async fn english_tts_looks_in_the_en_pack_dir_and_keeps_text_when_missing() {
+        let cfg = VoiceConfig {
+            tts: true,
+            tts_model_dir: PathBuf::from("/no/such/tts-cantonese"),
+            tts_en_model_dir: PathBuf::from("/no/such/tts-en"),
+            ..VoiceConfig::default()
+        };
+        let synth = LocalTts {
+            cfg,
+            spoken_lang: Some("en".to_string()),
+        };
+        let err = synth.synthesize_ogg_opus("hello").await.unwrap_err();
+        assert!(err.to_string().contains("English"), "{err}");
+        assert!(err.to_string().contains("tts-en"), "{err}");
+        assert!(!err.to_string().contains("tts-cantonese"), "{err}");
         let plan = plan_reply_delivery(true, "hello", Some(&synth)).await;
         assert_eq!(plan.text, "hello");
         assert!(plan.voice_ogg.is_none());
@@ -1642,7 +2035,67 @@ printf '%s\n' '/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav' '----'
             .unwrap();
         assert_eq!(transcript.text, "早晨呀");
         assert!(!transcript.text.contains("/tmp/"));
+        assert_eq!(transcript.detected_lang.as_deref(), Some("yue"));
         assert_eq!(shape_voice_note(&transcript.text), "[Voice note]:\n早晨呀");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sensevoice_cli_flag_is_auto_for_two_languages_and_the_id_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+        std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+        let script = write_exec(
+            dir.path(),
+            "sensevoice-args.sh",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args.txt\"\nprintf '%s\\n' '{\"text\":\"hi\",\"lang\":\"en\"}'\n",
+        );
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+
+        let voice = VoiceConfig {
+            model_dir: model.clone(),
+            stt_bin: script.display().to_string(),
+            ..VoiceConfig::default()
+        };
+        assert_eq!(voice.stt_language_flag(), "auto");
+        let transcript = transcribe_file(&voice, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert!(
+            args.lines()
+                .any(|line| line == "--sense-voice-language=auto"),
+            "{args}"
+        );
+        assert_eq!(transcript.detected_lang.as_deref(), Some("en"));
+        assert_eq!(
+            spoken_reply_language(
+                &voice.stt_language_flag(),
+                transcript.detected_lang.as_deref()
+            )
+            .as_deref(),
+            Some("en")
+        );
+
+        let ja = VoiceConfig {
+            languages: vec!["ja".to_string()],
+            model_dir: model,
+            stt_bin: script.display().to_string(),
+            ..VoiceConfig::default()
+        };
+        assert_eq!(ja.stt_language_flag(), "ja");
+        transcribe_file(&ja, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert!(
+            args.lines().any(|line| line == "--sense-voice-language=ja"),
+            "{args}"
+        );
+        assert_eq!(spoken_reply_language("ja", Some("en")), None);
     }
 
     #[cfg(unix)]
@@ -1659,7 +2112,10 @@ printf '%s\n' '/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav' '----'
             tts_bin: script.display().to_string(),
             ..VoiceConfig::default()
         };
-        let synth = LocalTts { cfg };
+        let synth = LocalTts {
+            cfg,
+            spoken_lang: Some("yue".to_string()),
+        };
         let plan = plan_reply_delivery(true, "早晨", Some(&synth)).await;
         assert_eq!(plan.text, "早晨");
         let ogg = plan.voice_ogg.expect("ogg");

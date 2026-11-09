@@ -1531,26 +1531,38 @@ pub async fn handle_message(
     // failure sends an honest clarify instead of returning with nothing.
     // Failed audio that keeps a typed caption is not voice-origin.
     let mut voice_origin = false;
+    let mut voice_spoken_lang = None;
     if let Some(voice) = msg.voice() {
-        let file_id = voice.file.id.to_string();
-        let downloaded = match download_telegram_file(&bot, &file_id, &temp_dir, None).await {
-            Ok((path, _)) => crate::platform::telegram_voice::DownloadedVoice::Ready(path),
-            Err(err) => {
-                crate::platform::telegram_voice::DownloadedVoice::Failed(format!("{err:#}"))
-            }
+        let voice_cfg = agent.voice_runtime.snapshot();
+        // Master gate off: no download and no STT (local or OpenRouter).
+        let turn = if !voice_cfg.enabled {
+            crate::platform::telegram_voice::voice_disabled_turn(&text)
+        } else {
+            let file_id = voice.file.id.to_string();
+            let downloaded = match download_telegram_file(&bot, &file_id, &temp_dir, None).await {
+                Ok((path, _)) => crate::platform::telegram_voice::DownloadedVoice::Ready(path),
+                Err(err) => {
+                    crate::platform::telegram_voice::DownloadedVoice::Failed(format!("{err:#}"))
+                }
+            };
+            crate::platform::telegram_voice::decide_voice_turn(
+                downloaded,
+                &text,
+                &voice_cfg,
+                &agent.config.openrouter.base_url,
+                &agent.config.openrouter.api_key,
+            )
+            .await
         };
-        let turn = crate::platform::telegram_voice::decide_voice_turn(
-            downloaded,
-            &text,
-            &agent.config.voice,
-            &agent.config.openrouter.base_url,
-            &agent.config.openrouter.api_key,
-        )
-        .await;
         voice_origin = crate::platform::telegram_voice::voice_origin_from_turn(&turn);
+        voice_spoken_lang =
+            crate::platform::telegram_voice::spoken_lang_from_turn(&turn).map(str::to_string);
         match turn {
-            crate::platform::telegram_voice::VoiceTurn::Text(shaped) => {
-                text = shaped;
+            crate::platform::telegram_voice::VoiceTurn::Text { body, .. } => {
+                text = body;
+            }
+            crate::platform::telegram_voice::VoiceTurn::Plain(caption) => {
+                text = caption;
             }
             crate::platform::telegram_voice::VoiceTurn::Clarify(clarify) => {
                 let sent =
@@ -2381,6 +2393,7 @@ pub async fn handle_message(
             None
         },
         voice_origin,
+        voice_spoken_lang,
         ..Default::default()
     };
 
@@ -2796,6 +2809,7 @@ async fn run_telegram_user_turn(
         device_room: input.device_room.clone(),
         device_fw: input.device_fw.clone(),
         voice_origin: input.voice_origin,
+        voice_spoken_lang: input.voice_spoken_lang.clone(),
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx
@@ -2883,12 +2897,14 @@ async fn run_telegram_user_turn(
     // When on, sendVoice is a second copy — the text above is never dropped
     // if synthesis or sendVoice fails.
     if let Ok(outcome) = &process_result {
+        let voice_cfg = agent.voice_runtime.snapshot();
         crate::platform::telegram_voice::maybe_send_tts_voice(
             &bot,
             chat_id,
-            &agent.config.voice,
+            &voice_cfg,
             &outcome.text,
             input.voice_origin,
+            input.voice_spoken_lang.as_deref(),
         )
         .await;
     }

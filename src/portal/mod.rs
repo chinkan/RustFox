@@ -331,6 +331,9 @@ pub struct PortalState {
     /// stand-in. Production uses the official host unless
     /// `RUSTFOX_MCP_REGISTRY_URL` is an http(s) URL.
     pub mcp_registry_base: String,
+    /// Live `[voice]` settings (ADR-0063). Production shares the agent's
+    /// handle so a Settings save is what the next Telegram note reads.
+    pub voice: crate::asr::VoiceRuntime,
 }
 
 impl PortalState {
@@ -352,6 +355,7 @@ impl PortalState {
         config_path: std::path::PathBuf,
         home_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        let voice = crate::asr::VoiceRuntime::from_config(agent.config().voice.clone());
         Self {
             agent,
             memory,
@@ -377,6 +381,7 @@ impl PortalState {
             )),
             switchbot: crate::switchbot::SwitchBotTools::disconnected(),
             mcp_registry_base: crate::mcp_registry::registry_base_from_env(),
+            voice,
         }
     }
 
@@ -389,6 +394,12 @@ impl PortalState {
     /// Share the process SwitchBot connector (vault + live enable flag).
     pub fn with_switchbot(mut self, tools: crate::switchbot::SwitchBotTools) -> Self {
         self.switchbot = tools;
+        self
+    }
+
+    /// Share the process voice handle with Telegram (ADR-0063).
+    pub fn with_voice(mut self, voice: crate::asr::VoiceRuntime) -> Self {
+        self.voice = voice;
         self
     }
 

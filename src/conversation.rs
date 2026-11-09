@@ -1627,6 +1627,7 @@ allowed_directory = "."
             device_room: None,
             device_fw: None,
             voice_origin: false,
+            voice_spoken_lang: None,
         };
 
         let (combined, image_parts) = cm.add_incoming(&msg, &config, false).await.unwrap();
@@ -1690,6 +1691,7 @@ allowed_directory = "."
             device_room: None,
             device_fw: None,
             voice_origin: false,
+            voice_spoken_lang: None,
         };
 
         let (combined, _) = cm.add_incoming(&msg, &config, false).await.unwrap();
@@ -1752,6 +1754,7 @@ allowed_directory = "."
             device_room: None,
             device_fw: None,
             voice_origin: false,
+            voice_spoken_lang: None,
         };
 
         let (combined, image_parts) = cm.add_incoming(&msg, &config, false).await.unwrap();

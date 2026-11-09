@@ -21,7 +21,7 @@ A typed caption is kept after a blank line. If the note has no caption and downl
 
 OpenRouter speech-to-text does not run unless you set `openrouter_stt = true`. A missing local model with the flag left at the default never posts audio to the network.
 
-TTS does not run unless you set `tts = true`, and then only for a voice-origin reply. Typed chat stays text even when `tts` is true. When a voice reply is spoken, the chat still gets the usual text message **and** a `sendVoice` OGG/Opus note. Synthesis or `sendVoice` failure leaves the text in the chat.
+TTS does not run unless you set `tts = true`, and then only for a voice-origin reply whose spoken language is Cantonese (`yue`) or English (`en`). `zh`, `ja`, `ko`, and an `auto` result that did not come back as `yue` or `en` stay text. Typed chat stays text even when `tts` is true. When a voice reply is spoken, the chat still gets the usual text message **and** a `sendVoice` OGG/Opus note. Synthesis or `sendVoice` failure leaves the text in the chat. `enabled = false` skips STT and TTS; a note with no caption says voice is off. Portal Settings can change this without a restart (ADR-0063). A missing model does not stop the process.
 
 ## Primary engine
 
@@ -120,7 +120,7 @@ OpenRouter `/audio/speech` is not wired.
 
 ## Config
 
-See the commented `[voice]` block in [`config.example.toml`](../config.example.toml). An absent `[voice]` section is the same as the defaults: SenseVoice, `yue`, `openrouter_stt = false`, `tts = false`.
+See the commented `[voice]` block in [`config.example.toml`](../config.example.toml). An absent `[voice]` section is the same as the defaults: SenseVoice on, languages `yue` and `en` (CLI `auto`), `openrouter_stt = false`, `tts = false`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -128,13 +128,16 @@ See the commented `[voice]` block in [`config.example.toml`](../config.example.t
 | `model_dir` | `<home>/models/sensevoice` | SenseVoice `model.int8.onnx` or `model.onnx`, plus `tokens.txt`. |
 | `stt_bin` | `sherpa-onnx-offline` | Local STT binary. |
 | `ffmpeg_bin` | `ffmpeg` | OGG/Opus ↔ WAV. |
-| `language` | `yue` | SenseVoice language. Unknown values become `yue`. |
+| `enabled` | `true` | Master gate. Absent means on. `false` skips STT and TTS. A caption-less note says voice is off. |
+| `languages` | `yue`, `en` | Selection from `yue`, `zh`, `en`, `ja`, `ko`. One id is that CLI flag. Two or more is `auto`. Empty or unknown is rejected. |
+| `language` | — | Legacy single id. Used only when `languages` is absent. An install pinned to `yue` stays on `yue` until Settings saves a selection. |
 | `openrouter_stt` | `false` | Cloud transcription. Off means no network STT. |
 | `openrouter_stt_model` | `openai/whisper-large-v3` | Used only when `openrouter_stt` is true. |
 | `stt_timeout_secs` | `120` | Wall clock for one transcription. `0` becomes 120. |
 | `tts` | `false` | Spoken copy of a voice-origin reply, in addition to text. Typed chat is not spoken. |
 | `tts_bin` | empty | When set, this binary writes the OGG instead of sherpa + ffmpeg. |
-| `tts_model_dir` | `<home>/models/tts-cantonese` | VITS `model.onnx` and `tokens.txt`. Optional `lexicon.txt`. `rule.fst` is passed as `--tts-rule-fsts` when the file exists. |
+| `tts_model_dir` | `<home>/models/tts-cantonese` | Cantonese VITS `model.onnx` and `tokens.txt`. Optional `lexicon.txt`. `rule.fst` is passed as `--tts-rule-fsts` when the file exists. |
+| `tts_en_model_dir` | `<home>/models/tts-en` | English Piper pack `vits-piper-en_US-lessac-medium` (`model.onnx`, `tokens.txt`, optional `espeak-ng-data/`). Local sherpa TTS, not a cloud voice. Spoken only when the reply language is `en`. |
 | `tts_timeout_secs` | `120` | Wall clock for one synthesis. `0` becomes 120. |
 
 Missing model files do not stop startup. The next voice note gets the clarify (or the caption, if you typed one).

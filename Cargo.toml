@@ -32,6 +32,11 @@ serde_json = "1"
 # Configuration
 toml = "1.1"
 
+# Voice pack unpack (SenseVoice and English Piper are tar.bz2). Models only —
+# this does not install sherpa-onnx or ffmpeg.
+bzip2 = "0.5"
+tar = "0.4"
+
 # MCP client
 http = "1"
 rmcp = { version = "3.7", features = ["client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
@@ -143,6 +148,7 @@ name = "rustfox"
 path = "src/main.rs"
 
 [dev-dependencies]
+async-trait = "0.1"
 serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["full", "test-util"] }
 wiremock = "0.6"

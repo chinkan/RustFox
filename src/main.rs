@@ -907,6 +907,7 @@ fn spawn_bare_user_turns(
                 device_room: first.device_room.clone(),
                 device_fw: first.device_fw.clone(),
                 voice_origin: first.voice_origin,
+                voice_spoken_lang: first.voice_spoken_lang.clone(),
             };
             let stop = match agent
                 .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None)
@@ -1811,7 +1812,8 @@ async fn main() -> Result<()> {
         .with_secret_store(secret_bridge.store())
         .with_pending_secrets(secret_bridge.pending())
         .with_sandbox_mode(std::sync::Arc::clone(&sandbox_mode_handle))
-        .with_switchbot(switchbot_tools);
+        .with_switchbot(switchbot_tools)
+        .with_voice(agent.voice_runtime.clone());
         if portal_on {
             rustfox::portal::auth::ensure_startup_token(&portal_state);
         }

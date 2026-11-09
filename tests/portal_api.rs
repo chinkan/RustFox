@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use futures::future::BoxFuture;
@@ -980,6 +982,199 @@ async fn settings_patch_rejects_port_zero() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = body_json(res).await;
     assert_eq!(body["error"]["code"], "invalid_portal_port");
+}
+
+struct FailVoiceFetcher {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl rustfox::asr::VoicePackFetcher for FailVoiceFetcher {
+    async fn fetch_pack(&self, pack: rustfox::asr::VoicePack, _dest: &Path) -> Result<(), String> {
+        self.calls.lock().unwrap().push(pack.id().to_string());
+        Err("disk full".into())
+    }
+}
+
+#[tokio::test]
+async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
+    let f = fixture(with_token_token()).await;
+    let home = f.state.home_dir.clone().expect("fixture home");
+    let mut cfg = f.state.voice.snapshot();
+    cfg.model_dir = home.join("models/sensevoice");
+    cfg.tts_model_dir = home.join("models/tts-cantonese");
+    cfg.tts_en_model_dir = home.join("models/tts-en");
+    f.state.voice.set(cfg);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    f.state.voice.set_fetcher(Arc::new(FailVoiceFetcher {
+        calls: Arc::clone(&calls),
+    }));
+
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["editable"]["voiceEnabled"], true);
+    assert_eq!(body["editable"]["voiceLanguages"], json!(["yue", "en"]));
+    assert_eq!(body["editable"]["voiceTts"], false);
+    assert_eq!(body["voiceDownload"]["sensevoice"]["status"], "absent");
+    assert_eq!(body["voiceDownload"]["ttsCantonese"]["status"], "absent");
+    assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "absent");
+    assert!(
+        body["voiceDownload"]["ttsEnglish"]["message"]
+            .as_str()
+            .unwrap()
+            .len()
+            < 80
+    );
+    for field in [
+        "voiceEnabled",
+        "voiceLanguages",
+        "voiceTts",
+        "voiceDownload",
+    ] {
+        assert!(
+            !body["restartRequired"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == field),
+            "{field} must not require a restart"
+        );
+    }
+
+    let before = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "voiceLanguages": [],
+                    "generalLocation": "should-not-stick",
+                    "voiceEnabled": false
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "invalid_voice_languages");
+    let after = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert_eq!(before, after, "a bad language list must write nothing");
+    assert!(f.state.voice.snapshot().enabled, "live gate stays on");
+    assert!(calls.lock().unwrap().is_empty());
+
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "voiceLanguages": ["fr"] }).to_string()))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "voiceEnabled": true,
+                    "voiceLanguages": ["ko", "en", "en"],
+                    "voiceTts": true,
+                    "openrouterStt": true
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    for field in ["voiceEnabled", "voiceLanguages", "voiceTts"] {
+        assert!(
+            body["updated"].as_array().unwrap().contains(&json!(field)),
+            "updated={:?}",
+            body["updated"]
+        );
+        assert!(!body["restartRequired"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == field));
+    }
+    assert!(body["voiceDownload"]["sensevoice"]["status"].is_string());
+
+    let live = f.state.voice.snapshot();
+    assert!(live.enabled);
+    assert!(live.tts);
+    assert!(
+        !live.openrouter_stt,
+        "OpenRouter STT stays off the whitelist"
+    );
+    assert_eq!(live.languages, vec!["en".to_string(), "ko".to_string()]);
+    assert_eq!(live.stt_language_flag(), "auto");
+    let other = f.state.voice.clone();
+    assert_eq!(other.snapshot().languages, live.languages);
+
+    let content = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert!(content.contains("[voice]"), "{content}");
+    assert!(content.contains("enabled = true"), "{content}");
+    assert!(content.contains("tts = true"), "{content}");
+    assert!(content.contains("\"en\""), "{content}");
+    assert!(content.contains("\"ko\""), "{content}");
+    assert!(
+        !content.contains("openrouter_stt"),
+        "cloud STT is not on this whitelist: {content}"
+    );
+    assert!(
+        !content.contains("language ="),
+        "Settings overwrite drops legacy language: {content}"
+    );
+    let bak = f.state.config_path.with_extension("toml.bak");
+    assert!(bak.is_file(), "config.toml.bak must exist");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let view = f.state.voice.view();
+        if view.sensevoice.status == "error"
+            && view.tts_cantonese.status == "error"
+            && view.tts_english.status == "error"
+        {
+            assert!(view.sensevoice.message.contains("disk full"));
+            assert!(!view.tts_english.message.is_empty());
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("download did not fail soft: {}", view.to_json());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let seen = calls.lock().unwrap().clone();
+    assert!(seen.iter().any(|id| id.contains("sense-voice")), "{seen:?}");
+    assert!(seen.iter().any(|id| id.contains("cantonese")), "{seen:?}");
+    assert!(seen.iter().any(|id| id.contains("lessac")), "{seen:?}");
+    assert!(
+        f.state.voice.snapshot().enabled,
+        "failed download keeps the save"
+    );
+
+    let req = bearer(get("/api/settings"), TEST_TOKEN);
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    let body = body_json(res).await;
+    assert_eq!(body["editable"]["voiceTts"], true);
+    assert_eq!(body["editable"]["voiceLanguages"], json!(["en", "ko"]));
+    assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "error");
 }
 
 #[tokio::test]
