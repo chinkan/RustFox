@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
-- **Amended:** 2026-11-03 (#363 voice-mode prompt, platform-only STT/TTS)
+- **Amended:** 2026-11-03 (#363 voice-mode prompt, platform-only STT/TTS); 2026-11-09 by [ADR-0063](./0063-portal-voice-settings.md) (Portal Settings voice is in scope; the setup wizard stays out)
 - **Issue:** #349 (v1.0.9 Must); amended by #363 (v1.0.9 Must)
 - **Product ACCEPT:** Grill Round 1 2026-11-02; Soft ACCEPT Soft/contract #363 2026-11-03
 
