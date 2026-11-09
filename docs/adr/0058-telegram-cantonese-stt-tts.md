@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
-- **Amended:** 2026-11-03 (#363 voice-mode prompt, platform-only STT/TTS); 2026-11-09 by [ADR-0063](./0063-portal-voice-settings.md) (Portal Settings voice is in scope; the setup wizard stays out)
+- **Amended:** 2026-11-03 (#363 voice-mode prompt, platform-only STT/TTS); 2026-11-09 by [ADR-0063](./0063-portal-voice-settings.md) (Portal Settings voice is in scope; the setup wizard stays out; English TTS is a v1.0.9 Must there — `sendVoice` for spoken `yue` or `en`)
 - **Issue:** #349 (v1.0.9 Must); amended by #363 (v1.0.9 Must)
 - **Product ACCEPT:** Grill Round 1 2026-11-02; Soft ACCEPT Soft/contract #363 2026-11-03
 
@@ -32,6 +32,7 @@ RustFox tip ignores caption-less Telegram voice notes (empty text + empty attach
 
 - Amends ADR-0020 Decision 9 follow-up: replace “type instead” placeholder path with real local STT for Voice notes.
 - #363 amends Decisions 2 and 4: the interactive turn is still ordinary text, and TTS is still dual and config-gated, but the voice-origin turn also gets the voice-mode prompt, and `sendVoice` is not applied to typed chat.
+- [ADR-0063](./0063-portal-voice-settings.md) puts voice on Portal **Settings** and makes English TTS a v1.0.9 Must: `sendVoice` for spoken `yue` or `en`, with the English pack beside `tts-cantonese`. The setup wizard stays out (Decisions 6 and 10).
 - Soft: fixtures + QA Telegram smoke (voice in / optional TTS out). #363 Soft is unit tests plus the Telegram injector with mocked STT/TTS (happy path and no self-STT/self-TTS). No tag without Kan ship GO.
 - OpenRouter fallback must be opt-in and visible in config/docs (privacy).
 

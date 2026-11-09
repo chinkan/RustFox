@@ -106,5 +106,5 @@ Seat with no live run signal capability yet; v1 stays idle and is labeled defini
 _Avoid_: fake busy, always-running
 
 **Voice settings**:
-Portal Settings controls for Telegram voice notes (`voice.enabled`, SenseVoice languages `{yue, zh, en, ja, ko}`, opt-in `tts`). One shared SenseVoice pack; Cantonese `sendVoice` only when the spoken language is yue (ADR-0063, amends ADR-0058).
+Portal Settings controls for Telegram voice notes (`voice.enabled`, SenseVoice languages `{yue, zh, en, ja, ko}`, opt-in `tts`). One shared SenseVoice pack; spoken reply is `sendVoice` for yue or en. zh, ja, and ko stay text (ADR-0063, amends ADR-0058).
 _Avoid_: Portal wizard, per-language STT download
