@@ -7,6 +7,7 @@ import type { SettingsPatch, SoulName, SelfUpgradeChoice, AutonomyMode } from '.
 import { ensureAuthBootstrapped } from '../../auth'
 import { OfficePrefsSection } from '../../agents/officePrefs'
 import { OpenCodeStatusCard } from '../../settings/opencodeStatusCard'
+import { VoiceSection } from '../../settings/VoiceSection'
 
 export const Route = createFileRoute('/_auth/settings')({
   beforeLoad: async ({ context }) => {
@@ -251,6 +252,8 @@ function SettingsPage() {
           </section>
 
           <OpenCodeStatusCard api={api} />
+
+          <VoiceSection api={api} voice={settings.data?.voice} />
 
           <section className="section" style={{ gridColumn: '1 / -1' }}>
             <h2 className="section-title">{t('settings.promptTitle')}</h2>

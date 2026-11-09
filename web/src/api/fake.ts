@@ -119,6 +119,15 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       },
       restartRequired: ['portalPort'],
       switchbot: { enabled: false, tokenMasked: null, secretMasked: null },
+      voice: {
+        enabled: true,
+        languages: ['yue', 'en'],
+        tts: false,
+        download: {
+          sensevoice: { status: 'ready', message: null },
+          ttsCantonese: { status: 'absent', message: null },
+        },
+      },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
       sandbox: {
         mode: 'trusted' as const,

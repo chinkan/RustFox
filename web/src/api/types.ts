@@ -434,6 +434,28 @@ export interface SwitchBotSettings {
   secretMasked: string | null
 }
 
+/** ADR-0063 — Telegram voice pipeline (Settings whitelist). */
+export type VoiceLanguage = 'yue' | 'zh' | 'en' | 'ja' | 'ko'
+
+export type VoicePackStatus = 'absent' | 'downloading' | 'ready' | 'error'
+
+export interface VoicePackDownload {
+  status: VoicePackStatus
+  message: string | null
+}
+
+export interface VoiceDownload {
+  sensevoice: VoicePackDownload
+  ttsCantonese: VoicePackDownload
+}
+
+export interface VoiceSettings {
+  enabled: boolean
+  languages: VoiceLanguage[]
+  tts: boolean
+  download: VoiceDownload
+}
+
 export interface ProviderInfo {
   name: string
   model: string
@@ -594,6 +616,8 @@ export interface Settings {
   systemPrompt: SystemPromptInfo
   sandbox: SandboxStatus
   switchbot: SwitchBotSettings
+  /** Omitted until Dev #385 lands; UI applies ADR defaults when absent. */
+  voice?: VoiceSettings
 }
 
 export type AutonomyMode = 'default' | 'autopilot' | 'plan'
@@ -606,6 +630,9 @@ export interface SettingsPatch {
   switchbotEnabled?: boolean
   switchbotToken?: string
   switchbotSecret?: string
+  voiceEnabled?: boolean
+  voiceLanguages?: VoiceLanguage[]
+  voiceTts?: boolean
 }
 
 export interface SettingsPatchResult {
