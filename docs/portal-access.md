@@ -10,7 +10,7 @@ config) — it must never face the public internet directly.
 |---|---|
 | On the VPS itself | `http://127.0.0.1:8090/` — works with the default bind |
 | Home Wi-Fi (laptop/phone on LAN) | Set `bind = "0.0.0.0"` → open `http://<vps-lan-ip>:8090/` |
-| Out and about (phone) | Install Tailscale on VPS + phone → `http://<vps-tailnet-ip>:8090/` |
+| Out and about (phone) | Tailscale on the phone. Manual install: `http://<vps-tailnet-ip>:8090/` (section 2). Settings Serve (ADR-0065): MagicDNS `https://<node>.<tailnet>.ts.net/` when Serve is up; portal bind stays loopback |
 | Don't know your URLs | Message the bot `/portal` in Telegram — it replies with working URLs for the current network |
 
 ## 1. LAN use
@@ -46,6 +46,20 @@ LAN binding is for trusted networks only. Auth is a token, but the channel
 is plain HTTP: don't pretend otherwise. On untrusted Wi-Fi, use Tailscale.
 
 ## 2. Remote access = Tailscale (supported path)
+
+Both paths below keep Portal off the public internet. Tailscale Funnel is not used.
+
+### Settings enroll + Serve (ADR-0065, v1.0.10)
+
+Productized path: Portal **Settings → Tailscale** (SwitchBot-style card, not the setup wizard). This page records the lock. The card itself ships in a later impl issue, not in this docs tip.
+
+1. The host already runs OS `tailscaled`. One Tailscale node per RustFox process host.
+2. Enable the card and save an auth key. Vault name `tailscale.auth_key`. `config.toml` stores a `secret:` ref and `enabled` only.
+3. RustFox brings the node up and configures `tailscale serve` HTTPS to `http://127.0.0.1:<portal.port>`. Portal `bind` stays `127.0.0.1`. The same Serve target covers the SPA and `/api/device/v1/ws`.
+4. When Serve is up, Settings and `/portal` show the MagicDNS URL (`https://<node>.<tailnet>.ts.net/`).
+5. If `tailscale` / `tailscaled` is missing, or Serve fails, the bot and Portal keep running. Settings shows the error and links back to this page. Use the manual steps until the node is up.
+
+### Manual install (still supported)
 
 No public port, real crypto, 5-minute setup:
 
@@ -105,6 +119,7 @@ conversation in the portal works after one login).
 |---|---|
 | Self-signed HTTPS baked in | mobile trust flows are miserable; wrong layer |
 | cloudflared/frp public tunnel | exposes an admin UI to internet scanners; token auth over TLS-but-public is a worse security posture than tailnet |
+| Tailscale Funnel | same public-internet exposure; ADR-0065 keeps Serve on the tailnet and leaves Funnel off |
 | Port-forward + DDNS | same scanner problem, plus NAT pain |
 
 **Escalation path** if a genuinely public deployment is ever wanted: put
