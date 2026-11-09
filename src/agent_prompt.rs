@@ -300,14 +300,65 @@ pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
     start
 }
 
+/// Seven level-2 headings of the structured handoff (ADR-0063 / #384).
+/// Heading 2 is **Constraints & Preferences**. Empty sections stay present.
+pub const HANDOFF_SECTION_HEADINGS: [&str; 7] = [
+    "Goal",
+    "Constraints & Preferences",
+    "Progress",
+    "Key Decisions",
+    "Relevant Files",
+    "Next Steps",
+    "Critical Context",
+];
+
+/// Progress buckets under `## Progress`.
+pub const HANDOFF_PROGRESS_BUCKETS: [&str; 3] = ["Done", "In Progress", "Blocked"];
+
+/// Instructions for the live Tier-3 summarizer and for
+/// [`build_compact_summary_prompt`]. One schema, updated in place.
+pub fn handoff_summary_instructions() -> String {
+    let mut skeleton = String::new();
+    for heading in HANDOFF_SECTION_HEADINGS {
+        skeleton.push_str(&format!("## {heading}\n"));
+        if heading == "Progress" {
+            for bucket in HANDOFF_PROGRESS_BUCKETS {
+                skeleton.push_str(&format!("### {bucket}\n"));
+            }
+        }
+    }
+    format!(
+        "You maintain one structured handoff of a long conversation.\n\
+         Update each section in place. Output the full document, not a delta \
+         and not a second copy of the previous handoff.\n\
+         Target length: about 1500–3000 tokens.\n\
+         \n\
+         HEADINGS (level 2, this order, every section present). \
+         Empty sections stay, with the placeholder None.\n\
+         {skeleton}\n\
+         MUST PRESERVE verbatim (do not paraphrase) from the previous handoff \
+         and the new messages:\n\
+         - file paths, URLs, issue/PR numbers, commit SHAs, conversation ids, \
+         tool_call ids, message ids\n\
+         - stated decisions, constraints, and task status strings\n\
+         \n\
+         Output ONLY the handoff. No preamble and no markers.\n"
+    )
+}
+
 /// Create a recovery nudge message appropriate for the conversation context.
 pub fn recovery_nudge_for(messages: &[ChatMessage]) -> ChatMessage {
     let previous_is_tool = messages.last().is_some_and(|msg| msg.role == "tool");
+    let handoff = "Read the structured handoff (Goal, Constraints & Preferences, Progress, Key Decisions, Relevant Files, Next Steps, Critical Context) for context.";
 
     let content = if previous_is_tool {
-        "Continue from the tool result above. Read the ## STATE block in the compact summary for context. Either call the next required tool or provide a final answer.".to_string()
+        format!(
+            "Continue from the tool result above. {handoff} Either call the next required tool or provide a final answer."
+        )
     } else {
-        "Continue from the user's request above. Read the ## STATE block in the compact summary for context. Either call the next required tool or provide a final answer.".to_string()
+        format!(
+            "Continue from the user's request above. {handoff} Either call the next required tool or provide a final answer."
+        )
     };
 
     ChatMessage {
@@ -664,43 +715,12 @@ fn compact_min_message_count(context_window: usize) -> usize {
     base + (base / 2) * window_k
 }
 
-/// Create the summary prompt content used for Tier 3 and Tier 4 LLM calls.
-/// Returns a system-role message instructing the LLM to summarize.
+/// Summary prompt for Tier-3 handoff compaction (ADR-0063).
+/// Same schema as the live `summarize_with_llm` instructions.
 pub fn build_compact_summary_prompt() -> ChatMessage {
-    let prompt_text = vec![
-        "You are producing a compact state summary of the conversation below.",
-        "",
-        "OUTPUT FORMAT:",
-        "",
-        "## STATE",
-        "```yaml",
-        "stage: <problem_definition | investigation | implementation | review | complete>",
-        "decisions:",
-        "  - <decision made>",
-        "pending:",
-        "  - <still to do>",
-        "last_action: <tool call name + brief result>",
-        "last_action_result: <what happened>",
-        "conversation_phase: <summary of current focus>",
-        "```",
-        "",
-        "## CONTEXT",
-        "- <bullet point of key fact, file, error, or finding>",
-        "- <bullet point>",
-        "- <bullet point>",
-        "",
-        "CRITICAL RULES:",
-        "- State must be precise enough for the LLM to continue without re-reading history",
-        "- Include ALL pending items the user explicitly requested",
-        "- Include ALL error messages and their resolutions",
-        "- Be specific with file paths and tool names",
-        "- Do NOT call any tools. Respond with text only.",
-    ]
-    .join("\n");
-
     ChatMessage {
         role: "system".to_string(),
-        content: Some(MessageContent::Text(prompt_text)),
+        content: Some(MessageContent::Text(handoff_summary_instructions())),
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -712,7 +732,7 @@ pub fn build_compact_boundary_marker(original_count: usize, compacted_count: usi
     ChatMessage {
         role: "system".to_string(),
         content: Some(MessageContent::Text(format!(
-            "★ COMPACT SUMMARY — previous {} messages → YAML state + narrative ({} messages) ★",
+            "★ COMPACT SUMMARY — previous {} messages → structured handoff ({} messages) ★",
             original_count, compacted_count,
         ))),
         tool_calls: None,
@@ -1210,24 +1230,62 @@ mod tests {
     }
 
     #[test]
-    fn compact_summary_prompt_contains_state_keywords() {
+    fn compact_summary_prompt_requests_seven_section_handoff() {
         let msg = build_compact_summary_prompt();
         let text = msg.content.as_ref().unwrap().as_text();
-        assert!(text.contains("## STATE"), "Should have STATE section");
-        assert!(text.contains("## CONTEXT"), "Should have CONTEXT section");
-        assert!(text.contains("decisions:"), "Should have decisions field");
-        assert!(text.contains("pending:"), "Should have pending field");
+        for heading in [
+            "## Goal",
+            "## Constraints & Preferences",
+            "## Progress",
+            "## Key Decisions",
+            "## Relevant Files",
+            "## Next Steps",
+            "## Critical Context",
+        ] {
+            assert!(text.contains(heading), "missing {heading}");
+        }
+        assert!(text.contains("### Done"));
+        assert!(text.contains("### In Progress"));
+        assert!(text.contains("### Blocked"));
+        assert!(text.contains("MUST PRESERVE"));
+        assert!(text.contains("in place"));
+        assert!(text.contains("1500"));
+        assert!(text.contains("3000"));
         assert!(
-            text.contains("last_action:"),
-            "Should have last_action field"
+            !text.contains("## STATE"),
+            "YAML STATE schema is retired: {text}"
+        );
+        assert!(
+            !text.contains("at most 300 words"),
+            "blind 300-word extend is retired"
         );
     }
 
     #[test]
-    fn compact_boundary_marker_contains_state_hint() {
+    fn recovery_nudge_points_at_structured_handoff_not_state_block() {
+        let messages = vec![ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text("result".to_string())),
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning_content: None,
+        }];
+        let text = recovery_nudge_for(&messages)
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text();
+        assert!(text.contains("tool result above"));
+        assert!(text.contains("Constraints & Preferences"));
+        assert!(!text.contains("## STATE"), "STATE hint is retired: {text}");
+    }
+
+    #[test]
+    fn compact_boundary_marker_names_structured_handoff() {
         let msg = build_compact_boundary_marker(10, 1);
         let text = msg.content.as_ref().unwrap().as_text();
-        assert!(text.contains("state"), "Should hint at state format");
+        assert!(text.contains("structured handoff"), "{text}");
+        assert!(!text.contains("YAML"), "{text}");
     }
 
     fn chat_msg(role: &str, text: &str) -> ChatMessage {

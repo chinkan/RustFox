@@ -23,11 +23,261 @@ pub struct ConversationManager {
     system_prompt: String,
     memory: MemoryStore,
     conversation_id: String,
-    /// Running summary of compacted history (ADR 0003 Q2) — layered,
-    /// persisted as `[SUMMARY]` rows (Q8), injected as a system message.
+    /// Running summary of compacted history (ADR 0003 Q2, ADR-0063).
+    /// One structured handoff document, persisted as a single `[SUMMARY]`
+    /// row (Q8), injected as a system message.
     summary: Option<String>,
     /// Highest message index whose user turn was already flushed to USER.md (Q6).
     last_flush_turn: Option<usize>,
+}
+
+/// Tool results longer than this are shortened before the summarizer sees them.
+const TOOL_RESULT_PRUNE_CHARS: usize = 160;
+/// Prefix kept from a pruned tool result so a short head can still be quoted.
+const TOOL_RESULT_KEEP_CHARS: usize = 80;
+
+/// Latest structured handoff wins. Pre-handoff `[SUMMARY]` snippets still join.
+pub(crate) fn fold_persisted_summary_parts(parts: &[String]) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+    if let Some(latest) = parts.iter().rev().find(|part| is_structured_handoff(part)) {
+        return Some(latest.trim().to_string());
+    }
+    Some(parts.join("\n\n"))
+}
+
+fn is_structured_handoff(text: &str) -> bool {
+    crate::agent_prompt::HANDOFF_SECTION_HEADINGS
+        .iter()
+        .all(|heading| text.contains(&format!("## {heading}")))
+}
+
+fn prune_tool_results_for_summary(messages: &[&ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(|message| {
+            if message.role != "tool" {
+                return (*message).clone();
+            }
+            let Some(content) = message.content.as_ref() else {
+                return (*message).clone();
+            };
+            let text = content.as_text();
+            if text.chars().count() <= TOOL_RESULT_PRUNE_CHARS {
+                return (*message).clone();
+            }
+            let keep: String = text.chars().take(TOOL_RESULT_KEEP_CHARS).collect();
+            let mut pruned = (*message).clone();
+            pruned.content = Some(MessageContent::Text(format!(
+                "{keep}\n[tool result pruned]"
+            )));
+            pruned
+        })
+        .collect()
+}
+
+fn format_messages_for_summary(messages: &[&ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| format_message_for_summary(message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_message_for_summary(message: &ChatMessage) -> String {
+    let mut lines = Vec::new();
+    if let Some(text) = message.content.as_ref().map(|content| content.as_text()) {
+        if !text.trim().is_empty() {
+            lines.push(text);
+        }
+    }
+    if let Some(calls) = &message.tool_calls {
+        for call in calls {
+            lines.push(format!(
+                "tool_call id={} name={} arguments={}",
+                call.id, call.function.name, call.function.arguments
+            ));
+        }
+    }
+    if let Some(id) = &message.tool_call_id {
+        if !lines.iter().any(|line| line.contains(id)) {
+            lines.push(format!("tool_call_id={id}"));
+        }
+    }
+    if lines.is_empty() {
+        format!("{}:", message.role)
+    } else {
+        format!("{}: {}", message.role, lines.join("\n"))
+    }
+}
+
+fn build_handoff_user_prompt(previous: &str, transcript: &str) -> String {
+    let prev_block = if previous.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Previous handoff (update these sections in place):\n{previous}\n\n")
+    };
+    format!(
+        "{}\n\n{prev_block}New conversation:\n{transcript}",
+        crate::agent_prompt::handoff_summary_instructions()
+    )
+}
+
+fn finish_structured_handoff(model_text: &str, preserve_corpus: &str) -> String {
+    let (preamble, mut sections) = parse_handoff_sections(model_text);
+    let preamble = preamble.trim();
+    if !preamble.is_empty() {
+        let ctx = sections[6].trim().to_string();
+        if ctx.is_empty() || ctx == "None" {
+            sections[6] = preamble.to_string();
+        } else if !ctx.contains(preamble) {
+            sections[6] = format!("{ctx}\n{preamble}");
+        }
+    }
+    let draft = render_handoff(&sections);
+    let missing: Vec<String> = extract_opaque_ids(preserve_corpus)
+        .into_iter()
+        .filter(|id| !draft.contains(id))
+        .collect();
+    if !missing.is_empty() {
+        let ctx = &mut sections[6];
+        let mut body = ctx.trim().to_string();
+        if body.is_empty() || body == "None" {
+            body.clear();
+        }
+        for id in missing {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&id);
+        }
+        *ctx = body;
+    }
+    render_handoff(&sections)
+}
+
+fn parse_handoff_sections(text: &str) -> (String, [String; 7]) {
+    let mut preamble = String::new();
+    let mut sections = std::array::from_fn(|_| String::new());
+    let mut current: Option<usize> = None;
+    for line in text.lines() {
+        if let Some(idx) = heading_index(line) {
+            current = Some(idx);
+            continue;
+        }
+        if let Some(idx) = current {
+            if !sections[idx].is_empty() {
+                sections[idx].push('\n');
+            }
+            sections[idx].push_str(line);
+        } else if !preamble.is_empty() {
+            preamble.push('\n');
+            preamble.push_str(line);
+        } else {
+            preamble.push_str(line);
+        }
+    }
+    (preamble, sections)
+}
+
+fn heading_index(line: &str) -> Option<usize> {
+    let trimmed = line.trim();
+    crate::agent_prompt::HANDOFF_SECTION_HEADINGS
+        .iter()
+        .position(|heading| trimmed == format!("## {heading}"))
+}
+
+fn render_handoff(sections: &[String; 7]) -> String {
+    let mut out = String::new();
+    for (idx, heading) in crate::agent_prompt::HANDOFF_SECTION_HEADINGS
+        .iter()
+        .enumerate()
+    {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let body = if *heading == "Progress" {
+            normalize_progress(sections[idx].trim())
+        } else {
+            let raw = sections[idx].trim();
+            if raw.is_empty() {
+                "None".to_string()
+            } else {
+                raw.to_string()
+            }
+        };
+        out.push_str(&format!("## {heading}\n{body}\n"));
+    }
+    out.trim_end().to_string()
+}
+
+fn normalize_progress(body: &str) -> String {
+    let mut buckets = [String::new(), String::new(), String::new()];
+    let mut current: Option<usize> = None;
+    let mut orphan = String::new();
+    for line in body.lines() {
+        if let Some(idx) = crate::agent_prompt::HANDOFF_PROGRESS_BUCKETS
+            .iter()
+            .position(|bucket| line.trim() == format!("### {bucket}"))
+        {
+            current = Some(idx);
+            continue;
+        }
+        if let Some(idx) = current {
+            if !buckets[idx].is_empty() {
+                buckets[idx].push('\n');
+            }
+            buckets[idx].push_str(line);
+        } else if !orphan.is_empty() {
+            orphan.push('\n');
+            orphan.push_str(line);
+        } else {
+            orphan.push_str(line);
+        }
+    }
+    let orphan = orphan.trim();
+    if !orphan.is_empty() && orphan != "None" && buckets[1].trim().is_empty() {
+        buckets[1] = orphan.to_string();
+    }
+    let mut out = String::new();
+    for (idx, name) in crate::agent_prompt::HANDOFF_PROGRESS_BUCKETS
+        .iter()
+        .enumerate()
+    {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let text = buckets[idx].trim();
+        let text = if text.is_empty() { "None" } else { text };
+        out.push_str(&format!("### {name}\n{text}"));
+    }
+    out
+}
+
+fn opaque_id_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)https?://[^\s<>\]\)"']+|\b(?:call|msg)_[A-Za-z0-9_-]+\b|#[0-9]+|\b[0-9a-f]{7,40}\b|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+"#,
+        )
+        .expect("opaque id regex")
+    })
+}
+
+fn extract_opaque_ids(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for found in opaque_id_re().find_iter(text) {
+        let id = found
+            .as_str()
+            .trim_end_matches([',', ';', ')', ']', '>', '"'])
+            .to_string();
+        if id.len() < 2 || out.iter().any(|seen: &String| seen == &id) {
+            continue;
+        }
+        out.push(id);
+    }
+    out
 }
 
 impl ConversationManager {
@@ -70,7 +320,7 @@ impl ConversationManager {
             }
             raw.push(m);
         }
-        let summary = (!folded_summary.is_empty()).then(|| folded_summary.join("\n\n"));
+        let summary = fold_persisted_summary_parts(&folded_summary);
 
         let schedule_tz = crate::scheduler::timezone::resolve_schedule_timezone(
             config.schedule_timezone_config(),
@@ -209,11 +459,13 @@ impl ConversationManager {
         }
     }
 
-    /// Apply a new summary layer (ADR 0003 Q2/Q8): fold into the running
-    /// summary, rebuild the message list as [system, summary block,
-    /// protected tail], and persist the layer as a `[SUMMARY]` system
-    /// message. Persistence failures are logged and ignored — the in-memory
-    /// state wins.
+    /// Store one structured handoff (ADR 0003 Q2/Q8, ADR-0063).
+    ///
+    /// The summarizer already extended the previous document in place, so
+    /// this replaces the running summary instead of concatenating layers.
+    /// Rebuilds the message list as [system, summary block, protected tail]
+    /// and persists a single `[SUMMARY]` row. Persistence failures are logged
+    /// and ignored — the in-memory state wins.
     pub(crate) async fn apply_summary_layer(
         &mut self,
         layer: &str,
@@ -223,10 +475,7 @@ impl ConversationManager {
         if layer.is_empty() {
             anyhow::bail!("empty summary layer");
         }
-        self.summary = Some(match self.summary.take() {
-            Some(prev) => format!("{prev}\n\n{layer}"),
-            None => layer.to_string(),
-        });
+        self.summary = Some(layer.to_string());
 
         let mut new_msgs = Vec::with_capacity(2 + self.messages.len().saturating_sub(tail_start));
         if let Some(system) = self.messages.first().cloned() {
@@ -254,10 +503,10 @@ impl ConversationManager {
         };
         if let Err(e) = self
             .memory
-            .save_message(&self.conversation_id, &persisted)
+            .replace_summary_message(&self.conversation_id, &persisted)
             .await
         {
-            tracing::warn!(error = %format!("{e:#}"), "Failed to persist summary layer");
+            tracing::warn!(error = %format!("{e:#}"), "Failed to persist summary document");
         }
         Ok(())
     }
@@ -377,41 +626,23 @@ impl ConversationManager {
         Ok(true)
     }
 
-    /// Ask the summarizer (Q9 model override, else current model) to EXTEND
-    /// the running summary with the new portion of the conversation.
+    /// Ask the summarizer (Q9 model override, else current model) to extend
+    /// the running handoff in place (ADR 0003 Q2, ADR-0063).
+    ///
+    /// Tool results in the to-be-summarized range are pruned before the
+    /// prompt is built. Opaque ids from the unpruned range and the previous
+    /// handoff are copied back if the model drops them.
     async fn summarize_with_llm(
         &self,
         ctx: &CompactionContext<'_>,
         to_summarize: &[&ChatMessage],
     ) -> Result<String> {
-        let summary_text: String = to_summarize
-            .iter()
-            .map(|m| {
-                format!(
-                    "{}: {}",
-                    m.role,
-                    m.content.as_ref().map(|c| c.as_text()).unwrap_or_default()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
         let previous = self.summary.as_deref().unwrap_or("");
-        let summary_prompt = format!(
-            "You are maintaining a running summary of a long conversation.\n\
-             {prev_block}\
-             Below is the new portion of the conversation. EXTEND the previous summary with it:\n\
-             - Preserve key facts, decisions, preferences, and open questions\n\
-             - Merge new information; never contradict or repeat the previous summary\n\
-             - Be concise — at most 300 words\n\
-             - Output ONLY the new summary text (no preamble, no markers)\n\n\
-             New conversation:\n{summary_text}",
-            prev_block = if previous.is_empty() {
-                String::new()
-            } else {
-                format!("Previous summary:\n{previous}\n\n")
-            },
-        );
+        let preserve_corpus = format!("{previous}\n{}", format_messages_for_summary(to_summarize));
+        let pruned = prune_tool_results_for_summary(to_summarize);
+        let pruned_refs: Vec<&ChatMessage> = pruned.iter().collect();
+        let transcript = format_messages_for_summary(&pruned_refs);
+        let summary_prompt = build_handoff_user_prompt(previous, &transcript);
 
         let summary_msg = vec![
             ChatMessage {
@@ -441,11 +672,12 @@ impl ConversationManager {
             }
             None => ctx.llm.chat(&summary_msg, &[]).await?,
         };
-        Ok(response
+        let raw = response
             .content
             .as_ref()
             .map(|c| c.as_text())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok(finish_structured_handoff(&raw, &preserve_corpus))
     }
 
     pub fn prepare(&self, context_window: usize) -> crate::agent_prompt::PreparedPrompt {
@@ -502,12 +734,20 @@ mod tests {
     /// Stub provider that returns a fixed summary text (no network).
     struct StubSummaryProvider {
         config: ProviderConfig,
-        reply: String,
+        replies: Vec<String>,
         calls: std::sync::atomic::AtomicUsize,
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl StubSummaryProvider {
         fn new(reply: impl Into<String>) -> Self {
+            Self::scripted(
+                vec![reply.into()],
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            )
+        }
+
+        fn scripted(replies: Vec<String>, captured: Arc<std::sync::Mutex<Vec<String>>>) -> Self {
             Self {
                 config: ProviderConfig {
                     name: "stub".to_string(),
@@ -524,8 +764,9 @@ mod tests {
                     rate_limit_retry_limit: 0,
                     extra_headers: vec![],
                 },
-                reply: reply.into(),
+                replies,
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                captured,
             }
         }
 
@@ -557,16 +798,29 @@ mod tests {
         async fn chat_completion(
             &self,
             _client: &reqwest::Client,
-            _messages: &[ChatMessage],
+            messages: &[ChatMessage],
             _tools: &[ToolDefinition],
             model: &str,
             _max_tokens: u32,
         ) -> anyhow::Result<ChatCompletion> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let prompt = messages
+                .iter()
+                .filter(|m| m.role == "user")
+                .filter_map(|m| m.content.as_ref().map(|c| c.as_text()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.captured.lock().expect("prompt capture").push(prompt);
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = self
+                .replies
+                .get(n)
+                .or_else(|| self.replies.last())
+                .cloned()
+                .unwrap_or_default();
             Ok(ChatCompletion {
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: Some(MessageContent::Text(self.reply.clone())),
+                    content: Some(MessageContent::Text(reply)),
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
@@ -723,22 +977,22 @@ mod tests {
             "latest request"
         );
 
-        // Second layer extends, not replaces.
+        // Second apply replaces the one structured document (#384).
         cm.apply_summary_layer("layer two content", 2)
             .await
             .unwrap();
         let summary_text = cm.messages[1].content.as_ref().unwrap().as_text();
         assert!(
-            summary_text.contains("layer one content")
-                && summary_text.contains("layer two content"),
-            "layered extension: {summary_text}"
+            summary_text.contains("layer two content"),
+            "replacement document injected: {summary_text}"
         );
-        assert_eq!(
-            cm.summary.as_deref().unwrap(),
-            "layer one content\n\nlayer two content"
+        assert!(
+            !summary_text.contains("layer one content"),
+            "previous layer must not stay concatenated: {summary_text}"
         );
+        assert_eq!(cm.summary.as_deref().unwrap(), "layer two content");
 
-        // Persisted: [SUMMARY] rows reload.
+        // Persisted: one [SUMMARY] row, the current document.
         let reloaded = store.load_messages(&conv).await.unwrap();
         let summary_rows: Vec<String> = reloaded
             .iter()
@@ -749,9 +1003,9 @@ mod tests {
                     .filter(|t| t.starts_with("[SUMMARY]"))
             })
             .collect();
-        assert_eq!(summary_rows.len(), 2, "one [SUMMARY] row per layer");
-        assert!(summary_rows[0].contains("layer one content"));
-        assert!(summary_rows[1].contains("layer two content"));
+        assert_eq!(summary_rows.len(), 1, "one stored summary document");
+        assert!(summary_rows[0].contains("layer two content"));
+        assert!(!summary_rows[0].contains("layer one content"));
     }
 
     #[tokio::test]
@@ -1598,6 +1852,368 @@ allowed_directory = "."
         assert!(
             !blob.contains("[schedule:sched-1]") && !blob.contains("inbox is quiet"),
             "interactive prompt must omit the schedule segment: {blob}"
+        );
+    }
+
+    fn sample_handoff(goal: &str) -> String {
+        format!(
+            "## Goal\n{goal}\n\
+             ## Constraints & Preferences\nNone\n\
+             ## Progress\n### Done\nNone\n### In Progress\nNone\n### Blocked\nNone\n\
+             ## Key Decisions\nNone\n\
+             ## Relevant Files\nNone\n\
+             ## Next Steps\nNone\n\
+             ## Critical Context\nNone\n"
+        )
+    }
+
+    fn assert_handoff_headings_once(text: &str) {
+        let mut cursor = 0;
+        for heading in [
+            "## Goal",
+            "## Constraints & Preferences",
+            "## Progress",
+            "## Key Decisions",
+            "## Relevant Files",
+            "## Next Steps",
+            "## Critical Context",
+        ] {
+            let found = text[cursor..]
+                .find(heading)
+                .unwrap_or_else(|| panic!("missing {heading} in order:\n{text}"));
+            assert_eq!(
+                text.matches(heading).count(),
+                1,
+                "{heading} must appear once:\n{text}"
+            );
+            cursor += found + heading.len();
+        }
+        for bucket in ["### Done", "### In Progress", "### Blocked"] {
+            assert!(text.contains(bucket), "missing {bucket}:\n{text}");
+        }
+    }
+
+    fn text_msg(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(MessageContent::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// Old user + tool_calls-only assistant + bulky tool result, then two
+    /// protected user turns. Window == token estimate so Tier 3 fires.
+    fn handoff_compact_history() -> Vec<ChatMessage> {
+        let mut messages = vec![text_msg("system", "system prompt")];
+        messages.push(text_msg(
+            "user",
+            &format!(
+                "old request msg_opaque_42 https://github.com/chinkan/RustFox/issues/384 {}",
+                "x".repeat(900)
+            ),
+        ));
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![crate::llm::ToolCall {
+                id: "call_opaque_9f3a".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"src/conversation.rs"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(MessageContent::Text(format!(
+                "head-ok {}BULKY_TAIL_MARKER",
+                "Q".repeat(400)
+            ))),
+            tool_calls: None,
+            tool_call_id: Some("call_opaque_9f3a".to_string()),
+            reasoning_content: None,
+        });
+        messages.push(text_msg("user", "middle turn stays protected"));
+        messages.push(text_msg("user", "UNIQUE_KEYWORD_B follow-up"));
+        messages
+    }
+
+    fn captured_user_prompt(captured: &Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        captured.lock().expect("prompt capture").join("\n")
+    }
+
+    #[tokio::test]
+    async fn first_compact_stores_seven_section_handoff_and_replaces_blind_extend_prompt() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handoff = sample_handoff("Ship the structured handoff");
+        let llm =
+            StubSummaryProvider::scripted(vec![handoff.clone()], Arc::clone(&captured)).into_llm();
+        let mut cm = manager(handoff_compact_history());
+        let tokens = crate::agent_prompt::estimate_tokens(&cm.messages);
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+        let stored = cm.summary.as_deref().expect("summary stored");
+        assert_handoff_headings_once(stored);
+        assert!(stored.contains("Ship the structured handoff"));
+
+        let prompt = captured_user_prompt(&captured);
+        assert!(prompt.contains("## Constraints & Preferences"), "{prompt}");
+        assert!(prompt.contains("MUST PRESERVE"), "{prompt}");
+        assert!(prompt.contains("in place"), "{prompt}");
+        assert!(prompt.contains("1500"), "{prompt}");
+        assert!(prompt.contains("3000"), "{prompt}");
+        assert!(
+            !prompt.contains("at most 300 words"),
+            "blind extend prompt must be gone: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extend_updates_handoff_sections_in_place() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let next = sample_handoff("SECOND_GOAL_TOKEN");
+        let llm = StubSummaryProvider::scripted(vec![next], Arc::clone(&captured)).into_llm();
+        let mut cm = manager(handoff_compact_history());
+        cm.summary = Some(sample_handoff("FIRST_GOAL_TOKEN"));
+        let tokens = crate::agent_prompt::estimate_tokens(&cm.messages);
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+        let stored = cm.summary.as_deref().expect("summary stored");
+        assert_handoff_headings_once(stored);
+        assert!(stored.contains("SECOND_GOAL_TOKEN"), "{stored}");
+        assert!(
+            !stored.contains("FIRST_GOAL_TOKEN"),
+            "extend must replace the document, not concatenate layers: {stored}"
+        );
+        let prompt = captured_user_prompt(&captured);
+        assert!(
+            prompt.contains("FIRST_GOAL_TOKEN"),
+            "extend prompt includes the previous handoff: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_ids_survive_paraphrase_prone_extend() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut previous = sample_handoff("keep going");
+        previous = previous.replace(
+            "## Critical Context\nNone",
+            "## Critical Context\n\
+             src/conversation.rs\n\
+             https://github.com/chinkan/RustFox/pull/327\n\
+             #384\n\
+             57146ed9dc9c2ef47c41931a0707cb8cd7410bf9\n\
+             call_opaque_9f3a",
+        );
+        let llm = StubSummaryProvider::scripted(
+            vec![sample_handoff("paraphrased the files and the ticket")],
+            Arc::clone(&captured),
+        )
+        .into_llm();
+        let mut cm = manager(handoff_compact_history());
+        cm.summary = Some(previous);
+        let tokens = crate::agent_prompt::estimate_tokens(&cm.messages);
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+        let stored = cm.summary.as_deref().expect("summary stored");
+        for id in [
+            "src/conversation.rs",
+            "https://github.com/chinkan/RustFox/pull/327",
+            "#384",
+            "57146ed9dc9c2ef47c41931a0707cb8cd7410bf9",
+            "call_opaque_9f3a",
+            "msg_opaque_42",
+            "https://github.com/chinkan/RustFox/issues/384",
+        ] {
+            assert!(stored.contains(id), "opaque id dropped: {id}\n{stored}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_calls_only_assistant_contributes_name_and_arguments() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm = StubSummaryProvider::scripted(
+            vec![sample_handoff("noted the read")],
+            Arc::clone(&captured),
+        )
+        .into_llm();
+        let mut cm = manager(handoff_compact_history());
+        let tokens = crate::agent_prompt::estimate_tokens(&cm.messages);
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+        let prompt = captured_user_prompt(&captured);
+        assert!(prompt.contains("read_file"), "tool name missing: {prompt}");
+        assert!(
+            prompt.contains(r#"{"path":"src/conversation.rs"}"#),
+            "tool arguments missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("call_opaque_9f3a"),
+            "tool_call id missing: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_prunes_tool_results_before_extend_prompt() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm = StubSummaryProvider::scripted(
+            vec![sample_handoff("pruned then extended")],
+            Arc::clone(&captured),
+        )
+        .into_llm();
+        let mut cm = manager(handoff_compact_history());
+        let tokens = crate::agent_prompt::estimate_tokens(&cm.messages);
+        let ctx = CompactionContext {
+            llm: &llm,
+            context_window: tokens,
+            compaction_model: None,
+            user_model_path: None,
+        };
+
+        assert!(cm.compact_messages(&ctx).await.unwrap());
+        let prompt = captured_user_prompt(&captured);
+        assert!(
+            prompt.contains("[tool result pruned]"),
+            "summarizer input must show pruned tool results: {prompt}"
+        );
+        assert!(
+            !prompt.contains("BULKY_TAIL_MARKER"),
+            "unpruned tool body reached the extend prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("## Constraints & Preferences"),
+            "prune runs on the transcript the extend prompt sends: {prompt}"
+        );
+        assert!(
+            cm.messages
+                .last()
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap()
+                .as_text()
+                .contains("UNIQUE_KEYWORD_B"),
+            "protected tail stays verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_uses_latest_structured_handoff_not_layer_concat() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cid = store
+            .get_or_create_conversation("test", crate::platform::DEFAULT_BOT_ID, "handoff_load")
+            .await
+            .unwrap();
+        for body in [
+            "[SUMMARY]\nlegacy layer one",
+            &format!("[SUMMARY]\n{}", sample_handoff("ONLY_HANDOFF_GOAL")),
+        ] {
+            store
+                .save_message(
+                    &cid,
+                    &ChatMessage {
+                        role: "system".into(),
+                        content: Some(MessageContent::from_text(body)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let cm = ConversationManager::new(
+            &store,
+            "test",
+            crate::platform::DEFAULT_BOT_ID,
+            "handoff_load",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let summary = cm.summary.as_deref().expect("handoff reloaded");
+        assert!(summary.contains("ONLY_HANDOFF_GOAL"), "{summary}");
+        assert!(
+            !summary.contains("legacy layer one"),
+            "legacy layer must not concatenate onto the structured document: {summary}"
+        );
+        assert_handoff_headings_once(summary);
+    }
+
+    #[tokio::test]
+    async fn load_still_joins_legacy_summary_layers_without_a_handoff() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let config = persist_test_config();
+        let skills = crate::skills::SkillRegistry::new();
+        let cid = store
+            .get_or_create_conversation("test", crate::platform::DEFAULT_BOT_ID, "legacy_load")
+            .await
+            .unwrap();
+        for body in ["[SUMMARY]\nlegacy one", "[SUMMARY]\nlegacy two"] {
+            store
+                .save_message(
+                    &cid,
+                    &ChatMessage {
+                        role: "system".into(),
+                        content: Some(MessageContent::from_text(body)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let cm = ConversationManager::new(
+            &store,
+            "test",
+            crate::platform::DEFAULT_BOT_ID,
+            "legacy_load",
+            "system base".into(),
+            &skills,
+            &config,
+        )
+        .await
+        .unwrap();
+        let summary = cm.summary.as_deref().expect("legacy summaries");
+        assert!(
+            summary.contains("legacy one") && summary.contains("legacy two"),
+            "{summary}"
         );
     }
 }
