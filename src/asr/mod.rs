@@ -118,7 +118,7 @@ pub struct VoiceConfig {
     /// Empty until home resolution fills `<home>/models/tts-cantonese`.
     pub tts_model_dir: PathBuf,
     /// Directory for [`EN_TTS_PACK_ID`]. Empty until home resolution fills
-    /// `<home>/models/tts-en`.
+    /// `<home>/models/tts-english`.
     pub tts_en_model_dir: PathBuf,
     /// Wall clock for one synthesis. `0` becomes 120.
     pub tts_timeout_secs: u64,
@@ -1947,7 +1947,7 @@ num threads: 2
         let cfg = VoiceConfig {
             tts: true,
             tts_model_dir: PathBuf::from("/no/such/tts-cantonese"),
-            tts_en_model_dir: PathBuf::from("/no/such/tts-en"),
+            tts_en_model_dir: PathBuf::from("/no/such/tts-english"),
             ..VoiceConfig::default()
         };
         let synth = LocalTts {
@@ -1956,7 +1956,7 @@ num threads: 2
         };
         let err = synth.synthesize_ogg_opus("hello").await.unwrap_err();
         assert!(err.to_string().contains("English"), "{err}");
-        assert!(err.to_string().contains("tts-en"), "{err}");
+        assert!(err.to_string().contains("tts-english"), "{err}");
         assert!(!err.to_string().contains("tts-cantonese"), "{err}");
         let plan = plan_reply_delivery(true, "hello", Some(&synth)).await;
         assert_eq!(plan.text, "hello");

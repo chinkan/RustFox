@@ -1003,7 +1003,7 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     let mut cfg = f.state.voice.snapshot();
     cfg.model_dir = home.join("models/sensevoice");
     cfg.tts_model_dir = home.join("models/tts-cantonese");
-    cfg.tts_en_model_dir = home.join("models/tts-en");
+    cfg.tts_en_model_dir = home.join("models/tts-english");
     f.state.voice.set(cfg);
     let calls = Arc::new(Mutex::new(Vec::new()));
     f.state.voice.set_fetcher(Arc::new(FailVoiceFetcher {

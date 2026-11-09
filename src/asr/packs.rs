@@ -38,14 +38,14 @@ const YUE_TTS_FILES: &[&str] = &[
 /// Local English TTS (Product amend on #385).
 ///
 /// Piper `en_US` lessac medium from the sherpa-onnx TTS models. Unpacked
-/// under `<home>/models/tts-en`. The `.onnx` weights are linked to
+/// under `<home>/models/tts-english`. The `.onnx` weights are linked to
 /// `model.onnx`. `espeak-ng-data/` is passed as `--vits-data-dir` when the
 /// directory is present. This is not a cloud TTS service.
 pub const EN_TTS_PACK_ID: &str = "vits-piper-en_US-lessac-medium";
 pub const EN_TTS_PACK_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2";
 /// Path under the fox home when `tts_en_model_dir` is unset.
-pub const EN_TTS_REL_DIR: &str = "models/tts-en";
+pub const EN_TTS_REL_DIR: &str = "models/tts-english";
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -70,7 +70,7 @@ impl VoicePack {
         match self {
             Self::SenseVoice => "sensevoice",
             Self::TtsCantonese => "tts-cantonese",
-            Self::TtsEnglish => "tts-en",
+            Self::TtsEnglish => "tts-english",
         }
     }
 }
@@ -693,7 +693,7 @@ mod tests {
             tts: true,
             model_dir: root.join("sensevoice"),
             tts_model_dir: root.join("tts-cantonese"),
-            tts_en_model_dir: root.join("tts-en"),
+            tts_en_model_dir: root.join("tts-english"),
             ..VoiceConfig::default()
         }
     }
@@ -702,7 +702,7 @@ mod tests {
     fn english_pack_is_local_piper_lessac_under_tts_en() {
         assert_eq!(EN_TTS_PACK_ID, "vits-piper-en_US-lessac-medium");
         assert!(EN_TTS_PACK_URL.contains(EN_TTS_PACK_ID));
-        assert_eq!(EN_TTS_REL_DIR, "models/tts-en");
+        assert_eq!(EN_TTS_REL_DIR, "models/tts-english");
         assert!(SENSEVOICE_PACK_URL.contains(SENSEVOICE_PACK_ID));
         assert_eq!(YUE_TTS_PACK_ID, "vits-cantonese-hf-xiaomaiiwn");
     }
@@ -795,7 +795,7 @@ mod tests {
             vec![
                 "sensevoice".to_string(),
                 "tts-cantonese".to_string(),
-                "tts-en".to_string()
+                "tts-english".to_string()
             ]
         );
     }
@@ -852,7 +852,7 @@ mod tests {
         runtime.ensure_now().await;
         let calls = fetcher.calls.lock().unwrap().clone();
         assert!(!calls.iter().any(|call| call == "sensevoice"));
-        assert!(calls.iter().any(|call| call == "tts-en"));
+        assert!(calls.iter().any(|call| call == "tts-english"));
         assert_eq!(runtime.view().sensevoice.status, "ready");
         assert_eq!(runtime.view().tts_english.status, "ready");
     }

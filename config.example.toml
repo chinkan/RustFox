@@ -468,7 +468,7 @@ Be concise and helpful."""
 #   https://huggingface.co/csukuangfj/vits-cantonese-hf-xiaomaiiwn
 #   files: vits-cantonese-hf-xiaomaiiwn.onnx (~114MB), tokens.txt, lexicon.txt, rule.fst
 #   ln -sf vits-cantonese-hf-xiaomaiiwn.onnx model.onnx
-# English pack (local sherpa Piper, not cloud TTS) into <home>/models/tts-en:
+# English pack (local sherpa Piper, not cloud TTS) into <home>/models/tts-english:
 #   vits-piper-en_US-lessac-medium
 #   https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2
 #   Unpack so model.onnx (symlink the en_US-lessac-medium.onnx weights), tokens.txt,
@@ -493,5 +493,5 @@ Be concise and helpful."""
 # tts = false                     # opt-in spoken copy; yue and en only; typed chat stays text
 # tts_bin = ""                    # empty = sherpa-onnx-offline-tts + ffmpeg
 # tts_model_dir = ""              # empty = <home>/models/tts-cantonese
-# tts_en_model_dir = ""           # empty = <home>/models/tts-en (vits-piper-en_US-lessac-medium)
+# tts_en_model_dir = ""           # empty = <home>/models/tts-english (vits-piper-en_US-lessac-medium)
 # tts_timeout_secs = 120

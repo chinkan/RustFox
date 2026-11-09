@@ -137,7 +137,7 @@ See the commented `[voice]` block in [`config.example.toml`](../config.example.t
 | `tts` | `false` | Spoken copy of a voice-origin reply, in addition to text. Typed chat is not spoken. |
 | `tts_bin` | empty | When set, this binary writes the OGG instead of sherpa + ffmpeg. |
 | `tts_model_dir` | `<home>/models/tts-cantonese` | Cantonese VITS `model.onnx` and `tokens.txt`. Optional `lexicon.txt`. `rule.fst` is passed as `--tts-rule-fsts` when the file exists. |
-| `tts_en_model_dir` | `<home>/models/tts-en` | English Piper pack `vits-piper-en_US-lessac-medium` (`model.onnx`, `tokens.txt`, optional `espeak-ng-data/`). Local sherpa TTS, not a cloud voice. Spoken only when the reply language is `en`. |
+| `tts_en_model_dir` | `<home>/models/tts-english` | English Piper pack `vits-piper-en_US-lessac-medium` (`model.onnx`, `tokens.txt`, optional `espeak-ng-data/`). Local sherpa TTS, not a cloud voice. Spoken only when the reply language is `en`. |
 | `tts_timeout_secs` | `120` | Wall clock for one synthesis. `0` becomes 120. |
 
 Missing model files do not stop startup. The next voice note gets the clarify (or the caption, if you typed one).
