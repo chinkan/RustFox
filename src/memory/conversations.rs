@@ -165,7 +165,7 @@ impl MemoryStore {
 
     /// Replace every `[SUMMARY]` row for this conversation with one document.
     ///
-    /// Tier-3 compaction stores a single structured handoff (ADR-0063). Older
+    /// Tier-3 compaction stores a single structured handoff (ADR-0064). Older
     /// summary rows are removed so reload cannot concatenate layers.
     pub async fn replace_summary_message(
         &self,

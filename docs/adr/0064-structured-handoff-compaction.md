@@ -1,4 +1,4 @@
-# ADR-0063: Structured handoff compaction
+# ADR-0064: Structured handoff compaction
 
 - **Status:** Accepted
 - **Date:** 2026-11-09

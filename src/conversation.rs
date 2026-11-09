@@ -23,7 +23,7 @@ pub struct ConversationManager {
     system_prompt: String,
     memory: MemoryStore,
     conversation_id: String,
-    /// Running summary of compacted history (ADR 0003 Q2, ADR-0063).
+    /// Running summary of compacted history (ADR 0003 Q2, ADR-0064).
     /// One structured handoff document, persisted as a single `[SUMMARY]`
     /// row (Q8), injected as a system message.
     summary: Option<String>,
@@ -459,7 +459,7 @@ impl ConversationManager {
         }
     }
 
-    /// Store one structured handoff (ADR 0003 Q2/Q8, ADR-0063).
+    /// Store one structured handoff (ADR 0003 Q2/Q8, ADR-0064).
     ///
     /// The summarizer already extended the previous document in place, so
     /// this replaces the running summary instead of concatenating layers.
@@ -627,7 +627,7 @@ impl ConversationManager {
     }
 
     /// Ask the summarizer (Q9 model override, else current model) to extend
-    /// the running handoff in place (ADR 0003 Q2, ADR-0063).
+    /// the running handoff in place (ADR 0003 Q2, ADR-0064).
     ///
     /// Tool results in the to-be-summarized range are pruned before the
     /// prompt is built. Opaque ids from the unpruned range and the previous

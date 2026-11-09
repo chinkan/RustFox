@@ -300,7 +300,7 @@ pub fn protected_tail_start(messages: &[ChatMessage], window: usize) -> usize {
     start
 }
 
-/// Seven level-2 headings of the structured handoff (ADR-0063 / #384).
+/// Seven level-2 headings of the structured handoff (ADR-0064 / #384).
 /// Heading 2 is **Constraints & Preferences**. Empty sections stay present.
 pub const HANDOFF_SECTION_HEADINGS: [&str; 7] = [
     "Goal",
@@ -715,7 +715,7 @@ fn compact_min_message_count(context_window: usize) -> usize {
     base + (base / 2) * window_k
 }
 
-/// Summary prompt for Tier-3 handoff compaction (ADR-0063).
+/// Summary prompt for Tier-3 handoff compaction (ADR-0064).
 /// Same schema as the live `summarize_with_llm` instructions.
 pub fn build_compact_summary_prompt() -> ChatMessage {
     ChatMessage {
