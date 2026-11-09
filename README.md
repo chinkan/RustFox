@@ -34,12 +34,28 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 | 🔧 **Built-in Tools** | File read/write, command execution, file sending, task scheduling — all sandboxed |
 | 🧩 **MCP Servers** | Connect any MCP-compatible server (Git, Brave Search, GitHub, Filesystem, Threads…) |
 | 🧠 **Persistent Memory** | SQLite-backed conversation history, vector embedding search (hybrid + FTS5), RAG |
-| 🧬 **Skills & Agents** | Folder-based skill instructions auto-loaded at startup; subagent skills with own model and tool whitelist |
-| 🤝 **Agent Layer** | Isolated agentic mini-loops in `agents/` with own model/tools; `invoke_agent`, `spawn_agents`, zero-trust verifier |
+| 🧬 **Skills & Agents** | Compact `# Available Skills` catalog at startup; full `SKILL.md` on demand via `read_skill_file` (optional line `offset` / `limit`). Subagent skills keep their own model and tool whitelist |
+| 🤝 **Agent Layer** | Isolated agentic mini-loops in `agents/` with own model/tools; `invoke_agent`, named `spawn_agents` (pack + whitelist; unknown name errors; omit the name for ad-hoc), zero-trust verifier |
 | 🪪 **Multi-Bot / Multi-Persona** | Run several Telegram bots in one process, each bound to its own persona, model, and tool whitelist via `[[bots]]` |
-| 🔄 **Task Scheduling** | Cron and one-shot task scheduler with SQLite persistence, plus a dead-letter rerun queue |
+| 🔄 **Task Scheduling** | Cron and one-shot task scheduler with SQLite persistence and a dead-letter rerun queue. A schedule run uses a fresh context and does not write into the main chat; reply-quote that Telegram message to pull the result into the current turn |
 | 🌐 **Web Portal** | Built-in browser UI (chat, agents, memory, tasks, settings) served from the same binary — token-auth, loopback by default |
 | 📦 **Self-Hosting** | Single binary, 2-min setup wizard, background service (systemd/launchd/Windows Service) |
+
+### What’s new (1.0.9 track)
+
+On `main` ahead of a release tag. Not a full changelog — see [Unreleased](CHANGELOG.md#unreleased).
+
+| | |
+|---|---|
+| 🎙 **Telegram Cantonese voice** | Voice note → local SenseVoice STT (`yue`) → short spoken-style reply. Optional `[voice].tts = true` also sends `sendVoice` (the text copy stays). Typed chat never auto-`sendVoice`. [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) · [ADR-0058](docs/adr/0058-telegram-cantonese-stt-tts.md) |
+| 📅 **Schedule context** | Schedule runs stay out of the main chat. Interactive chat sees a result only by reply-quoting that message. [ADR-0059](docs/adr/0059-schedule-run-not-in-interactive-context.md) |
+| 🔌 **Device WebSocket** | Opt-in `[device_ws]` JSON text duplex on the portal bind (`GET /api/device/v1/ws`) for a hardware text adapter. Off by default. [ADR-0056](docs/adr/0056-device-websocket-channel.md) |
+| 🏠 **SwitchBot** | Builtin `switchbot_*` tools. Portal Settings holds token + secret. Off until enabled. [ADR-0057](docs/adr/0057-switchbot-open-api-connector.md) |
+| 📚 **Skill catalog** | System prompt lists name, trigger, and how to load. Full `SKILL.md` via `read_skill_file` (whole file, or `offset` / `limit`). [ADR-0060](docs/adr/0060-skill-catalog-on-demand-trigger.md) |
+| 🤝 **Named spawn** | `spawn_agents` with a resolvable agent, skill, or bot name loads that pack and whitelist. An unknown name is an error. Omit the name for an ad-hoc subagent. [ADR-0062](docs/adr/0062-named-spawn-loads-the-pack.md) |
+| 📏 **Prompt budget** | Compaction and the hard cap use `estimate_tokens` against the context window (90% hard-cap marker), not a fixed byte ceiling. [ADR-0003](docs/adr/0003-conversation-compaction-redesign.md) |
+
+Reply-quoting a message RustFox sent resolves the stored local text of that bubble (no extra Telegram fetch for our own sends).
 
 → Full feature reference: [docs/GUIDE.md](docs/GUIDE.md#advanced-features)
 
@@ -50,7 +66,7 @@ Star the repo ⭐, fork to contribute, or open an issue for feedback.
 | **Self-Upgrade** | In-place upgrade ([ADR-0030](docs/adr/0030-selfupgrade-main-or-release.md)): Telegram bare `/selfupgrade` = **auto** (Cargo.toml near exe → source/git; else → latest GitHub release); `/selfupgrade main` = tip-of-main (**requires** source tree — refuse clearly if missing, **no silent clone**); `/selfupgrade release` = latest GitHub binary. Portal Settings: `auto` \| `main` \| `release` (same mapping). Auto-restarts after upgrade. |
 | **Model Switching** | Switch models at runtime via `/models`. Interactive picker lets you choose the best model per task: fast/cheap for simple queries, powerful for complex reasoning. |
 | **Model Fallback** | Ordered `[fallback] chain` of provider-prefixed model IDs. When the primary model fails (e.g. HTTP 429), RustFox retries down the chain before surfacing an error. |
-| **Soul Files** | SOUL.md (persona), AGENTS.md (behaviour), USER.md (preferences) — persistent identity files auto-injected into every system prompt. Session-end self-reflection with `.bak` backups. |
+| **Soul Files** | SOUL.md (persona), AGENTS.md (behaviour), USER.md (preferences). A file that fits is injected whole; over the character budget the prompt gets a visible window — preamble plus the most recent `##` sections — not the entire file ([ADR-0055](docs/adr/0055-soul-visible-window.md)). Use `read_soul_file` for the full text. Session-end self-reflection with `.bak` backups. |
 
 ---
 
@@ -194,7 +210,9 @@ rustfox status
 |---------|-------------|
 | `[[bots]]` | Array of Telegram bots, each with `id`, `bot_token`, `allowed_user_ids`, `persona`, and optional `model` / `tools` overrides |
 | `telegram.*` | Legacy single-bot section (deprecated alias when `[[bots]]` is present) |
-| `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese), opt-in OpenRouter STT, opt-in text+voice TTS. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
+| `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese `yue`), voice-mode short reply, opt-in OpenRouter STT, opt-in `[voice].tts` text + `sendVoice`. Typed chat stays text. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
+| `[device_ws]` | Opt-in JSON device WebSocket on the portal bind (default off). See [ADR-0056](docs/adr/0056-device-websocket-channel.md) |
+| `[switchbot]` | SwitchBot Open API (`enabled` + secret refs). Tools stay off until enabled. Token and secret are set in Portal Settings |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
 | `openrouter.model` | Default LLM model ID (`provider/model`; wizard shortcuts or any typed id; default: `moonshotai/kimi-k2.6`) |
 | `[[provider]]` | Additional LLM providers (Ollama, LM Studio, any OpenAI-compatible endpoint); model strings use `provider/model_id` |
@@ -257,7 +275,8 @@ python3 -c 'import hashlib,secrets; t=secrets.token_hex(32); print("token:", t);
 | `read_skill_file` / `write_skill_file` / `reload_skills` | Read (full file, or a 1-based `offset` / `limit` line slice), write, and hot-reload skills |
 | `read_agent_file` / `write_agent_file` / `reload_agents` | Read, write, and hot-reload sub-agent definitions |
 | `invoke_agent` | Run a predefined agent from `agents/` (or a `[[bots]]` persona via `bot=`) |
-| `spawn_agents` | Spawn subagents in parallel. A resolvable `agent` or `name` loads that pack and whitelist (same as `invoke_agent`); an unknown name errors. Omit the name for an ad-hoc subagent with `system_prompt`. |
+| `spawn_agents` | Spawn subagents in parallel. A resolvable `agent` or `name` (agent, skill, or bot) loads that pack and whitelist (same as `invoke_agent`); an unknown name errors. Omit the name for an ad-hoc subagent with `system_prompt`. |
+| `switchbot_list_devices` / `switchbot_get_status` / `switchbot_command` / `switchbot_list_scenes` / `switchbot_execute_scene` | SwitchBot Open API. Off until `[switchbot]` is enabled and token + secret resolve |
 | `try_new_tech` | Sandboxed experiment — run Rust/JS code and check results |
 | `schedule_task` / `list_scheduled_tasks` / `get_scheduled_task_history` / `cancel_scheduled_task` | Create, list, inspect, and cancel cron/one-shot tasks |
 | `task_reruns` | Inspect and resolve the dead-letter rerun queue |
