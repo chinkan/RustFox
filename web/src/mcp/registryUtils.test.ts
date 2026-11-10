@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { McpRegistryRemote } from './registryTypes'
 import {
   REGISTRY_FIXTURE_HTTP,
   REGISTRY_FIXTURE_MIXED,
@@ -102,6 +103,28 @@ describe('mapRegistryRemoteToUpsert', () => {
     const remote = REGISTRY_FIXTURE_HTTP.server.remotes![0]
     const fields = collectRegistrySecretFields(remote)
     expect(fields.map((f) => f.name).sort()).toEqual(['Authorization', 'X-Api-Key'])
+  })
+  it('includes required non-secret headers with static values', () => {
+    const remote: McpRegistryRemote = {
+      type: 'streamable-http',
+      url: 'https://example.com/mcp',
+      headers: [
+        {
+          name: 'X-Client-Version',
+          value: '1.0.0',
+          isRequired: true,
+          isSecret: false,
+        },
+        {
+          name: 'Optional-Trace',
+          value: 'off',
+          isRequired: false,
+          isSecret: false,
+        },
+      ],
+    }
+    const body = mapRegistryRemoteToUpsert(remote, 'demo', {})
+    expect(body.headers).toEqual({ 'X-Client-Version': '1.0.0' })
   })
 })
 

@@ -117,15 +117,26 @@ export function mapRegistryRemoteToUpsert(
   for (const h of remote.headers ?? []) {
     const key = h.name
     const lower = key.toLowerCase()
-    const raw = (secretValues[key] ?? secretValues[lower] ?? '').trim()
-    if (!raw) continue
+    const operator = (secretValues[key] ?? secretValues[lower] ?? '').trim()
     if (lower === 'authorization') {
-      const bearer = raw.replace(/^Bearer\s+/i, '').trim()
-      if (bearer) body.bearer = bearer
+      if (operator) {
+        const bearer = operator.replace(/^Bearer\s+/i, '').trim()
+        if (bearer) body.bearer = bearer
+      }
       continue
     }
-    if (h.isSecret || headerValueHasPlaceholder(h.value)) {
-      headerMap[key] = raw
+    if (operator) {
+      headerMap[key] = operator
+      continue
+    }
+    const staticValue = h.value?.trim() ?? ''
+    if (
+      h.isRequired &&
+      !h.isSecret &&
+      staticValue &&
+      !headerValueHasPlaceholder(staticValue)
+    ) {
+      headerMap[key] = staticValue
     }
   }
   if (Object.keys(headerMap).length > 0) body.headers = headerMap
