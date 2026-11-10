@@ -12,6 +12,8 @@
     "memory": "記憶",
     "tasks": "定時任務",
     "settings": "設定",
+    "integrations": "整合",
+    "devices": "裝置",
     "signOut": "登出",
     "signOutEverywhere": "所有裝置登出",
     "skills": "技能"
@@ -282,6 +284,14 @@
     "devicesCreated": "裝置已建立。",
     "devicesRotated": "Token 已輪換。舊 token 唔再有效。",
     "devicesRevoked": "裝置已撤銷。"
+  },
+  "integrations": {
+    "title": "整合",
+    "subtitle": "Google 登入、SwitchBot 憑證同 MCP 伺服器 — 同之前一樣嘅 API，獨立一頁。"
+  },
+  "devices": {
+    "title": "裝置",
+    "subtitle": "為硬件文字通道簽發同輪換 WebSocket token。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",

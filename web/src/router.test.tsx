@@ -153,6 +153,61 @@ describe('RBAC guard', () => {
     await screen.findByRole('heading', { name: 'Dashboard' })
     expect(screen.queryByText('Settings')).toBeNull()
   })
+
+  it('redirects non-admin from /integrations and /devices', async () => {
+    bindAuthApi(fakeApi({ login: async () => ({ username: 'guest', role: 'user' }) }))
+    await authStore.loginWithToken('t')
+    const integrations = renderAt('/integrations', makeContext({
+      login: async () => ({ username: 'guest', role: 'user' }),
+    }))
+    await waitFor(() => {
+      expect(integrations.state.location.pathname).toBe('/dashboard')
+    })
+    const devices = renderAt('/devices', makeContext({
+      login: async () => ({ username: 'guest', role: 'user' }),
+    }))
+    await waitFor(() => {
+      expect(devices.state.location.pathname).toBe('/dashboard')
+    })
+  })
+
+  it('settings page no longer shows MCP or Devices sections', async () => {
+    await signIn()
+    renderAt('/settings', makeContext())
+    await screen.findByRole('heading', { name: 'Settings' })
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Devices' })).toBeNull()
+    expect(screen.queryByText('SwitchBot')).toBeNull()
+  })
+
+  it('renders /integrations with MCP for admin', async () => {
+    await signIn()
+    const router = renderAt('/integrations', makeContext())
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/integrations')
+    })
+    expect(await screen.findByRole('heading', { name: 'Integrations' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'MCP servers' })).toBeTruthy()
+  })
+
+  it('renders /devices for admin', async () => {
+    await signIn()
+    const router = renderAt('/devices', makeContext())
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/devices')
+    })
+    expect(await screen.findByRole('heading', { name: 'Devices', level: 1 })).toBeTruthy()
+    expect(await screen.findByLabelText('Name')).toBeTruthy()
+    expect(await screen.findByText('No devices yet.')).toBeTruthy()
+  })
+
+  it('system nav shows Integrations and Devices for admin', async () => {
+    await signIn()
+    renderAt('/settings', makeContext())
+    await screen.findByRole('heading', { name: 'Settings' })
+    expect(screen.getByText('Integrations').closest('a')?.getAttribute('href')).toBe('/integrations')
+    expect(screen.getByText('Devices').closest('a')?.getAttribute('href')).toBe('/devices')
+  })
 })
 
 describe('type-safe search params', () => {

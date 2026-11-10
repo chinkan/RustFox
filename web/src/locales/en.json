@@ -12,6 +12,8 @@
     "memory": "Memory",
     "tasks": "Scheduled Tasks",
     "settings": "Settings",
+    "integrations": "Integrations",
+    "devices": "Devices",
     "signOut": "Sign out",
     "signOutEverywhere": "Sign out everywhere",
     "skills": "Skills"
@@ -282,6 +284,14 @@
     "devicesCreated": "Device created.",
     "devicesRotated": "Token rotated. The previous token no longer works.",
     "devicesRevoked": "Device revoked."
+  },
+  "integrations": {
+    "title": "Integrations",
+    "subtitle": "Google sign-in, SwitchBot credentials, and MCP servers — same APIs as before, on their own page."
+  },
+  "devices": {
+    "title": "Devices",
+    "subtitle": "Issue and rotate WebSocket tokens for hardware text channels."
   },
   "notFound": {
     "title": "404 — Route not found",
