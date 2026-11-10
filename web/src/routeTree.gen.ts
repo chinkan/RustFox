@@ -17,6 +17,7 @@ import { Route as AuthChatRouteImport } from './routes/_auth/chat'
 import { Route as AuthDashboardRouteImport } from './routes/_auth/dashboard'
 import { Route as AuthDevicesRouteImport } from './routes/_auth/devices'
 import { Route as AuthIntegrationsRouteImport } from './routes/_auth/integrations'
+import { Route as AuthMcpRouteImport } from './routes/_auth/mcp'
 import { Route as AuthMemoryRouteImport } from './routes/_auth/memory'
 import { Route as AuthSettingsRouteImport } from './routes/_auth/settings'
 import { Route as AuthSkillsRouteImport } from './routes/_auth/skills'
@@ -64,6 +65,11 @@ const AuthIntegrationsRoute = AuthIntegrationsRouteImport.update({
   path: '/integrations',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthMcpRoute = AuthMcpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthMemoryRoute = AuthMemoryRouteImport.update({
   id: '/memory',
   path: '/memory',
@@ -108,6 +114,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthDashboardRoute
   '/devices': typeof AuthDevicesRoute
   '/integrations': typeof AuthIntegrationsRoute
+  '/mcp': typeof AuthMcpRoute
   '/memory': typeof AuthMemoryRoute
   '/settings': typeof AuthSettingsRoute
   '/skills': typeof AuthSkillsRoute
@@ -123,6 +130,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthDashboardRoute
   '/devices': typeof AuthDevicesRoute
   '/integrations': typeof AuthIntegrationsRoute
+  '/mcp': typeof AuthMcpRoute
   '/memory': typeof AuthMemoryRoute
   '/settings': typeof AuthSettingsRoute
   '/skills': typeof AuthSkillsRoute
@@ -141,6 +149,7 @@ export interface FileRoutesById {
   '/_auth/dashboard': typeof AuthDashboardRoute
   '/_auth/devices': typeof AuthDevicesRoute
   '/_auth/integrations': typeof AuthIntegrationsRoute
+  '/_auth/mcp': typeof AuthMcpRoute
   '/_auth/memory': typeof AuthMemoryRoute
   '/_auth/settings': typeof AuthSettingsRoute
   '/_auth/skills': typeof AuthSkillsRoute
@@ -159,6 +168,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/devices'
     | '/integrations'
+    | '/mcp'
     | '/memory'
     | '/settings'
     | '/skills'
@@ -174,6 +184,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/devices'
     | '/integrations'
+    | '/mcp'
     | '/memory'
     | '/settings'
     | '/skills'
@@ -191,6 +202,7 @@ export interface FileRouteTypes {
     | '/_auth/dashboard'
     | '/_auth/devices'
     | '/_auth/integrations'
+    | '/_auth/mcp'
     | '/_auth/memory'
     | '/_auth/settings'
     | '/_auth/skills'
@@ -265,6 +277,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthIntegrationsRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/mcp': {
+      id: '/_auth/mcp'
+      path: '/mcp'
+      fullPath: '/mcp'
+      preLoaderRoute: typeof AuthMcpRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/memory': {
       id: '/_auth/memory'
       path: '/memory'
@@ -337,6 +356,7 @@ interface AuthRouteChildren {
   AuthDashboardRoute: typeof AuthDashboardRoute
   AuthDevicesRoute: typeof AuthDevicesRoute
   AuthIntegrationsRoute: typeof AuthIntegrationsRoute
+  AuthMcpRoute: typeof AuthMcpRoute
   AuthMemoryRoute: typeof AuthMemoryRoute
   AuthSettingsRoute: typeof AuthSettingsRoute
   AuthSkillsRoute: typeof AuthSkillsRoute
@@ -349,6 +369,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthDashboardRoute: AuthDashboardRoute,
   AuthDevicesRoute: AuthDevicesRoute,
   AuthIntegrationsRoute: AuthIntegrationsRoute,
+  AuthMcpRoute: AuthMcpRoute,
   AuthMemoryRoute: AuthMemoryRoute,
   AuthSettingsRoute: AuthSettingsRoute,
   AuthSkillsRoute: AuthSkillsRoute,

@@ -46,6 +46,7 @@ const WORKSPACE_NAV: NavItem[] = [
 const SYSTEM_NAV: NavItem[] = [
   { to: '/settings', labelKey: 'nav.settings', icon: '⚙️', adminOnly: true },
   { to: '/integrations', labelKey: 'nav.integrations', icon: '🔌', adminOnly: true },
+  { to: '/mcp', labelKey: 'nav.mcp', icon: '🛠️', adminOnly: true },
   { to: '/devices', labelKey: 'nav.devices', icon: '📟', adminOnly: true },
 ]
 

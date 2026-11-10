@@ -4,10 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { ensureAuthBootstrapped } from '../../auth'
 import { GoogleConnect } from '../../settings/googleConnect'
 import { SwitchBotSection } from '../../settings/switchBotSection'
-import { McpSettingsSection } from '../../settings/mcpSettingsSection'
 
 /**
- * `/integrations` — admin-only. Google connector, SwitchBot, and MCP portal controls.
+ * `/integrations` — admin-only. Google connector and SwitchBot credentials.
  */
 export const Route = createFileRoute('/_auth/integrations')({
   beforeLoad: async ({ context }) => {
@@ -23,7 +22,6 @@ function IntegrationsPage() {
   const { api } = Route.useRouteContext()
   const { t } = useTranslation()
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
-  const masked = settings.data?.masked
 
   return (
     <>
@@ -42,7 +40,6 @@ function IntegrationsPage() {
           {settings.data?.switchbot ? (
             <SwitchBotSection api={api} switchbot={settings.data.switchbot} />
           ) : null}
-          <McpSettingsSection api={api} servers={masked?.mcpServers ?? []} />
         </div>
       )}
     </>

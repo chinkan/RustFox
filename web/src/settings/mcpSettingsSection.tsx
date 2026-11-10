@@ -40,9 +40,11 @@ function resolvePresetRow(id: string, servers: McpServerMasked[]): McpServerMask
 export function McpSettingsSection({
   api,
   servers,
+  hideTitle,
 }: {
   api: Api
   servers: McpServerMasked[]
+  hideTitle?: boolean
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -61,7 +63,9 @@ export function McpSettingsSection({
 
   return (
     <section className="section" style={{ gridColumn: '1 / -1' }}>
-      <h2 className="section-title">{t('settings.mcpTitle')}</h2>
+      {hideTitle ? null : (
+        <h2 className="section-title">{t('settings.mcpTitle')}</h2>
+      )}
       <p className="hint" style={{ marginBottom: 12 }}>{t('settings.mcpHint')}</p>
       {presetsQ.isLoading ? (
         <div className="loading">{t('common.loading')}</div>
