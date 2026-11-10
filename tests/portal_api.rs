@@ -56,6 +56,10 @@ struct FakeAgent {
     seat_run: SeatRunSignal,
     /// Agent names that intentionally lack live-signal capability (definition-only).
     definition_only: Mutex<Vec<String>>,
+    /// When set, `process_message` writes the turn onto the active
+    /// get-or-create conversation (the real agent path). Default off so
+    /// older chat tests stay free of memory side effects.
+    persist: Mutex<Option<MemoryStore>>,
 }
 
 impl FakeAgent {
@@ -67,6 +71,7 @@ impl FakeAgent {
             model: Mutex::new("fake-model".into()),
             seat_run: SeatRunSignal::new(),
             definition_only: Mutex::new(Vec::new()),
+            persist: Mutex::new(None),
         }
     }
 }
@@ -160,11 +165,47 @@ impl AgentOps for FakeAgent {
     ) -> BoxFuture<'_, anyhow::Result<String>> {
         self.counters.process_calls.fetch_add(1, Ordering::SeqCst);
         let busy = self.busy.clone();
+        let memory = self.persist.lock().unwrap().clone();
+        let platform = _incoming.platform.clone();
+        let user_id = _incoming.user_id.clone();
+        let text = _incoming.text.clone();
         Box::pin(async move {
             // Simulate a generation that returns promptly unless a test
             // holds it open to provoke 409.
             while busy.load(Ordering::SeqCst) {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if let Some(memory) = memory {
+                let conv = memory
+                    .get_or_create_conversation(
+                        &platform,
+                        rustfox::platform::DEFAULT_BOT_ID,
+                        &user_id,
+                    )
+                    .await
+                    .expect("persist conversation");
+                let user = rustfox::llm::ChatMessage {
+                    role: "user".into(),
+                    content: Some(rustfox::llm::MessageContent::from_text(&text)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                };
+                let assistant = rustfox::llm::ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(rustfox::llm::MessageContent::from_text("fake answer")),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                };
+                memory
+                    .save_message(&conv, &user)
+                    .await
+                    .expect("persist user");
+                memory
+                    .save_message(&conv, &assistant)
+                    .await
+                    .expect("persist assistant");
             }
             Ok("fake answer".to_string())
         })
@@ -2141,6 +2182,376 @@ async fn chat_history_empty_conversation_ok() {
     let body = body_json(res).await;
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
     assert!(body["conversationId"].is_string());
+}
+
+async fn save_user_text(memory: &MemoryStore, conv: &str, text: &str) {
+    memory
+        .save_message(
+            conv,
+            &rustfox::llm::ChatMessage {
+                role: "user".into(),
+                content: Some(rustfox::llm::MessageContent::from_text(text)),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn archived_flag(memory: &MemoryStore, id: &str) -> i64 {
+    let conn = memory.connection();
+    let conn = conn.lock().await;
+    conn.query_row(
+        "SELECT COALESCE(is_archived, 0) FROM conversations WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+async fn message_count(memory: &MemoryStore, id: &str) -> i64 {
+    let conn = memory.connection();
+    let conn = conn.lock().await;
+    conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+        rusqlite::params![id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+async fn set_updated_at(memory: &MemoryStore, id: &str, stamp: &str) {
+    let conn = memory.connection();
+    let conn = conn.lock().await;
+    conn.execute(
+        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![stamp, id],
+    )
+    .unwrap();
+}
+
+async fn active_web_count(memory: &MemoryStore) -> i64 {
+    let conn = memory.connection();
+    let conn = conn.lock().await;
+    conn.query_row(
+        "SELECT COUNT(*) FROM conversations
+         WHERE platform = 'web' AND user_id = 'web'
+           AND (is_archived IS NULL OR is_archived = 0)",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn contents_of(body: &Value) -> Vec<&str> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn chat_threads_create_requires_auth() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(post_json("/api/chat/threads", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "unauthenticated");
+}
+
+#[tokio::test]
+async fn chat_threads_create_archives_previous_and_send_stays_on_new_id() {
+    let f = fixture(with_token_token()).await;
+    let old = f
+        .state
+        .memory
+        .get_or_create_conversation("web", "default", "web")
+        .await
+        .unwrap();
+    save_user_text(&f.state.memory, &old, "alphaunique previous thread").await;
+    let old_messages = message_count(&f.state.memory, &old).await;
+
+    let telegram = f
+        .state
+        .memory
+        .get_or_create_conversation("telegram", "default", "4242")
+        .await
+        .unwrap();
+    save_user_text(&f.state.memory, &telegram, "telegram stays put").await;
+    let other = f
+        .state
+        .memory
+        .get_or_create_conversation("web", "default", "someone-else")
+        .await
+        .unwrap();
+    save_user_text(&f.state.memory, &other, "other user thread").await;
+
+    let created = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json("/api/chat/threads", json!({})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = body_json(created).await;
+    assert_eq!(created_body["created"], true);
+    assert_eq!(created_body["previousId"], old);
+    assert_eq!(created_body["title"], "New chat");
+    assert_eq!(created_body["messageCount"], 0);
+    let new_id = created_body["id"].as_str().unwrap().to_string();
+    assert_ne!(new_id, old);
+    assert_eq!(archived_flag(&f.state.memory, &old).await, 1);
+    assert_eq!(message_count(&f.state.memory, &old).await, old_messages);
+    assert_eq!(active_web_count(&f.state.memory).await, 1);
+    assert_eq!(archived_flag(&f.state.memory, &telegram).await, 0);
+
+    // Empty active thread: second POST (empty body) is a no-op.
+    let again = f
+        .app
+        .clone()
+        .oneshot(bearer(post_empty("/api/chat/threads"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+    let again_body = body_json(again).await;
+    assert_eq!(again_body["created"], false);
+    assert!(again_body["previousId"].is_null());
+    assert_eq!(again_body["id"], new_id);
+    assert_eq!(active_web_count(&f.state.memory).await, 1);
+
+    // Older archived row sorts after a more recently updated archived row.
+    // updatedAt is the stored column, not the request clock.
+    set_updated_at(&f.state.memory, &old, "2020-01-02 03:04:05").await;
+    set_updated_at(&f.state.memory, &new_id, "2024-05-06 07:08:09").await;
+    // A second archived web row (not a second active one) checks list order.
+    {
+        let conn = f.state.memory.connection();
+        let conn = conn.lock().await;
+        conn.execute(
+            "INSERT INTO conversations (id, platform, bot_id, user_id, is_archived, updated_at)
+             VALUES ('archived-mid', 'web', 'default', 'web', 1, '2023-06-07 08:09:10')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, role, content)
+             VALUES ('m-mid', 'archived-mid', 'user', 'middle archived title')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let threads_res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/chat/threads"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(threads_res.status(), StatusCode::OK);
+    let threads = body_json(threads_res).await;
+    let rows = threads.as_array().unwrap();
+    assert!(rows.len() >= 3, "threads: {threads}");
+    assert_eq!(rows[0]["id"], new_id);
+    assert_eq!(rows[0]["archived"], false);
+    assert_eq!(rows[0]["updatedAt"], "2024-05-06T07:08:09Z");
+    assert_eq!(rows[1]["id"], "archived-mid");
+    assert_eq!(rows[1]["archived"], true);
+    assert_eq!(rows[1]["title"], "middle archived title");
+    assert_eq!(rows[1]["updatedAt"], "2023-06-07T08:09:10Z");
+    assert_eq!(rows[2]["id"], old);
+    assert_eq!(rows[2]["archived"], true);
+    assert_eq!(rows[2]["title"], "alphaunique previous thread");
+    assert_eq!(rows[2]["messageCount"], 1);
+    assert_eq!(rows[2]["updatedAt"], "2020-01-02T03:04:05Z");
+    assert!(
+        f.state.memory.load_messages(&old).await.unwrap().is_empty(),
+        "agent load_messages must stay empty for archived ids"
+    );
+    assert!(
+        f.state
+            .memory
+            .load_messages("archived-mid")
+            .await
+            .unwrap()
+            .is_empty(),
+        "archived title/count must not depend on load_messages"
+    );
+
+    let old_hist = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            get(&format!("/api/chat/history?conversationId={old}")),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(old_hist.status(), StatusCode::OK);
+    let old_hist_body = body_json(old_hist).await;
+    assert_eq!(old_hist_body["conversationId"], old);
+    assert_eq!(
+        contents_of(&old_hist_body),
+        vec!["alphaunique previous thread"]
+    );
+    assert_eq!(
+        archived_flag(&f.state.memory, &old).await,
+        1,
+        "must not unarchive"
+    );
+    assert_eq!(
+        f.state
+            .memory
+            .get_or_create_conversation("web", "default", "web")
+            .await
+            .unwrap(),
+        new_id,
+        "reading an old id must not get-or-create a replacement"
+    );
+
+    let active_hist = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/chat/history"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let active_hist_body = body_json(active_hist).await;
+    assert_eq!(active_hist_body["conversationId"], new_id);
+    assert!(contents_of(&active_hist_body).is_empty());
+
+    for (label, id) in [
+        ("telegram", telegram.as_str()),
+        ("other-user", other.as_str()),
+        ("missing", "00000000-0000-0000-0000-000000000000"),
+    ] {
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(
+                get(&format!("/api/chat/history?conversationId={id}")),
+                TEST_TOKEN,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{label}");
+        let body = body_json(res).await;
+        assert_eq!(
+            body["error"]["code"], "conversation_not_found",
+            "{label}: {body}"
+        );
+    }
+
+    *f.fake.persist.lock().unwrap() = Some(f.state.memory.clone());
+    let send = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json("/api/chat", json!({ "text": "only-on-new" })),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(send.status(), StatusCode::OK);
+    let mut saw_new = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let res = f
+            .app
+            .clone()
+            .oneshot(bearer(get("/api/chat/history"), TEST_TOKEN))
+            .await
+            .unwrap();
+        let body = body_json(res).await;
+        if body["conversationId"] == new_id && contents_of(&body).contains(&"only-on-new") {
+            saw_new = true;
+            assert!(contents_of(&body).contains(&"fake answer"));
+            assert!(!contents_of(&body).iter().any(|c| c.contains("alphaunique")));
+            break;
+        }
+    }
+    assert!(saw_new, "POST /api/chat must append on the new active id");
+    let old_after = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            get(&format!("/api/chat/history?conversationId={old}")),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    let old_after_body = body_json(old_after).await;
+    assert_eq!(
+        contents_of(&old_after_body),
+        vec!["alphaunique previous thread"]
+    );
+    assert_eq!(message_count(&f.state.memory, &old).await, old_messages);
+
+    f.state
+        .memory
+        .clear_conversation("telegram", "default", "4242")
+        .await
+        .unwrap();
+    assert_eq!(archived_flag(&f.state.memory, &telegram).await, 1);
+    assert_eq!(archived_flag(&f.state.memory, &new_id).await, 0);
+    assert_eq!(active_web_count(&f.state.memory).await, 1);
+    let found = f
+        .state
+        .memory
+        .search_messages("alphaunique", 5)
+        .await
+        .unwrap();
+    assert!(
+        found.iter().any(|m| m
+            .content
+            .as_ref()
+            .is_some_and(|c| c.as_text().contains("alphaunique"))),
+        "archived web messages stay searchable"
+    );
+}
+
+#[tokio::test]
+async fn chat_threads_create_409_while_generation_running() {
+    let f = fixture(with_token_token()).await;
+    let old = f
+        .state
+        .memory
+        .get_or_create_conversation("web", "default", "web")
+        .await
+        .unwrap();
+    save_user_text(&f.state.memory, &old, "do not archive mid stream").await;
+    f.state.chat_busy.store(true, Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json("/api/chat/threads", json!({})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "chat_in_progress");
+    assert_eq!(archived_flag(&f.state.memory, &old).await, 0);
+    assert_eq!(
+        f.state
+            .memory
+            .get_or_create_conversation("web", "default", "web")
+            .await
+            .unwrap(),
+        old
+    );
 }
 
 #[tokio::test]

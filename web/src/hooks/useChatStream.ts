@@ -1,13 +1,14 @@
 import { useCallback, useSyncExternalStore } from 'react'
 import { ApiError, type Api } from '../api/client'
-import type { StreamFrame } from '../api/types'
+import type { ChatMessage, StreamFrame } from '../api/types'
 
 /**
  * Chat session store driving POST /api/chat SSE (ADR 0005 + 0008B).
  *
- * MVP backend keeps ONE active conversation per portal user (docs/portal-api.md
- * → GET /api/chat/history), so this store manages a single thread; the thread
- * sidebar lists it. Multi-conversation browsing is an M3 backend follow-up.
+ * Send always targets the single active web conversation (`POST /api/chat`
+ * has no conversation id). Opening an archived thread loads
+ * `GET /api/chat/history?conversationId=` and refuses send, so a click in
+ * an old transcript cannot append to the active one.
  *
  * - optimistic user bubble → token deltas appended live → `done` commits
  * - `tool` frames surface as notes on the streaming bubble
@@ -30,7 +31,10 @@ export interface UiMessage {
 export interface ChatState {
   conversationId: string
   messages: UiMessage[]
+  /** True while a generation is running, including when another thread is on screen. */
   streaming: boolean
+  /** Archived / non-active thread: composer must not send. */
+  readOnly: boolean
   loaded: boolean
   error: string | null
 }
@@ -38,17 +42,41 @@ export interface ChatState {
 let counter = 0
 const nextId = () => `local-${++counter}-${Date.now().toString(36)}`
 
+function toUi(messages: ChatMessage[]): UiMessage[] {
+  return messages.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    state: 'complete' as const,
+    tools: [],
+  }))
+}
+
 export class ChatSession {
   private state: ChatState
   private listeners = new Set<() => void>()
   private controller: AbortController | null = null
   private reconciling = false
+  /** Active (send-target) conversation from a parameterless history load. */
+  private activeId = ''
+  /** Transcript currently on screen. Empty until the first load or send. */
+  private viewId = ''
+  private explicitReadOnly = false
+  private streamingFlag = false
+  /** Conversation the in-flight generation is painting. */
+  private streamingOn = ''
+  /** True only while `chatStream` has not settled. Reconcile runs after this drops. */
+  private streamLive = false
+  private transcripts = new Map<string, UiMessage[]>()
+  private loadedIds = new Set<string>()
+  private error: string | null = null
 
   constructor(private api: Api) {
     this.state = {
       conversationId: '',
       messages: [],
       streaming: false,
+      readOnly: false,
       loaded: false,
       error: null,
     }
@@ -60,34 +88,89 @@ export class ChatSession {
   }
   getSnapshot = () => this.state
 
-  private set(patch: Partial<ChatState>) {
-    this.state = { ...this.state, ...patch }
+  private isReadOnly(): boolean {
+    return (
+      this.explicitReadOnly ||
+      (this.activeId !== '' && this.viewId !== '' && this.viewId !== this.activeId)
+    )
+  }
+
+  private publish() {
+    const id = this.viewId
+    this.state = {
+      conversationId: id,
+      messages: this.transcripts.get(id) ?? [],
+      streaming: this.streamingFlag,
+      readOnly: this.isReadOnly(),
+      loaded: this.loadedIds.has(id),
+      error: this.error,
+    }
     this.listeners.forEach((l) => l())
   }
 
-  private setMessages(fn: (m: UiMessage[]) => UiMessage[]) {
-    this.set({ messages: fn(this.state.messages) })
+  /**
+   * Load history. No id → active get-or-create thread (send target).
+   * An id loads that conversation and is read-only when it is not the active one.
+   */
+  async load(conversationId?: string): Promise<void> {
+    // Paint the requested thread before the fetch returns so a route switch
+    // does not keep showing the previous transcript.
+    const hinted = (conversationId ?? '').trim() || this.activeId
+    if (hinted && hinted !== this.viewId) {
+      this.viewId = hinted
+      this.explicitReadOnly =
+        Boolean(conversationId) && this.activeId !== '' && hinted !== this.activeId
+      this.publish()
+    }
+    try {
+      const hist = conversationId
+        ? await this.api.getHistory(conversationId)
+        : await this.api.getHistory()
+      const id = hist.conversationId
+      if (!conversationId) this.activeId = id
+      const keepLive =
+        this.streamLive && this.streamingOn === id && this.transcripts.has(id)
+      if (!keepLive) this.transcripts.set(id, toUi(hist.messages))
+      this.viewId = id
+      this.explicitReadOnly = Boolean(conversationId) && this.activeId !== '' && id !== this.activeId
+      this.loadedIds.add(id)
+      this.error = null
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : 'load failed'
+      const id = conversationId || this.viewId
+      if (id) {
+        this.viewId = id
+        this.loadedIds.add(id)
+      }
+    }
+    this.publish()
   }
 
-  /** Load history from the DB (safe to call on boot and every reconcile). */
-  async load(): Promise<void> {
-    try {
-      const hist = await this.api.getHistory()
-      this.set({
-        conversationId: hist.conversationId,
-        messages: hist.messages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          state: 'complete' as const,
-          tools: [],
-        })),
-        loaded: true,
-        error: null,
-      })
-    } catch (e) {
-      this.set({ loaded: true, error: e instanceof Error ? e.message : 'load failed' })
+  /**
+   * Open an archived thread. Learns the active id first so a later Send on
+   * the active pane still targets it, and so this view cannot send.
+   */
+  async showArchived(conversationId: string): Promise<void> {
+    if (this.viewId !== conversationId) {
+      this.viewId = conversationId
+      this.explicitReadOnly = true
+      this.publish()
     }
+    if (!this.activeId) {
+      try {
+        const active = await this.api.getHistory()
+        this.activeId = active.conversationId
+        if (!this.transcripts.has(active.conversationId)) {
+          this.transcripts.set(active.conversationId, toUi(active.messages))
+        }
+        this.loadedIds.add(active.conversationId)
+      } catch {
+        /* The archived transcript is still shown read-only. */
+      }
+    }
+    await this.load(conversationId)
+    this.explicitReadOnly = true
+    this.publish()
   }
 
   /** After a detected restart / dropped stream: truth-from-DB, no replay. */
@@ -95,22 +178,26 @@ export class ChatSession {
     if (this.reconciling) return
     this.reconciling = true
     try {
-      if (this.state.streaming) {
-        // The stream died with the server — clear busy; load() below replaces
-        // bubbles with whatever was actually persisted.
-        this.set({ streaming: false })
+      if (this.streamingFlag) this.streamingFlag = false
+      if (this.explicitReadOnly && this.viewId) {
+        await this.load(this.viewId)
+        this.explicitReadOnly = true
+        this.publish()
+      } else {
+        await this.load()
       }
-      await this.load()
     } finally {
       this.reconciling = false
     }
   }
 
-  /** Send a message and consume the SSE stream. */
+  /** Send a message and consume the SSE stream. No-ops on a read-only thread. */
   async send(text: string): Promise<void> {
     const trimmed = text.trim()
-    if (!trimmed || this.state.streaming) return
+    if (!trimmed || this.streamingFlag || this.isReadOnly()) return
 
+    const bucket = this.viewId
+    this.streamingOn = bucket
     const userMsg: UiMessage = {
       id: nextId(),
       role: 'user',
@@ -126,15 +213,24 @@ export class ChatSession {
       state: 'streaming',
       tools: [],
     }
-    this.setMessages((m) => [...m, userMsg, draft])
-    this.set({ streaming: true, error: null })
+    this.transcripts.set(bucket, [...(this.transcripts.get(bucket) ?? []), userMsg, draft])
+    this.streamingFlag = true
+    this.error = null
+    this.publish()
 
     this.controller = new AbortController()
     let arrivedTerminal = false
 
-    const patchDraft = (fn: (d: UiMessage) => UiMessage) =>
-      this.setMessages((list) => list.map((m) => (m.id === draftId ? fn(m) : m)))
+    const patchDraft = (fn: (d: UiMessage) => UiMessage) => {
+      const list = this.transcripts.get(bucket) ?? []
+      this.transcripts.set(
+        bucket,
+        list.map((m) => (m.id === draftId ? fn(m) : m)),
+      )
+      this.publish()
+    }
 
+    this.streamLive = true
     try {
       await this.api.chatStream(
         trimmed,
@@ -161,7 +257,8 @@ export class ChatSession {
             case 'error':
               arrivedTerminal = true
               patchDraft((d) => ({ ...d, state: 'failed' }))
-              this.set({ error: frame.data.message })
+              this.error = frame.data.message
+              this.publish()
               break
             case 'ping':
               break // keep-alive
@@ -169,27 +266,36 @@ export class ChatSession {
         },
         this.controller.signal,
       )
+      this.streamLive = false
       // Stream closed cleanly without a done/error frame ⇒ server died.
       if (!arrivedTerminal) {
         patchDraft((d) => (d.state === 'streaming' ? { ...d, state: 'failed' } : d))
         await this.reconcile()
       }
     } catch (e) {
+      this.streamLive = false
       if (e instanceof DOMException && e.name === 'AbortError') {
         patchDraft((d) => ({ ...d, state: 'failed' }))
       } else {
         const busy = e instanceof ApiError && e.code === 'chat_in_progress'
-        // Drop the draft entirely if nothing streamed; keep partial text as failed.
-        this.setMessages((list) => list.filter((m) => !(m.id === draftId && !m.content)))
-        if (this.state.messages.some((m) => m.id === draftId)) {
+        const list = (this.transcripts.get(bucket) ?? []).filter(
+          (m) => !(m.id === draftId && !m.content),
+        )
+        this.transcripts.set(bucket, list)
+        if (list.some((m) => m.id === draftId)) {
           patchDraft((d) => ({ ...d, state: 'failed' }))
+        } else {
+          this.publish()
         }
-        this.set({ error: busy ? 'busy' : e instanceof Error ? e.message : 'stream failed' })
+        this.error = busy ? 'busy' : e instanceof Error ? e.message : 'stream failed'
+        this.publish()
         if (!busy && !arrivedTerminal) await this.reconcile()
       }
     } finally {
+      this.streamLive = false
       this.controller = null
-      this.set({ streaming: false })
+      this.streamingFlag = false
+      this.publish()
     }
   }
 

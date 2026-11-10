@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use super::MemoryStore;
@@ -225,6 +226,180 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Archive the active web conversation when it has visible messages, then
+    /// insert one fresh active row. An empty active row is returned unchanged.
+    ///
+    /// The check, archive, and insert share one transaction on the store lock
+    /// so two callers cannot leave two non-archived web rows. This does not
+    /// touch Telegram rows and does not delete messages.
+    pub(crate) async fn start_fresh_web_conversation(
+        &self,
+        bot_id: &str,
+        user_id: &str,
+    ) -> Result<FreshWebThread> {
+        let bot_id = crate::platform::normalize_bot_id(bot_id);
+        let conn = self.conn.lock().await;
+        let tx = conn.unchecked_transaction()?;
+
+        let Some((current_id, _)) = active_web_row(&tx, bot_id, user_id)? else {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO conversations (id, platform, bot_id, user_id)
+                 VALUES (?1, 'web', ?2, ?3)",
+                rusqlite::params![&id, &bot_id, user_id],
+            )
+            .context("Failed to create empty web conversation")?;
+            let updated_at = updated_at_of(&tx, &id)?;
+            tx.commit()?;
+            return Ok(FreshWebThread {
+                id,
+                created: false,
+                previous_id: None,
+                updated_at,
+                title: "New chat".to_string(),
+                message_count: 0,
+            });
+        };
+
+        let (title, message_count) = thread_title_and_count(&tx, &current_id)?;
+        if message_count == 0 {
+            let updated_at = updated_at_of(&tx, &current_id)?;
+            tx.commit()?;
+            return Ok(FreshWebThread {
+                id: current_id,
+                created: false,
+                previous_id: None,
+                updated_at,
+                title,
+                message_count: 0,
+            });
+        }
+
+        tx.execute(
+            "UPDATE conversations SET is_archived = 1, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![&current_id],
+        )
+        .context("Failed to archive web conversation")?;
+
+        // If a second non-archived web row already existed, keep it instead of
+        // inserting another. The portal invariant is one active web thread.
+        if let Some((still_id, _)) = active_web_row(&tx, bot_id, user_id)? {
+            let (still_title, still_count) = thread_title_and_count(&tx, &still_id)?;
+            let updated_at = updated_at_of(&tx, &still_id)?;
+            tx.commit()?;
+            return Ok(FreshWebThread {
+                id: still_id,
+                created: true,
+                previous_id: Some(current_id),
+                updated_at,
+                title: still_title,
+                message_count: still_count,
+            });
+        }
+
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO conversations (id, platform, bot_id, user_id)
+             VALUES (?1, 'web', ?2, ?3)",
+            rusqlite::params![&id, &bot_id, user_id],
+        )
+        .context("Failed to create fresh web conversation")?;
+        let updated_at = updated_at_of(&tx, &id)?;
+        tx.commit()?;
+        Ok(FreshWebThread {
+            id,
+            created: true,
+            previous_id: Some(current_id),
+            updated_at,
+            title: "New chat".to_string(),
+            message_count: 0,
+        })
+    }
+
+    /// Every web conversation for this portal user. The non-archived row is
+    /// first; archived rows follow by `updated_at` descending. Titles and
+    /// counts are read from `messages` directly so archived threads stay
+    /// visible (`load_messages` hides them).
+    pub(crate) async fn list_web_conversations(
+        &self,
+        bot_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<WebThreadSummary>> {
+        let bot_id = crate::platform::normalize_bot_id(bot_id);
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(is_archived, 0), updated_at
+             FROM conversations
+             WHERE platform = 'web' AND bot_id = ?1 AND user_id = ?2
+             ORDER BY CASE WHEN COALESCE(is_archived, 0) = 0 THEN 0 ELSE 1 END,
+                      updated_at DESC, id ASC",
+        )?;
+        let metas = stmt
+            .query_map(rusqlite::params![bot_id, user_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to list web conversations")?;
+        drop(stmt);
+
+        let mut out = Vec::with_capacity(metas.len());
+        for (id, archived, updated_at) in metas {
+            let (title, message_count) = thread_title_and_count(&conn, &id)?;
+            out.push(WebThreadSummary {
+                id,
+                title,
+                message_count,
+                updated_at,
+                archived: archived != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The web row for `conversation_id` when it belongs to `user_id`.
+    /// Another platform, another user, or an unknown id is `None`.
+    /// Does not unarchive and does not create a row.
+    pub(crate) async fn find_owned_web_conversation(
+        &self,
+        conversation_id: &str,
+        bot_id: &str,
+        user_id: &str,
+    ) -> Result<Option<WebThreadSummary>> {
+        let bot_id = crate::platform::normalize_bot_id(bot_id);
+        let conn = self.conn.lock().await;
+        let found = conn
+            .query_row(
+                "SELECT id, COALESCE(is_archived, 0), updated_at
+                 FROM conversations
+                 WHERE id = ?1 AND platform = 'web' AND bot_id = ?2 AND user_id = ?3",
+                rusqlite::params![conversation_id, bot_id, user_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("Failed to look up web conversation")?;
+        let Some((id, archived, updated_at)) = found else {
+            return Ok(None);
+        };
+        let (title, message_count) = thread_title_and_count(&conn, &id)?;
+        Ok(Some(WebThreadSummary {
+            id,
+            title,
+            message_count,
+            updated_at,
+            archived: archived != 0,
+        }))
+    }
+
     /// Load all messages for a conversation, with raw message limit and [SUMMARY] messages first.
     #[allow(dead_code)]
     pub async fn load_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>> {
@@ -233,24 +408,52 @@ impl MemoryStore {
 
     /// Load messages for a conversation: [SUMMARY] system messages first, then the most recent
     /// `raw_limit` non-summary messages, all ordered by created_at ASC.
+    ///
+    /// Archived conversations return no rows. The agent pack and compaction
+    /// depend on that filter; portal reads of an old thread use
+    /// [`Self::load_messages_including_archived`] instead.
     pub async fn load_messages_with_limit(
         &self,
         conversation_id: &str,
         raw_limit: usize,
     ) -> Result<Vec<ChatMessage>> {
-        let conn = self.conn.lock().await;
+        self.load_messages_inner(conversation_id, raw_limit, false)
+            .await
+    }
 
-        // Load all [SUMMARY] system messages ordered by created_at ASC
-        let mut summary_stmt = conn.prepare(
+    /// Same window as [`Self::load_messages`], including archived conversations.
+    /// Does not change the default `load_messages` filter.
+    pub(crate) async fn load_messages_including_archived(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ChatMessage>> {
+        self.load_messages_inner(conversation_id, 50, true).await
+    }
+
+    async fn load_messages_inner(
+        &self,
+        conversation_id: &str,
+        raw_limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<ChatMessage>> {
+        let conn = self.conn.lock().await;
+        let archived_filter = if include_archived {
+            ""
+        } else {
+            "AND (c.is_archived IS NULL OR c.is_archived = 0)"
+        };
+
+        let summary_sql = format!(
             "SELECT m.role, m.content, m.tool_calls, m.tool_call_id
              FROM messages m
              JOIN conversations c ON m.conversation_id = c.id
              WHERE m.conversation_id = ?1
                AND m.role = 'system'
                AND m.content LIKE '[SUMMARY]%'
-               AND (c.is_archived IS NULL OR c.is_archived = 0)
-             ORDER BY m.created_at ASC",
-        )?;
+               {archived_filter}
+             ORDER BY m.created_at ASC"
+        );
+        let mut summary_stmt = conn.prepare(&summary_sql)?;
         let summaries = summary_stmt
             .query_map(rusqlite::params![conversation_id], |row| {
                 parse_message_row(row)
@@ -258,19 +461,19 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to load summary messages")?;
 
-        // Load the most recent raw_limit non-summary messages, re-ordered ASC
-        let mut raw_stmt = conn.prepare(
+        let raw_sql = format!(
             "SELECT role, content, tool_calls, tool_call_id FROM (
                 SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.created_at
                 FROM messages m
                 JOIN conversations c ON m.conversation_id = c.id
                 WHERE m.conversation_id = ?1
                   AND NOT (m.role = 'system' AND m.content LIKE '[SUMMARY]%')
-                  AND (c.is_archived IS NULL OR c.is_archived = 0)
+                  {archived_filter}
                 ORDER BY m.created_at DESC
                 LIMIT ?2
-            ) ORDER BY created_at ASC",
-        )?;
+            ) ORDER BY created_at ASC"
+        );
+        let mut raw_stmt = conn.prepare(&raw_sql)?;
         let raw_messages = raw_stmt
             .query_map(
                 rusqlite::params![conversation_id, raw_limit as i64],
@@ -548,6 +751,99 @@ impl MemoryStore {
             .collect::<Result<Vec<String>, _>>()
             .context("Failed to load active conversations")?;
         Ok(ids)
+    }
+}
+
+/// One web conversation row for the portal thread list.
+#[derive(Debug, Clone)]
+pub(crate) struct WebThreadSummary {
+    pub id: String,
+    pub title: String,
+    pub message_count: u64,
+    pub updated_at: String,
+    pub archived: bool,
+}
+
+/// Result of [`MemoryStore::start_fresh_web_conversation`].
+#[derive(Debug, Clone)]
+pub(crate) struct FreshWebThread {
+    pub id: String,
+    pub created: bool,
+    pub previous_id: Option<String>,
+    pub updated_at: String,
+    pub title: String,
+    pub message_count: u64,
+}
+
+fn active_web_row(
+    conn: &rusqlite::Connection,
+    bot_id: &str,
+    user_id: &str,
+) -> Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT id, updated_at FROM conversations
+         WHERE platform = 'web' AND bot_id = ?1 AND user_id = ?2
+           AND (is_archived IS NULL OR is_archived = 0)
+         ORDER BY updated_at DESC LIMIT 1",
+        rusqlite::params![bot_id, user_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .context("Failed to read the active web conversation")
+}
+
+fn updated_at_of(conn: &rusqlite::Connection, id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT updated_at FROM conversations WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get(0),
+    )
+    .context("Failed to read conversation updated_at")
+}
+
+/// First user message (60 chars) and the count of non-empty user/assistant rows.
+/// Reads `messages` directly so an archived conversation still has a title.
+fn thread_title_and_count(conn: &rusqlite::Connection, id: &str) -> Result<(String, u64)> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM messages
+         WHERE conversation_id = ?1
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to read conversation messages")?;
+    drop(stmt);
+
+    let mut title: Option<String> = None;
+    let mut saw_user = false;
+    let mut count = 0u64;
+    for (role, content) in rows {
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        if role == "user" && !saw_user {
+            saw_user = true;
+            // NULL content does not supply a title (same as the previous
+            // portal handler). A present string does, after trim.
+            if let Some(raw) = content.as_deref() {
+                title = Some(truncate_thread_title(raw.trim()));
+            }
+        }
+        if !content.unwrap_or_default().trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok((title.unwrap_or_else(|| "New chat".to_string()), count))
+}
+
+fn truncate_thread_title(t: &str) -> String {
+    if t.chars().count() > 60 {
+        format!("{}…", t.chars().take(60).collect::<String>())
+    } else {
+        t.to_string()
     }
 }
 
@@ -1191,5 +1487,74 @@ mod tests {
             messages.is_empty(),
             "Archived conversation should return no messages via load_messages"
         );
+    }
+
+    #[tokio::test]
+    async fn test_load_messages_including_archived_keeps_default_filter() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let conv = store
+            .get_or_create_conversation("web", "default", "portal-reader")
+            .await
+            .unwrap();
+        let msg = crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: Some(crate::llm::MessageContent::from_text("archived visible")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        store.save_message(&conv, &msg).await.unwrap();
+        store
+            .clear_conversation("web", "default", "portal-reader")
+            .await
+            .unwrap();
+
+        assert!(
+            store.load_messages(&conv).await.unwrap().is_empty(),
+            "default load_messages stays active-only"
+        );
+        let visible = store.load_messages_including_archived(&conv).await.unwrap();
+        assert!(
+            visible.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text().contains("archived visible"))),
+            "explicit archived load returns the stored rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_telegram_does_not_archive_web() {
+        let store = crate::memory::MemoryStore::open_in_memory().unwrap();
+        let web = store
+            .get_or_create_conversation("web", "default", "web")
+            .await
+            .unwrap();
+        let telegram = store
+            .get_or_create_conversation("telegram", "default", "42")
+            .await
+            .unwrap();
+        store
+            .clear_conversation("telegram", "default", "42")
+            .await
+            .unwrap();
+        let conn = store.connection();
+        let conn = conn.lock().await;
+        let web_archived: i64 = conn
+            .query_row(
+                "SELECT COALESCE(is_archived, 0) FROM conversations WHERE id = ?1",
+                rusqlite::params![&web],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tg_archived: i64 = conn
+            .query_row(
+                "SELECT COALESCE(is_archived, 0) FROM conversations WHERE id = ?1",
+                rusqlite::params![&telegram],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tg_archived, 1);
+        assert_eq!(web_archived, 0);
     }
 }

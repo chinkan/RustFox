@@ -110,6 +110,42 @@ describe('ChatSession streaming', () => {
     expect(snapshot(s).messages[0].content).toBe('saved')
   })
 
+  it('paints the opened thread and does not send into a different one', async () => {
+    const sent: string[] = []
+    const api = {
+      getHistory: async (conversationId?: string) => {
+        if (conversationId === 'old') {
+          return {
+            conversationId: 'old',
+            messages: [
+              { id: 'h0', role: 'user' as const, content: 'old transcript', createdAt: null },
+            ],
+          }
+        }
+        return { conversationId: 'active', messages: [] }
+      },
+      chatStream: async (text: string) => {
+        sent.push(text)
+      },
+      cancelChat: async () => ({ cancelled: true }),
+    } as unknown as Api
+    const s = new ChatSession(api)
+    await s.load()
+    expect(snapshot(s).conversationId).toBe('active')
+    expect(snapshot(s).readOnly).toBe(false)
+    await s.load('old')
+    expect(snapshot(s).conversationId).toBe('old')
+    expect(snapshot(s).messages.map((m) => m.content)).toEqual(['old transcript'])
+    expect(snapshot(s).readOnly).toBe(true)
+    await s.send('should-not-send')
+    expect(sent).toEqual([])
+    expect(snapshot(s).messages.map((m) => m.content)).toEqual(['old transcript'])
+    await s.load()
+    expect(snapshot(s).conversationId).toBe('active')
+    expect(snapshot(s).readOnly).toBe(false)
+    expect(snapshot(s).messages).toEqual([])
+  })
+
   it('ignores concurrent sends while streaming', async () => {
     let release: () => void = () => undefined
     const gate = new Promise<void>((r) => (release = r))

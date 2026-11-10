@@ -49,6 +49,7 @@ import type {
   TaskUpdateBody,
   TaskUpdateResult,
   Thread,
+  CreatedThread,
   SecretClaimMeta,
   SecretClaimResult,
   PendingSecret,
@@ -122,8 +123,13 @@ export const api = {
   me: () => get<MeResponse>('/auth/me'),
 
   // ── chat ────────────────────────────────────────────────────────────────
-  getHistory: () => get<ChatHistory>('/chat/history'),
+  getHistory: (conversationId?: string) => {
+    if (!conversationId) return get<ChatHistory>('/chat/history')
+    const q = new URLSearchParams({ conversationId })
+    return get<ChatHistory>(`/chat/history?${q}`)
+  },
   listThreads: () => get<Thread[]>('/chat/threads'),
+  createThread: () => request<CreatedThread>('/chat/threads', { method: 'POST', body: '{}' }),
   cancelChat: () => request<{ cancelled: boolean }>('/chat/cancel', { method: 'POST' }),
   /**
    * POST /api/chat and stream SSE frames. The caller owns the AbortSignal;

@@ -6,11 +6,9 @@ import { useChatSession } from '../../hooks/useChatStream'
 /**
  * `/chat/$threadId` — the live conversation pane.
  *
- * The loader checks the requested thread id against the server's active web
- * conversation (one API call, no message fetch — ChatSession owns that to
- * keep the SSE lifecycle in a single place). Unknown ids render notFound.
- * The pane itself is driven by the shared ChatSession store: optimistic user
- * bubble, streamed tokens, tool notes, stop button, and reconcile-on-restart.
+ * The loader accepts any id returned by the thread list, including archived
+ * web conversations. The pane loads that transcript. An archived thread is
+ * read-only so Send cannot append to the active conversation instead.
  */
 export const Route = createFileRoute('/_auth/chat/$threadId')({
   loader: async ({ context, params }) => {
@@ -29,19 +27,19 @@ function ThreadPage() {
   const { state, send, stop } = useChatSession(chat)
   const [draft, setDraft] = useState('')
   const bodyRef = useRef<HTMLDivElement>(null)
+  const readOnly = !!thread.archived || state.readOnly
 
-  // Initial history load (idempotent — guarded inside the session by `loaded`).
+  // Active pane: parameterless history (get-or-create). Archived pane: that id only.
+  // Do not depend on streaming: a reload when the stream settles would replace
+  // the live transcript. `load` keeps an in-flight transcript when the route
+  // returns to the thread that is generating.
   useEffect(() => {
-    if (!state.loaded) void chat.load()
-  }, [chat, state.loaded])
-
-  // Reconcile when this view mounts after a restart the watcher caught while
-  // we were elsewhere (streaming flag stuck / bubbles stale).
-  useEffect(() => {
-    if (state.loaded && !state.streaming && state.messages.length === 0) {
-      void chat.load()
+    if (thread.archived) {
+      void chat.showArchived(thread.id)
+      return
     }
-  }, [chat, state.loaded, state.streaming, state.messages.length])
+    void chat.load()
+  }, [chat, thread.id, thread.archived])
 
   // Auto-scroll on stream growth.
   useEffect(() => {
@@ -52,7 +50,7 @@ function ThreadPage() {
   function submit(e: React.FormEvent) {
     e.preventDefault()
     const text = draft
-    if (!text.trim() || state.streaming) return
+    if (readOnly || !text.trim() || state.streaming) return
     setDraft('')
     send(text)
   }
@@ -62,7 +60,9 @@ function ThreadPage() {
       <div className="row" style={{ padding: '13px 18px', borderBottom: '1px solid var(--border)' }}>
         <strong>{thread.title}</strong>
         <span className="spacer" />
-        {state.streaming ? <span className="badge dot running">{t('chat.threadRunning')}</span> : null}
+        {state.streaming && !readOnly ? (
+          <span className="badge dot running">{t('chat.threadRunning')}</span>
+        ) : null}
         <span className="badge">{thread.messageCount} messages</span>
       </div>
 
@@ -94,20 +94,21 @@ function ThreadPage() {
         ) : null}
       </div>
 
+      {readOnly ? <p className="read-only-hint">{t('chat.readOnly')}</p> : null}
       <form className="chat-input" onSubmit={submit}>
         <input
           type="text"
-          placeholder={t('chat.placeholder')}
+          placeholder={readOnly ? t('chat.readOnly') : t('chat.placeholder')}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          disabled={state.streaming}
+          disabled={state.streaming || readOnly}
         />
-        {state.streaming ? (
+        {state.streaming && !readOnly ? (
           <button type="button" className="ghost" onClick={() => void stop()}>
             {t('chat.stop')}
           </button>
         ) : (
-          <button type="submit" className="primary" disabled={!draft.trim()}>
+          <button type="submit" className="primary" disabled={readOnly || !draft.trim()}>
             {t('chat.send')}
           </button>
         )}

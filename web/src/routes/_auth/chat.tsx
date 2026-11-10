@@ -1,15 +1,14 @@
-import { createFileRoute, Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useChatSession } from '../../hooks/useChatStream'
 
 /**
  * `/chat` layout route.
  *
- * Renders the thread sidebar once; children swap only the conversation pane.
- * MVP backend keeps a single active web conversation (docs/portal-api.md),
- * so the list normally has one row — it is still fetched from the API rather
- * than invented client-side.
+ * Sidebar lists the active web conversation and archived ones. 「開新對話」
+ * archives the active thread when it has messages and opens a fresh one.
  */
 export const Route = createFileRoute('/_auth/chat')({
   component: ChatLayout,
@@ -18,8 +17,11 @@ export const Route = createFileRoute('/_auth/chat')({
 function ChatLayout() {
   const { api, chat } = Route.useRouteContext()
   const { t } = useTranslation()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const { state: session } = useChatSession(chat)
+  const [creating, setCreating] = useState(false)
 
   const threads = useQuery({
     queryKey: ['threads'],
@@ -27,6 +29,21 @@ function ChatLayout() {
   })
 
   const rows = threads.data ?? []
+
+  async function onNewConversation() {
+    if (session.streaming || creating) return
+    setCreating(true)
+    try {
+      const created = await api.createThread()
+      await queryClient.invalidateQueries({ queryKey: ['threads'] })
+      await chat.load()
+      await navigate({ to: '/chat/$threadId', params: { threadId: created.id } })
+    } catch {
+      /* 409 while generating, or a network miss: stay on the current thread. */
+    } finally {
+      setCreating(false)
+    }
+  }
 
   return (
     <>
@@ -37,6 +54,14 @@ function ChatLayout() {
 
       <div className="chat-layout">
         <div className="thread-list">
+          <button
+            type="button"
+            className="primary new-conversation"
+            disabled={session.streaming || creating}
+            onClick={() => void onNewConversation()}
+          >
+            {t('chat.newConversation')}
+          </button>
           {threads.isLoading ? (
             <div className="loading">{t('common.loading')}</div>
           ) : (
@@ -52,7 +77,7 @@ function ChatLayout() {
                   <div className="t">{th.title}</div>
                   <div className="m">
                     {th.messageCount} messages
-                    {active && session.streaming ? ` · ${t('chat.threadRunning')}` : ''}
+                    {!th.archived && session.streaming ? ` · ${t('chat.threadRunning')}` : ''}
                   </div>
                 </Link>
               )

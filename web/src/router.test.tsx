@@ -356,6 +356,49 @@ describe('chat', () => {
     const hellos = await screen.findAllByText('hello')
     expect(hellos.length).toBeGreaterThanOrEqual(2)
     expect(await screen.findByText('hi kan')).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'New conversation' })).toBeTruthy()
+  })
+
+  it('opens an archived thread read-only and can start a new one', async () => {
+    await signIn()
+    let created = 0
+    const router = renderAt(
+      '/chat/old-1',
+      makeContext({
+        listThreads: async () => [
+          { id: 'conv-2', title: 'New chat', messageCount: 0, updatedAt: '2026-09-22T00:00:00Z', archived: false },
+          { id: 'old-1', title: 'earlier', messageCount: 1, updatedAt: '2026-09-21T00:00:00Z', archived: true },
+        ],
+        getHistory: async (conversationId?: string) => ({
+          conversationId: conversationId ?? 'conv-2',
+          messages:
+            conversationId === 'old-1'
+              ? [{ id: 'h0', role: 'user' as const, content: 'earlier text', createdAt: null }]
+              : [],
+        }),
+        createThread: async () => {
+          created += 1
+          return {
+            id: 'conv-2',
+            title: 'New chat',
+            messageCount: 0,
+            updatedAt: '2026-09-22T00:00:00Z',
+            created: false,
+            previousId: null,
+          }
+        },
+      }),
+    )
+    expect(await screen.findByText('earlier text')).toBeTruthy()
+    const archivedInput = screen.getByPlaceholderText('This conversation is read-only.') as HTMLInputElement
+    expect(archivedInput.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'New conversation' }))
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/chat/conv-2')
+      const input = screen.getByPlaceholderText('Message RustFox…') as HTMLInputElement
+      expect(input.disabled).toBe(false)
+    })
+    expect(created).toBe(1)
   })
 
   it('renders notFound for an unknown thread id', async () => {

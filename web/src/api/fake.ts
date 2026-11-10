@@ -17,16 +17,28 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     login: async () => ({ username: 'web', role: 'admin' }),
     logout: async () => undefined,
     me: async () => ({ authenticated: false, username: '', role: '' }),
-    getHistory: async () => ({
-      conversationId: 'conv-1',
-      messages: [
-        { id: 'h0', role: 'user' as const, content: 'hello', createdAt: null },
-        { id: 'h1', role: 'assistant' as const, content: 'hi kan', createdAt: null },
-      ],
+    getHistory: async (conversationId?: string) => ({
+      conversationId: conversationId ?? 'conv-1',
+      messages:
+        conversationId && conversationId !== 'conv-1'
+          ? []
+          : [
+              { id: 'h0', role: 'user' as const, content: 'hello', createdAt: null },
+              { id: 'h1', role: 'assistant' as const, content: 'hi kan', createdAt: null },
+            ],
     }),
     listThreads: async () => [
-      { id: 'conv-1', title: 'hello', messageCount: 2, updatedAt: '2026-09-22T00:00:00Z' },
+      { id: 'conv-1', title: 'hello', messageCount: 2, updatedAt: '2026-09-22T00:00:00Z', archived: false },
     ],
+    createThread: async () => ({
+      id: 'conv-1',
+      title: 'New chat',
+      messageCount: 0,
+      updatedAt: '2026-09-22T00:00:00Z',
+      archived: false,
+      created: false,
+      previousId: null,
+    }),
     cancelChat: async () => ({ cancelled: true }),
     chatStream: async () => undefined,
     getHealth: async () => ({
