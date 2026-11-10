@@ -153,6 +153,80 @@ describe('RBAC guard', () => {
     await screen.findByRole('heading', { name: 'Dashboard' })
     expect(screen.queryByText('Settings')).toBeNull()
   })
+
+  it('redirects non-admin from /integrations, /mcp, and /devices', async () => {
+    bindAuthApi(fakeApi({ login: async () => ({ username: 'guest', role: 'user' }) }))
+    await authStore.loginWithToken('t')
+    const ctxOver = { login: async () => ({ username: 'guest', role: 'user' }) }
+    const integrations = renderAt('/integrations', makeContext(ctxOver))
+    await waitFor(() => {
+      expect(integrations.state.location.pathname).toBe('/dashboard')
+    })
+    const mcp = renderAt('/mcp', makeContext(ctxOver))
+    await waitFor(() => {
+      expect(mcp.state.location.pathname).toBe('/dashboard')
+    })
+    const devices = renderAt('/devices', makeContext(ctxOver))
+    await waitFor(() => {
+      expect(devices.state.location.pathname).toBe('/dashboard')
+    })
+  })
+
+  it('settings page no longer shows MCP or Devices sections', async () => {
+    await signIn()
+    renderAt('/settings', makeContext())
+    await screen.findByRole('heading', { name: 'Settings' })
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Devices' })).toBeNull()
+    expect(screen.queryByText('SwitchBot')).toBeNull()
+  })
+
+  it('renders /integrations with Google and SwitchBot only (no MCP)', async () => {
+    await signIn()
+    const router = renderAt('/integrations', makeContext())
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/integrations')
+    })
+    expect(await screen.findByRole('heading', { name: 'Integrations', level: 1 })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Google' })).toBeTruthy()
+    expect(
+      await screen.findByText(/official Gmail MCP through OAuth/i),
+    ).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'SwitchBot' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).toBeNull()
+    expect(screen.queryByText('Custom HTTP')).toBeNull()
+  })
+
+  it('renders /mcp with MCP settings for admin', async () => {
+    await signIn()
+    const router = renderAt('/mcp', makeContext())
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/mcp')
+    })
+    expect(await screen.findByRole('heading', { name: 'MCP', level: 1 })).toBeTruthy()
+    expect(await screen.findByText('Custom HTTP')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'MCP servers' })).toBeNull()
+  })
+
+  it('renders /devices for admin', async () => {
+    await signIn()
+    const router = renderAt('/devices', makeContext())
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/devices')
+    })
+    expect(await screen.findByRole('heading', { name: 'Devices', level: 1 })).toBeTruthy()
+    expect(await screen.findByLabelText('Name')).toBeTruthy()
+    expect(await screen.findByText('No devices yet.')).toBeTruthy()
+  })
+
+  it('system nav shows Integrations, MCP, and Devices for admin', async () => {
+    await signIn()
+    renderAt('/settings', makeContext())
+    await screen.findByRole('heading', { name: 'Settings' })
+    expect(screen.getByText('Integrations').closest('a')?.getAttribute('href')).toBe('/integrations')
+    expect(screen.getByText('MCP').closest('a')?.getAttribute('href')).toBe('/mcp')
+    expect(screen.getByText('Devices').closest('a')?.getAttribute('href')).toBe('/devices')
+  })
 })
 
 describe('type-safe search params', () => {

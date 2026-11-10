@@ -12,6 +12,9 @@
     "memory": "記憶",
     "tasks": "定時任務",
     "settings": "設定",
+    "integrations": "整合",
+    "mcp": "MCP",
+    "devices": "裝置",
     "signOut": "登出",
     "signOutEverywhere": "所有裝置登出",
     "skills": "技能"
@@ -282,6 +285,32 @@
     "devicesCreated": "裝置已建立。",
     "devicesRotated": "Token 已輪換。舊 token 唔再有效。",
     "devicesRevoked": "裝置已撤銷。"
+  },
+  "googleConnect": {
+    "title": "Google",
+    "intro": "撳「連接 Google」會經 OAuth 接上官方 Gmail MCP（讀取郵件、起草）；呢度唔使貼 client secret。",
+    "connect": "連接 Google",
+    "noClientId": "未有任何 OAuth client id。請喺「進階」加 Desktop client id，然後用「連接 Google」。",
+    "advancedSummary": "進階",
+    "advancedWhen": "正式發行版多數已內置 client id——如果上面有「連接 Google」，通常唔使開進階。自己編譯、又冇 bake in id 嗰陣先用進階。",
+    "desktopIdLabel": "Desktop client id",
+    "desktopIdHelp": "Google Cloud Console → 憑證 → 建立憑證 → OAuth 用戶端 ID → 應用程式類型揀 Desktop app（唔係 Web）。只貼 Client ID，唔要 client secret（PKCE 公開用戶端）。",
+    "redirectHelp": "RustFox 用下面嘅 callback URL（portal 端口 {{portalPort}}，喺設定 → 可編輯）。Console 如果要 redirect URI，用一模一樣嘅網址。Desktop app 通常寬鬆啲。",
+    "save": "儲存",
+    "saving": "儲存中…",
+    "saveEmptyHint": "留空再儲存會清除進階 id，有 bake in client 嗰陣會用返嗰個。"
+  },
+  "integrations": {
+    "title": "整合",
+    "subtitle": "Google 登入同 SwitchBot 憑證 — 同之前一樣嘅 API，獨立一頁。"
+  },
+  "mcpPage": {
+    "title": "MCP",
+    "subtitle": "預設同自訂 MCP 伺服器 — 啟用、憑證同 HTTP 端點。"
+  },
+  "devices": {
+    "title": "裝置",
+    "subtitle": "為硬件文字通道簽發同輪換 WebSocket token。"
   },
   "notFound": {
     "title": "404 — 搵唔到呢頁",
