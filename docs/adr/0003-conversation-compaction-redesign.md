@@ -7,6 +7,8 @@ Accepted (implemented)
 
 **Amendment (2026-11-07, #376):** Q3 landing — Tier 1, Tier 2, and the hard cap compare `estimate_tokens` to `context_window`, the same metric as the Tier 3 trigger. The fixed `PROMPT_HARD_CAP_BYTES = 100_000` is retired. The hard cap is `PROMPT_HARD_CAP_PCT` (0.90) × `context_window` (≥ 0.90 and above `COLLAPSE_PCT`). The hard-cap marker is `★ earlier conversation dropped — prompt hard-cap truncation ★`. Summary failure still defers with `Compaction summary failed; deferring (no truncation)` and does not truncate (Q7). The protected tail (Q4 / #326 / #327 / ADR-0051) is unchanged.
 
+**Amendment (2026-11-09, #384, [ADR-0064](./0064-structured-handoff-compaction.md)):** Q2's running summary is one seven-section handoff, updated in place (heading 2 is **Constraints & Preferences**). This does **not** reopen Q1–Q9. It cites Q2 (extend the previous summary), Q4 / #326 / #327 (protected tail), Q5/Q6 (USER.md flush), Q7 (defer on summary failure, no truncation), and #376 (`PROMPT_HARD_CAP_PCT` 0.90). Ownership stays [ADR-0051](./0051-compaction-ownership-option-a-and-harness-target.md) Option A. Where this amendment conflicts with "layered" concatenation below, the stored summary is the single extended document.
+
 ## Date
 2026-08-06
 
