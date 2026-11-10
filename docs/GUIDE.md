@@ -46,10 +46,12 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 | `[langsmith]` | `api_key` | LangSmith API key for LLM observability | — |
 | `[learning]` | `skill_extraction_enabled` | Post-task skill extraction | `false` |
 | `[supervisor]` | `default_autonomy_mode` | Workflow mode: `fast`, `standard`, `rigorous` | `standard` |
-| `[voice]` | `engine` | Telegram voice-note STT. Only `sensevoice` | `sensevoice` |
-| | `language` | SenseVoice language (`yue` = Cantonese) | `yue` |
-| | `openrouter_stt` | Opt-in OpenRouter transcription. Off means no cloud audio | `false` |
-| | `tts` | Also send an OGG/Opus voice note with the text reply | `false` |
+| `[voice]` | `enabled` | Master gate for Telegram STT and TTS. Absent means on | `true` |
+| | `engine` | Telegram voice-note STT. Only `sensevoice` | `sensevoice` |
+| | `languages` | SenseVoice selection (`yue`, `zh`, `en`, `ja`, `ko`). One id, or `auto` when two or more. Default yue+en | `yue`, `en` |
+| | `language` | Legacy single id, used only when `languages` is absent | — |
+| | `openrouter_stt` | Opt-in OpenRouter transcription. Off means no cloud audio. Not a Settings field | `false` |
+| | `tts` | Spoken copy of a voice-origin reply when the language is yue or en. Text is still sent. Typed chat stays text | `false` |
 
 > Persistent home: All paths resolve relative to `~/.rustfox` by default.
 > Override with `RUSTFOX_HOME` env or `[general].home`.

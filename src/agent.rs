@@ -266,6 +266,9 @@ pub struct Agent {
     pub schedule_tz: crate::scheduler::timezone::ScheduleTimezone,
     /// ADR-0050 / #309: in-flight invoke_agent / spawn_agents names for seat←run.
     pub seat_run: crate::seat_run::SeatRunSignal,
+    /// Live `[voice]` settings. Portal Settings updates this; Telegram reads
+    /// it on the next note (ADR-0063). Not a process restart.
+    pub voice_runtime: crate::asr::VoiceRuntime,
 }
 
 /// Follow-up under `# Available Agents`. A name passed to `spawn_agents` loads
@@ -444,6 +447,7 @@ impl Agent {
         )
         .with_fallback_chain(config.fallback_chain());
         let initial_model = registry.default_qualified_model();
+        let voice_runtime = crate::asr::VoiceRuntime::from_config(config.voice.clone());
         let schedule_tz = crate::scheduler::timezone::resolve_schedule_timezone(
             config.schedule_timezone_config(),
         )
@@ -482,6 +486,7 @@ impl Agent {
             supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             schedule_tz,
             seat_run: crate::seat_run::SeatRunSignal::new(),
+            voice_runtime,
         }
     }
 
@@ -2054,6 +2059,7 @@ impl Agent {
             device_room: None,
             device_fw: None,
             voice_origin: false,
+            voice_spoken_lang: None,
         }
     }
 

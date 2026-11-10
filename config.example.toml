@@ -451,30 +451,47 @@ Be concise and helpful."""
 # OpenRouter /audio/transcriptions with the existing OpenRouter key.
 # Cantonese (`yue`) does not send a Whisper language hint (no ISO-639-1 yue).
 #
-# TTS is off unless tts = true. When on, each interactive reply is the text
-# message plus a sendVoice OGG/Opus note. Text is still sent if synthesis fails.
-# Default TTS is sherpa-onnx-offline-tts. tts_model_dir needs model.onnx and
-# tokens.txt. lexicon.txt is optional. When rule.fst exists, the command passes
-# --tts-rule-fsts=<tts_model_dir>/rule.fst.
-# Canonical Cantonese pack (download into <home>/models/tts-cantonese, then symlink):
+# TTS is off unless tts = true. When on, a voice-origin reply whose spoken
+# language is yue or en is the text message plus a sendVoice OGG/Opus note.
+# zh, ja, ko, and an unresolved auto result stay text. Text is still sent if
+# synthesis fails. Typed chat is not spoken. enabled = false (absent means
+# true) turns off STT and TTS; a caption-less note gets a short "voice is off"
+# note. Portal Settings can change enabled, languages, and tts without a
+# restart and will try to download missing packs. A failed download does not
+# fail the save.
+#
+# Default TTS is sherpa-onnx-offline-tts. Each TTS directory needs model.onnx
+# and tokens.txt. lexicon.txt is optional. When rule.fst exists, the command
+# passes --tts-rule-fsts. espeak-ng-data/ is passed as --vits-data-dir when
+# that directory exists (the English Piper pack ships it).
+# Cantonese pack (download into <home>/models/tts-cantonese, then symlink):
 #   https://huggingface.co/csukuangfj/vits-cantonese-hf-xiaomaiiwn
 #   files: vits-cantonese-hf-xiaomaiiwn.onnx (~114MB), tokens.txt, lexicon.txt, rule.fst
 #   ln -sf vits-cantonese-hf-xiaomaiiwn.onnx model.onnx
+# English pack (local sherpa Piper, not cloud TTS) into <home>/models/tts-english:
+#   vits-piper-en_US-lessac-medium
+#   https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2
+#   Unpack so model.onnx (symlink the en_US-lessac-medium.onnx weights), tokens.txt,
+#   and espeak-ng-data/ sit in that directory.
 # tts_bin replaces sherpa + ffmpeg with:
 #   tts_bin --text-file <txt> --output <file.ogg>
 #
 # This path is Telegram voice notes only. It is not Device WS and not ESP32.
+# RustFox does not install sherpa-onnx or ffmpeg.
 #
 # [voice]
+# enabled = true                  # absent = true; false skips STT and TTS
 # engine = "sensevoice"
 # model_dir = ""                  # empty = <home>/models/sensevoice
 # stt_bin = ""                    # empty = sherpa-onnx-offline on PATH
 # ffmpeg_bin = ""                 # empty = ffmpeg on PATH
-# language = "yue"                # auto | zh | en | ja | ko | yue
-# openrouter_stt = false          # opt-in cloud STT; default off
+# languages = ["yue", "en"]       # yue, zh, en, ja, ko. One id, or auto when two+.
+# language = "yue"                # legacy single id, used only when languages is absent
+# openrouter_stt = false          # opt-in cloud STT; default off; not a Settings field
 # openrouter_stt_model = "openai/whisper-large-v3"
 # stt_timeout_secs = 120
-# tts = false                     # opt-in spoken copy of a voice-note reply; typed chat stays text
+# tts = false                     # opt-in spoken copy; yue and en only; typed chat stays text
 # tts_bin = ""                    # empty = sherpa-onnx-offline-tts + ffmpeg
 # tts_model_dir = ""              # empty = <home>/models/tts-cantonese
+# tts_en_model_dir = ""           # empty = <home>/models/tts-english (vits-piper-en_US-lessac-medium)
 # tts_timeout_secs = 120

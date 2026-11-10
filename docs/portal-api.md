@@ -164,13 +164,15 @@ Session-gated on portal (wizard exposes the same path publicly as `/api/opencode
 ## Settings (ADR 0006 — whitelisted projection, never raw TOML)
 
 ### GET /api/settings
-→ `200 {"editable": {"model","generalLocation","defaultAutonomyMode","portalPort"}, "masked": {"openrouterApiKey":"sk-or-…abcd","telegramBotToken":"123…456","providers":[{"name","model","baseUrl","apiKeyMasked":true}], "embeddingApiKey"?}, "switchbot": {"enabled":false,"tokenMasked":null,"secretMasked":null}, "restartRequired": ["portalPort"]}`
+→ `200 {"editable": {"model","generalLocation","defaultAutonomyMode","portalPort","voiceEnabled","voiceLanguages","voiceTts"}, "masked": {"openrouterApiKey":"sk-or-…abcd","telegramBotToken":"123…456","providers":[{"name","model","baseUrl","apiKeyMasked":true}], "embeddingApiKey"?}, "switchbot": {"enabled":false,"tokenMasked":null,"secretMasked":null}, "voiceDownload": {"sensevoice":{"status":"absent"|"downloading"|"ready"|"error","message":""}, "ttsCantonese":{"status","message"}, "ttsEnglish":{"status","message"}}, "restartRequired": ["portalPort"]}`
+
+`voiceEnabled` defaults to true when `[voice].enabled` is absent. `voiceLanguages` is ordered `yue, zh, en, ja, ko` (default `["yue","en"]`). `voiceTts` defaults to false. `voiceDownload` is read-only. These fields are not in `restartRequired`. OpenRouter STT is not on this whitelist.
 
 `switchbot.tokenMasked` / `secretMasked` are masks or null. The raw token and secret never appear.
 
 ### PATCH /api/settings
-Body may contain any subset of `{"model","generalLocation","defaultAutonomyMode","portalPort","switchbotEnabled","switchbotToken","switchbotSecret"}`.
-Validation: `model` non-empty → `Agent::set_model` (live, no restart); `portalPort` 1–65535; `defaultAutonomyMode` ∈ {`default`,`autopilot`,`plan`}.
+Body may contain any subset of `{"model","generalLocation","defaultAutonomyMode","portalPort","switchbotEnabled","switchbotToken","switchbotSecret","voiceEnabled","voiceLanguages","voiceTts"}`.
+Validation: `model` non-empty → `Agent::set_model` (live, no restart); `portalPort` 1–65535; `defaultAutonomyMode` ∈ {`default`,`autopilot`,`plan`}. `voiceLanguages` must be a non-empty subset of `yue, zh, en, ja, ko` (duplicates collapse, order is fixed). An empty or unknown list is `400 invalid_voice_languages` and writes nothing. `voiceEnabled` / `voiceTts` are booleans. A save with `voiceEnabled: true` ensures the SenseVoice pack; `voiceTts: true` (and enabled) also ensures Cantonese TTS and the English pack `vits-piper-en_US-lessac-medium` under `<home>/models/tts-english`. Download failure does not fail the save. The response includes `voiceDownload`. Voice fields are live on the next Telegram note and are not listed in `restartRequired`.
 `switchbotToken` / `switchbotSecret` are write-only plaintext. The server seals them into SecretStore as `secret:switchbot.api_token` and `secret:switchbot.api_secret` and writes only those refs plus `enabled` under `[switchbot]`. `switchbotEnabled: true` without both secrets resolvable → `400 switchbot_credentials_required`. Empty token or secret → `400 empty_switchbot_credential`. SwitchBot changes are live (not listed in `restartRequired`). Advanced `env:NAME` refs are not written by this PATCH; an operator can set them in `config.toml`.
 Before write: copy current file to `config.toml.bak`. Response:
 `200 {"updated":["model","portalPort"], "restartRequired":["portalPort"], "applied":{"model":"<new>"}}`

@@ -1095,6 +1095,11 @@ impl Config {
             &self.voice.tts_model_dir,
             "models/tts-cantonese",
         );
+        let tts_en_model = resolve_one(
+            "voice.tts_en_model_dir",
+            &self.voice.tts_en_model_dir,
+            crate::asr::EN_TTS_REL_DIR,
+        );
         // ADR 0011 R7: system_prompt_file is resolved lazily by
         // resolve_prompt_path() (so portal overrides of resolved_home take
         // effect without re-running resolve()).
@@ -1135,6 +1140,7 @@ impl Config {
         self.supervisor.artifacts_dir = artifacts;
         self.voice.model_dir = voice_model;
         self.voice.tts_model_dir = tts_model;
+        self.voice.tts_en_model_dir = tts_en_model;
         self.voice.normalize();
         self.resolved_home = Some(home);
 
@@ -1412,10 +1418,15 @@ mod tests {
     #[test]
     fn missing_voice_section_keeps_cloud_stt_and_tts_off() {
         let cfg: Config = toml::from_str(base_toml()).unwrap();
+        assert!(cfg.voice.enabled);
         assert!(!cfg.voice.openrouter_stt);
         assert!(!cfg.voice.tts);
         assert_eq!(cfg.voice.engine, "sensevoice");
-        assert_eq!(cfg.voice.language, "yue");
+        assert_eq!(
+            cfg.voice.languages,
+            vec!["yue".to_string(), "en".to_string()]
+        );
+        assert_eq!(cfg.voice.stt_language_flag(), "auto");
     }
 
     #[test]
@@ -1432,9 +1443,36 @@ mod tests {
         cfg.resolve().unwrap();
         assert!(!cfg.voice.openrouter_stt);
         assert!(!cfg.voice.tts);
+        assert!(cfg.voice.enabled);
         assert_eq!(cfg.voice.model_dir, home.join("models/sensevoice"));
         assert_eq!(cfg.voice.tts_model_dir, home.join("models/tts-cantonese"));
-        assert_eq!(cfg.voice.language, "yue");
+        assert_eq!(
+            cfg.voice.tts_en_model_dir,
+            home.join(crate::asr::EN_TTS_REL_DIR)
+        );
+        assert_eq!(
+            cfg.voice.languages,
+            vec!["yue".to_string(), "en".to_string()]
+        );
+        assert_eq!(cfg.voice.stt_language_flag(), "auto");
+    }
+
+    #[test]
+    fn legacy_voice_language_survives_resolve_as_one_id() {
+        let _env = isolate_home_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config =
+            toml::from_str(&format!("{}\n[voice]\nlanguage = \"yue\"\n", base_toml())).unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home),
+            timezone: None,
+        });
+        cfg.resolve().unwrap();
+        assert_eq!(cfg.voice.languages, vec!["yue".to_string()]);
+        assert_eq!(cfg.voice.stt_language_flag(), "yue");
+        assert!(cfg.voice.enabled);
     }
 
     /// Tests that assert `[general].home` precedence must not see an ambient

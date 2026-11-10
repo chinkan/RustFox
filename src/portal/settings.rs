@@ -39,6 +39,15 @@ pub struct SettingsPatch {
     /// Write-only secret key. Sealed as `secret:switchbot.api_secret`.
     #[serde(default)]
     pub switchbot_secret: Option<String>,
+    /// ADR-0063 master gate. Absent key in config means true.
+    #[serde(default)]
+    pub voice_enabled: Option<bool>,
+    /// SenseVoice selection. Empty or unknown ids are 400 and write nothing.
+    #[serde(default)]
+    pub voice_languages: Option<Vec<String>>,
+    /// Opt-in spoken reply. Default false. `yue` and `en` only.
+    #[serde(default)]
+    pub voice_tts: Option<bool>,
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -90,6 +99,9 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "generalLocation": cfg.general.as_ref().and_then(|g| g.location.clone()).unwrap_or_default(),
             "defaultAutonomyMode": cfg.supervisor.default_autonomy_mode,
             "portalPort": cfg.portal.port,
+            "voiceEnabled": state.voice.snapshot().enabled,
+            "voiceLanguages": state.voice.snapshot().languages,
+            "voiceTts": state.voice.snapshot().tts,
         },
         // ADR 0011 R7: system-prompt provenance so the SPA can show which
         // layer is live and warn about the divergence trap.
@@ -130,6 +142,7 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "tokenMasked": switchbot.token_masked,
             "secretMasked": switchbot.secret_masked,
         },
+        "voiceDownload": state.voice.view().to_json(),
         "restartRequired": ["portalPort", "portalEnabled", "portalBind", "portalToken"],
     })))
 }
@@ -181,6 +194,13 @@ pub async fn patch_settings(
     let mut restart_required: Vec<String> = Vec::new();
     let path = state.config_path.as_path();
 
+    // Bad language lists write nothing, including a model change in the same
+    // body (ADR-0063). Validate before any setter that touches the file.
+    if let Some(languages) = &patch.voice_languages {
+        crate::asr::order_voice_languages(languages)
+            .map_err(|message| PortalError::bad_request("invalid_voice_languages", message))?;
+    }
+
     // `model` has a live setter — no TOML edit needed here (and set_model
     // writes the file itself, so ordering matters: model goes first).
     if let Some(model) = patch.model.filter(|m| !m.trim().is_empty()) {
@@ -191,6 +211,11 @@ pub async fn patch_settings(
             .map_err(|e| PortalError::bad_request("model_rejected", e.to_string()))?;
         updated.push("model".to_string());
     }
+
+    let voice_touched = patch.voice_enabled.is_some()
+        || patch.voice_languages.is_some()
+        || patch.voice_tts.is_some();
+    let mut pending_voice = None;
 
     let mut doc = match load_doc(path).await {
         Ok(d) => d,
@@ -276,6 +301,29 @@ pub async fn patch_settings(
         dirty = true;
         updated.push("switchbot".to_string());
     }
+    if voice_touched {
+        let next = crate::asr::merge_voice_settings(
+            &state.voice.snapshot(),
+            &crate::asr::VoiceSettingsPatch {
+                enabled: patch.voice_enabled,
+                languages: patch.voice_languages.clone(),
+                tts: patch.voice_tts,
+            },
+        )
+        .map_err(|message| PortalError::bad_request("invalid_voice_languages", message))?;
+        write_voice_section(&mut doc, &next);
+        dirty = true;
+        if patch.voice_enabled.is_some() {
+            updated.push("voiceEnabled".to_string());
+        }
+        if patch.voice_languages.is_some() {
+            updated.push("voiceLanguages".to_string());
+        }
+        if patch.voice_tts.is_some() {
+            updated.push("voiceTts".to_string());
+        }
+        pending_voice = Some(next);
+    }
 
     if dirty {
         let new_content = toml::to_string_pretty(&doc)
@@ -284,10 +332,33 @@ pub async fn patch_settings(
         tracing::info!("Portal settings: updated {:?} (backup written)", updated);
     }
 
+    if let Some(next) = pending_voice {
+        state.voice.set(next);
+        // Download is fail-soft: a missing pack does not fail this save.
+        state.voice.kick();
+    }
+
     Ok(Json(json!({
         "updated": updated,
         "restartRequired": restart_required,
+        "voiceDownload": state.voice.view().to_json(),
     })))
+}
+
+/// Persist the voice whitelist. Drops legacy `language` so the next boot
+/// uses `languages` (Settings overwrite).
+fn write_voice_section(doc: &mut toml::Value, voice: &crate::asr::VoiceConfig) {
+    let table = doc_table(doc, "voice");
+    table.insert("enabled".to_string(), toml::Value::Boolean(voice.enabled));
+    let languages = voice
+        .languages
+        .iter()
+        .cloned()
+        .map(toml::Value::String)
+        .collect();
+    table.insert("languages".to_string(), toml::Value::Array(languages));
+    table.insert("tts".to_string(), toml::Value::Boolean(voice.tts));
+    table.remove("language");
 }
 
 // ---------------------------------------------------------------------------

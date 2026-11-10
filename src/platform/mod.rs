@@ -103,6 +103,9 @@ pub struct IncomingMessage {
     /// device text stay false. The agent injects the voice-mode prompt only
     /// when this is true, and TTS is limited to that reply.
     pub voice_origin: bool,
+    /// `yue` or `en` when [`IncomingMessage::voice_origin`] may be spoken.
+    /// Typed chat, schedules, portal, and device text leave this empty.
+    pub voice_spoken_lang: Option<String>,
 }
 
 #[cfg(test)]
