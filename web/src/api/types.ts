@@ -93,8 +93,12 @@ export interface MemoryEntry {
   kind: MemoryKind
   text: string
   score: number
-  /** Currently always null — knowledge rows have no timestamp column. */
+  /** Currently always null — the Memory page does not read the row timestamp. */
   createdAt: string | null
+  /** Parsed `knowledge.evidence` JSON (object or array). Absent on conversation hits. */
+  evidence?: unknown
+  /** `⚠️ 無來源` when evidence is unknown or missing. Absent on conversation hits. */
+  evidenceText?: string | null
 }
 
 // ---------------------------------------------------------------------------

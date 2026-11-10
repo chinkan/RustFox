@@ -114,7 +114,7 @@ Existing same-name entry → skipped with reason (unless `force:true`, which qua
 - `kind=fact|knowledge`: `MemoryStore::search_knowledge` (knowledge entries; `fact` and `knowledge` currently alias — reserved for the fact store).
 - `kind=conversation`: `MemoryStore::search_messages`.
 - `kind` omitted: both, interleaved, score-ordered.
-→ `200 [{"id","kind","text","score","createdAt"}]`. `q` empty → most recent entries.
+→ `200 [{"id","kind","text","score","createdAt","evidence","evidenceText"}]`. Knowledge hits include `evidence` (JSON object or array: `{kind, ref, captured_at}`) and `evidenceText`. Unknown or missing evidence sets `evidenceText` to `⚠️ 無來源`. Conversation hits omit those two fields. `q` empty → most recent entries.
 
 ## Tasks (from `ScheduledTaskStore`) — full CRUD (ADR 0011a R6)
 
