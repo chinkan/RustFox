@@ -36,7 +36,10 @@ function IntegrationsPage() {
         <div className="error-note">{(settings.error as Error).message}</div>
       ) : (
         <div className="grid cols-2">
-          <GoogleConnect api={api} />
+          <GoogleConnect
+            api={api}
+            portalPort={settings.data?.editable.portalPort ?? 8090}
+          />
           {settings.data?.switchbot ? (
             <SwitchBotSection api={api} switchbot={settings.data.switchbot} />
           ) : null}

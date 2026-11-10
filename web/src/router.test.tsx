@@ -189,6 +189,9 @@ describe('RBAC guard', () => {
     })
     expect(await screen.findByRole('heading', { name: 'Integrations', level: 1 })).toBeTruthy()
     expect(await screen.findByRole('heading', { name: 'Google' })).toBeTruthy()
+    expect(
+      await screen.findByText(/official Gmail MCP through OAuth/i),
+    ).toBeTruthy()
     expect(await screen.findByRole('heading', { name: 'SwitchBot' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'MCP servers' })).toBeNull()
     expect(screen.queryByText('Custom HTTP')).toBeNull()
