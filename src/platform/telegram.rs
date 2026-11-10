@@ -128,6 +128,12 @@ pub(crate) fn parse_command(s: &str) -> Option<(String, String)> {
     Some((cmd, arg))
 }
 
+/// `/portal`, `/portal@bot`, and `/portal` plus any trailing tokens (including
+/// `tailscale`) are the same command. There is no separate subcommand.
+pub(crate) fn is_portal_command(text: &str) -> bool {
+    matches!(parse_command(text), Some((cmd, _)) if cmd == "portal")
+}
+
 /// Build the static list of slash commands shown in Telegram's "/" menu.
 ///
 /// The descriptions surface to the user via the BotFather command menu.
@@ -537,6 +543,24 @@ pub async fn send_markdown_message(
     };
     // Final chunks only — this path does not send streaming drafts.
     index_outbound(outbound, chat_id, &sent).await;
+    Ok(())
+}
+
+/// `/portal` always goes out as message entities so the primary link is a
+/// Telegram `text_link`, independent of the chat's markdown/rich format.
+async fn send_portal_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    reply: &crate::portal::url::PortalReply,
+    outbound: &crate::memory::MemoryStore,
+) -> ResponseResult<()> {
+    let (text, entities) = reply.telegram_parts();
+    let mut req = bot.send_message(chat_id, text.clone());
+    if !entities.is_empty() {
+        req = req.entities(entities);
+    }
+    let sent = req.await?;
+    index_outbound(outbound, chat_id, &[(sent.id.0, text)]).await;
     Ok(())
 }
 
@@ -1792,9 +1816,9 @@ pub async fn handle_message(
         .await;
     }
 
-    if text == "/portal" {
+    if is_portal_command(&text) {
         let reply = crate::portal::url::portal_reply(&agent.config.portal).await;
-        return send_markdown_message(&bot, msg.chat.id, &reply, msg_format, &agent.memory).await;
+        return send_portal_reply(&bot, msg.chat.id, &reply, &agent.memory).await;
     }
 
     if text == "/verbose" {
@@ -3763,6 +3787,52 @@ mod tests {
         assert_eq!(
             parse_telegram_selfupgrade_arg(&bad),
             TelegramSelfUpgradeParse::RejectUnknown
+        );
+    }
+
+    #[test]
+    fn portal_tailscale_hits_the_same_handler() {
+        for text in [
+            "/portal",
+            "/portal@rustfox_bot",
+            "/portal tailscale",
+            "/portal@rustfox_bot tailscale",
+            "/portal   tailscale extra",
+        ] {
+            assert!(
+                super::is_portal_command(text),
+                "{text} must take the /portal path"
+            );
+        }
+        for text in [
+            "/portals",
+            "/portalx",
+            "/portalx tailscale",
+            "see /portal",
+            "portal",
+        ] {
+            assert!(!super::is_portal_command(text), "{text} is not /portal");
+        }
+    }
+
+    #[test]
+    fn portal_handler_sends_official_text_link_entities() {
+        let source = include_str!("telegram.rs");
+        assert!(
+            source.contains("if is_portal_command(&text)"),
+            "trailing /portal tokens must share the /portal handler"
+        );
+        assert!(
+            !source.contains("text == \"/portal\""),
+            "exact /portal match drops /portal tailscale and /portal@bot"
+        );
+        let start = source
+            .find("async fn send_portal_reply")
+            .expect("portal replies must be sent as Telegram entities");
+        let body = &source[start..start + 700];
+        assert!(
+            body.contains(".entities("),
+            "send_portal_reply must attach official message entities, not a plain-text URL"
         );
     }
 
