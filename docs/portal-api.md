@@ -22,12 +22,18 @@ Request `{"token": "<portal token>"}` → `200 {"username": "<portal.user_name>"
 ## Chat (ADR 0005)
 
 ### GET /api/chat/history
-Active web conversation (`platform="web"`, `user_id=portal.user_name`).
+No query: the active web conversation (`platform="web"`, `bot_id="default"`, `user_id=portal.user_name`), get-or-created.
 → `200 {"conversationId": "<uuid>", "messages": [{"id","role":"user|assistant","content","createdAt"}]}`
 
+`?conversationId=<uuid>` loads that web conversation for the same portal user, including an archived thread. It does not get-or-create and does not unarchive. A wrong id, another platform, or another user → `404 {"error":{"code":"conversation_not_found","message":"Conversation not found"}}`. The response shape is the same.
+
 ### GET /api/chat/threads
-Conversations for the web user, newest first.
-→ `200 [{"id","title","messageCount","updatedAt"}]` — `title` = first user message, truncated to 60 chars.
+Web conversations for the portal user only (never Telegram). The single non-archived row is first; archived rows follow by stored `conversations.updated_at` descending. A first visit still get-or-creates the active row.
+→ `200 [{"id","title","messageCount","updatedAt","archived":false}]` — `title` = first user message, truncated to 60 chars, or the English fallback `"New chat"`. `updatedAt` is that stored timestamp (RFC3339). `archived` is false on the active row.
+
+### POST /api/chat/threads
+Empty body or `{}`. No client id or title. If a generation is in progress → `409 chat_in_progress` and nothing is archived. Otherwise the active web conversation is resolved. Zero visible user/assistant messages → `200` of that same row with `"created": false` and `"previousId": null` (no empty archived row). Otherwise that web conversation is archived by id, a fresh active UUID is created, and mid-run mode for `(default, portal.user_name)` is reset. Messages are not deleted. Telegram `/clear` is not involved.
+→ `200 {"id","title","messageCount","updatedAt","created":true|false,"previousId":"<uuid>"|null}` — an empty new thread uses title `"New chat"` and `messageCount` 0.
 
 ### POST /api/chat
 Request `{"text": "...", "attachments"?: [{"name","path"}]}` (attachments = files already placed in the sandbox dir; MVP: none).

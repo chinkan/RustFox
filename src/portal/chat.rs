@@ -10,7 +10,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use axum::extract::State;
+use axum::body::Bytes;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -30,6 +32,13 @@ use super::PortalState;
 pub struct SendRequest {
     #[serde(default)]
     pub text: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryQuery {
+    #[serde(default)]
+    conversation_id: Option<String>,
 }
 
 /// Minimal `Stream` over an mpsc receiver, required by `Sse`.
@@ -188,22 +197,150 @@ pub async fn cancel(State(state): State<PortalState>) -> Json<serde_json::Value>
     Json(json!({ "cancelled": cancelled }))
 }
 
-/// GET /api/chat/history — messages of the active web conversation.
+/// GET /api/chat/history — active web conversation, or one owned web thread.
+///
+/// No query get-or-creates the active conversation (today's single-thread
+/// path). `?conversationId=` loads that web row for this portal user,
+/// including archived threads, and does not create or unarchive.
 pub async fn history(
+    State(state): State<PortalState>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, PortalError> {
+    let user = state.config.user_name.clone();
+    let requested = query
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    let (conv_id, messages) = if let Some(id) = requested {
+        let owned = state
+            .memory
+            .find_owned_web_conversation(id, crate::platform::DEFAULT_BOT_ID, &user)
+            .await
+            .map_err(PortalError::from)?;
+        if owned.is_none() {
+            return Err(PortalError::new(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversation not found",
+            ));
+        }
+        let messages = state
+            .memory
+            .load_messages_including_archived(id)
+            .await
+            .map_err(PortalError::from)?;
+        (id.to_string(), messages)
+    } else {
+        let conv_id = state
+            .memory
+            .get_or_create_conversation("web", crate::platform::DEFAULT_BOT_ID, &user)
+            .await
+            .map_err(PortalError::from)?;
+        let messages = state
+            .memory
+            .load_messages(&conv_id)
+            .await
+            .map_err(PortalError::from)?;
+        (conv_id, messages)
+    };
+
+    Ok(Json(history_body(&conv_id, &messages)))
+}
+
+/// GET /api/chat/threads — active web conversation, then archived ones.
+///
+/// Still get-or-creates the active row so a first visit has a thread. Archived
+/// titles are derived from stored messages, not `load_messages` (that helper
+/// returns nothing for an archived id). `updatedAt` is the stored timestamp.
+pub async fn threads(
     State(state): State<PortalState>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let user = state.config.user_name.clone();
-    let conv_id = state
+    state
         .memory
         .get_or_create_conversation("web", crate::platform::DEFAULT_BOT_ID, &user)
         .await
         .map_err(PortalError::from)?;
-    let messages = state
+    let rows = state
         .memory
-        .load_messages(&conv_id)
+        .list_web_conversations(crate::platform::DEFAULT_BOT_ID, &user)
         .await
         .map_err(PortalError::from)?;
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "title": row.title,
+                "messageCount": row.message_count,
+                "updatedAt": stored_updated_at(&row.updated_at),
+                "archived": row.archived,
+            })
+        })
+        .collect();
+    Ok(Json(json!(items)))
+}
 
+/// POST /api/chat/threads — archive the active web thread and open a fresh one.
+///
+/// Empty body or `{}`. A generation in progress is `409` and does not archive.
+/// An active thread with no visible messages is returned unchanged.
+pub async fn create_thread(
+    State(state): State<PortalState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, PortalError> {
+    if !empty_json_body(&body)? {
+        return Err(PortalError::bad_request(
+            "invalid_body",
+            "Request body must be empty",
+        ));
+    }
+    if state.chat_busy.load(Ordering::SeqCst) {
+        return Err(PortalError::conflict(
+            "chat_in_progress",
+            "A generation is already running",
+        ));
+    }
+
+    let user = state.config.user_name.clone();
+    let fresh = state
+        .memory
+        .start_fresh_web_conversation(crate::platform::DEFAULT_BOT_ID, &user)
+        .await
+        .map_err(PortalError::from)?;
+    if fresh.created {
+        // Same mid-run reset as Agent::clear_conversation, scoped to the
+        // portal user. Never passes platform "telegram".
+        state.agent.reset_web_mid_run_mode(user).await;
+    }
+
+    Ok(Json(json!({
+        "id": fresh.id,
+        "title": fresh.title,
+        "messageCount": fresh.message_count,
+        "updatedAt": stored_updated_at(&fresh.updated_at),
+        "created": fresh.created,
+        "previousId": fresh.previous_id,
+    })))
+}
+
+fn empty_json_body(body: &[u8]) -> Result<bool, PortalError> {
+    if std::str::from_utf8(body).unwrap_or("").trim().is_empty() {
+        return Ok(true);
+    }
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) if value.as_object().is_some_and(|obj| obj.is_empty()) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Err(PortalError::bad_request(
+            "invalid_body",
+            "Expected a JSON object",
+        )),
+    }
+}
+
+fn history_body(conv_id: &str, messages: &[crate::llm::ChatMessage]) -> serde_json::Value {
     let mut items = Vec::new();
     for (i, m) in messages.iter().enumerate() {
         if m.role != "user" && m.role != "assistant" {
@@ -220,58 +357,17 @@ pub async fn history(
             "createdAt": null,
         }));
     }
-
-    Ok(Json(
-        json!({ "conversationId": conv_id, "messages": items }),
-    ))
+    json!({ "conversationId": conv_id, "messages": items })
 }
 
-/// GET /api/chat/threads — one row for the active web conversation (MVP;
-/// multi-thread browsing is a follow-up).
-pub async fn threads(
-    State(state): State<PortalState>,
-) -> Result<Json<serde_json::Value>, PortalError> {
-    let user = state.config.user_name.clone();
-    let conv_id = state
-        .memory
-        .get_or_create_conversation("web", crate::platform::DEFAULT_BOT_ID, &user)
-        .await
-        .map_err(PortalError::from)?;
-    let messages = state
-        .memory
-        .load_messages(&conv_id)
-        .await
-        .map_err(PortalError::from)?;
-    let count = messages
-        .iter()
-        .filter(|m| {
-            (m.role == "user" || m.role == "assistant")
-                && m.content
-                    .as_ref()
-                    .map(|c| c.as_text())
-                    .unwrap_or_default()
-                    .trim()
-                    != ""
+/// SQLite `datetime('now')` (`YYYY-MM-DD HH:MM:SS`, UTC) as RFC3339.
+/// A value that is already RFC3339 is returned unchanged.
+fn stored_updated_at(stored: &str) -> String {
+    chrono::NaiveDateTime::parse_from_str(stored, "%Y-%m-%d %H:%M:%S")
+        .map(|naive| {
+            naive
+                .and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         })
-        .count();
-    let title = messages
-        .iter()
-        .find(|m| m.role == "user")
-        .and_then(|m| m.content.as_ref().map(|c| c.as_text()))
-        .map(|t| {
-            let t = t.trim();
-            if t.chars().count() > 60 {
-                format!("{}…", t.chars().take(60).collect::<String>())
-            } else {
-                t.to_string()
-            }
-        })
-        .unwrap_or_else(|| "New chat".to_string());
-
-    Ok(Json(json!([{
-        "id": conv_id,
-        "title": title,
-        "messageCount": count,
-        "updatedAt": chrono::Utc::now().to_rfc3339(),
-    }])))
+        .unwrap_or_else(|_| stored.to_string())
 }

@@ -56,6 +56,14 @@ pub trait AgentOps: Send + Sync {
     fn reload_skills_and_agents(&self) -> futures::future::BoxFuture<'_, (usize, usize)>;
     fn cancel_processing(&self, user_id: String) -> futures::future::BoxFuture<'_, bool>;
     fn clear_cancel_token(&self, user_id: String) -> futures::future::BoxFuture<'_, ()>;
+    /// Reset mid-run mode for the portal user (`default` + `user_id`).
+    /// Default is a no-op so test fakes stay quiet. The real agent deletes
+    /// the same key as [`Agent::clear_conversation`] and never takes a
+    /// Telegram platform.
+    fn reset_web_mid_run_mode(&self, user_id: String) -> futures::future::BoxFuture<'_, ()> {
+        let _ = user_id;
+        Box::pin(async {})
+    }
     fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn agent_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>>;
     fn remove_scheduler_job(&self, job_id: uuid::Uuid) -> futures::future::BoxFuture<'_, bool>;
@@ -165,6 +173,12 @@ impl AgentOps for Agent {
                 crate::agent::CancelLane::Interactive,
             )
             .await
+        })
+    }
+    fn reset_web_mid_run_mode(&self, user_id: String) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.delete_mid_run_mode(crate::platform::DEFAULT_BOT_ID, &user_id)
+                .await;
         })
     }
     fn skill_entries(&self) -> futures::future::BoxFuture<'_, Vec<SkillInfo>> {
@@ -474,7 +488,10 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
 
     let protected = Router::new()
         .route("/chat/history", get(chat::history))
-        .route("/chat/threads", get(chat::threads))
+        .route(
+            "/chat/threads",
+            get(chat::threads).post(chat::create_thread),
+        )
         .route("/chat", post(chat::send))
         .route("/chat/cancel", post(chat::cancel))
         .route("/agents", get(data::agents))

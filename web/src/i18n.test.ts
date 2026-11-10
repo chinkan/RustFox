@@ -47,6 +47,15 @@ describe('i18n locale parity', () => {
   })
 })
 
+describe('portal chat new conversation (#396)', () => {
+  it('names the sidebar control in en and zh-HK', () => {
+    expect(en.chat.newConversation).toBe('New conversation')
+    expect(zhHK.chat.newConversation).toBe('開新對話')
+    expect(en.chat.readOnly.length).toBeGreaterThan(0)
+    expect(zhHK.chat.readOnly.length).toBeGreaterThan(0)
+  })
+})
+
 describe('schedule timezone copy (ADR-0022 / #166)', () => {
   it('removes temporary UTC portal hints from #167', () => {
     expect(JSON.stringify(en)).not.toContain('Times are in UTC for now.')

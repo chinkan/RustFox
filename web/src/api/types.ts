@@ -40,6 +40,14 @@ export interface Thread {
   title: string
   messageCount: number
   updatedAt: string
+  /** False (or absent) on the active web thread. True on an archived one. */
+  archived?: boolean
+}
+
+/** POST /api/chat/threads — the active thread after the call. */
+export interface CreatedThread extends Thread {
+  created: boolean
+  previousId: string | null
 }
 
 /** SSE frames emitted by POST /api/chat (docs/portal-api.md → Chat). */

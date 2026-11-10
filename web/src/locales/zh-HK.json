@@ -73,7 +73,9 @@
     "busy": "已經有個生成緊進行中。",
     "streamDied": "連線斷咗 — 重連後會自動對返歷史。",
     "noMessages": "未有訊息。打個招呼先 👋",
-    "threadRunning": "生成緊…"
+    "threadRunning": "生成緊…",
+    "newConversation": "開新對話",
+    "readOnly": "呢段對話只可以睇。"
   },
   "agents": {
     "title": "Agents",

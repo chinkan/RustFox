@@ -73,7 +73,9 @@
     "busy": "A generation is already running.",
     "streamDied": "Connection lost — history reconciles after reconnect.",
     "noMessages": "No messages yet. Say hi 👋",
-    "threadRunning": "generating…"
+    "threadRunning": "generating…",
+    "newConversation": "New conversation",
+    "readOnly": "This conversation is read-only."
   },
   "agents": {
     "title": "Agents",
