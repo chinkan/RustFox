@@ -195,6 +195,28 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         configOwned: false,
       },
     }),
+    searchMcpRegistry: async ({ q } = {}) => ({
+      servers: q
+        ? []
+        : [
+            {
+              server: {
+                name: 'io.github.user/demo-mcp',
+                description: 'Fake registry hit',
+                remotes: [
+                  { type: 'streamable-http', url: 'https://example.com/mcp' },
+                ],
+              },
+            },
+          ],
+      metadata: { nextCursor: null, count: q ? 0 : 1 },
+    }),
+    getMcpRegistryServer: async (name) => ({
+      server: {
+        name,
+        remotes: [{ type: 'streamable-http', url: 'https://example.com/mcp' }],
+      },
+    }),
     disableMcpServer: async (name) => ({
       server: {
         name,

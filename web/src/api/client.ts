@@ -27,6 +27,8 @@ import type {
   SelfUpgradeChoice,
   SelfUpgradeResult,
   McpPresetsResponse,
+  McpRegistrySearchResponse,
+  McpRegistryServerDetailResponse,
   McpUpsertBody,
   McpServerMutationResult,
   DeviceList,
@@ -219,6 +221,18 @@ export const api = {
       method: 'POST',
       body: '{}',
     }),
+  searchMcpRegistry: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.q?.trim()) sp.set('q', params.q.trim())
+    if (params.cursor) sp.set('cursor', params.cursor)
+    if (params.limit != null) sp.set('limit', String(params.limit))
+    const qs = sp.toString()
+    return get<McpRegistrySearchResponse>(`/mcp/registry/search${qs ? `?${qs}` : ''}`)
+  },
+  getMcpRegistryServer: (name: string) =>
+    get<McpRegistryServerDetailResponse>(
+      `/mcp/registry/servers/${encodeURIComponent(name)}`,
+    ),
   getSoul: (name: SoulName) => get<SoulFile>(`/soul?name=${encodeURIComponent(name)}`),
   putSoul: (name: SoulName, content: string) =>
     request<{ ok: boolean; name: string; bytes: number }>('/soul', {

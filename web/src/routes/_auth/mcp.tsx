@@ -2,6 +2,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { ensureAuthBootstrapped } from '../../auth'
+import { McpRegistrySection } from '../../settings/mcpRegistrySection'
 import { McpSettingsSection } from '../../settings/mcpSettingsSection'
 
 /**
@@ -35,7 +36,13 @@ function McpPage() {
       ) : settings.isError ? (
         <div className="error-note">{(settings.error as Error).message}</div>
       ) : (
-        <McpSettingsSection api={api} servers={masked?.mcpServers ?? []} hideTitle />
+        <>
+          <McpRegistrySection
+            api={api}
+            existingServerNames={(masked?.mcpServers ?? []).map((s) => s.name)}
+          />
+          <McpSettingsSection api={api} servers={masked?.mcpServers ?? []} hideTitle />
+        </>
       )}
     </>
   )

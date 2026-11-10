@@ -306,7 +306,35 @@
   },
   "mcpPage": {
     "title": "MCP",
-    "subtitle": "Preset and custom MCP servers — enable, credentials, and HTTP endpoints."
+    "subtitle": "Official Registry search, presets, and custom Streamable HTTP servers."
+  },
+  "mcpRegistry": {
+    "title": "Official MCP Registry",
+    "hint": "Search the public registry via the portal proxy. Install only Streamable HTTP remotes into custom MCP servers.",
+    "searchLabel": "Search",
+    "searchPlaceholder": "e.g. github, linear, filesystem",
+    "searchHint": "Leave empty for the latest list, or type at least {{min}} characters.",
+    "searchTooShort": "Search must be empty or at least {{min}} characters.",
+    "search": "Search",
+    "searching": "Searching…",
+    "remoteOnly": "Remote only",
+    "loadMore": "Load more",
+    "noResults": "No registry servers matched.",
+    "registryUnavailable": "Registry search is unavailable ({{message}}). Portal settings still work.",
+    "registryDownBanner": "Official MCP Registry is unreachable — retry later. Existing MCP servers are unaffected.",
+    "badgeStdio": "stdio — edit config.toml",
+    "badgeSse": "SSE unsupported",
+    "stdioHint": "Stdio packages are not installable from the portal.",
+    "selectServer": "Select {{name}}",
+    "reviewTitle": "Install review",
+    "reviewHint": "Each server is saved with a separate PUT. Secrets are sealed on the server.",
+    "slug": "Portal name (slug)",
+    "slugRequired": "Every selected server needs a slug.",
+    "bearerFor": "{{name}} (Bearer)",
+    "installSelected": "Install selected",
+    "installing": "Installing…",
+    "installAllOk": "Installed {{count}} server(s).",
+    "installPartial": "Installed {{ok}}, failed {{fail}}: {{detail}}"
   },
   "devices": {
     "title": "Devices",

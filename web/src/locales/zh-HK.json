@@ -306,7 +306,35 @@
   },
   "mcpPage": {
     "title": "MCP",
-    "subtitle": "預設同自訂 MCP 伺服器 — 啟用、憑證同 HTTP 端點。"
+    "subtitle": "官方 Registry 搜尋、預設同自訂 Streamable HTTP 伺服器。"
+  },
+  "mcpRegistry": {
+    "title": "官方 MCP Registry",
+    "hint": "經入口網站 proxy 搜尋公開 registry。只可安裝 Streamable HTTP remote 做自訂 MCP。",
+    "searchLabel": "搜尋",
+    "searchPlaceholder": "例如 github、linear、filesystem",
+    "searchHint": "留空列出最新；否則至少 {{min}} 個字。",
+    "searchTooShort": "搜尋要留空或至少 {{min}} 個字。",
+    "search": "搜尋",
+    "searching": "搜尋中…",
+    "remoteOnly": "只顯示 remote",
+    "loadMore": "載入更多",
+    "noResults": "冇符合嘅 registry 伺服器。",
+    "registryUnavailable": "Registry 搜尋用唔到（{{message}}）。其他 MCP 設定仍然可用。",
+    "registryDownBanner": "官方 MCP Registry 連唔到 — 遲啲再試。現有 MCP 唔受影響。",
+    "badgeStdio": "stdio — 改 config.toml",
+    "badgeSse": "唔支援 SSE",
+    "stdioHint": "Stdio package 唔可以喺入口網站安裝。",
+    "selectServer": "揀 {{name}}",
+    "reviewTitle": "安裝覆核",
+    "reviewHint": "每個伺服器分開 PUT 儲存；密鑰喺伺服器端 seal。",
+    "slug": "入口名稱（slug）",
+    "slugRequired": "每個已選伺服器要有 slug。",
+    "bearerFor": "{{name}}（Bearer）",
+    "installSelected": "安裝已選",
+    "installing": "安裝中…",
+    "installAllOk": "已安裝 {{count}} 個伺服器。",
+    "installPartial": "成功 {{ok}}、失敗 {{fail}}：{{detail}}"
   },
   "devices": {
     "title": "裝置",

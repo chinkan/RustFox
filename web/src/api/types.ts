@@ -489,6 +489,12 @@ export interface McpServerMutationResult {
   server: McpServerMasked
 }
 
+export type {
+  McpRegistryListEntry,
+  McpRegistrySearchResponse,
+  McpRegistryServerDetailResponse,
+} from '../mcp/registryTypes'
+
 export interface SettingsMasked {
   telegramBotToken: string
   openrouterApiKey: string
