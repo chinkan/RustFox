@@ -1235,3 +1235,143 @@ button.danger:hover { background: rgba(248, 81, 73, 0.12); }
 .office-pref label + .office-pref-hint {
   margin-left: 24px;
 }
+
+/* Phone shell (#401). 767px covers a typical phone (375–430 CSS px). */
+@media (max-width: 767px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .phone-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+    min-width: 0;
+  }
+
+  .phone-bar-title {
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+
+  .phone-nav-toggle {
+    min-height: 44px;
+    padding: 8px 12px;
+  }
+
+  .nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: rgba(3, 5, 9, 0.55);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .sidebar.open {
+    display: flex;
+    position: fixed;
+    z-index: 40;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(280px, 86vw);
+    max-width: 100%;
+    box-shadow: 12px 0 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .nav-item {
+    min-height: 44px;
+  }
+
+  .main {
+    min-width: 0;
+    max-width: 100%;
+    padding: 16px 14px 28px;
+    overflow-x: clip;
+  }
+
+  .page-head,
+  .card,
+  .section,
+  .grid,
+  .chat-layout,
+  .chat-pane,
+  .thread-list {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .grid.cols-2,
+  .grid.cols-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+    gap: 10px;
+  }
+
+  .thread-list {
+    max-height: 9.5rem;
+  }
+
+  .thread-list .new-conversation,
+  .chat-input input,
+  .chat-input button {
+    min-height: 44px;
+  }
+
+  .chat-input input {
+    min-width: 0;
+  }
+
+  .chat-pane {
+    min-height: 18rem;
+  }
+
+  .msg {
+    max-width: 100%;
+  }
+
+  .row,
+  .mono,
+  td,
+  th,
+  code,
+  pre {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .badge {
+    white-space: normal;
+  }
+
+  .card {
+    overflow-x: auto;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    max-width: 100%;
+  }
+}

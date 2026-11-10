@@ -3,6 +3,7 @@ import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from '@tan
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useChatSession } from '../../hooks/useChatStream'
+import { usePhoneViewport } from '../../layout/phoneViewport'
 
 /**
  * `/chat` layout route.
@@ -22,6 +23,7 @@ function ChatLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const { state: session } = useChatSession(chat)
   const [creating, setCreating] = useState(false)
+  const phone = usePhoneViewport()
 
   const threads = useQuery({
     queryKey: ['threads'],
@@ -52,7 +54,7 @@ function ChatLayout() {
         <p>{t('chat.subtitle')}</p>
       </div>
 
-      <div className="chat-layout">
+      <div className="chat-layout" data-layout={phone ? 'phone' : 'desktop'}>
         <div className="thread-list">
           <button
             type="button"

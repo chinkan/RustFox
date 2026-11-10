@@ -1,9 +1,11 @@
+import { useState } from 'react'
 import { createFileRoute, Link, Outlet, redirect, useRouterState } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { useAuth } from '../auth'
 import { useBootState } from '../hooks/useBootWatcher'
 import { ensureAuthBootstrapped } from '../auth'
 import { LANGS, setLang, type Lang } from '../i18n'
+import { usePhoneViewport } from '../layout/phoneViewport'
 
 /**
  * `_auth` — the authenticated shell.
@@ -57,10 +59,39 @@ function AuthLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
   const isActive = (to: string) => pathname === to || pathname.startsWith(to + '/')
+  const phone = usePhoneViewport()
+  const [navOpen, setNavOpen] = useState(false)
+  const [navPath, setNavPath] = useState(pathname)
+  if (navPath !== pathname) {
+    setNavPath(pathname)
+    setNavOpen(false)
+  }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className="shell" data-layout={phone ? 'phone' : 'desktop'}>
+      {phone ? (
+        <header className="phone-bar">
+          <button
+            type="button"
+            className="phone-nav-toggle"
+            aria-expanded={navOpen}
+            aria-controls="portal-nav"
+            onClick={() => setNavOpen((open) => !open)}
+          >
+            {navOpen ? t('nav.closeMenu') : t('nav.openMenu')}
+          </button>
+          <span className="phone-bar-title">RustFox</span>
+        </header>
+      ) : null}
+      {phone && navOpen ? (
+        <button
+          type="button"
+          className="nav-backdrop"
+          aria-label={t('nav.closeMenu')}
+          onClick={() => setNavOpen(false)}
+        />
+      ) : null}
+      <aside id="portal-nav" className={navOpen ? 'sidebar open' : 'sidebar'} hidden={phone && !navOpen}>
         <div className="brand">
           <span className="fox">🦊</span>
           <span>
