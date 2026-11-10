@@ -9,6 +9,7 @@ import {
   VOICE_LANGUAGE_OPTIONS,
   voicePackNeedsAttention,
   voiceSettingsDirty,
+  type VoicePackKey,
 } from './voice'
 
 function packBadgeClass(status: VoicePackDownload['status']): string {
@@ -79,7 +80,18 @@ export function VoiceSection({
     })
   }
 
-  const renderPack = (packKey: 'sensevoice' | 'ttsCantonese', label: string) => {
+  const packLabel = (pack: VoicePackKey): string => {
+    switch (pack) {
+      case 'sensevoice':
+        return t('settings.voicePackSensevoice')
+      case 'ttsEnglish':
+        return t('settings.voicePackTtsEnglish')
+      case 'ttsCantonese':
+        return t('settings.voicePackTtsCantonese')
+    }
+  }
+
+  const renderPack = (packKey: VoicePackKey, label: string) => {
     const pack = download[packKey]
     const statusLabel = t(`settings.voiceDownloadStatus.${pack.status}`)
     return (
@@ -146,14 +158,12 @@ export function VoiceSection({
         <h3 style={{ margin: '0 0 8px', fontSize: 15 }}>{t('settings.voiceDownloadTitle')}</h3>
         {renderPack('sensevoice', t('settings.voicePackSensevoice'))}
         {renderPack('ttsCantonese', t('settings.voicePackTtsCantonese'))}
+        {renderPack('ttsEnglish', t('settings.voicePackTtsEnglish'))}
 
         {attention ? (
           <div className="banner warn" role="status" style={{ marginTop: 12 }}>
             {t('settings.voicePackWarn', {
-              pack:
-                attention.pack === 'sensevoice'
-                  ? t('settings.voicePackSensevoice')
-                  : t('settings.voicePackTtsCantonese'),
+              pack: packLabel(attention.pack),
               status: t(`settings.voiceDownloadStatus.${attention.status}`),
             })}
           </div>

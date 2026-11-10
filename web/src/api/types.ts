@@ -455,6 +455,7 @@ export interface VoicePackDownload {
 export interface VoiceDownload {
   sensevoice: VoicePackDownload
   ttsCantonese: VoicePackDownload
+  ttsEnglish: VoicePackDownload
 }
 
 export interface VoiceSettings {

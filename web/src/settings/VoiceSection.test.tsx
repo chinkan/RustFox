@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import '../i18n'
+import i18n from '../i18n'
 import type { Api } from '../api/client'
 import type { SettingsPatchResult, VoiceSettings } from '../api/types'
 import { VoiceSection } from './VoiceSection'
@@ -20,6 +20,7 @@ const baseVoice: VoiceSettings = {
   download: {
     sensevoice: { status: 'ready', message: null },
     ttsCantonese: { status: 'downloading', message: 'fetching vits' },
+    ttsEnglish: { status: 'absent', message: 'english weights missing' },
   },
 }
 
@@ -28,6 +29,10 @@ describe('VoiceSection', () => {
 
   beforeEach(() => {
     patchSettings = vi.fn(async () => ({ updated: ['voiceEnabled'], restartRequired: [] }))
+  })
+
+  afterEach(async () => {
+    await i18n.changeLanguage('en')
   })
 
   function api(over: Partial<Api> = {}): Api {
@@ -44,9 +49,16 @@ describe('VoiceSection', () => {
     expect(enable.checked).toBe(true)
     const tts = screen.getByRole('checkbox', { name: /Spoken replies/i }) as HTMLInputElement
     expect(tts.checked).toBe(false)
+    expect(screen.getByText('SenseVoice (STT)')).toBeTruthy()
+    expect(screen.getByText('Cantonese TTS')).toBeTruthy()
+    expect(screen.getByText('English TTS')).toBeTruthy()
     expect(screen.getByText('ready')).toBeTruthy()
     expect(screen.getByText('downloading')).toBeTruthy()
+    expect(screen.getByText('not downloaded')).toBeTruthy()
     expect(screen.getByText('fetching vits')).toBeTruthy()
+    expect(screen.getByText('english weights missing')).toBeTruthy()
+    expect(screen.getAllByText(/Cantonese and English/).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('checkbox', { name: /Spoken replies \(Cantonese and English TTS\)/i })).toBeTruthy()
     expect((screen.getByRole('checkbox', { name: /Cantonese \(yue\)/i }) as HTMLInputElement).checked).toBe(true)
     expect((screen.getByRole('checkbox', { name: /English \(en\)/i }) as HTMLInputElement).checked).toBe(true)
   })
@@ -57,6 +69,8 @@ describe('VoiceSection', () => {
     expect(enable.checked).toBe(true)
     expect((screen.getByRole('checkbox', { name: /Cantonese \(yue\)/i }) as HTMLInputElement).checked).toBe(true)
     expect((screen.getByRole('checkbox', { name: /English \(en\)/i }) as HTMLInputElement).checked).toBe(true)
+    expect(screen.getByText('English TTS')).toBeTruthy()
+    expect(screen.getAllByText('not downloaded').length).toBeGreaterThanOrEqual(1)
   })
 
   it('disables save and shows validation when all languages are unchecked', () => {
@@ -94,11 +108,58 @@ describe('VoiceSection', () => {
           download: {
             sensevoice: { status: 'absent', message: 'run save to fetch' },
             ttsCantonese: { status: 'ready', message: null },
+            ttsEnglish: { status: 'ready', message: null },
           },
         }}
       />,
     )
     expect(screen.getByText(/Voice notes may fail softly/i)).toBeTruthy()
     expect(screen.getByText('run save to fetch')).toBeTruthy()
+  })
+
+  it('warns when spoken replies are on and the English pack is absent or error', () => {
+    const { unmount } = wrap(
+      <VoiceSection
+        api={api()}
+        voice={{
+          ...baseVoice,
+          tts: true,
+          download: {
+            sensevoice: { status: 'ready', message: null },
+            ttsCantonese: { status: 'ready', message: null },
+            ttsEnglish: { status: 'absent', message: null },
+          },
+        }}
+      />,
+    )
+    expect(screen.getByText(/English TTS is not downloaded/i)).toBeTruthy()
+    unmount()
+
+    wrap(
+      <VoiceSection
+        api={api()}
+        voice={{
+          ...baseVoice,
+          tts: true,
+          download: {
+            sensevoice: { status: 'ready', message: null },
+            ttsCantonese: { status: 'ready', message: null },
+            ttsEnglish: { status: 'error', message: 'piper unpack failed' },
+          },
+        }}
+      />,
+    )
+    expect(screen.getByText(/English TTS is error/i)).toBeTruthy()
+    expect(screen.getByText('piper unpack failed')).toBeTruthy()
+  })
+
+  it('shows Cantonese and English spoken-reply copy in zh-HK', async () => {
+    await i18n.changeLanguage('zh-HK')
+    wrap(<VoiceSection api={api()} voice={baseVoice} />)
+    expect(screen.getByText('英文 TTS')).toBeTruthy()
+    expect(screen.getByText('廣東話 TTS')).toBeTruthy()
+    expect(screen.getAllByText(/廣東話同英文/).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('checkbox', { name: /語音回覆（廣東話同英文 TTS）/ })).toBeTruthy()
+    expect(screen.queryByText('語音回覆（廣東話 TTS）')).toBeNull()
   })
 })

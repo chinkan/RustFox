@@ -23,10 +23,26 @@ const defaultDownloadPack = (): VoicePackDownload => ({ status: 'absent', messag
 const defaultDownload = (): VoiceDownload => ({
   sensevoice: defaultDownloadPack(),
   ttsCantonese: defaultDownloadPack(),
+  ttsEnglish: defaultDownloadPack(),
 })
 
+/** GET may omit `voiceDownload` or one pack key; each pack still has a safe object. */
+type VoiceSettingsInput = Omit<VoiceSettings, 'download'> & {
+  download?: Partial<VoiceDownload> | null
+}
+
+function normalizeDownload(download?: Partial<VoiceDownload> | null): VoiceDownload {
+  const fallback = defaultDownload()
+  if (!download) return fallback
+  return {
+    sensevoice: download.sensevoice ?? fallback.sensevoice,
+    ttsCantonese: download.ttsCantonese ?? fallback.ttsCantonese,
+    ttsEnglish: download.ttsEnglish ?? fallback.ttsEnglish,
+  }
+}
+
 /** Defaults when GET omits voice (enabled absent → true; languages → yue+en). */
-export function normalizeVoiceSettings(voice?: VoiceSettings | null): VoiceSettings {
+export function normalizeVoiceSettings(voice?: VoiceSettingsInput | null): VoiceSettings {
   if (!voice) {
     return {
       enabled: true,
@@ -43,7 +59,7 @@ export function normalizeVoiceSettings(voice?: VoiceSettings | null): VoiceSetti
     enabled: voice.enabled,
     languages,
     tts: voice.tts,
-    download: voice.download ?? defaultDownload(),
+    download: normalizeDownload(voice.download),
   }
 }
 
@@ -67,22 +83,27 @@ export function voiceSettingsDirty(
   )
 }
 
-/** Fail-soft copy when voice is on but a required pack is not ready. */
+export type VoicePackKey = 'sensevoice' | 'ttsCantonese' | 'ttsEnglish'
+
+/** Fail-soft copy when voice is on but a required pack is not ready. `tts` needs both TTS packs (ADR-0063). */
 export function voicePackNeedsAttention(
   enabled: boolean,
   tts: boolean,
   download: VoiceDownload,
-): { pack: 'sensevoice' | 'ttsCantonese'; status: VoicePackDownload['status'] } | null {
+): { pack: VoicePackKey; status: VoicePackDownload['status'] } | null {
   if (!enabled) return null
   const stt = download.sensevoice.status
   if (stt === 'absent' || stt === 'error') {
     return { pack: 'sensevoice', status: stt }
   }
-  if (tts) {
-    const ttsSt = download.ttsCantonese.status
-    if (ttsSt === 'absent' || ttsSt === 'error') {
-      return { pack: 'ttsCantonese', status: ttsSt }
-    }
+  if (!tts) return null
+  const cantonese = download.ttsCantonese.status
+  if (cantonese === 'absent' || cantonese === 'error') {
+    return { pack: 'ttsCantonese', status: cantonese }
+  }
+  const english = download.ttsEnglish.status
+  if (english === 'absent' || english === 'error') {
+    return { pack: 'ttsEnglish', status: english }
   }
   return null
 }

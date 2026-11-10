@@ -138,6 +138,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         download: {
           sensevoice: { status: 'ready', message: null },
           ttsCantonese: { status: 'absent', message: null },
+          ttsEnglish: { status: 'absent', message: null },
         },
       },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },

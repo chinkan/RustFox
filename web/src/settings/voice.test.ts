@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import en from '../locales/en.json'
+import zhHK from '../locales/zh-HK.json'
+import type { VoiceDownload } from '../api/types'
 import {
   normalizeVoiceSettings,
   sortVoiceLanguages,
@@ -15,7 +18,33 @@ describe('voice settings helpers', () => {
       download: {
         sensevoice: { status: 'absent', message: null },
         ttsCantonese: { status: 'absent', message: null },
+        ttsEnglish: { status: 'absent', message: null },
       },
+    })
+  })
+
+  it('fills ttsEnglish when GET omits download or that pack', () => {
+    const omitted = normalizeVoiceSettings({
+      enabled: true,
+      languages: ['yue'],
+      tts: false,
+      download: undefined,
+    })
+    expect(omitted.download.ttsEnglish).toEqual({ status: 'absent', message: null })
+
+    const partial = normalizeVoiceSettings({
+      enabled: true,
+      languages: ['yue', 'en'],
+      tts: true,
+      download: {
+        sensevoice: { status: 'ready', message: 'ok' },
+        ttsCantonese: { status: 'downloading', message: 'fetching' },
+      },
+    })
+    expect(partial.download).toEqual({
+      sensevoice: { status: 'ready', message: 'ok' },
+      ttsCantonese: { status: 'downloading', message: 'fetching' },
+      ttsEnglish: { status: 'absent', message: null },
     })
   })
 
@@ -31,6 +60,7 @@ describe('voice settings helpers', () => {
       download: {
         sensevoice: { status: 'ready', message: null },
         ttsCantonese: { status: 'absent', message: null },
+        ttsEnglish: { status: 'absent', message: null },
       },
     })
     expect(voiceSettingsDirty(server, false, server.languages, server.tts)).toBe(true)
@@ -40,9 +70,10 @@ describe('voice settings helpers', () => {
   })
 
   it('flags STT pack attention when enabled and pack missing', () => {
-    const download = {
-      sensevoice: { status: 'error' as const, message: 'bin missing' },
-      ttsCantonese: { status: 'ready' as const, message: null },
+    const download: VoiceDownload = {
+      sensevoice: { status: 'error', message: 'bin missing' },
+      ttsCantonese: { status: 'ready', message: null },
+      ttsEnglish: { status: 'ready', message: null },
     }
     expect(voicePackNeedsAttention(true, false, download)).toEqual({
       pack: 'sensevoice',
@@ -52,10 +83,59 @@ describe('voice settings helpers', () => {
   })
 
   it('flags TTS pack when tts on and pack absent', () => {
-    const download = {
-      sensevoice: { status: 'ready' as const, message: null },
-      ttsCantonese: { status: 'absent' as const, message: null },
+    const download: VoiceDownload = {
+      sensevoice: { status: 'ready', message: null },
+      ttsCantonese: { status: 'absent', message: null },
+      ttsEnglish: { status: 'ready', message: null },
     }
     expect(voicePackNeedsAttention(true, true, download)?.pack).toBe('ttsCantonese')
+  })
+
+  it('flags English TTS when tts is on and that pack is absent or error', () => {
+    const absent: VoiceDownload = {
+      sensevoice: { status: 'ready', message: null },
+      ttsCantonese: { status: 'ready', message: null },
+      ttsEnglish: { status: 'absent', message: null },
+    }
+    expect(voicePackNeedsAttention(true, true, absent)).toEqual({
+      pack: 'ttsEnglish',
+      status: 'absent',
+    })
+
+    const error: VoiceDownload = {
+      ...absent,
+      ttsEnglish: { status: 'error', message: 'unpack failed' },
+    }
+    expect(voicePackNeedsAttention(true, true, error)).toEqual({
+      pack: 'ttsEnglish',
+      status: 'error',
+    })
+    expect(voicePackNeedsAttention(true, false, error)).toBeNull()
+    expect(voicePackNeedsAttention(false, true, error)).toBeNull()
+  })
+
+  it('does not flag English TTS while the pack is downloading or ready', () => {
+    const downloading: VoiceDownload = {
+      sensevoice: { status: 'ready', message: null },
+      ttsCantonese: { status: 'ready', message: null },
+      ttsEnglish: { status: 'downloading', message: null },
+    }
+    const ready: VoiceDownload = {
+      ...downloading,
+      ttsEnglish: { status: 'ready', message: null },
+    }
+    expect(voicePackNeedsAttention(true, true, downloading)).toBeNull()
+    expect(voicePackNeedsAttention(true, true, ready)).toBeNull()
+  })
+
+  it('names English and Cantonese spoken replies in both locales', () => {
+    expect(en.settings.voicePackTtsEnglish).toBe('English TTS')
+    expect(zhHK.settings.voicePackTtsEnglish).toBe('英文 TTS')
+    expect(en.settings.voiceHint).toMatch(/Cantonese and English/)
+    expect(en.settings.voiceTts).toMatch(/Cantonese and English/)
+    expect(zhHK.settings.voiceHint).toMatch(/廣東話同英文/)
+    expect(zhHK.settings.voiceTts).toMatch(/廣東話同英文/)
+    expect(en.settings.voiceHint).not.toMatch(/Cantonese TTS for/)
+    expect(zhHK.settings.voiceTts).not.toBe('語音回覆（廣東話 TTS）')
   })
 })
