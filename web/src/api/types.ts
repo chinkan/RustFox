@@ -433,6 +433,12 @@ export interface SettingsEditable {
   generalLocation: string
   defaultAutonomyMode: string
   portalPort: number
+  /** ADR-0063. Absent on GET means the pipeline stays on. */
+  voiceEnabled?: boolean
+  /** Ordered SenseVoice ids. Absent or empty means yue+en. */
+  voiceLanguages?: string[]
+  /** ADR-0063. Absent on GET means spoken replies stay off. */
+  voiceTts?: boolean
 }
 
 /** ADR-0057 — Enable is editable; token and secret are write-only masks. */
@@ -631,8 +637,12 @@ export interface Settings {
   systemPrompt: SystemPromptInfo
   sandbox: SandboxStatus
   switchbot: SwitchBotSettings
-  /** Omitted until Dev #385 lands; UI applies ADR defaults when absent. */
-  voice?: VoiceSettings
+  /**
+   * Read-only pack status (ADR-0063). Live GET puts this next to `editable`,
+   * not under a `voice` object. `editable.voiceEnabled`, `voiceLanguages`,
+   * and `voiceTts` are the writable fields.
+   */
+  voiceDownload?: Partial<VoiceDownload> | null
 }
 
 export type AutonomyMode = 'default' | 'autopilot' | 'plan'

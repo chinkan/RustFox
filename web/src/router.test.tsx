@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
 import { RouterProvider, createRouter, createMemoryHistory } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
@@ -7,6 +7,7 @@ import { authStore, bindAuthApi, __resetAuthForTests, type RouterContext } from 
 import { BootWatcher } from './hooks/useBootWatcher'
 import { ChatSession } from './hooks/useChatStream'
 import { fakeApi } from './api/fake'
+import type { Settings } from './api/types'
 import { __resetOfficePrefsForTests } from './agents/officePrefs'
 
 /**
@@ -91,6 +92,88 @@ describe('auth guard', () => {
 })
 
 describe('RBAC guard', () => {
+  it('shows live voice GET after a hard reload, ignoring a nested voice object', async () => {
+    await signIn()
+    const base = await fakeApi().getSettings()
+    const live: Settings = {
+      ...base,
+      editable: {
+        ...base.editable,
+        voiceEnabled: true,
+        voiceLanguages: ['en', 'ko'],
+        voiceTts: true,
+      },
+      voiceDownload: {
+        sensevoice: { status: 'ready', message: 'Ready.' },
+        ttsCantonese: { status: 'ready', message: 'Ready.' },
+        ttsEnglish: { status: 'ready', message: 'Ready.' },
+      },
+    }
+    // The wire payload has no `voice`. A leftover nested object must not win.
+    const wire = live as Settings & { voice?: unknown }
+    delete wire.voice
+    Object.assign(wire, {
+      voice: {
+        enabled: false,
+        languages: ['ja'],
+        tts: false,
+        download: {
+          sensevoice: { status: 'absent', message: null },
+          ttsCantonese: { status: 'absent', message: null },
+          ttsEnglish: { status: 'absent', message: null },
+        },
+      },
+    })
+    renderAt('/settings', makeContext({ getSettings: async () => wire }))
+
+    const spoken = (await screen.findByRole('checkbox', { name: /Spoken replies/i })) as HTMLInputElement
+    expect(spoken.checked).toBe(true)
+    const enable = screen.getByRole('checkbox', { name: /Enable voice pipeline/i }) as HTMLInputElement
+    expect(enable.checked).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /English \(en\)/i }) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /Korean \(ko\)/i }) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /Cantonese \(yue\)/i }) as HTMLInputElement).checked).toBe(false)
+    expect((screen.getByRole('checkbox', { name: /Japanese \(ja\)/i }) as HTMLInputElement).checked).toBe(false)
+
+    const heading = screen.getByRole('heading', { name: /Voice \(Telegram\)/i })
+    const section = heading.closest('section')
+    expect(section).toBeTruthy()
+    const voice = within(section as HTMLElement)
+    expect(voice.getByText('English TTS')).toBeTruthy()
+    expect(voice.getAllByText('ready')).toHaveLength(3)
+    expect(voice.getAllByText('Ready.')).toHaveLength(3)
+    expect(voice.queryByText(/not downloaded/i)).toBeNull()
+    expect(voice.queryByText(/fail softly/i)).toBeNull()
+  })
+
+  it('names an absent English pack from live voiceDownload when spoken replies are on', async () => {
+    await signIn()
+    const base = await fakeApi().getSettings()
+    const live: Settings = {
+      ...base,
+      editable: {
+        ...base.editable,
+        voiceEnabled: true,
+        voiceLanguages: ['yue', 'en'],
+        voiceTts: true,
+      },
+      voiceDownload: {
+        sensevoice: { status: 'ready', message: null },
+        ttsCantonese: { status: 'ready', message: null },
+        ttsEnglish: { status: 'absent', message: 'english weights missing' },
+      },
+    }
+    delete (live as Settings & { voice?: unknown }).voice
+    renderAt('/settings', makeContext({ getSettings: async () => live }))
+
+    const spoken = (await screen.findByRole('checkbox', { name: /Spoken replies/i })) as HTMLInputElement
+    expect(spoken.checked).toBe(true)
+    const heading = screen.getByRole('heading', { name: /Voice \(Telegram\)/i })
+    const voice = within(heading.closest('section') as HTMLElement)
+    expect(voice.getByText(/English TTS is not downloaded/i)).toBeTruthy()
+    expect(voice.getByText('english weights missing')).toBeTruthy()
+  })
+
   it('renders /settings for an admin with real masked data', async () => {
     await signIn()
     const router = renderAt('/settings', makeContext())

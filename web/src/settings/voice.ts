@@ -41,6 +41,31 @@ function normalizeDownload(download?: Partial<VoiceDownload> | null): VoiceDownl
   }
 }
 
+/**
+ * Live GET /api/settings has no nested `voice`. Writable fields live on
+ * `editable`; pack status is top-level `voiceDownload`.
+ */
+export function voiceFromSettings(settings?: {
+  editable?: {
+    voiceEnabled?: boolean
+    voiceLanguages?: readonly string[] | null
+    voiceTts?: boolean
+  } | null
+  voiceDownload?: Partial<VoiceDownload> | null
+} | null): VoiceSettings {
+  if (!settings) return normalizeVoiceSettings(undefined)
+  const editable = settings.editable
+  const rawLanguages = editable?.voiceLanguages
+  const languages =
+    rawLanguages && rawLanguages.length > 0 ? sortVoiceLanguages(rawLanguages) : []
+  return normalizeVoiceSettings({
+    enabled: editable?.voiceEnabled ?? true,
+    languages: languages.length > 0 ? languages : ['yue', 'en'],
+    tts: editable?.voiceTts ?? false,
+    download: settings.voiceDownload,
+  })
+}
+
 /** Defaults when GET omits voice (enabled absent → true; languages → yue+en). */
 export function normalizeVoiceSettings(voice?: VoiceSettingsInput | null): VoiceSettings {
   if (!voice) {

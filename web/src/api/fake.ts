@@ -98,6 +98,9 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         generalLocation: 'Hong Kong',
         defaultAutonomyMode: 'default',
         portalPort: 8090,
+        voiceEnabled: true,
+        voiceLanguages: ['yue', 'en'],
+        voiceTts: false,
       },
       masked: {
         telegramBotToken: '123…456',
@@ -131,15 +134,10 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       },
       restartRequired: ['portalPort'],
       switchbot: { enabled: false, tokenMasked: null, secretMasked: null },
-      voice: {
-        enabled: true,
-        languages: ['yue', 'en'],
-        tts: false,
-        download: {
-          sensevoice: { status: 'ready', message: null },
-          ttsCantonese: { status: 'absent', message: null },
-          ttsEnglish: { status: 'absent', message: null },
-        },
+      voiceDownload: {
+        sensevoice: { status: 'ready', message: null },
+        ttsCantonese: { status: 'absent', message: null },
+        ttsEnglish: { status: 'absent', message: null },
       },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
       sandbox: {

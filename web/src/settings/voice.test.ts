@@ -5,6 +5,7 @@ import type { VoiceDownload } from '../api/types'
 import {
   normalizeVoiceSettings,
   sortVoiceLanguages,
+  voiceFromSettings,
   voicePackNeedsAttention,
   voiceSettingsDirty,
 } from './voice'
@@ -126,6 +127,57 @@ describe('voice settings helpers', () => {
     }
     expect(voicePackNeedsAttention(true, true, downloading)).toBeNull()
     expect(voicePackNeedsAttention(true, true, ready)).toBeNull()
+  })
+
+  it('maps the live GET shape and ignores a nested voice object', () => {
+    const live = {
+      editable: {
+        voiceEnabled: true,
+        voiceLanguages: ['ko', 'en', 'en'],
+        voiceTts: true,
+      },
+      voiceDownload: {
+        sensevoice: { status: 'ready' as const, message: 'Ready.' },
+        ttsCantonese: { status: 'ready' as const, message: 'Ready.' },
+        ttsEnglish: { status: 'error' as const, message: 'unpack failed' },
+      },
+      voice: {
+        enabled: false,
+        languages: ['ja'],
+        tts: false,
+        download: {
+          sensevoice: { status: 'absent' as const, message: null },
+          ttsCantonese: { status: 'absent' as const, message: null },
+          ttsEnglish: { status: 'absent' as const, message: null },
+        },
+      },
+    }
+    expect(voiceFromSettings(live)).toEqual({
+      enabled: true,
+      languages: ['en', 'ko'],
+      tts: true,
+      download: {
+        sensevoice: { status: 'ready', message: 'Ready.' },
+        ttsCantonese: { status: 'ready', message: 'Ready.' },
+        ttsEnglish: { status: 'error', message: 'unpack failed' },
+      },
+    })
+    expect(voicePackNeedsAttention(true, true, voiceFromSettings(live).download)?.pack).toBe('ttsEnglish')
+  })
+
+  it('defaults a live GET that omits voice fields or ttsEnglish', () => {
+    expect(voiceFromSettings({ editable: {} })).toEqual(normalizeVoiceSettings(undefined))
+    const partial = voiceFromSettings({
+      editable: { voiceEnabled: false, voiceLanguages: [], voiceTts: true },
+      voiceDownload: {
+        sensevoice: { status: 'ready', message: null },
+        ttsCantonese: { status: 'downloading', message: 'fetching' },
+      },
+    })
+    expect(partial.enabled).toBe(false)
+    expect(partial.tts).toBe(true)
+    expect(partial.languages).toEqual(['yue', 'en'])
+    expect(partial.download.ttsEnglish).toEqual({ status: 'absent', message: null })
   })
 
   it('names English and Cantonese spoken replies in both locales', () => {
