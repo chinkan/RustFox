@@ -103,7 +103,7 @@ describe('RBAC guard', () => {
     // ADR-0043: detect-only card sits with Settings. Not an Active control.
     const heading = await screen.findByRole('heading', { name: 'OpenCode' })
     const section = heading.parentElement
-    expect(await screen.findByText('ready')).toBeTruthy()
+    expect(section?.textContent).toMatch(/ready/)
     expect(screen.getByText('2 models')).toBeTruthy()
     expect(section?.querySelector('input, select, textarea')).toBeNull()
     expect(section?.querySelector('button')?.textContent).toBe('Refresh')
