@@ -13,7 +13,10 @@ pub type ToolResult = Result<String>;
 /// Controls how tool execution progress is displayed to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolUiMode {
-    /// No tool progress messages at all (just "⏳ Thinking..." placeholder).
+    /// No tool progress or tool-result messages. On Telegram this is the same
+    /// quietness as `fully_silent`: no Thinking placeholder, no Working /
+    /// Running line, no completed tool bubble, including no post-then-delete.
+    /// The final assistant reply still posts.
     Silent,
     /// Show tool names + status, but hide args and command output.
     Minimal,
@@ -29,7 +32,7 @@ impl ToolUiMode {
             Some("minimal") => Self::Minimal,
             Some("silent") => Self::Silent,
             // backward compat: old "true"/"false" key. "false" meant no tool UI
-            // at all (placeholder only) → Silent. Absent key → new default Minimal.
+            // → Silent. Absent key → new default Minimal.
             Some("true") => Self::Verbose,
             Some("false") => Self::Silent,
             None => Self::Minimal,

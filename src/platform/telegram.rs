@@ -2524,10 +2524,14 @@ async fn run_telegram_user_turn(
 
     // Check tool UI mode for this user (per-chat /verbose). Unchanged default:
     // Minimal still shows Working / Running while a tool runs and removes the
-    // completed tool message. Silent still uses the Thinking placeholder.
+    // completed tool message. Verbose still shows args and the command result.
+    // Silent posts no tool progress or tool-result message, including no
+    // Thinking placeholder and no post-then-delete tool UI.
     let tool_ui_mode = read_tool_ui_mode(&agent, &user_id.to_string()).await;
     // Opt-in on the speaking bot only. Not stored per chat, not inherited
-    // from another bot. When on, this turn posts zero tool-call messages.
+    // from another bot. When on, this turn posts zero tool-call messages
+    // even if the stored mode is Minimal or Verbose. `/verbose` may still
+    // cycle that stored mode; it applies again when the flag is turned off.
     let fully_silent = agent.config.bot_fully_silent(&bot_id);
     let turn_ui_mode = if fully_silent {
         ToolUiMode::Silent
@@ -2572,28 +2576,6 @@ async fn run_telegram_user_turn(
     } else {
         None
     };
-
-    // When silent, send a transient "Thinking..." placeholder so the user
-    // knows the bot is processing. The placeholder is **independent** of the
-    // streaming output — when the first token arrives it is delivered as a NEW
-    // message, and the placeholder is deleted by `handle_message` after the
-    // stream completes (success or error). This keeps the placeholder a
-    // standalone progress signal rather than a doomed attempt to morph into the
-    // final answer.
-    // Fully silent skips the Thinking placeholder too: no in-progress bubble.
-    // Per-chat silent (fully_silent off) still sends it.
-    let placeholder_msg_id: Option<teloxide::types::MessageId> =
-        if !fully_silent && tool_ui_mode == ToolUiMode::Silent {
-            match bot.send_message(chat_id, "⏳ Thinking...").await {
-                Ok(sent) => Some(sent.id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to send thinking placeholder");
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
     // Streaming: set up token channel for progressive message display
     // Split threshold: use UTF-16 code units (Telegram's limit is 4096).
@@ -2857,15 +2839,6 @@ async fn run_telegram_user_turn(
     // Cleanup temp dir used for file downloads (async to avoid blocking the executor)
     if temp_dir.exists() {
         tokio::fs::remove_dir_all(&temp_dir).await.ok();
-    }
-
-    // Delete the "Thinking..." placeholder now that the response (or error
-    // reply below) has been delivered. Best-effort: ignore failures so a
-    // stale placeholder never blocks reporting the actual outcome.
-    if let Some(placeholder_id) = placeholder_msg_id {
-        if let Err(e) = bot.delete_message(chat_id, placeholder_id).await {
-            tracing::warn!(error = %e, "Failed to delete thinking placeholder");
-        }
     }
 
     if let Err(e) = &process_result {
@@ -3872,9 +3845,8 @@ mod tests {
     #[test]
     fn test_first_token_does_not_inherit_placeholder_msg_id() {
         // The streaming task must seed `current_msg_id` to `None` so the first
-        // token is delivered as a NEW message rather than editing the
-        // "Thinking..." placeholder. Source-inspection guard against future
-        // refactors that re-introduce the seeding behavior.
+        // token is a new message. Source-inspection guard against seeding that
+        // id from a progress placeholder.
         //
         // Construct the bad-pattern needle at runtime from pieces so the test
         // body itself never contains the contiguous substring being searched
@@ -3916,13 +3888,23 @@ mod tests {
     }
 
     #[test]
-    fn test_placeholder_is_deleted_after_streaming() {
-        // The Thinking placeholder must be cleaned up in `handle_message` after
-        // `stream_handle.await`, regardless of success/error outcome.
+    fn test_silent_does_not_post_thinking_placeholder() {
+        // Per-chat Silent is the same Telegram quietness as fully_silent:
+        // no Thinking placeholder send, and no post-then-delete of one.
         let source = include_str!("telegram.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("telegram.rs has a tests module");
+        let thinking = format!("{} {}", "⏳", "Thinking...");
         assert!(
-            source.contains("Failed to delete thinking placeholder"),
-            "handle_message must delete the Thinking placeholder after streaming completes"
+            !production.contains(&thinking),
+            "Silent must not post a Thinking placeholder"
+        );
+        let delete_warn = format!("Failed to delete {} placeholder", "thinking");
+        assert!(
+            !production.contains(&delete_warn),
+            "Silent must not post-then-delete a Thinking placeholder"
         );
     }
 

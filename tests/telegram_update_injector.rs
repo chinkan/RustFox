@@ -411,6 +411,71 @@ fn is_tool_progress(text: &str) -> bool {
         || text.contains("Tool activity")
 }
 
+/// Tool feedback that `/verbose` Silent and `fully_silent` must never post,
+/// including a completed bubble and a briefly-then-delete placeholder.
+fn is_forbidden_tool_ui(text: &str) -> bool {
+    is_tool_progress(text) || text.contains("Completed") || text.contains("Final answer sent below")
+}
+
+async fn remember_tool_ui_mode(agent: &Agent, mode: &str) {
+    agent
+        .memory
+        .remember("settings", &format!("tool_ui_mode_{ALLOWED}"), mode, None)
+        .await
+        .expect("store tool ui mode");
+}
+
+fn assert_no_tool_ui(sent: &[(i32, String)], deleted: &[i32]) {
+    let posted: Vec<(i32, String)> = sent
+        .iter()
+        .filter(|(_, text)| is_forbidden_tool_ui(text))
+        .cloned()
+        .collect();
+    assert!(
+        posted.is_empty(),
+        "must not send Thinking / Working / Running / completed tool UI, including post-then-delete; posted={posted:?} deleted={deleted:?} sent={sent:?}"
+    );
+}
+
+fn assert_final_text_posted(sent: &[(i32, String)], deleted: &[i32], needle: &str) {
+    let copies: Vec<i32> = sent
+        .iter()
+        .filter(|(_, text)| text.contains(needle))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(
+        !copies.is_empty(),
+        "final assistant text must be sent; sent={sent:?}"
+    );
+    assert!(
+        copies.iter().any(|id| !deleted.contains(id)),
+        "a final assistant copy must remain posted; copies={copies:?} deleted={deleted:?}"
+    );
+}
+
+async fn assert_typing_chat_action_allowed(api: &MockTelegramApi) {
+    let requests = api.server.received_requests().await.unwrap_or_default();
+    let mut saw_typing = false;
+    for req in &requests {
+        let path = req.url.path().to_ascii_lowercase();
+        if !path.contains("chataction") {
+            continue;
+        }
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            action, "typing",
+            "send_chat_action may stay only as Typing; path={path} body={body}"
+        );
+        saw_typing = true;
+    }
+    let paths: Vec<String> = requests.iter().map(|r| r.url.path().to_string()).collect();
+    assert!(
+        saw_typing,
+        "Typing chat action is still sent and is not tool UI; paths={paths:?}"
+    );
+}
+
 /// Owns temp home/config + Agent wired to a mock Bot and [`FixtureLlm`].
 struct HandleMessageHarness {
     _tmp: TempDir,
@@ -520,8 +585,8 @@ impl HandleMessageHarness {
             )
         });
 
-        // Prefer Silent UI so chat path uses Thinking placeholder + stream,
-        // without tool-notifier edit chatter (no tools in this harness).
+        // Prefer Silent UI so these no-tool chat turns do not spawn the
+        // tool notifier. Silent must not post a Thinking placeholder either.
         agent
             .memory
             .remember(
@@ -1050,6 +1115,135 @@ async fn default_cleans_completed_tool_messages_and_may_show_progress() {
         sent.iter().any(|(_, text)| text.contains(TOOL_TURN_REPLY)),
         "final assistant text must still be sent; sent={sent:?}"
     );
+    assert!(
+        sent.iter().all(|(_, text)| !text.contains("Thinking")),
+        "Minimal must not post a Thinking placeholder; sent={sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn verbose_tool_turn_still_shows_tool_ui_and_final_reply() {
+    let h = HandleMessageHarness::tool_turn(false).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    remember_tool_ui_mode(&h.agent, "verbose").await;
+    drive_tool_turn(&h, "main").await;
+
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Running:") || text.contains("Working")),
+        "Verbose must still show Running / Working tool UI; sent={sent:?}"
+    );
+    let running: Vec<i32> = sent
+        .iter()
+        .filter(|(_, text)| text.contains("Running:"))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(
+        !running.is_empty(),
+        "Verbose command UI still posts Running:; sent={sent:?}"
+    );
+    for id in &running {
+        assert!(
+            !deleted.contains(id),
+            "Verbose keeps the Running bubble and edits it; id={id} deleted={deleted:?}"
+        );
+    }
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+}
+
+#[tokio::test]
+async fn per_chat_silent_sends_no_tool_ui_and_keeps_final_reply() {
+    let h = HandleMessageHarness::tool_turn(false).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    remember_tool_ui_mode(&h.agent, "silent").await;
+    drive_tool_turn(&h, "main").await;
+
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_typing_chat_action_allowed(&h.api).await;
+}
+
+#[tokio::test]
+async fn fully_silent_suppresses_verbose_stored_mode() {
+    let h = HandleMessageHarness::tool_turn(true).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    remember_tool_ui_mode(&h.agent, "verbose").await;
+    drive_tool_turn(&h, "main").await;
+
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("verbose"));
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_typing_chat_action_allowed(&h.api).await;
+}
+
+#[tokio::test]
+async fn fully_silent_suppresses_minimal_stored_mode() {
+    let h = HandleMessageHarness::tool_turn(true).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    remember_tool_ui_mode(&h.agent, "minimal").await;
+    drive_tool_turn(&h, "main").await;
+
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("minimal"));
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+}
+
+#[tokio::test]
+async fn fully_silent_verbose_command_still_confirms_stored_mode() {
+    let h = HandleMessageHarness::tool_turn(true).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    injector()
+        .drive_handle_message(
+            &plain_text_message("/verbose"),
+            h.bot.clone(),
+            Arc::clone(&h.agent),
+        )
+        .await
+        .expect("/verbose");
+
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some("verbose"),
+        "fully_silent must still cycle the stored per-chat mode"
+    );
+    let sent = h.api.sent_snapshot();
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Tool UI verbose")),
+        "/verbose confirmation is a command reply, not tool feedback; sent={sent:?}"
+    );
+
+    drive_tool_turn(&h, "main").await;
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
 }
 
 #[tokio::test]
@@ -1365,6 +1559,60 @@ async fn voice_transcript_is_prefixed_and_tts_dual_sends() {
         text_at.unwrap() < voice_at.unwrap(),
         "text is sent before the voice copy; paths={paths:?}"
     );
+}
+
+/// Per-chat Silent (`fully_silent` off) still posts the assistant text and
+/// `sendVoice`. Typing may stay. No Thinking / tool bubble is posted.
+#[cfg(unix)]
+#[tokio::test]
+async fn per_chat_silent_still_sends_text_and_voice() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("model.int8.onnx"), b"x").unwrap();
+    std::fs::write(model.join("tokens.txt"), b"a\n").unwrap();
+    let stt = write_exec(dir.path(), "stt.sh", "#!/bin/sh\nprintf '%s\\n' '早晨'\n");
+    let tts = write_exec(
+        dir.path(),
+        "tts.sh",
+        "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf 'OggS' > \"$out\"\n",
+    );
+    let suffix = format!(
+        "\n[voice]\nengine = \"sensevoice\"\nmodel_dir = \"{model}\"\nstt_bin = \"{stt}\"\ntts = true\ntts_bin = \"{tts}\"\nopenrouter_stt = false\nlanguage = \"yue\"\n",
+        model = model.display(),
+        stt = stt.display(),
+        tts = tts.display(),
+    );
+    let h = HandleMessageHarness::with_config_suffix(STUB_REPLY, &suffix).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("silent"));
+    h.api.stub_voice_wav().await;
+    h.api.stub_send_voice().await;
+
+    injector()
+        .drive_handle_message(&voice_message(None), h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("voice note");
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, STUB_REPLY);
+    let paths = h.api.received_requests_paths().await;
+    assert!(
+        paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains("sendvoice")),
+        "Silent must still sendVoice; paths={paths:?}"
+    );
+    assert_typing_chat_action_allowed(&h.api).await;
 }
 
 fn plain_text_message(text: &str) -> teloxide::types::Update {
