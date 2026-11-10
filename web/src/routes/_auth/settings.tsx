@@ -1,6 +1,6 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError } from '../../api/client'
 import type { SettingsPatch, SoulName, SelfUpgradeChoice, AutonomyMode } from '../../api/types'
@@ -8,6 +8,7 @@ import { ensureAuthBootstrapped } from '../../auth'
 import { OfficePrefsSection } from '../../agents/officePrefs'
 import { OpenCodeStatusCard } from '../../settings/opencodeStatusCard'
 import { VoiceSection } from '../../settings/VoiceSection'
+import { voiceFromSettings } from '../../settings/voice'
 
 export const Route = createFileRoute('/_auth/settings')({
   beforeLoad: async ({ context }) => {
@@ -31,6 +32,7 @@ function SettingsPage() {
   const queryClient = useQueryClient()
 
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
+  const voice = useMemo(() => voiceFromSettings(settings.data), [settings.data])
 
   const [form, setForm] = useState<SettingsPatch>({
     model: '', generalLocation: '', defaultAutonomyMode: 'default', portalPort: 8090,
@@ -253,7 +255,7 @@ function SettingsPage() {
 
           <OpenCodeStatusCard api={api} />
 
-          <VoiceSection api={api} voice={settings.data?.voice} />
+          <VoiceSection api={api} voice={voice} />
 
           <section className="section" style={{ gridColumn: '1 / -1' }}>
             <h2 className="section-title">{t('settings.promptTitle')}</h2>
