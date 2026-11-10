@@ -29,4 +29,5 @@ The portal exposes powerful operations (chat as the agent, config changes) and m
 - Session cookie without TLS is plaintext on the wire — acceptable **only** because MVP is loopback/private-network; the docs must say so loudly.
 - Generated-token-on-startup survives restarts only if it's persisted; chosen deployment: log it and tell operators to set `token_sha256` for stable auth.
 - Whitelist grows endpoint by endpoint; adding a config knob requires touching both the projection and PATCH map (accepted maintenance cost for safety).
+- MCP server rows stay on dedicated `/api/settings/mcp/*` routes (ADR-0041), not on the Settings field PATCH whitelist. Official Registry reads (`/api/mcp/registry/*`, ADR-0041 §11) are public-metadata GETs under the same portal session auth. They are not Settings field PATCH entries and they do not store registry secrets.
 - `set_model` persists to `[[provider]]`/`[openrouter]` and takes effect immediately; other edits report `restart_required: true`.

@@ -195,6 +195,39 @@ Custom only. Presets → `400 preset_delete_forbidden`.
 ### POST /api/settings/mcp/{name}/enable · `/disable`
 Persist `enabled` and hot-connect / disconnect that server only (no process restart). Exa first enable requires `{"privacyAccepted":true}` when consent is unset (`400 privacy_required`). Config-owned Exa → `400 config_owned`.
 
+### GET /api/mcp/registry/search (ADR-0041 §11)
+Session-gated. Proxies Official Registry `GET https://registry.modelcontextprotocol.io/v0.1/servers?version=latest` plus `search` / `cursor` / `limit` when sent.
+
+Query: `q` (empty or omitted = unfiltered list; nonempty must be ≥3 Unicode characters after trim, else `400 search_too_short` and the registry is not called; surrounding whitespace is preserved on the upstream `search` value), `cursor` (opaque, max 512 bytes), `limit` (integer 1–100, else `400 invalid_limit`).
+
+`200` is the registry list (`servers`, `metadata.nextCursor`, `metadata.count`) with an `install` object added on each server record. Upstream down, timeout, or non-success → `502 {"error":{"code":"registry_unavailable","message":"Official MCP Registry is unreachable"}}`. The portal process stays up.
+
+### GET /api/mcp/registry/servers/{urlencodedName}
+Session-gated. `{urlencodedName}` is one path segment: encode `/` as `%2F` (`io.github.user%2Fweather`). Proxies `GET /v0.1/servers/{name}/versions/latest`. `200` is that registry record plus `install`. Unknown name → `404`. Invalid name → `400 invalid_name`. Upstream down → `502 registry_unavailable`.
+
+`install` (both routes):
+
+| Field | Meaning |
+| --- | --- |
+| `registryName` | Full registry `server.name` (UI subtitle). Not persisted. |
+| `suggestedSlug` | `[[mcp_servers]].name` to PUT. Last `/` segment, lowercased, invalid chars → `-`. Collision with an existing name or `exa` / `jina` / `google` → `-2` … `-20`, then a short hash. Same Custom URL (no `command`) reuses that row's name. |
+| `installable` | True only for a usable `remotes[]` entry with `type=streamable-http`. |
+| `blockReason` | `null`, or `sse`, `stdio`, `no_remote`, `unsupported`. |
+| `transport` | Chosen remote type, or null. |
+| `remoteTypes` | Distinct remote types, registry order. |
+| `hasPackages` | Registry `packages[]` is non-empty. |
+| `url` | Install URL, or the SSE URL for display when `blockReason=sse`. Null when the URL is templated or contains a credential. |
+| `description`, `version`, `title`, `status`, `isLatest` | Copied for the UI. `status` is official registry status (`active` / `deprecated` / `deleted`). |
+| `enabled` | Always `true` (default for a new install). |
+| `bearer` | `null`, or `{required, placeholders}`. Present when `Authorization` is Bearer or absent-valued. The token is **not** copied. PUT `bearer` is the token only (no `Bearer ` prefix); the upsert seals it. |
+| `headers` | Non-Authorization headers: `{name, isSecret, required, mapsTo:"header", placeholders, literal}`. `literal` is set only for a concrete non-secret value. `isSecret` / credential names / `{placeholder}` values are not echoed. |
+
+**Install** is the existing upsert, once per server. There is no batch route. Multi-add is N sequential calls:
+
+`PUT /api/settings/mcp/{suggestedSlug}` with `{url, enabled:true, bearer?, headers?}`.
+
+Copy `literal` headers through. Operator-supplied bearer and secret header values are plaintext in that body; the upsert seals them (ADR-0041 §6) and hot-reloads that server. Omit `bearer` / a header to keep the previous sealed value on re-install. Best-effort: a failed PUT does not roll back earlier names. Do not PUT `exa`, `jina`, or `google`. SSE-only and package-only rows are not installable (`installable:false`). When both `streamable-http` and `sse` exist, `url` is the streamable-http remote.
+
 ### GET /api/soul · PUT /api/soul
 Markdown files, whitelisted names only: `SOUL.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, and `system` (ADR 0011 R7 — the system-prompt file).
 GET → `200 {"name","content","mtime"}`; PUT body `{"name","content"}` → backup `*.bak` then write; fires the `soul_updated` notification so the agent re-reads identity files.

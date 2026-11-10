@@ -16,6 +16,7 @@ pub mod error;
 pub mod google;
 pub mod install;
 pub mod mcp;
+pub mod mcp_registry;
 pub mod secrets;
 pub mod settings;
 pub mod static_serve;
@@ -326,6 +327,10 @@ pub struct PortalState {
     /// SwitchBot Open API tools (ADR-0057). Same `Arc` as the ToolRegistry
     /// so Portal Settings enable without a restart.
     pub switchbot: crate::switchbot::SwitchBotTools,
+    /// Official MCP Registry origin (ADR-0041 §11). Tests point this at a
+    /// stand-in. Production uses the official host unless
+    /// `RUSTFOX_MCP_REGISTRY_URL` is an http(s) URL.
+    pub mcp_registry_base: String,
 }
 
 impl PortalState {
@@ -371,7 +376,14 @@ impl PortalState {
                 crate::sandbox::SandboxMode::Trusted,
             )),
             switchbot: crate::switchbot::SwitchBotTools::disconnected(),
+            mcp_registry_base: crate::mcp_registry::registry_base_from_env(),
         }
+    }
+
+    /// Point registry reads at another origin (tests, or a pinned mirror).
+    pub fn with_mcp_registry_base(mut self, base: impl Into<String>) -> Self {
+        self.mcp_registry_base = crate::mcp_registry::normalize_registry_base(Some(&base.into()));
+        self
     }
 
     /// Share the process SwitchBot connector (vault + live enable flag).
@@ -530,6 +542,11 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
         .route(
             "/settings/mcp/{name}/disable",
             axum::routing::post(mcp::disable_server),
+        )
+        .route("/mcp/registry/search", get(mcp_registry::search))
+        .route(
+            "/mcp/registry/servers/{name}",
+            get(mcp_registry::server_detail),
         )
         .route("/soul", get(settings::get_soul))
         .route("/soul", axum::routing::put(settings::put_soul))

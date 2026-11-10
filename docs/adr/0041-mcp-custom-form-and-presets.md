@@ -1,6 +1,6 @@
 # ADR-0041: Portal MCP presets and Custom HTTP form
 
-- **Status:** Accepted. **Amended by ADR-0042** (wizard Exa-only exception).
+- **Status:** Accepted. **Amended by ADR-0042** (wizard Exa-only exception). **Amended (#393)** — Official MCP Registry discover and remote Streamable HTTP install on `/mcp` (§11).
 - **Date:** 2026-10-21
 - **Amends:** ADR-0023 (one-tap Exa). Exa tools pin, consent, `web_search` stub, and soft 429 stay on the Exa preset. Preset storage and the Custom entry point follow this ADR.
 - **Depends on:** ADR-0016 (secrets as `secret:NAME` in SecretStore), ADR-0004 / ADR-0006 (portal Settings)
@@ -61,6 +61,8 @@ Jina and Custom do not gain the stub, the consent record, or the soft-429 copy.
 The form lives on portal **Settings**. Settings stays the full MCP form (presets + Custom).
 
 **Amended by ADR-0042:** the web setup wizard may offer an **optional, skippable Exa-only** page (keyless + one-time consent). Custom, Jina, and Google stay out of the wizard. There is still no full MCP form in the wizard.
+
+**Amended (#393):** presets and Custom also live on the portal **`/mcp`** page. Integrations stays Google and SwitchBot. Official Registry search and remote Streamable HTTP install are specified in §11. Settings field PATCH is unchanged. MCP server rows stay on `/api/settings/mcp/*`.
 
 ### 4. Telegram is not a form (Q4 / Q5 A)
 
@@ -133,6 +135,30 @@ Saving, enabling, or disabling one server connects or disconnects **that** serve
 
 This ADR amends ADR-0023. The implementation PR **Closes #172**. That work starts after #240 Slice B. This document does not implement the form and does not tag a release.
 
+### 11. Official MCP Registry discover and remote install (#393)
+
+Portal search does not call the registry from the browser. The portal proxies two reads, under the same session auth as the rest of the API (ADR-0006). These routes are not Settings field PATCH entries. MCP server rows stay on `/api/settings/mcp/*`.
+
+- `GET /api/mcp/registry/search?q=&cursor=&limit=` calls `GET https://registry.modelcontextprotocol.io/v0.1/servers` with `version=latest`. `search` is set from `q`. `cursor` and `limit` are forwarded when the client sends them.
+- `GET /api/mcp/registry/servers/{urlencodedName}` calls `GET /v0.1/servers/{name}/versions/latest`.
+
+`q` is either omitted or empty (unfiltered list) or at least 3 Unicode characters after trimming surrounding whitespace. A shorter nonempty query is rejected locally (`400 search_too_short`) and is not forwarded. The registry returns 422 for that case. When the trimmed length is at least 3, surrounding whitespace stays on the forwarded `search` value. `limit`, when present, is an integer from 1 to 100. If the registry is down, times out, or returns a non-success status other than a detail 404, the portal answers `502 registry_unavailable` and stays up. A detail miss is `404`.
+
+Each registry record in the proxy JSON gains an `install` object. The rest of the registry payload is passed through. `install.registryName` is the full registry `server.name` (the UI subtitle). The persisted `[[mcp_servers]].name` is `install.suggestedSlug`: the segment after the last `/`, lowercased, with any character outside ASCII alphanumeric, `_`, `-`, and `.` replaced by `-`. A collision with an existing server name, or with the reserved names `exa`, `jina`, and `google`, appends `-2`, then `-3`, up through `-20`. When those suffixes are taken, the slug appends a short hash of the full registry name. If an existing Custom row (no `command`) already uses the same remote URL, the suggested slug is that row's name so a re-install is the existing upsert. A stdio row is not reused.
+
+Install uses the existing Custom upsert `PUT /api/settings/mcp/{slug}` (§5, §6, and §9). There is no batch API. Multi-add is N sequential PUTs. A later failure does not roll back earlier rows.
+
+Only a `remotes[]` entry whose `type` is `streamable-http` is installable. If both `streamable-http` and `sse` are present, the streamable-http remote is the one installed. Mapping:
+
+- remote `url` → Custom `url` (no credential in the URL; a templated URL or a URL with userinfo is not installable)
+- an `Authorization` header that is Bearer, or an empty `Authorization` header → Custom `bearer`, sealed by the upsert to `secret:mcp.<slug>.auth_token`
+- other headers with `isSecret`, or a credential header name → Custom `headers`, sealed by the existing header sealer
+- header values that contain `{placeholder}` are not copied as live secrets; the operator supplies the value on PUT
+- `enabled` defaults to true on install
+- `command`, `args`, and `env` stay empty
+
+`install.installable` is false when this path cannot install the record. `install.blockReason` is `sse` (SSE only), `stdio` (packages and no streamable-http remote), `no_remote`, or `unsupported` (the streamable-http URL is missing, templated, or contains a credential). SSE transport and portal stdio launch from `packages[]` stay out of scope. A browser-direct fetch of the registry is not the supported path.
+
 ### Soft checks (implementation PR)
 
 - Custom header map is sent on the HTTP connection, including a non-Bearer header.
@@ -145,7 +171,10 @@ This ADR amends ADR-0023. The implementation PR **Closes #172**. That work start
 - A full MCP form (name, URL, Bearer, header map) or Jina / Custom / Google in the setup wizard. ADR-0042 allows an optional Exa-only keyless+consent page in the web wizard; that exception is not a Non-goal.
 - A Telegram form for name, URL, Bearer, or headers.
 - Changing Google MCP (#119).
-- Stdio server launch changes.
+- Stdio server launch changes, including portal install of registry `packages[]` (`command` / `args` / `env`).
+- An SSE client, or installing a registry server that only publishes an `sse` remote.
+- A batch MCP upsert API. Multi-add is N sequential Custom PUTs.
+- A browser-direct Official Registry client as the portal path.
 - A new OAuth flow.
 - Presets beyond Exa and Jina.
 - Jina or Custom copies of the Exa stub, consent record, or soft-429 prompt.
@@ -158,6 +187,8 @@ This ADR amends ADR-0023. The implementation PR **Closes #172**. That work start
 - Operators can point at `env:NAME` and keep the key out of the config file.
 - `McpServerConfig` gains a header map; HTTP auth learns `env:NAME`; plaintext credential fields get migrate-and-scrub; `McpManager` learns a one-server disconnect.
 - `config.example.toml` still shows Exa Bearer and a key in the URL. The implementation PR rewrites that example to refs and the pinned URL.
+- `/mcp` hosts presets, Custom, and Official Registry search. Installing a registry remote is the Custom upsert, including secret sealing and per-server hot reload.
+- Registry reads are authenticated GETs under `/api/mcp/registry/*`. They do not widen the Settings PATCH whitelist. Server rows remain `/api/settings/mcp/*`.
 
 ## Related
 
@@ -165,4 +196,5 @@ This ADR amends ADR-0023. The implementation PR **Closes #172**. That work start
 - ADR-0016 — `secret:NAME` and SecretStore.
 - ADR-0042 / #256 — optional skippable Exa one-tap in the web setup wizard (Exa-only exception to §3 / Non-goals).
 - #172 — tracking. The implementation PR Closes it, after #240 Slice B.
+- #393 — Official Registry search and streamable-http install (§11). No release tag in that change.
 - #119 — Google MCP, unchanged.
