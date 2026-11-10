@@ -12,6 +12,9 @@
     "memory": "Memory",
     "tasks": "Scheduled Tasks",
     "settings": "Settings",
+    "integrations": "Integrations",
+    "mcp": "MCP",
+    "devices": "Devices",
     "signOut": "Sign out",
     "signOutEverywhere": "Sign out everywhere",
     "skills": "Skills"
@@ -282,6 +285,32 @@
     "devicesCreated": "Device created.",
     "devicesRotated": "Token rotated. The previous token no longer works.",
     "devicesRevoked": "Device revoked."
+  },
+  "googleConnect": {
+    "title": "Google",
+    "intro": "Click Connect Google to link the official Gmail MCP through OAuth (read mail, draft messages). You do not paste a client secret here.",
+    "connect": "Connect Google",
+    "noClientId": "No OAuth client id is available yet. Add a Desktop client id under Advanced, then use Connect Google.",
+    "advancedSummary": "Advanced",
+    "advancedWhen": "Official releases often bake in a client id—if you see Connect Google above, you usually do not need Advanced. Use Advanced when you compiled RustFox yourself and no id was baked in.",
+    "desktopIdLabel": "Desktop client id",
+    "desktopIdHelp": "Google Cloud Console → Credentials → Create credentials → OAuth client ID → Application type Desktop app (not Web). Paste the Client ID only—no client secret (PKCE public client).",
+    "redirectHelp": "RustFox uses the callback URL below (portal port {{portalPort}} from Settings → Editable). If the Console asks for a redirect URI, use this exact URL. Desktop app clients are usually more permissive.",
+    "save": "Save",
+    "saving": "Saving…",
+    "saveEmptyHint": "Leave empty and save to clear the advanced id and fall back to the baked-in client when one exists."
+  },
+  "integrations": {
+    "title": "Integrations",
+    "subtitle": "Google sign-in and SwitchBot credentials — same APIs as before, on their own page."
+  },
+  "mcpPage": {
+    "title": "MCP",
+    "subtitle": "Preset and custom MCP servers — enable, credentials, and HTTP endpoints."
+  },
+  "devices": {
+    "title": "Devices",
+    "subtitle": "Issue and rotate WebSocket tokens for hardware text channels."
   },
   "notFound": {
     "title": "404 — Route not found",

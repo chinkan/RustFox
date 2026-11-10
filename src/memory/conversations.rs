@@ -163,6 +163,48 @@ impl MemoryStore {
         Ok(id)
     }
 
+    /// Replace every `[SUMMARY]` row for this conversation with one document.
+    ///
+    /// Tier-3 compaction stores a single structured handoff (ADR-0064). Older
+    /// summary rows are removed so reload cannot concatenate layers.
+    pub async fn replace_summary_message(
+        &self,
+        conversation_id: &str,
+        message: &ChatMessage,
+    ) -> Result<String> {
+        {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare(
+                "SELECT rowid FROM messages
+                 WHERE conversation_id = ?1
+                   AND role = 'system'
+                   AND content LIKE '[SUMMARY]%'",
+            )?;
+            let rowids = stmt
+                .query_map(rusqlite::params![conversation_id], |row| {
+                    row.get::<_, i64>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for rowid in rowids {
+                // Embeddings are optional; a missing vec row must not block replace.
+                let _ = conn.execute(
+                    "DELETE FROM message_embeddings WHERE rowid = ?1",
+                    rusqlite::params![rowid],
+                );
+            }
+            conn.execute(
+                "DELETE FROM messages
+                 WHERE conversation_id = ?1
+                   AND role = 'system'
+                   AND content LIKE '[SUMMARY]%'",
+                rusqlite::params![conversation_id],
+            )
+            .context("Failed to replace summary document")?;
+        }
+        self.save_message(conversation_id, message).await
+    }
+
     /// Clear a conversation (soft archive: mark as archived, don't delete messages).
     /// Scoped to `(platform, bot_id, user_id)` so clearing bot A does not archive bot B.
     pub async fn clear_conversation(

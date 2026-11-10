@@ -69,6 +69,11 @@ function MemoryPage() {
                 <span className="mono">score {m.score.toFixed(2)}</span>
               </div>
               <p style={{ margin: '9px 0 0', fontSize: 13.5 }}>{m.text}</p>
+              {m.evidenceText ? (
+                <p className="mono" style={{ margin: '6px 0 0', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                  {m.evidenceText}
+                </p>
+              ) : null}
             </div>
           ))}
           {results.data?.length === 0 ? (

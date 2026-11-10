@@ -54,8 +54,8 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     reloadAgents: async () => ({ skillsLoaded: 91, agentsLoaded: 10 }),
     searchMemory: async (q: string) =>
       [
-        { id: 'k1', kind: 'fact' as const, text: 'Kan prefers HKT for all match reporting', score: 0.98, createdAt: null },
-        { id: 'k2', kind: 'knowledge' as const, text: 'HKO weather API endpoints', score: 0.91, createdAt: null },
+        { id: 'k1', kind: 'fact' as const, text: 'Kan prefers HKT for all match reporting', score: 0.98, createdAt: null, evidence: { kind: 'unknown' }, evidenceText: '⚠️ 無來源' },
+        { id: 'k2', kind: 'knowledge' as const, text: 'HKO weather API endpoints', score: 0.91, createdAt: null, evidence: { kind: 'url', ref: 'https://data.weather.gov.hk/' }, evidenceText: 'evidence: {"kind":"url","ref":"https://data.weather.gov.hk/"}' },
       ].filter((m) => m.text.toLowerCase().includes(q.toLowerCase())),
     getScheduleTimezone: async () => ({
       timezone: 'Asia/Hong_Kong',

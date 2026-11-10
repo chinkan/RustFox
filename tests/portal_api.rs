@@ -1845,10 +1845,11 @@ async fn memory_search_smoke() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_json(res).await;
     assert!(
-        body.as_array()
-            .unwrap()
-            .iter()
-            .any(|i| i["text"].as_str().unwrap_or("").contains("portal")),
+        body.as_array().unwrap().iter().any(|i| {
+            i["text"].as_str().unwrap_or("").contains("portal")
+                && i["evidence"]["kind"] == "unknown"
+                && i["evidenceText"].as_str().unwrap_or("").contains("無來源")
+        }),
         "search miss: {body}"
     );
 }
