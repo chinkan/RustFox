@@ -241,13 +241,14 @@ async fn fixture(portal: PortalConfig) -> Fixture {
 /// Same fixture, but lets a test tweak the loaded `Config` before the fake
 /// agent is built (e.g. set `system_prompt_file` for ADR 0011 R7 tests).
 async fn fixture_with(portal: PortalConfig, tweak: impl FnOnce(&mut Config)) -> Fixture {
-    assemble(portal, tweak, None).await
+    assemble(portal, tweak, None, None).await
 }
 
 async fn assemble(
     portal: PortalConfig,
     tweak: impl FnOnce(&mut Config),
     switchbot: Option<rustfox::switchbot::SwitchBotTools>,
+    registry_base: Option<&str>,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -271,6 +272,9 @@ async fn assemble(
     );
     if let Some(tools) = switchbot {
         state = state.with_switchbot(tools);
+    }
+    if let Some(base) = registry_base {
+        state = state.with_mcp_registry_base(base);
     }
     Fixture {
         app: rustfox::portal::router(state.clone()),
@@ -353,6 +357,8 @@ async fn protected_routes_401_without_credentials() {
         "/api/settings",
         "/api/soul?name=SOUL.md",
         "/api/stats",
+        "/api/mcp/registry/search",
+        "/api/mcp/registry/servers/io.github.acme%2Fweather",
     ] {
         let res = f.app.clone().oneshot(get(path)).await.unwrap();
         assert_eq!(
@@ -363,6 +369,123 @@ async fn protected_routes_401_without_credentials() {
         let body = body_json(res).await;
         assert_eq!(body["error"]["code"], "unauthenticated", "{path}: {body}");
     }
+}
+
+#[tokio::test]
+async fn mcp_registry_search_rejects_short_query_without_calling_upstream() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/mcp/registry/search?q=ab"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "search_too_short");
+}
+
+#[tokio::test]
+async fn mcp_registry_search_and_detail_annotate_install_drafts() {
+    let upstream = wiremock::MockServer::start().await;
+    let record = serde_json::json!({
+        "server": {
+            "name": "io.github.acme/weather",
+            "description": "Weather tools",
+            "version": "1.0.0",
+            "remotes": [{
+                "type": "streamable-http",
+                "url": "https://example.com/mcp",
+                "headers": [{
+                    "name": "Authorization",
+                    "value": "Bearer {token}",
+                    "isSecret": true,
+                    "isRequired": true
+                }]
+            }]
+        },
+        "_meta": {
+            "io.modelcontextprotocol.registry/official": { "status": "active", "isLatest": true }
+        }
+    });
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v0.1/servers"))
+        .and(wiremock::matchers::query_param("version", "latest"))
+        .and(wiremock::matchers::query_param("search", "weather"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "servers": [record.clone()],
+                "metadata": { "count": 1, "nextCursor": "next-1" }
+            })),
+        )
+        .mount(&upstream)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/v0.1/servers/io.github.acme%2Fweather/versions/latest",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(record))
+        .mount(&upstream)
+        .await;
+
+    let f = assemble(with_token_token(), |_| {}, None, Some(&upstream.uri())).await;
+    let path = f.state.config_path.as_path();
+    let mut text = std::fs::read_to_string(path).unwrap();
+    text.push_str(
+        "\n[[mcp_servers]]\nname = \"weather\"\nurl = \"https://other.example/mcp\"\nenabled = true\n",
+    );
+    std::fs::write(path, text).unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            get("/api/mcp/registry/search?q=weather&limit=10"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "search proxy");
+    let body = body_json(res).await;
+    assert_eq!(body["metadata"]["nextCursor"], "next-1");
+    assert_eq!(body["servers"][0]["install"]["suggestedSlug"], "weather-2");
+    assert_eq!(body["servers"][0]["install"]["installable"], true);
+    assert_eq!(
+        body["servers"][0]["install"]["url"],
+        "https://example.com/mcp"
+    );
+    assert_eq!(
+        body["servers"][0]["install"]["registryName"],
+        "io.github.acme/weather"
+    );
+    assert!(body["servers"][0]["install"]["bearer"]["required"]
+        .as_bool()
+        .unwrap());
+    // Official header values stay on `server` so the UI can map static headers.
+    // The install draft does not copy the template into a sealed field.
+    assert!(
+        body["servers"][0]["server"]["remotes"][0]["headers"][0]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Bearer {token}")
+    );
+    assert!(!body["servers"][0]["install"]
+        .to_string()
+        .contains("Bearer {token}"));
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            get("/api/mcp/registry/servers/io.github.acme%2Fweather"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "detail proxy");
+    let body = body_json(res).await;
+    assert_eq!(body["install"]["suggestedSlug"], "weather-2");
+    assert_eq!(body["server"]["name"], "io.github.acme/weather");
 }
 
 #[tokio::test]
@@ -866,7 +989,7 @@ async fn settings_patch_switchbot_seals_secrets_and_enables_live_tools() {
         rustfox::config::SwitchBotConfig::default(),
         store.clone(),
     );
-    let f = assemble(with_token_token(), |_| {}, Some(switchbot)).await;
+    let f = assemble(with_token_token(), |_| {}, Some(switchbot), None).await;
     let token = "sb-token-PLAINTEXT-should-not-hit-disk";
     let secret = "sb-secret-PLAINTEXT-should-not-hit-disk";
     let req = bearer(

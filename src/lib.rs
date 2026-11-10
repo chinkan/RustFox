@@ -25,6 +25,7 @@ pub mod loop_detector;
 pub mod loop_runner;
 pub mod mcp;
 pub mod mcp_presets;
+pub mod mcp_registry;
 pub mod memory;
 pub mod memory_tools;
 pub mod opencode;
