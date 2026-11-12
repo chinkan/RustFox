@@ -6,6 +6,7 @@
 //!
 //! ADR-0056: `[device_ws]` shares this bind and port. When only the device
 //! socket is on, [`serve_device_api_only`] binds the same address without the SPA.
+//! ADR-0066 adds `POST/GET /api/device/v1/audio` on that same bind.
 
 pub mod auth;
 pub mod chat;
@@ -26,6 +27,7 @@ pub mod url;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio_util::sync::CancellationToken;
@@ -348,6 +350,10 @@ pub struct PortalState {
     /// Live `[voice]` settings (ADR-0063). Production shares the agent's
     /// handle so a Settings save is what the next Telegram note reads.
     pub voice: crate::asr::VoiceRuntime,
+    /// Authenticated device sockets that can receive `assistant_audio`.
+    pub device_live: crate::device_ws::LiveSockets,
+    /// PCM bytes named by `assistant_audio`. Not a replay queue.
+    pub device_pcm: crate::device_audio::PcmStore,
 }
 
 impl PortalState {
@@ -396,6 +402,8 @@ impl PortalState {
             switchbot: crate::switchbot::SwitchBotTools::disconnected(),
             mcp_registry_base: crate::mcp_registry::registry_base_from_env(),
             voice,
+            device_live: crate::device_ws::LiveSockets::new(),
+            device_pcm: crate::device_audio::PcmStore::new(),
         }
     }
 
@@ -608,7 +616,14 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
     // via the static fallback (clients branch on the error envelope).
     let mut public = public;
     if device_ws_on {
-        public = public.route("/device/v1/ws", get(devices::ws));
+        public = public
+            .route("/device/v1/ws", get(devices::ws))
+            .route(
+                "/device/v1/audio",
+                post(devices::post_audio)
+                    .layer(DefaultBodyLimit::max(crate::device_audio::MAX_WAV_BYTES)),
+            )
+            .route("/device/v1/audio/{id}", get(devices::get_audio));
     }
 
     let api = public.merge(protected).fallback(|| async {
@@ -685,10 +700,16 @@ pub async fn serve_device_api_only(
     Ok(())
 }
 
-/// Router used when the portal SPA is off: the device socket and nothing else.
+/// Router used when the portal SPA is off: the device socket, device audio, and nothing else.
 pub fn device_api_router(state: PortalState) -> Router {
     Router::new()
         .route(crate::device_ws::WS_PATH, get(devices::ws))
+        .route(
+            crate::device_ws::AUDIO_PATH,
+            post(devices::post_audio)
+                .layer(DefaultBodyLimit::max(crate::device_audio::MAX_WAV_BYTES)),
+        )
+        .route(crate::device_ws::AUDIO_ID_PATH, get(devices::get_audio))
         .fallback(|| async {
             (
                 axum::http::StatusCode::NOT_FOUND,

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -15,6 +16,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::device_audio::{self, AudioHost, LibraryDeviceAudio};
 use crate::device_ws::{
     self, DeviceInbound, DeviceRecord, DeviceTurnOutcome, DeviceUserText, IssuedDevice,
 };
@@ -160,5 +162,77 @@ pub async fn ws(
         Err(e) => return PortalError::internal(e).into_response(),
     };
     let inbound: Arc<dyn DeviceInbound> = Arc::new(PortalDeviceInbound(Arc::clone(&state.agent)));
-    device_ws::accept(registry, inbound, headers, upgrade).await
+    device_ws::accept(
+        registry,
+        inbound,
+        state.device_live.clone(),
+        headers,
+        upgrade,
+    )
+    .await
+}
+
+fn audio_host(state: &PortalState, registry: crate::device_ws::DeviceRegistry) -> AudioHost {
+    let config = state.agent.config();
+    let engine = Arc::new(LibraryDeviceAudio::new(
+        state.voice.snapshot(),
+        config.openrouter.base_url.clone(),
+        config.openrouter.api_key.clone(),
+    ));
+    let inbound: Arc<dyn DeviceInbound> = Arc::new(PortalDeviceInbound(Arc::clone(&state.agent)));
+    AudioHost {
+        registry,
+        inbound,
+        live: state.device_live.clone(),
+        pcm: state.device_pcm.clone(),
+        engine,
+    }
+}
+
+async fn open_registry(
+    state: &PortalState,
+) -> Result<crate::device_ws::DeviceRegistry, PortalError> {
+    state.device_registry().await.map_err(PortalError::internal)
+}
+
+/// POST /api/device/v1/audio — one 16 kHz mono WAV, device Bearer token.
+pub async fn post_audio(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.agent.config().device_ws.enabled {
+        return device_disabled();
+    }
+    let registry = match open_registry(&state).await {
+        Ok(registry) => registry,
+        Err(err) => return err.into_response(),
+    };
+    device_audio::post(audio_host(&state, registry), headers, body).await
+}
+
+/// GET /api/device/v1/audio/{id} — 16 kHz mono PCM s16le for the uploading device.
+pub async fn get_audio(
+    State(state): State<PortalState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.agent.config().device_ws.enabled {
+        return device_disabled();
+    }
+    let registry = match open_registry(&state).await {
+        Ok(registry) => registry,
+        Err(err) => return err.into_response(),
+    };
+    device_audio::get(&registry, &state.device_pcm, &id, &headers).await
+}
+
+fn device_disabled() -> Response {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": { "code": "not_found", "message": "device websocket is disabled" }
+        })),
+    )
+        .into_response()
 }
