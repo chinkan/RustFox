@@ -3,6 +3,8 @@
 ## Status
 Accepted (Product 2026-11-02; grill Round 1–2)
 
+**Amendment (2026-11-12, [ADR-0066](./0066-esp32-off-device-stt-http-audio.md)):** Decision 6 is path B. The ESP32-C6 captures and plays TTS; RustFox does off-device STT. There is no on-device open-vocab STT. Board audio is authenticated HTTP on the shared portal bind, specified in ADR-0066, including a JSON text `assistant_audio` frame that names a PCM download. Decisions 1–5 and 7 are unchanged, including JSON text frames only and out-of-scope binary audio frames and partial token streaming. Should / Soft parallel; does not block the v1.0.9 tag. This amend does not implement runtime code.
+
 ## Date
 2026-11-02
 
@@ -18,7 +20,7 @@ RustFox tip has no WebSocket server. Non-Telegram ingress is Portal REST + SSE c
    - Client→server: `auth` (if unused header), `user_text` (required for turns), `ping`, optional `device_hello` (`device_id` / room / fw_version).
    - Server→client: `assistant_text`, `device_ack`, `pong`, optional `error`.
    - Out of scope: binary audio frames, partial token streaming.
-6. **vs #349 TTS/STT:** text handoff. #349 = software Telegram (etc.) voice. ESP32 does on-device/edge STT and sends text; RustFox may later return TTS/PCM for the board — not the same capture pipeline.
+6. **Path B audio (amended 2026-11-12 by [ADR-0066](./0066-esp32-off-device-stt-http-audio.md)):** the ESP32-C6 captures and plays TTS; RustFox does STT. No on-device or edge open-vocab STT. Device WS stays the JSON text control plane in Decision 5. Board audio uses the authenticated HTTP side channel in ADR-0066 (`POST /api/device/v1/audio`, then JSON text `assistant_audio` and `GET /api/device/v1/audio/{id}`), not binary frames on this socket and not the Telegram voice pipeline.
 7. **Network assumptions:** MVP = loopback / Tailscale / LAN trusted (same spirit as ADR-0006 / 0007). Docs must state bare public WS is not recommended. TLS via external reverse proxy; no built-in TLS in this ADR.
 
 ## Rejected
