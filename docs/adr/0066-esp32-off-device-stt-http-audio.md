@@ -1,7 +1,7 @@
 # ADR-0066: ESP32 off-device STT and HTTP audio (path B)
 
 ## Status
-Proposed — Product contract ACCEPT 2026-11-12 (Should / Soft parallel). This ADR awaits acceptance on the docs PR before server work. It does not block the v1.0.9 tag. No Must claim. No runtime. No tag.
+Accepted (Product tip Final ACCEPT 2026-11-12 at `a0f3b9b`, squash #408; Should / Soft parallel). Does not block the v1.0.9 tag. No Must claim. No runtime in the accepted tip. No tag.
 
 ## Date
 2026-11-12

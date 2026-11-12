@@ -12,7 +12,7 @@ RustFox tip ignores caption-less Telegram voice notes (empty text + empty attach
 
 ## Decision
 
-1. **Scope:** Software Telegram STT + TTS only. Does **not** use #351 / #353 capture pipelines. Distinct from Device WS JSON text frames (ADR-0056 Decision 6).
+1. **Scope:** Software Telegram STT + TTS only. Does **not** use #351 / #353 capture pipelines. Distinct from Device WS JSON text frames ([ADR-0056](./0056-device-websocket-channel.md) Decision 5) and from ESP32 HTTP audio ([ADR-0066](./0066-esp32-off-device-stt-http-audio.md)).
 2. **STT first (Must slice):** Ingest Telegram **Voice** notes only (not general `Audio` unless Product widens). Download → local STT → inbound text shaped as:
    ```
    [Voice note]:
