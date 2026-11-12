@@ -67,7 +67,11 @@ async fn open_registry() -> DeviceRegistry {
 }
 
 async fn spawn_device_server(inbound: Arc<dyn DeviceInbound>, registry: DeviceRegistry) -> String {
-    let app = rustfox::device_ws::router(DeviceWsRuntime { registry, inbound });
+    let app = rustfox::device_ws::router(DeviceWsRuntime {
+        registry,
+        inbound,
+        live: rustfox::device_ws::LiveSockets::new(),
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -470,6 +474,24 @@ async fn settings_devices_show_token_once_and_device_token_is_not_portal_login()
         StatusCode::NOT_FOUND,
         "disabled device_ws must not mount the socket"
     );
+    let audio_off = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/device/v1/audio")
+                .header(header::CONTENT_TYPE, "audio/wav")
+                .body(Body::from(b"RIFF".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        audio_off.status(),
+        StatusCode::NOT_FOUND,
+        "disabled device_ws must not mount audio upload"
+    );
 
     let created = f
         .app
@@ -554,6 +576,19 @@ async fn enabled_portal_mounts_ws_and_user_text_reaches_agent_ops() {
         .await
         .unwrap();
     assert_ne!(probe.status(), StatusCode::NOT_FOUND);
+    let audio = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/device/v1/audio")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(audio.status(), StatusCode::UNAUTHORIZED);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -577,6 +612,7 @@ async fn enabled_portal_mounts_ws_and_user_text_reaches_agent_ops() {
 
     let api_only = rustfox::portal::device_api_router(f.state.clone());
     let health = api_only
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/health")
@@ -586,4 +622,15 @@ async fn enabled_portal_mounts_ws_and_user_text_reaches_agent_ops() {
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::NOT_FOUND);
+    let headless_audio = api_only
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/device/v1/audio")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(headless_audio.status(), StatusCode::UNAUTHORIZED);
 }
