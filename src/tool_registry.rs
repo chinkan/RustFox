@@ -16,7 +16,9 @@ pub enum ToolUiMode {
     /// No tool progress or tool-result messages. On Telegram this is the same
     /// quietness as `fully_silent`: no Thinking placeholder, no Working /
     /// Running line, no completed tool bubble, including no post-then-delete.
-    /// The final assistant reply still posts.
+    /// The final assistant reply still posts. Silent sets 👀 on the accepted
+    /// user message when the turn starts and clears it, including mid-run
+    /// steer 👀 from that turn, when the turn ends.
     Silent,
     /// Show tool names + status, but hide args and command output.
     Minimal,

@@ -2413,18 +2413,41 @@ pub async fn handle_message(
             // Mid-run behind the **interactive** lane: 👀 steer/queue ack
             // (ADR-0020 Q7). A scheduled lane running beside it is not this UX
             // (ADR-0052 / #338) — that case is `Start`, not `Accepted`.
-            if let Err(e) = bot
-                .set_message_reaction(msg.chat.id, msg.id)
-                .reaction([ReactionType::Emoji {
-                    emoji: "👀".to_owned(),
-                }])
-                .await
-            {
-                warn!(error = %e, "setMessageReaction(👀) failed; enqueue still accepted");
-            }
+            // Silent turns clear this 👀 when the turn ends (#404).
+            set_eyes_reaction(
+                &bot,
+                msg.chat.id,
+                msg.id.0,
+                true,
+                "setMessageReaction(👀) failed; enqueue still accepted",
+            )
+            .await;
+            agent.turn_gate.note_silent_eyes(&key, msg.id.0).await;
             Ok(())
         }
         Submit::Start(inputs) => {
+            // Silent (per-chat or fully_silent): 👀 on each accepted message
+            // before the task runs, so a steer that arrives immediately is
+            // tracked for the end-of-turn clear. No text bubble.
+            let silent = agent.config.bot_fully_silent(&bot_id)
+                || read_tool_ui_mode(&agent, &user_id.to_string()).await == ToolUiMode::Silent;
+            if silent {
+                agent.turn_gate.begin_silent_eyes(&key).await;
+                for item in &inputs {
+                    let Some(id) = item.platform_msg_id else {
+                        continue;
+                    };
+                    agent.turn_gate.note_silent_eyes(&key, id).await;
+                    set_eyes_reaction(
+                        &bot,
+                        msg.chat.id,
+                        id,
+                        true,
+                        "setMessageReaction(👀) failed; turn continues",
+                    )
+                    .await;
+                }
+            }
             spawn_telegram_turn_loop(
                 bot.clone(),
                 Arc::clone(&agent),
@@ -2436,6 +2459,30 @@ pub async fn handle_message(
             );
             Ok(())
         }
+    }
+}
+
+/// ADR-0020 / #404: set or clear the 👀 reaction. `eyes == false` sends an
+/// empty list, which removes the bot's reaction. A failure is `warn!` and
+/// the caller continues. This does not post a text bubble.
+async fn set_eyes_reaction(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    message_id: i32,
+    eyes: bool,
+    fail_msg: &str,
+) {
+    let req = bot.set_message_reaction(chat_id, MessageId(message_id));
+    let result = if eyes {
+        req.reaction([ReactionType::Emoji {
+            emoji: "👀".to_owned(),
+        }])
+        .await
+    } else {
+        req.reaction(Vec::<ReactionType>::new()).await
+    };
+    if let Err(e) = result {
+        warn!(error = %e, "{fail_msg}");
     }
 }
 
@@ -2526,7 +2573,9 @@ async fn run_telegram_user_turn(
     // Minimal still shows Working / Running while a tool runs and removes the
     // completed tool message. Verbose still shows args and the command result.
     // Silent posts no tool progress or tool-result message, including no
-    // Thinking placeholder and no post-then-delete tool UI.
+    // Thinking placeholder and no post-then-delete tool UI. It sets 👀 on
+    // the accepted user message when the turn starts and clears that 👀,
+    // plus any mid-run steer 👀 accepted into this turn, when the turn ends.
     let tool_ui_mode = read_tool_ui_mode(&agent, &user_id.to_string()).await;
     // Opt-in on the speaking bot only. Not stored per chat, not inherited
     // from another bot. When on, this turn posts zero tool-call messages
@@ -2538,6 +2587,23 @@ async fn run_telegram_user_turn(
     } else {
         tool_ui_mode
     };
+    let turn_key = session_key(&bot_id, &user_id.to_string());
+    if turn_ui_mode == ToolUiMode::Silent {
+        // Also covers a `Next::User` continuation, which does not pass
+        // through `handle_message`. A second set on the same id is fine.
+        agent.turn_gate.begin_silent_eyes(&turn_key).await;
+        if let Some(id) = input.platform_msg_id {
+            agent.turn_gate.note_silent_eyes(&turn_key, id).await;
+            set_eyes_reaction(
+                &bot,
+                chat_id,
+                id,
+                true,
+                "setMessageReaction(👀) failed; turn continues",
+            )
+            .await;
+        }
+    }
 
     // Set up tool event channel if not silent
     let (tool_event_tx, tool_event_rx) = if turn_ui_mode != ToolUiMode::Silent {
@@ -2841,7 +2907,7 @@ async fn run_telegram_user_turn(
         tokio::fs::remove_dir_all(&temp_dir).await.ok();
     }
 
-    if let Err(e) = &process_result {
+    let stop = if let Err(e) = &process_result {
         warn!(error = %e, "Agent processing failed");
         let _ = send_markdown_message(
             &bot,
@@ -2851,55 +2917,79 @@ async fn run_telegram_user_turn(
             &agent.memory,
         )
         .await;
-        return None;
-    }
-    // Ok text is not always streamed. Max iterations, cancel, and the
-    // empty-retry sentence return without pushing tokens.
-    if !streamed {
-        if let Ok(outcome) = &process_result {
-            if !outcome.text.is_empty() {
-                let _ =
-                    send_markdown_message(&bot, chat_id, &outcome.text, msg_format, &agent.memory)
-                        .await;
+        None
+    } else {
+        // Ok text is not always streamed. Max iterations, cancel, and the
+        // empty-retry sentence return without pushing tokens.
+        if !streamed {
+            if let Ok(outcome) = &process_result {
+                if !outcome.text.is_empty() {
+                    let _ = send_markdown_message(
+                        &bot,
+                        chat_id,
+                        &outcome.text,
+                        msg_format,
+                        &agent.memory,
+                    )
+                    .await;
+                }
             }
         }
-    }
 
-    // ADR-0058 / #363: TTS is off unless configured, and only a voice-origin
-    // reply is spoken. Typed chat stays text even when `[voice].tts` is true.
-    // When on, sendVoice is a second copy — the text above is never dropped
-    // if synthesis or sendVoice fails.
-    if let Ok(outcome) = &process_result {
-        let voice_cfg = agent.voice_runtime.snapshot();
-        crate::platform::telegram_voice::maybe_send_tts_voice(
-            &bot,
-            chat_id,
-            &voice_cfg,
-            &outcome.text,
-            input.voice_origin,
-            input.voice_spoken_lang.as_deref(),
-        )
-        .await;
-    }
-
-    // Check if a self-upgrade tool call requested a restart.
-    if agent
-        .restart_pending
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        agent
-            .restart_pending
-            .store(false, std::sync::atomic::Ordering::Release);
-        let _ = bot
-            .send_message(chat_id, "🔄 Self-upgrade complete. Restarting...")
+        // ADR-0058 / #363: TTS is off unless configured, and only a voice-origin
+        // reply is spoken. Typed chat stays text even when `[voice].tts` is true.
+        // When on, sendVoice is a second copy — the text above is never dropped
+        // if synthesis or sendVoice fails.
+        if let Ok(outcome) = &process_result {
+            let voice_cfg = agent.voice_runtime.snapshot();
+            crate::platform::telegram_voice::maybe_send_tts_voice(
+                &bot,
+                chat_id,
+                &voice_cfg,
+                &outcome.text,
+                input.voice_origin,
+                input.voice_spoken_lang.as_deref(),
+            )
             .await;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let _ = crate::learning::restart_bot();
-        });
-    }
+        }
 
-    run_stop
+        // Check if a self-upgrade tool call requested a restart.
+        if agent
+            .restart_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            agent
+                .restart_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+            let _ = bot
+                .send_message(chat_id, "🔄 Self-upgrade complete. Restarting...")
+                .await;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let _ = crate::learning::restart_bot();
+            });
+        }
+
+        run_stop
+    };
+
+    // Silent completion: 👀 gone after the final reply, sendVoice, error
+    // text, or a cancel/error end with no further work. Mid-run 👀 stays
+    // up until this clear. A failed clear does not fail the turn.
+    if turn_ui_mode == ToolUiMode::Silent {
+        let ids = agent.turn_gate.take_silent_eyes(&turn_key).await;
+        for id in ids {
+            set_eyes_reaction(
+                &bot,
+                chat_id,
+                id,
+                false,
+                "setMessageReaction(clear 👀) failed; turn continues",
+            )
+            .await;
+        }
+    }
+    stop
 }
 
 /// ADR-0038: apply human-gate Retry/Cancel from inline callback.

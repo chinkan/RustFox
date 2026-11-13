@@ -10,7 +10,7 @@ Three levels of tool execution visibility for the user.
 
 | Mode | Tool Notifier | Command Output | Cancel Button |
 |------|---------------|----------------|---------------|
-| Silent | Off (no tool messages, including no Thinking placeholder) | Hidden | Hidden |
+| Silent | Off (no tool messages, including no Thinking placeholder). Telegram sets 👀 on the accepted user message while the turn runs, then clears it | Hidden | Hidden |
 | Minimal | Tool name + status, no args | Hidden | Visible (simple text, no live output) |
 | Verbose | Tool name + args + status | Live stream + result | Visible (with live output) |
 

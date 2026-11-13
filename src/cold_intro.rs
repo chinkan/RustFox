@@ -43,10 +43,7 @@ fn is_continuity_turn(m: &ChatMessage) -> bool {
     match m.role.as_str() {
         "user" | "assistant" => {
             // Legacy summary rows used role=user + tool_call_id=summary.
-            if m.role == "user" && m.tool_call_id.as_deref() == Some("summary") {
-                return false;
-            }
-            true
+            !(m.role == "user" && m.tool_call_id.as_deref() == Some("summary"))
         }
         "system" => false,
         _ => false,

@@ -114,6 +114,10 @@ struct KeyState {
     pending: VecDeque<QueuedInput>,
     waiting_scheduled: VecDeque<tokio::sync::oneshot::Sender<()>>,
     auto_continue_used: bool,
+    /// Message ids showing 👀 for the active Silent turn. Empty unless
+    /// `silent_eyes_active`. Minimal and Verbose never set the flag.
+    silent_eyes: Vec<i32>,
+    silent_eyes_active: bool,
 }
 
 /// Hand the scheduled lane to the oldest waiter. Caller must only invoke this
@@ -343,6 +347,41 @@ impl TurnGate {
             st.pending.push_front(item);
         }
     }
+
+    /// The interactive turn that just started is Silent (`/verbose` Silent or
+    /// `fully_silent`). Steer 👀 accepted after this are cleared with the
+    /// start message when the turn ends. Does not drop ids already noted.
+    pub async fn begin_silent_eyes(&self, key: &str) {
+        let mut keys = self.keys.lock().await;
+        let st = keys.entry(key.to_string()).or_default();
+        st.silent_eyes_active = true;
+    }
+
+    /// Remember a Telegram message whose 👀 belongs to the active Silent turn.
+    /// No-op when this key is not in a Silent turn, so Minimal and Verbose
+    /// keep the ADR-0020 mid-run 👀.
+    pub async fn note_silent_eyes(&self, key: &str, message_id: i32) {
+        let mut keys = self.keys.lock().await;
+        let Some(st) = keys.get_mut(key) else {
+            return;
+        };
+        if !st.silent_eyes_active {
+            return;
+        }
+        if !st.silent_eyes.contains(&message_id) {
+            st.silent_eyes.push(message_id);
+        }
+    }
+
+    /// End the Silent 👀 window and return every id to clear.
+    pub async fn take_silent_eyes(&self, key: &str) -> Vec<i32> {
+        let mut keys = self.keys.lock().await;
+        let Some(st) = keys.get_mut(key) else {
+            return Vec::new();
+        };
+        st.silent_eyes_active = false;
+        std::mem::take(&mut st.silent_eyes)
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +397,21 @@ mod tests {
 
     fn texts(v: &[QueuedInput]) -> Vec<&str> {
         v.iter().map(|i| i.text.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn silent_eyes_track_only_an_active_silent_turn() {
+        let g = TurnGate::new();
+        g.note_silent_eyes("k", 1).await;
+        assert!(g.take_silent_eyes("k").await.is_empty());
+        g.begin_silent_eyes("k").await;
+        g.note_silent_eyes("k", 1).await;
+        g.note_silent_eyes("k", 1).await;
+        g.note_silent_eyes("k", 2).await;
+        g.begin_silent_eyes("k").await;
+        assert_eq!(g.take_silent_eyes("k").await, vec![1, 2]);
+        g.note_silent_eyes("k", 3).await;
+        assert!(g.take_silent_eyes("k").await.is_empty());
     }
 
     #[tokio::test]

@@ -68,6 +68,9 @@ fn ok_message_result(chat_id: i64, message_id: i32, text: &str) -> serde_json::V
     })
 }
 
+/// `(message id, emoji)`. `None` is a clear.
+type ReactionLog = Vec<(i32, Option<String>)>;
+
 /// Wiremock stand-in for `https://api.telegram.org` (teloxide `Bot::set_api_url`).
 struct MockTelegramApi {
     server: MockServer,
@@ -76,6 +79,8 @@ struct MockTelegramApi {
     /// (assigned message id, text) for SendMessage and sendRichMessage.
     sent: Arc<Mutex<Vec<(i32, String)>>>,
     deleted: Arc<Mutex<Vec<i32>>>,
+    /// `(message id, emoji)`. `None` is a clear (empty, null, or missing reaction).
+    reactions: Arc<Mutex<ReactionLog>>,
 }
 
 impl MockTelegramApi {
@@ -86,6 +91,7 @@ impl MockTelegramApi {
             next_msg_id: Arc::new(AtomicI32::new(100)),
             sent: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
+            reactions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -185,6 +191,40 @@ impl MockTelegramApi {
                 rich_log.lock().expect("rich log").push((mid, text.clone()));
                 ResponseTemplate::new(200).set_body_json(ok_message_result(chat_id, mid, &text))
             })
+            .expect(0..)
+            .mount(&self.server)
+            .await;
+
+        let reactions = Arc::clone(&self.reactions);
+        Mock::given(method("POST"))
+            .and(path_regex(r"(?i)^/bot[^/]+/setmessagereaction$"))
+            .respond_with(move |req: &Request| {
+                record_reaction(&reactions, req);
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "ok": true,
+                    "result": true
+                }))
+            })
+            .expect(0..)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// `setMessageReaction` returns 400. Higher priority than the success stub.
+    /// A 4xx is a failed call without teloxide's 10s server-error delay.
+    async fn fail_message_reactions(&self) {
+        let reactions = Arc::clone(&self.reactions);
+        Mock::given(method("POST"))
+            .and(path_regex(r"(?i)^/bot[^/]+/setmessagereaction$"))
+            .respond_with(move |req: &Request| {
+                record_reaction(&reactions, req);
+                ResponseTemplate::new(400).set_body_json(json!({
+                    "ok": false,
+                    "error_code": 400,
+                    "description": "Bad Request: REACTION_INVALID"
+                }))
+            })
+            .with_priority(1)
             .expect(0..)
             .mount(&self.server)
             .await;
@@ -291,6 +331,36 @@ impl MockTelegramApi {
 
     fn deleted_snapshot(&self) -> Vec<i32> {
         self.deleted.lock().expect("deleted log").clone()
+    }
+
+    fn reactions_snapshot(&self) -> ReactionLog {
+        self.reactions.lock().expect("reactions").clone()
+    }
+}
+
+fn record_reaction(reactions: &Mutex<ReactionLog>, req: &Request) {
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+    let mid = body.get("message_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    reactions
+        .lock()
+        .expect("reactions")
+        .push((mid, reaction_mark(&body)));
+}
+
+/// Emoji on a `setMessageReaction` body. Empty, null, or absent is a clear.
+fn reaction_mark(body: &serde_json::Value) -> Option<String> {
+    match body.get("reaction") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(arr)) if arr.is_empty() => None,
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .find_map(|item| {
+                item.get("emoji")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .or_else(|| Some(serde_json::Value::Array(arr.clone()).to_string())),
+        Some(other) => Some(other.to_string()),
     }
 }
 
@@ -404,6 +474,110 @@ impl rustfox::provider::Provider for ToolThenReply {
     }
 }
 
+/// Blocks the first completion until `release`, then returns a final reply.
+/// `fail` returns an error instead of blocking.
+struct HoldReply {
+    config: rustfox::provider::ProviderConfig,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    reply: String,
+    fail: bool,
+    held: AtomicBool,
+}
+
+impl HoldReply {
+    fn new(
+        reply: impl Into<String>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        fail: bool,
+    ) -> Self {
+        Self {
+            config: rustfox::provider::ProviderConfig {
+                name: "fixture".into(),
+                provider_type: rustfox::config::ProviderType::OpenRouter,
+                base_url: "http://fixture.invalid/v1".into(),
+                api_key: None,
+                default_model: "stub".into(),
+                supports_vision: false,
+                max_tokens: 256,
+                discover_models: false,
+                context_window: 4096,
+                context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
+                parse_retry_limit: 0,
+                rate_limit_retry_limit: 0,
+                extra_headers: vec![],
+            },
+            started,
+            release,
+            reply: reply.into(),
+            fail,
+            held: AtomicBool::new(false),
+        }
+    }
+
+    fn into_registry(self) -> rustfox::provider::ProviderRegistry {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "fixture".to_string(),
+            Arc::new(self) as Arc<dyn rustfox::provider::Provider>,
+        );
+        rustfox::provider::ProviderRegistry::new(providers, "fixture".into())
+    }
+}
+
+#[async_trait::async_trait]
+impl rustfox::provider::Provider for HoldReply {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn default_model(&self) -> &str {
+        &self.config.default_model
+    }
+    fn supports_vision(&self) -> bool {
+        self.config.supports_vision
+    }
+    fn config(&self) -> &rustfox::provider::ProviderConfig {
+        &self.config
+    }
+
+    async fn chat_completion(
+        &self,
+        _client: &reqwest::Client,
+        _messages: &[rustfox::llm::ChatMessage],
+        _tools: &[rustfox::llm::ToolDefinition],
+        model: &str,
+        _max_tokens: u32,
+    ) -> anyhow::Result<rustfox::llm::ChatCompletion> {
+        if self.fail {
+            anyhow::bail!("fixture llm down");
+        }
+        if self
+            .held
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(rustfox::llm::ChatCompletion {
+            message: rustfox::llm::ChatMessage {
+                role: "assistant".into(),
+                content: Some(rustfox::llm::MessageContent::from_text(self.reply.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some("stop".into()),
+            model: model.to_string(),
+        })
+    }
+
+    async fn list_models(&self, _client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+        Ok(vec![self.config.default_model.clone()])
+    }
+}
+
 fn is_tool_progress(text: &str) -> bool {
     text.contains("Working")
         || text.contains("Running:")
@@ -473,6 +647,126 @@ async fn assert_typing_chat_action_allowed(api: &MockTelegramApi) {
     assert!(
         saw_typing,
         "Typing chat action is still sent and is not tool UI; paths={paths:?}"
+    );
+}
+
+fn eyes_on(reactions: &ReactionLog, message_id: i32) -> Vec<Option<&str>> {
+    reactions
+        .iter()
+        .filter(|(id, _)| *id == message_id)
+        .map(|(_, emoji)| emoji.as_deref())
+        .collect()
+}
+
+fn assert_eyes_set_then_cleared(reactions: &ReactionLog, message_id: i32) {
+    let seq = eyes_on(reactions, message_id);
+    let set_at = seq.iter().position(|emoji| *emoji == Some("👀"));
+    let clear_at = seq.iter().rposition(|emoji| emoji.is_none());
+    assert!(
+        set_at.is_some(),
+        "👀 must be set on {message_id} when the turn starts; seq={seq:?} all={reactions:?}"
+    );
+    assert!(
+        clear_at.is_some() && set_at.unwrap() < clear_at.unwrap(),
+        "👀 must be cleared after it is set on {message_id}; seq={seq:?}"
+    );
+    assert!(
+        seq.last().copied().flatten().is_none(),
+        "the last reaction on {message_id} must clear 👀; seq={seq:?}"
+    );
+}
+
+fn assert_no_eyes(reactions: &ReactionLog, message_id: i32) {
+    let seq = eyes_on(reactions, message_id);
+    assert!(
+        seq.iter().all(|emoji| *emoji != Some("👀")),
+        "message {message_id} must not get 👀; seq={seq:?} all={reactions:?}"
+    );
+}
+
+fn assert_eyes_still_set(reactions: &ReactionLog, message_id: i32) {
+    let seq = eyes_on(reactions, message_id);
+    assert!(
+        seq.contains(&Some("👀")),
+        "👀 must be set on {message_id}; seq={seq:?}"
+    );
+    assert_eq!(
+        seq.last().copied(),
+        Some(Some("👀")),
+        "Minimal and Verbose must keep the mid-run 👀; seq={seq:?}"
+    );
+}
+
+async fn wait_eyes(api: &MockTelegramApi, message_id: i32) {
+    for _ in 0..200 {
+        if api
+            .reactions_snapshot()
+            .iter()
+            .any(|(id, emoji)| *id == message_id && emoji.as_deref() == Some("👀"))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "no 👀 on {message_id} while the turn was still running; reactions={:?}",
+        api.reactions_snapshot()
+    );
+}
+
+fn text_update(update_id: i32, message_id: i32, text: &str) -> teloxide::types::Update {
+    UpdateInjector::parse_update_value(&json!({
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "date": 1700000100,
+            "from": { "id": ALLOWED, "is_bot": false, "first_name": "QA" },
+            "chat": { "id": ALLOWED, "type": "private", "first_name": "QA" },
+            "text": text
+        }
+    }))
+    .unwrap()
+}
+
+async fn assert_clear_follows_text(api: &MockTelegramApi, message_id: i32, needle: &str) {
+    assert_clear_follows(api, message_id, false, needle).await;
+}
+
+async fn assert_clear_follows_voice(api: &MockTelegramApi, message_id: i32) {
+    assert_clear_follows(api, message_id, true, "").await;
+}
+
+async fn assert_clear_follows(api: &MockTelegramApi, message_id: i32, voice: bool, needle: &str) {
+    let requests = api.server.received_requests().await.unwrap_or_default();
+    let mut marker = None;
+    let mut clear = None;
+    for (index, req) in requests.iter().enumerate() {
+        let path = req.url.path().to_ascii_lowercase();
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        if voice {
+            if path.contains("sendvoice") {
+                marker = Some(index);
+            }
+        } else if path.contains("sendmessage") || path.contains("sendrichmessage") {
+            let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let rich = body
+                .pointer("/rich_message/markdown")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if text.contains(needle) || rich.contains(needle) {
+                marker = Some(index);
+            }
+        }
+        if path.contains("setmessagereaction") {
+            let mid = body.get("message_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            if mid == message_id && reaction_mark(&body).is_none() {
+                clear = Some(index);
+            }
+        }
+    }
+    assert!(
+        marker.is_some() && clear.is_some() && marker < clear,
+        "👀 clear on {message_id} must follow the final reply; marker={marker:?} clear={clear:?}"
     );
 }
 
@@ -617,6 +911,51 @@ impl HandleMessageHarness {
     }
 
     async fn tool_turn_cfg(main_fully_silent: bool, max_iterations: u32, only_tools: bool) -> Self {
+        let registry = Arc::new(if only_tools {
+            ToolThenReply::tools_only().into_registry()
+        } else {
+            ToolThenReply::new(TOOL_TURN_REPLY).into_registry()
+        });
+        Self::tool_turn_registry(main_fully_silent, max_iterations, registry).await
+    }
+
+    /// First completion blocks until `release`. Later completions return immediately.
+    async fn holding_turn(
+        main_fully_silent: bool,
+    ) -> (Self, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let registry = Arc::new(
+            HoldReply::new(
+                TOOL_TURN_REPLY,
+                Arc::clone(&started),
+                Arc::clone(&release),
+                false,
+            )
+            .into_registry(),
+        );
+        let harness = Self::tool_turn_registry(main_fully_silent, 4, registry).await;
+        (harness, started, release)
+    }
+
+    async fn failing_turn(main_fully_silent: bool) -> Self {
+        let registry = Arc::new(
+            HoldReply::new(
+                TOOL_TURN_REPLY,
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(tokio::sync::Notify::new()),
+                true,
+            )
+            .into_registry(),
+        );
+        Self::tool_turn_registry(main_fully_silent, 4, registry).await
+    }
+
+    async fn tool_turn_registry(
+        main_fully_silent: bool,
+        max_iterations: u32,
+        registry: Arc<rustfox::provider::ProviderRegistry>,
+    ) -> Self {
         std::env::remove_var("RUSTFOX_HOME");
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().join(".rustfox");
@@ -674,11 +1013,6 @@ impl HandleMessageHarness {
         let bot = api.bot();
         let bot_arc = Arc::new(bot.clone());
 
-        let registry = Arc::new(if only_tools {
-            ToolThenReply::tools_only().into_registry()
-        } else {
-            ToolThenReply::new(TOOL_TURN_REPLY).into_registry()
-        });
         let memory = MemoryStore::open_in_memory().expect("in-memory sqlite");
         let task_store = ScheduledTaskStore::new(memory.connection());
         let scheduler = Arc::new(Scheduler::new().await.expect("scheduler"));
@@ -1119,6 +1453,7 @@ async fn default_cleans_completed_tool_messages_and_may_show_progress() {
         sent.iter().all(|(_, text)| !text.contains("Thinking")),
         "Minimal must not post a Thinking placeholder; sent={sent:?}"
     );
+    assert_no_eyes(&h.api.reactions_snapshot(), 22);
 }
 
 #[tokio::test]
@@ -1151,6 +1486,7 @@ async fn verbose_tool_turn_still_shows_tool_ui_and_final_reply() {
         );
     }
     assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_no_eyes(&h.api.reactions_snapshot(), 22);
 }
 
 #[tokio::test]
@@ -1165,6 +1501,8 @@ async fn per_chat_silent_sends_no_tool_ui_and_keeps_final_reply() {
     assert_no_tool_ui(&sent, &deleted);
     assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
     assert_typing_chat_action_allowed(&h.api).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 22);
+    assert_clear_follows_text(&h.api, 22, TOOL_TURN_REPLY).await;
 }
 
 #[tokio::test]
@@ -1186,6 +1524,8 @@ async fn fully_silent_suppresses_verbose_stored_mode() {
     assert_no_tool_ui(&sent, &deleted);
     assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
     assert_typing_chat_action_allowed(&h.api).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 22);
+    assert_clear_follows_text(&h.api, 22, TOOL_TURN_REPLY).await;
 }
 
 #[tokio::test]
@@ -1206,6 +1546,7 @@ async fn fully_silent_suppresses_minimal_stored_mode() {
     let deleted = h.api.deleted_snapshot();
     assert_no_tool_ui(&sent, &deleted);
     assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 22);
 }
 
 #[tokio::test]
@@ -1244,6 +1585,9 @@ async fn fully_silent_verbose_command_still_confirms_stored_mode() {
     let deleted = h.api.deleted_snapshot();
     assert_no_tool_ui(&sent, &deleted);
     assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    let reactions = h.api.reactions_snapshot();
+    assert_no_eyes(&reactions, 60);
+    assert_eyes_set_then_cleared(&reactions, 22);
 }
 
 #[tokio::test]
@@ -1613,6 +1957,213 @@ async fn per_chat_silent_still_sends_text_and_voice() {
         "Silent must still sendVoice; paths={paths:?}"
     );
     assert_typing_chat_action_allowed(&h.api).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 50);
+    assert_clear_follows_voice(&h.api, 50).await;
+}
+
+async fn drive_text(h: &HandleMessageHarness, update: &teloxide::types::Update) {
+    injector()
+        .drive_handle_message(update, h.bot.clone(), Arc::clone(&h.agent))
+        .await
+        .expect("drive text");
+}
+
+async fn silent_eyes_cover_the_start_message_and_a_steer(fully_silent: bool) {
+    let (h, started, release) = HandleMessageHarness::holding_turn(fully_silent).await;
+    if fully_silent {
+        remember_tool_ui_mode(&h.agent, "verbose").await;
+    } else {
+        remember_tool_ui_mode(&h.agent, "silent").await;
+    }
+    drive_text(&h, &text_update(9200, 300, "please hold")).await;
+    started.notified().await;
+    wait_eyes(&h.api, 300).await;
+    drive_text(&h, &text_update(9201, 301, "steer this")).await;
+    wait_eyes(&h.api, 301).await;
+    let mid = h.api.reactions_snapshot();
+    assert_eq!(
+        eyes_on(&mid, 300).last().copied(),
+        Some(Some("👀")),
+        "start 👀 stays up while the turn is running; mid={mid:?}"
+    );
+    assert_eq!(
+        eyes_on(&mid, 301).last().copied(),
+        Some(Some("👀")),
+        "steer 👀 stays up while the turn is running; mid={mid:?}"
+    );
+    release.notify_one();
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    let reactions = h.api.reactions_snapshot();
+    assert_eyes_set_then_cleared(&reactions, 300);
+    assert_eyes_set_then_cleared(&reactions, 301);
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_clear_follows_text(&h.api, 300, TOOL_TURN_REPLY).await;
+}
+
+#[tokio::test]
+async fn per_chat_silent_sets_eyes_then_clears_start_and_steer() {
+    silent_eyes_cover_the_start_message_and_a_steer(false).await;
+}
+
+#[tokio::test]
+async fn fully_silent_sets_eyes_then_clears_start_and_steer() {
+    silent_eyes_cover_the_start_message_and_a_steer(true).await;
+}
+
+#[tokio::test]
+async fn minimal_does_not_set_turn_start_eyes_and_keeps_steer_eyes() {
+    let (h, started, release) = HandleMessageHarness::holding_turn(false).await;
+    remember_tool_ui_mode(&h.agent, "minimal").await;
+    drive_text(&h, &text_update(9300, 310, "please hold")).await;
+    started.notified().await;
+    drive_text(&h, &text_update(9301, 311, "steer this")).await;
+    wait_eyes(&h.api, 311).await;
+    assert_no_eyes(&h.api.reactions_snapshot(), 310);
+    release.notify_one();
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+    let reactions = h.api.reactions_snapshot();
+    assert_no_eyes(&reactions, 310);
+    assert_eyes_still_set(&reactions, 311);
+}
+
+#[tokio::test]
+async fn verbose_does_not_set_turn_start_eyes() {
+    let h = HandleMessageHarness::tool_turn(false).await;
+    remember_tool_ui_mode(&h.agent, "verbose").await;
+    drive_text(&h, &text_update(9400, 320, "hello")).await;
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+    assert_no_eyes(&h.api.reactions_snapshot(), 320);
+    assert_final_text_posted(
+        &h.api.sent_snapshot(),
+        &h.api.deleted_snapshot(),
+        TOOL_TURN_REPLY,
+    );
+}
+
+#[tokio::test]
+async fn silent_reaction_failure_does_not_fail_the_turn_or_post_a_bubble() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    h.api.fail_message_reactions().await;
+    let upd = UpdateInjector::parse_update_file(fixture("chat_hello.json")).unwrap();
+    drive_text(&h, &upd).await;
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 22);
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains(STUB_REPLY)),
+        "the turn still posts the final reply; texts={texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| !text.contains("👀") && !text.to_ascii_lowercase().contains("reaction")),
+        "a failed setMessageReaction must not fall back to a text bubble; texts={texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn commands_that_do_not_start_a_turn_do_not_get_eyes() {
+    let h = HandleMessageHarness::new(STUB_REPLY).await;
+    for name in ["text_message.json", "slash_verbose.json"] {
+        let upd = UpdateInjector::parse_update_file(fixture(name)).unwrap();
+        drive_text(&h, &upd).await;
+    }
+    drive_text(&h, &plain_text_message("/stop")).await;
+    let reactions = h.api.reactions_snapshot();
+    assert!(
+        reactions.is_empty(),
+        "commands must not set 👀; reactions={reactions:?}"
+    );
+    assert_no_eyes(&reactions, 10);
+    assert_no_eyes(&reactions, 23);
+    assert_no_eyes(&reactions, 60);
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains("Tool UI")),
+        "/verbose confirmation stays text; texts={texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Nothing is currently processing")),
+        "idle /stop stays text; texts={texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn silent_clears_eyes_when_the_turn_errors() {
+    let h = HandleMessageHarness::failing_turn(false).await;
+    remember_tool_ui_mode(&h.agent, "silent").await;
+    drive_text(&h, &text_update(9500, 330, "this will fail")).await;
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 330);
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains("Error:")),
+        "the error reply is still sent; texts={texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| !text.contains("👀") && !text.to_ascii_lowercase().contains("reaction")),
+        "an error end must not add a reaction text bubble; texts={texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn silent_clears_eyes_when_stop_ends_the_turn() {
+    let (h, started, release) = HandleMessageHarness::holding_turn(false).await;
+    remember_tool_ui_mode(&h.agent, "silent").await;
+    drive_text(&h, &text_update(9600, 340, "please hold")).await;
+    started.notified().await;
+    wait_eyes(&h.api, 340).await;
+    drive_text(&h, &text_update(9601, 341, "/stop")).await;
+    assert_no_eyes(&h.api.reactions_snapshot(), 341);
+    release.notify_one();
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 340);
+    assert_no_eyes(&h.api.reactions_snapshot(), 341);
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Processing cancelled")),
+        "/stop still replies with text; texts={texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn silent_queue_full_refusal_stays_text_without_eyes() {
+    let (h, started, release) = HandleMessageHarness::holding_turn(false).await;
+    remember_tool_ui_mode(&h.agent, "silent").await;
+    drive_text(&h, &text_update(9700, 400, "please hold")).await;
+    started.notified().await;
+    wait_eyes(&h.api, 400).await;
+    for n in 0..10 {
+        drive_text(&h, &text_update(9701 + n, 401 + n, &format!("queued {n}"))).await;
+        wait_eyes(&h.api, 401 + n).await;
+    }
+    drive_text(&h, &text_update(9800, 499, "one too many")).await;
+    let mid = h.api.reactions_snapshot();
+    assert_no_eyes(&mid, 499);
+    let texts = h.api.outbound_texts().await;
+    assert!(
+        texts.iter().any(|text| text.contains("Too many messages")),
+        "queue-full refusal stays text; texts={texts:?}"
+    );
+    release.notify_one();
+    wait_turn_idle(&h.agent, "main", ALLOWED).await;
+    let reactions = h.api.reactions_snapshot();
+    assert_eyes_set_then_cleared(&reactions, 400);
+    for id in 401..411 {
+        assert_eyes_set_then_cleared(&reactions, id);
+    }
+    assert_no_eyes(&reactions, 499);
 }
 
 fn plain_text_message(text: &str) -> teloxide::types::Update {
