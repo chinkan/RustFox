@@ -1295,6 +1295,21 @@ async fn synthesize_in(
         return read_ogg(&ogg_path).await;
     }
 
+    let wav_path = render_vits_wav(cfg, spoken_lang, work, spoken).await?;
+    let ffmpeg = bin_path(&cfg.ffmpeg_bin, DEFAULT_FFMPEG_BIN);
+    let ogg_args = ffmpeg_ogg_opus_args(&wav_path, &ogg_path);
+    run_capturing(&ffmpeg, &ogg_args, cfg.tts_timeout_secs)
+        .await
+        .map_err(|err| TtsError::new(format!("ogg encode: {}", err.message)))?;
+    read_ogg(&ogg_path).await
+}
+
+async fn render_vits_wav(
+    cfg: &VoiceConfig,
+    spoken_lang: Option<&str>,
+    work: &Path,
+    spoken: &str,
+) -> Result<PathBuf, TtsError> {
     let english = spoken_lang == Some("en");
     let model_dir = if english {
         &cfg.tts_en_model_dir
@@ -1316,12 +1331,144 @@ async fn synthesize_in(
     run_capturing(&bin, &args, cfg.tts_timeout_secs)
         .await
         .map_err(|err| TtsError::new(err.message))?;
-    let ffmpeg = bin_path(&cfg.ffmpeg_bin, DEFAULT_FFMPEG_BIN);
-    let ogg_args = ffmpeg_ogg_opus_args(&wav_path, &ogg_path);
-    run_capturing(&ffmpeg, &ogg_args, cfg.tts_timeout_secs)
+    Ok(wav_path)
+}
+
+/// 16 kHz mono PCM s16le from the local TTS WAV stage.
+///
+/// The full reply is spoken. This does not encode OGG/Opus. A WAV that is
+/// not already 16 kHz mono is resampled with the existing ffmpeg WAV helper.
+pub async fn synthesize_pcm_s16le(
+    cfg: &VoiceConfig,
+    spoken_lang: &str,
+    text: &str,
+) -> Result<Vec<u8>, TtsError> {
+    let spoken = text.trim();
+    if spoken.is_empty() {
+        return Err(TtsError::new("nothing to speak"));
+    }
+    if spoken_lang != "yue" && spoken_lang != "en" {
+        return Err(TtsError::new("spoken language is not yue or en"));
+    }
+    let work = std::env::temp_dir().join(format!("rustfox-tts-pcm-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&work)
         .await
-        .map_err(|err| TtsError::new(format!("ogg encode: {}", err.message)))?;
-    read_ogg(&ogg_path).await
+        .map_err(|err| TtsError::new(format!("tts work dir: {err}")))?;
+    let result = async {
+        let wav_path = render_vits_wav(cfg, Some(spoken_lang), &work, spoken).await?;
+        let wav = tokio::fs::read(&wav_path)
+            .await
+            .map_err(|err| TtsError::new(format!("read wav: {err}")))?;
+        wav_bytes_to_16k_pcm(cfg, &work, &wav).await
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&work).await;
+    result
+}
+
+async fn wav_bytes_to_16k_pcm(
+    cfg: &VoiceConfig,
+    work: &Path,
+    wav: &[u8],
+) -> Result<Vec<u8>, TtsError> {
+    if let Some(pcm) = pcm_if_16k_mono(wav) {
+        return Ok(pcm);
+    }
+    let src = work.join("source.wav");
+    let dst = work.join("speaker.wav");
+    tokio::fs::write(&src, wav)
+        .await
+        .map_err(|err| TtsError::new(format!("tts wav file: {err}")))?;
+    let ffmpeg = bin_path(&cfg.ffmpeg_bin, DEFAULT_FFMPEG_BIN);
+    let args = ffmpeg_to_wav_args(&src, &dst);
+    run_capturing(&ffmpeg, &args, cfg.tts_timeout_secs)
+        .await
+        .map_err(|err| TtsError::new(format!("pcm resample: {}", err.message)))?;
+    let converted = tokio::fs::read(&dst)
+        .await
+        .map_err(|err| TtsError::new(format!("read resampled wav: {err}")))?;
+    pcm_if_16k_mono(&converted).ok_or_else(|| TtsError::new("resampled wav is not 16 kHz mono PCM"))
+}
+
+fn pcm_if_16k_mono(wav: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_wav_pcm(wav).ok()?;
+    if parsed.sample_rate == 16_000 && parsed.channels == 1 && !parsed.pcm.is_empty() {
+        Some(parsed.pcm)
+    } else {
+        None
+    }
+}
+
+/// PCM payload of a little-endian RIFF WAVE file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WavPcm {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub pcm: Vec<u8>,
+}
+
+/// Read format-1 16-bit PCM. Unknown chunks are skipped. The `data` size is
+/// the PCM length, not including a pad byte.
+pub fn parse_wav_pcm(bytes: &[u8]) -> Result<WavPcm, String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a RIFF WAVE file".to_string());
+    }
+    let mut offset = 12usize;
+    let mut audio_format = None;
+    let mut channels = None;
+    let mut sample_rate = None;
+    let mut bits = None;
+    let mut pcm = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| "wav chunk size overflows".to_string())?;
+        if end > bytes.len() {
+            return Err("truncated wav chunk".to_string());
+        }
+        let chunk = &bytes[offset..end];
+        if id == b"fmt " {
+            if chunk.len() < 16 {
+                return Err("wav fmt chunk is short".to_string());
+            }
+            audio_format = Some(u16::from_le_bytes(chunk[0..2].try_into().unwrap()));
+            channels = Some(u16::from_le_bytes(chunk[2..4].try_into().unwrap()));
+            sample_rate = Some(u32::from_le_bytes(chunk[4..8].try_into().unwrap()));
+            bits = Some(u16::from_le_bytes(chunk[14..16].try_into().unwrap()));
+        } else if id == b"data" && pcm.is_none() {
+            pcm = Some(chunk.to_vec());
+        }
+        offset = end;
+        if size % 2 == 1 {
+            offset = offset.saturating_add(1);
+        }
+    }
+    let (Some(format), Some(channels), Some(sample_rate), Some(bits), Some(pcm)) =
+        (audio_format, channels, sample_rate, bits, pcm)
+    else {
+        return Err("wav is missing fmt or data".to_string());
+    };
+    if format != 1 {
+        return Err("wav is not PCM".to_string());
+    }
+    if bits != 16 {
+        return Err("wav is not 16-bit".to_string());
+    }
+    if channels == 0 {
+        return Err("wav has no channels".to_string());
+    }
+    let frame = channels as usize * 2;
+    if pcm.len() % frame != 0 {
+        return Err("wav data is not a whole number of frames".to_string());
+    }
+    Ok(WavPcm {
+        sample_rate,
+        channels,
+        pcm,
+    })
 }
 
 async fn read_ogg(path: &Path) -> Result<Vec<u8>, TtsError> {
@@ -2151,6 +2298,79 @@ printf '%s\n' '/tmp/rustfox-16k-11111111-2222-3333-4444-555555555555.wav' '----'
             started.elapsed() < Duration::from_secs(10),
             "timeout took {:?}",
             started.elapsed()
+        );
+    }
+
+    fn sample_wav(sample_rate: u32, channels: u16, frames: &[i16]) -> Vec<u8> {
+        let block = channels as usize * 2;
+        let data_len = frames.len() * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * block as u32).to_le_bytes());
+        out.extend_from_slice(&(block as u16).to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for sample in frames {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn parse_wav_pcm_reads_16k_mono_and_skips_unknown_chunks() {
+        let mut bytes = sample_wav(16_000, 1, &[1, -2, 3]);
+        let mut with_junk = bytes[..12].to_vec();
+        with_junk.extend_from_slice(b"JUNK");
+        with_junk.extend_from_slice(&4u32.to_le_bytes());
+        with_junk.extend_from_slice(b"abcd");
+        with_junk.extend_from_slice(&bytes[12..]);
+        bytes = with_junk;
+        let parsed = parse_wav_pcm(&bytes).unwrap();
+        assert_eq!(parsed.sample_rate, 16_000);
+        assert_eq!(parsed.channels, 1);
+        assert_eq!(
+            parsed.pcm,
+            1i16.to_le_bytes()
+                .into_iter()
+                .chain((-2i16).to_le_bytes())
+                .chain(3i16.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert!(parse_wav_pcm(b"not-wav").is_err());
+        assert_ne!(
+            parse_wav_pcm(&sample_wav(8_000, 1, &[0]))
+                .unwrap()
+                .sample_rate,
+            16_000
+        );
+        assert_eq!(
+            parse_wav_pcm(&sample_wav(16_000, 2, &[0, 0]))
+                .unwrap()
+                .channels,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn pcm_synth_rejects_other_languages_and_a_missing_model() {
+        let cfg = VoiceConfig::default();
+        let err = synthesize_pcm_s16le(&cfg, "zh", "hello").await.unwrap_err();
+        assert!(err.to_string().contains("yue") || err.to_string().contains("en"));
+        let err = synthesize_pcm_s16le(&cfg, "en", "hello").await.unwrap_err();
+        assert!(err.to_string().contains("model"), "{err}");
+        let long = "a".repeat(TTS_MAX_CHARS + 20);
+        let err = synthesize_pcm_s16le(&cfg, "yue", &long).await.unwrap_err();
+        assert!(
+            !err.to_string().contains("3500"),
+            "a long reply is not rejected for length: {err}"
         );
     }
 }

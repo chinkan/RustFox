@@ -17,6 +17,8 @@
     "devices": "Devices",
     "signOut": "Sign out",
     "signOutEverywhere": "Sign out everywhere",
+    "openMenu": "Open menu",
+    "closeMenu": "Close menu",
     "skills": "Skills"
   },
   "login": {

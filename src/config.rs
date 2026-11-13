@@ -112,7 +112,8 @@ pub struct Config {
     #[serde(default)]
     pub portal: PortalConfig,
     /// Opt-in device WebSocket adapter (ADR-0056). Absent section = disabled.
-    /// Shares [`PortalConfig`] bind and port. Path `/api/device/v1/ws`.
+    /// Shares [`PortalConfig`] bind and port. Paths `/api/device/v1/ws` and
+    /// `/api/device/v1/audio` (ADR-0056, ADR-0066).
     #[serde(default)]
     pub device_ws: DeviceWsConfig,
     /// Scheduled-run wall-clock timeout (ADR-0024 / #175).
@@ -288,8 +289,8 @@ impl Default for PortalConfig {
 ///
 /// Bind address and port always come from [`PortalConfig`]. When this is on
 /// and the portal UI is off, the process still binds that address and serves
-/// only the device API. Bare public WebSocket is not recommended; put TLS on
-/// a reverse proxy and keep the listener on loopback, Tailscale, or a LAN.
+/// only the device API. Bare public HTTP is not a supported deployment; put
+/// TLS on a reverse proxy and keep the listener on loopback, Tailscale, or a LAN.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct DeviceWsConfig {

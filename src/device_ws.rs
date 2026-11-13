@@ -18,13 +18,15 @@
 //! There is no anonymous socket.
 //!
 //! Frames are JSON text only (`auth`, `user_text`, `ping`, `device_hello` →
-//! `assistant_text`, `device_ack`, `pong`, `error`). Binary audio, partial
-//! token streaming, and portal-chat-over-WebSocket are out of scope.
+//! `assistant_text`, `device_ack`, `pong`, `error`, plus `assistant_audio`
+//! from ADR-0066). `assistant_audio` is a JSON text frame. Binary audio,
+//! partial token streaming, and portal-chat-over-WebSocket are out of scope.
 //!
-//! Network: loopback, Tailscale, or a trusted LAN. Bare public WebSocket is
-//! not recommended. TLS belongs on an external reverse proxy.
+//! Network: loopback, Tailscale, or a trusted LAN. Bare public HTTP is not
+//! a supported deployment. TLS belongs on an external reverse proxy.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,7 +43,7 @@ use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::agent::{session_key, Agent};
 use crate::config::Config;
@@ -50,6 +52,8 @@ use crate::secret_store::SecretStore;
 use crate::turn_gate::{QueuedInput, Submit, TurnGate};
 
 pub const WS_PATH: &str = "/api/device/v1/ws";
+pub const AUDIO_PATH: &str = "/api/device/v1/audio";
+pub const AUDIO_ID_PATH: &str = "/api/device/v1/audio/{id}";
 
 const MAX_USER_TEXT_CHARS: usize = 16_000;
 const AUTH_WAIT: Duration = Duration::from_secs(15);
@@ -64,7 +68,7 @@ pub fn warn_if_public_bind(bind: &str) {
     let bind = bind.trim();
     if bind == "0.0.0.0" || bind == "::" || bind == "[::]" {
         tracing::warn!(
-            "Device WebSocket bind {bind} listens on all interfaces. Bare public WebSocket is not recommended; use loopback, Tailscale, or a trusted LAN and terminate TLS at a reverse proxy."
+            "Device bind {bind} listens on all interfaces. Bare public HTTP is not a supported deployment; use loopback, Tailscale, or a trusted LAN and terminate TLS at a reverse proxy."
         );
     }
 }
@@ -72,7 +76,7 @@ pub fn warn_if_public_bind(bind: &str) {
 /// Log the operator warning that belongs next to a successful bind.
 pub fn log_listening(local: &str) {
     tracing::info!(
-        "Device WebSocket: ws://{local}{WS_PATH} (JSON text). Bare public WebSocket is not recommended; use loopback, Tailscale, or a trusted LAN and terminate TLS at a reverse proxy."
+        "Device WebSocket: ws://{local}{WS_PATH} (JSON text). Device audio: http://{local}{AUDIO_PATH}. Bare public HTTP is not a supported deployment; use loopback, Tailscale, or a trusted LAN and terminate TLS at a reverse proxy."
     );
 }
 
@@ -612,11 +616,168 @@ fn sanitize_meta(value: Option<&str>) -> Option<String> {
     }
 }
 
+/// One authenticated device socket that can receive JSON text frames.
+#[derive(Clone, Default)]
+pub struct LiveSockets {
+    inner: Arc<StdMutex<LiveInner>>,
+}
+
+struct LiveInner {
+    next: u64,
+    slots: HashMap<String, LiveSlot>,
+}
+
+impl Default for LiveInner {
+    fn default() -> Self {
+        Self {
+            next: 1,
+            slots: HashMap::new(),
+        }
+    }
+}
+
+struct LiveSlot {
+    generation: u64,
+    tx: mpsc::UnboundedSender<Value>,
+    device_id: String,
+    room: Option<String>,
+    fw: Option<String>,
+}
+
+/// Hello metadata from the uploader's current socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceLiveMeta {
+    pub device_id: String,
+    pub room: Option<String>,
+    pub fw: Option<String>,
+}
+
+pub struct LiveGuard {
+    live: LiveSockets,
+    id: String,
+    generation: u64,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.live.unregister(&self.id, self.generation);
+    }
+}
+
+impl LiveSockets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace any previous socket for this device token. The new socket is
+    /// the one `assistant_audio` is sent on.
+    pub fn register(
+        &self,
+        device: &DeviceRecord,
+    ) -> (u64, mpsc::UnboundedReceiver<Value>, LiveGuard) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut inner = self.lock();
+        let generation = inner.next;
+        inner.next = inner.next.saturating_add(1);
+        inner.slots.insert(
+            device.id.clone(),
+            LiveSlot {
+                generation,
+                tx,
+                device_id: device.id.clone(),
+                room: device.room.clone(),
+                fw: None,
+            },
+        );
+        drop(inner);
+        (
+            generation,
+            rx,
+            LiveGuard {
+                live: self.clone(),
+                id: device.id.clone(),
+                generation,
+            },
+        )
+    }
+
+    pub fn note_hello(
+        &self,
+        registry_id: &str,
+        generation: u64,
+        device_id: &str,
+        room: Option<&str>,
+        fw: Option<&str>,
+    ) {
+        let mut inner = self.lock();
+        let Some(slot) = inner.slots.get_mut(registry_id) else {
+            return;
+        };
+        if slot.generation != generation {
+            return;
+        }
+        slot.device_id = device_id.to_string();
+        slot.room = room.map(str::to_string);
+        slot.fw = fw.map(str::to_string);
+    }
+
+    pub fn meta(&self, registry_id: &str) -> Option<DeviceLiveMeta> {
+        let inner = self.lock();
+        let slot = inner.slots.get(registry_id)?;
+        if slot.tx.is_closed() {
+            return None;
+        }
+        Some(DeviceLiveMeta {
+            device_id: slot.device_id.clone(),
+            room: slot.room.clone(),
+            fw: slot.fw.clone(),
+        })
+    }
+
+    pub fn is_connected(&self, registry_id: &str) -> bool {
+        let inner = self.lock();
+        inner
+            .slots
+            .get(registry_id)
+            .is_some_and(|slot| !slot.tx.is_closed())
+    }
+
+    pub fn try_send(&self, registry_id: &str, frame: &Value) -> bool {
+        let tx = {
+            let inner = self.lock();
+            let Some(slot) = inner.slots.get(registry_id) else {
+                return false;
+            };
+            if slot.tx.is_closed() {
+                return false;
+            }
+            slot.tx.clone()
+        };
+        tx.send(frame.clone()).is_ok()
+    }
+
+    fn unregister(&self, registry_id: &str, generation: u64) {
+        let mut inner = self.lock();
+        if inner
+            .slots
+            .get(registry_id)
+            .is_some_and(|slot| slot.generation == generation)
+        {
+            inner.slots.remove(registry_id);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LiveInner> {
+        self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
 /// Runtime for a standalone device router (tests and the API-only server's twin).
 #[derive(Clone)]
 pub struct DeviceWsRuntime {
     pub registry: DeviceRegistry,
     pub inbound: Arc<dyn DeviceInbound>,
+    pub live: LiveSockets,
 }
 
 pub fn router(runtime: DeviceWsRuntime) -> Router {
@@ -630,7 +791,7 @@ async fn runtime_ws(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    accept(rt.registry, rt.inbound, headers, ws).await
+    accept(rt.registry, rt.inbound, rt.live, headers, ws).await
 }
 
 enum PresentedToken {
@@ -675,28 +836,45 @@ fn store_http() -> Response {
         .into_response()
 }
 
+pub(crate) enum HeaderAuth {
+    Absent,
+    Device(DeviceRecord),
+    Reject(Response),
+}
+
+/// Bearer check shared by the socket and the audio routes.
+/// Absent is not a rejection: the socket may still send a first `auth` frame.
+pub(crate) async fn header_auth(registry: &DeviceRegistry, headers: &HeaderMap) -> HeaderAuth {
+    match presented_token(headers) {
+        PresentedToken::Absent => HeaderAuth::Absent,
+        PresentedToken::Invalid => HeaderAuth::Reject(unauthorized_http()),
+        PresentedToken::Token(token) => match registry.authenticate(&token).await {
+            Ok(Some(device)) => HeaderAuth::Device(device),
+            Ok(None) => HeaderAuth::Reject(unauthorized_http()),
+            Err(e) => {
+                tracing::warn!(error = %e, "device token check failed");
+                HeaderAuth::Reject(store_http())
+            }
+        },
+    }
+}
+
 /// Upgrade, or reject a bad bearer before the socket exists.
 pub async fn accept(
     registry: DeviceRegistry,
     inbound: Arc<dyn DeviceInbound>,
+    live: LiveSockets,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let preauth = match presented_token(&headers) {
-        PresentedToken::Invalid => return unauthorized_http(),
-        PresentedToken::Absent => None,
-        PresentedToken::Token(token) => match registry.authenticate(&token).await {
-            Ok(Some(device)) => Some(device),
-            Ok(None) => return unauthorized_http(),
-            Err(e) => {
-                tracing::warn!(error = %e, "device websocket token check failed");
-                return store_http();
-            }
-        },
+    let preauth = match header_auth(&registry, &headers).await {
+        HeaderAuth::Absent => None,
+        HeaderAuth::Device(device) => Some(device),
+        HeaderAuth::Reject(response) => return response,
     };
     ws.max_message_size(256 * 1024)
         .max_frame_size(256 * 1024)
-        .on_upgrade(move |socket| session(socket, registry, inbound, preauth))
+        .on_upgrade(move |socket| session(socket, registry, inbound, live, preauth))
 }
 
 struct Hello {
@@ -709,6 +887,7 @@ async fn session(
     mut socket: WebSocket,
     registry: DeviceRegistry,
     inbound: Arc<dyn DeviceInbound>,
+    live: LiveSockets,
     preauth: Option<DeviceRecord>,
 ) {
     let device = if let Some(device) = preauth {
@@ -722,21 +901,47 @@ async fn session(
             None => return,
         }
     };
+    let (generation, mut outbound, _guard) = live.register(&device);
     let mut hello = Hello {
         device_id: None,
         room: None,
         fw: None,
     };
+    let mut outbound_open = true;
     loop {
-        let Some(msg) = socket.recv().await else {
-            break;
-        };
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(_) => break,
-        };
-        if !on_live_frame(&mut socket, &registry, &inbound, &device, &mut hello, msg).await {
-            break;
+        tokio::select! {
+            biased;
+            incoming = socket.recv() => {
+                let Some(Ok(msg)) = incoming else {
+                    break;
+                };
+                if !on_live_frame(
+                    &mut socket,
+                    &registry,
+                    &inbound,
+                    &device,
+                    &mut hello,
+                    &LiveWrite {
+                        live: &live,
+                        generation,
+                    },
+                    msg,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+            outgoing = outbound.recv(), if outbound_open => {
+                match outgoing {
+                    Some(frame) => {
+                        if !send_json(&mut socket, &frame).await {
+                            break;
+                        }
+                    }
+                    None => outbound_open = false,
+                }
+            }
         }
     }
 }
@@ -861,12 +1066,18 @@ async fn authenticate_frame(registry: &DeviceRegistry, token: Option<&str>) -> A
     }
 }
 
+struct LiveWrite<'a> {
+    live: &'a LiveSockets,
+    generation: u64,
+}
+
 async fn on_live_frame(
     socket: &mut WebSocket,
     registry: &DeviceRegistry,
     inbound: &Arc<dyn DeviceInbound>,
     device: &DeviceRecord,
     hello: &mut Hello,
+    write: &LiveWrite<'_>,
     msg: Message,
 ) -> bool {
     let text = match msg {
@@ -894,8 +1105,14 @@ async fn on_live_frame(
             if let Some(fw) = sanitize_meta(frame.fw_version.as_deref()) {
                 hello.fw = Some(fw);
             }
-            let shown = hello.device_id.clone().unwrap_or_else(|| device.id.clone());
-            let room = hello.room.clone().or_else(|| device.room.clone());
+            let (shown, room, fw) = turn_meta(device, hello);
+            write.live.note_hello(
+                &device.id,
+                write.generation,
+                &shown,
+                room.as_deref(),
+                fw.as_deref(),
+            );
             send_json(socket, &ack_body("hello", &shown, room.as_deref())).await
         }
         "user_text" => on_user_text(socket, inbound, device, hello, frame.text.as_deref()).await,
@@ -943,7 +1160,7 @@ async fn on_user_text(
     match inbound.submit(msg).await {
         Ok(DeviceTurnOutcome::Replies(replies)) => {
             for reply in replies {
-                if !send_json(socket, &json!({ "type": "assistant_text", "text": reply })).await {
+                if !send_json(socket, &assistant_text_frame(&reply)).await {
                     return false;
                 }
             }
@@ -1007,11 +1224,15 @@ fn parse_frame(text: &str) -> Result<ClientFrame, Value> {
     serde_json::from_str(text).map_err(|_| error_body("bad_frame", "expected a JSON text frame"))
 }
 
-fn error_body(code: &str, message: &str) -> Value {
+pub(crate) fn assistant_text_frame(text: &str) -> Value {
+    json!({ "type": "assistant_text", "text": text })
+}
+
+pub(crate) fn error_body(code: &str, message: &str) -> Value {
     json!({ "type": "error", "code": code, "message": message })
 }
 
-fn ack_body(status: &str, device_id: &str, room: Option<&str>) -> Value {
+pub(crate) fn ack_body(status: &str, device_id: &str, room: Option<&str>) -> Value {
     let mut body = json!({
         "type": "device_ack",
         "status": status,

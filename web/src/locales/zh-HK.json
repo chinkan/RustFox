@@ -17,6 +17,8 @@
     "devices": "裝置",
     "signOut": "登出",
     "signOutEverywhere": "所有裝置登出",
+    "openMenu": "開啟選單",
+    "closeMenu": "關閉選單",
     "skills": "技能"
   },
   "login": {
