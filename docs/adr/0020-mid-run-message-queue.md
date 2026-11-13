@@ -11,6 +11,10 @@
   Decision 8 below: inbound chat while a scheduled run is already going starts
   an interactive lane immediately. It is not deferred and not a steer into the
   schedule loop. A scheduled run still waits to *start* until that lane is idle.
+  **#404 (2026-11-13):** a Silent turn (per-chat `/verbose` Silent, or
+  `fully_silent`) also sets this same 👀 when the turn starts, and clears it
+  — including mid-run 👀 accepted into that turn — when the turn completes.
+  Minimal and Verbose still 👀 only for the mid-run ack and do not clear it.
 
 ## Context
 
@@ -139,7 +143,12 @@ blocking.
      the standard emoji set bots may use). Same in every tool-UI mode, including
      `fully_silent`. **No text bubble.** If the call fails (for example a group admin limited
      `available_reactions`, or an old client), `warn!` and continue. Do not fail the turn and
-     do not fall back to a text bubble.
+     do not fall back to a text bubble. A Silent turn also sets this 👀 on the user message
+     when the turn starts, and clears that 👀 and any mid-run 👀 accepted into the same turn
+     when the turn completes (final reply / `sendVoice`, or cancel / error). The clear uses
+     the same call with an empty reaction list. A failed clear is `warn!` and the turn
+     still ends. Minimal and Verbose do not clear the mid-run 👀. Commands that do not
+     start a model turn, and the queue-full refusal, still do not get 👀.
    - Full (`pending.len() == 10`) → the message is **not** stored, and the bot replies to it:
      `⚠️ Too many messages are waiting (10). Please wait until this turn finishes, then send
      again.` The refusal is a text reply in **every** tool-UI mode, including `fully_silent`

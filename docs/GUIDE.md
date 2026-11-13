@@ -102,6 +102,8 @@ The default is unchanged. While a tool runs, that bot may still show a `Working�
 
 `fully_silent` is an opt-in on the **bot that is speaking** (`[[bots]]`). It is not a setup-wizard question and not a per-chat `/verbose` setting. When it is `true`, that bot's Telegram turn posts no tool-call UI: no in-progress bubble, no completed tool bubble, and no raw `Running:` line. The final assistant reply still posts. Single-bot and multi-bot both follow the speaking bot. Another bot does not inherit the flag.
 
+`/verbose` cycles Minimal → Verbose → Silent for that chat. Silent is the same Telegram quietness: no `⏳ Thinking...`, no Working, no `Running:`, no completed tool bubble, and no post-then-delete tool message. The final text and `sendVoice` still post. Typing may stay. When a Silent turn starts, the bot sets 👀 on the accepted user message (the same reaction as a mid-run steer ack, not a new text bubble) and clears that 👀, including any steer 👀 accepted into the same turn, when the turn finishes. A failed reaction call is logged and the turn continues. `fully_silent = true` forces that quietness even when the stored mode is Minimal or Verbose. `/verbose` still cycles the stored mode and sends the mode confirmation. Queue-full refusals and commands that do not start a model turn stay text and do not get 👀. When the flag is later turned off, the stored mode applies. Minimal and Verbose are unchanged. Portal Chat tool UI is unchanged.
+
 ```toml
 [[bots]]
 id = "main"
