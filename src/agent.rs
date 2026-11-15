@@ -2859,6 +2859,24 @@ impl Agent {
         text
     }
 
+    /// Per-chat `/verbose` Silent (`tool_ui_mode_{user_id}`). A missing key or a
+    /// failed recall stays non-silent, the same Minimal fallback as the Telegram
+    /// turn. `fully_silent` is applied by the caller and still wins over a stored
+    /// Minimal or Verbose mode.
+    async fn stored_tool_ui_is_silent(&self, user_id: &str) -> bool {
+        let key = format!("tool_ui_mode_{user_id}");
+        match self.memory.recall("settings", &key).await {
+            Ok(val) => {
+                crate::tool_registry::ToolUiMode::from_memory(val.as_deref())
+                    == crate::tool_registry::ToolUiMode::Silent
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to recall tool UI mode");
+                false
+            }
+        }
+    }
+
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
     /// Returns a boxed future to break type-level cycles with the special_tool_handler.
@@ -2940,9 +2958,15 @@ impl Agent {
             };
 
             let turn_sender = self.sender_for_bot(&delivery.bot_id).await;
+            // Speaking bot (stack root), not the peer. `fully_silent` forces
+            // Silent even when the stored per-chat mode is Minimal or Verbose.
+            // Per-chat `/verbose` Silent does the same. A Minimal or Verbose
+            // speaker keeps today's subagent Minimal hardcode.
             let speaking_fully_silent = invoke_stack
                 .first()
                 .is_some_and(|id| self.config.bot_fully_silent(id));
+            let per_chat_silent = self.stored_tool_ui_is_silent(&delivery.user_id).await;
+            let subagent_silent = speaking_fully_silent || per_chat_silent;
             let make_ctx = {
                 let sandbox_dir = self.config.sandbox.allowed_directory.clone();
                 let home_dir = self.config.resolved_home.clone();
@@ -2959,10 +2983,7 @@ impl Agent {
                     user_id: user_id.clone(),
                     chat_id: chat_id.clone(),
                     bot_id: turn_bot.clone(),
-                    // Follow the speaking bot (stack root), not the peer.
-                    // Another bot's fully_silent flag is not inherited, and a
-                    // silent speaker stays silent for peer tool UI too.
-                    tool_ui_mode: if speaking_fully_silent {
+                    tool_ui_mode: if subagent_silent {
                         crate::tool_registry::ToolUiMode::Silent
                     } else {
                         crate::tool_registry::ToolUiMode::Minimal
