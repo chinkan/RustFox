@@ -116,7 +116,7 @@ Failure uses the manual dead-letter gate (`enqueue_manual` / `mark_awaiting_user
 
 [ADR-0054](adr/0054-scheduler-cross-run-progress.md) / #331. A scheduled run reads and writes `{workspace}/_runs/<task_id>-YYYY-MM-DD.json` (the task timezone's calendar day). When today's file exists at the start of a fresh run (no transcript continue), the prompt is told to continue from `next_phase` and not redo completed work. Success and an explicit hard failure delete the file. Timeout, max-iterations, a guard rewrite, and other unverified stops update it. A transient provider error leaves it unchanged.
 
-Transcript checkpoints ([ADR-0039](adr/0039-scheduler-timeout-transcript-continue.md)) are saved on the max-iterations and guard-rewrite human-gates as well as on wall-clock timeout. Retry continues when a checkpoint row exists. Plan read-back is not this path. `max_iterations` is unchanged.
+Transcript checkpoints ([ADR-0039](adr/0039-scheduler-timeout-transcript-continue.md)) are saved on the max-iterations and guard-rewrite stops as well as on wall-clock timeout, and after each completed tool on a scheduled run ([ADR-0067](adr/0067-scheduled-auto-resume.md)). A scheduled timeout, max-iterations stop, or process restart continues from that checkpoint without a Retry click (startup, and a 60-second restore tick). Unverified results stay a human gate. Retry still continues when a checkpoint row exists. Plan read-back is not this path. `max_iterations` is unchanged. The budget formula stays kind-dependent ([ADR-0054](adr/0054-scheduler-cross-run-progress.md) Decision 4).
 
 ## Agentic Loop
 

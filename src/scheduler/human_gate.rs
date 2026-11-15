@@ -220,6 +220,7 @@ pub async fn apply_gate_action(
                 let checkpoints =
                     crate::scheduler::checkpoint::CheckpointStore::new(queue.connection());
                 let _ = checkpoints.clear(id).await;
+                let _ = checkpoints.clear_task(&row.task_id).await;
                 Ok(GateOutcome::Cancelled)
             } else {
                 Ok(GateOutcome::AlreadyDone)

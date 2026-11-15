@@ -269,6 +269,9 @@ pub struct Agent {
     /// Live `[voice]` settings. Portal Settings updates this; Telegram reads
     /// it on the next note (ADR-0063). Not a process restart.
     pub voice_runtime: crate::asr::VoiceRuntime,
+    /// Task ids inside `run_one_scheduled_job` (ADR-0067). A human Retry
+    /// while this set contains the task must not start a second copy.
+    pub live_scheduled: crate::scheduler::auto_resume::LiveScheduledRuns,
 }
 
 /// Follow-up under `# Available Agents`. A name passed to `spawn_agents` loads
@@ -487,6 +490,7 @@ impl Agent {
             schedule_tz,
             seat_run: crate::seat_run::SeatRunSignal::new(),
             voice_runtime,
+            live_scheduled: crate::scheduler::auto_resume::LiveScheduledRuns::new(),
         }
     }
 
@@ -1234,7 +1238,14 @@ impl Agent {
         tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
         Ok(self
-            .process_message_outcome(incoming, tool_event_tx, stream_token_tx, tool_ui_mode, None)
+            .process_message_outcome(
+                incoming,
+                tool_event_tx,
+                stream_token_tx,
+                tool_ui_mode,
+                None,
+                None,
+            )
             .await?
             .text)
     }
@@ -1251,6 +1262,7 @@ impl Agent {
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
         continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
+        on_tool_completed: Option<crate::loop_runner::ToolCompletedHook>,
     ) -> Result<RunOutcome> {
         if let Some(cp) = continue_from {
             return self
@@ -1260,6 +1272,7 @@ impl Agent {
                     tool_event_tx,
                     stream_token_tx,
                     tool_ui_mode,
+                    on_tool_completed,
                 )
                 .await;
         }
@@ -1615,6 +1628,9 @@ impl Agent {
                 })
             }));
         }
+        if let Some(hook) = on_tool_completed {
+            agentic = agentic.with_tool_completed(hook);
+        }
         let mut container = crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr));
         let outcome = CANCEL_SCOPE
             .scope(
@@ -1771,6 +1787,7 @@ impl Agent {
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
+        on_tool_completed: Option<crate::loop_runner::ToolCompletedHook>,
     ) -> Result<RunOutcome> {
         let bot_id = crate::platform::normalize_bot_id(&incoming.bot_id);
         let user_id = &incoming.user_id;
@@ -1913,7 +1930,7 @@ impl Agent {
             }
         };
 
-        let agentic = crate::loop_runner::AgenticLoop::new(
+        let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,
             &self.mcp,
@@ -1925,6 +1942,9 @@ impl Agent {
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
         );
+        if let Some(hook) = on_tool_completed {
+            agentic = agentic.with_tool_completed(hook);
+        }
         let mut container = crate::loop_runner::MessageContainer::Plain(messages);
         let outcome = CANCEL_SCOPE
             .scope(

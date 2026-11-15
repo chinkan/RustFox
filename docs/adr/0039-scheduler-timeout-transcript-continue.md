@@ -165,6 +165,10 @@ Today (tip ~`4b7ec3c`):
   re-fired; true mid-tool hard resume and idempotent-tool registry
   remain later work.
 
+## Amend (2026-11-15, #412 / ADR-0067)
+
+Decision 11 (write the checkpoint only on a human-gate stop) is amended for scheduled runs: also write a transcript checkpoint synchronously after each completed tool, before the next tool starts, so startup and the 60-second restore tick can continue from it. Do not write mid-tool or mid-LLM-stream. The existing human-gate writes (timeout, max-iterations, guard-rewrite) stay. Unfinished in-flight tools stay stubbed and are not rerun. Interactive turns do not write this row. See ADR-0067.
+
 ## Amend (2026-11-01, #331 / ADR-0054)
 
 Decision 7 and Decision 11 (write the checkpoint only on the wall-clock
