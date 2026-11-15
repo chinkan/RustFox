@@ -24,6 +24,24 @@ use uuid::Uuid;
 
 /// Default wait before a queued re-fire becomes eligible.
 pub const ELIGIBILITY_DELAY_MINUTES: i64 = 30;
+/// Scheduled auto-resume rows (ADR-0067). Not the transient 429/5xx queue.
+/// `due()` and `reset_inflight_on_boot` skip this prefix so those rows do not
+/// inherit the +30 minute delay.
+pub const AUTO_RESUME_REASON_PREFIX: &str = "auto-resume: ";
+
+/// True when `reason` was written by the scheduled auto-resume path.
+pub fn is_auto_resume_reason(reason: &str) -> bool {
+    reason.starts_with(AUTO_RESUME_REASON_PREFIX)
+}
+
+/// Prefix a stop detail once. Already-prefixed text is unchanged.
+pub fn prefix_auto_resume_reason(detail: &str) -> String {
+    if is_auto_resume_reason(detail) {
+        detail.to_string()
+    } else {
+        format!("{AUTO_RESUME_REASON_PREFIX}{detail}")
+    }
+}
 /// Awaiting-user rows abandoned (with a one-line DM) after this many days.
 pub const AWAITING_USER_EXPIRY_DAYS: i64 = 7;
 /// Terminal rows (done/abandoned/superseded) are purged after this many days.
@@ -91,12 +109,10 @@ impl RerunQueue {
             .await
     }
 
-    /// Enqueue a run that died on a *non-transient* stop (max-iterations) as
-    /// a manual gate: `awaiting_user` from birth, so the watchdog NEVER
-    /// auto re-fires it (replaying half-finished work risks duplicated side
-    /// effects), but `/continue` can resume it and `/continue cancel` can
-    /// drop it. The run is still recorded — the point is that the human
-    /// learns about the death, not that we stay silent.
+    /// Enqueue a run that stays a human gate (unverified result, failed-twice):
+    /// `awaiting_user` from birth, so the watchdog never auto re-fires it.
+    /// Scheduled timeout and max-iterations use [`Self::enqueue_auto_resume`]
+    /// (ADR-0067) instead of this gate.
     pub async fn enqueue_manual(
         &self,
         task_id: &str,
@@ -170,11 +186,13 @@ impl RerunQueue {
                  WHERE state = 'queued'
                    AND attempts = 0
                    AND next_eligible_at <= datetime('now')
+                   AND fail_reason NOT LIKE ?1
                  ORDER BY next_eligible_at",
             )
             .context("Failed to prepare due query")?;
+        let pattern = format!("{AUTO_RESUME_REASON_PREFIX}%");
         let rows = stmt
-            .query_map([], Self::row_to_pending)
+            .query_map(rusqlite::params![pattern], Self::row_to_pending)
             .context("Failed to query due reruns")?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to deserialize due reruns")
@@ -355,11 +373,127 @@ impl RerunQueue {
             .execute(
                 "UPDATE pending_reruns
                  SET attempts = 0, next_eligible_at = datetime('now', ?1), updated_at = datetime('now')
-                 WHERE state = 'queued' AND attempts > 0",
-                rusqlite::params![format!("+{ELIGIBILITY_DELAY_MINUTES} minutes")],
+                 WHERE state = 'queued' AND attempts > 0
+                   AND fail_reason NOT LIKE ?2",
+                rusqlite::params![
+                    format!("+{ELIGIBILITY_DELAY_MINUTES} minutes"),
+                    format!("{AUTO_RESUME_REASON_PREFIX}%")
+                ],
             )
             .context("Failed to reset inflight reruns")?;
         Ok(n)
+    }
+
+    /// Queue a scheduled auto-resume that is eligible immediately.
+    /// Supersedes other `queued` rows for the task. Does not touch
+    /// `awaiting_user` (an open human gate stays).
+    pub async fn enqueue_auto_resume(
+        &self,
+        task_id: &str,
+        original_run_id: &str,
+        detail: &str,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let fail_reason = prefix_auto_resume_reason(detail);
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE pending_reruns
+             SET state = 'superseded', updated_at = datetime('now')
+             WHERE task_id = ?1 AND state = 'queued'",
+            rusqlite::params![task_id],
+        )
+        .context("Failed to supersede queued rows before auto-resume")?;
+        conn.execute(
+            "INSERT INTO pending_reruns
+             (id, task_id, original_run_id, fail_reason, attempts, state, next_eligible_at)
+             VALUES (?1, ?2, ?3, ?4, 0, 'queued', datetime('now'))",
+            rusqlite::params![id, task_id, original_run_id, fail_reason],
+        )
+        .context("Failed to insert auto-resume row")?;
+        Ok(id)
+    }
+
+    /// Make an existing row the immediate auto-resume continue key.
+    /// `attempts` goes back to 0 and eligibility is now, not +30 minutes.
+    pub async fn requeue_auto_resume(&self, id: &str, detail: &str) -> Result<()> {
+        let fail_reason = prefix_auto_resume_reason(detail);
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE pending_reruns
+             SET state = 'queued', attempts = 0, fail_reason = ?2,
+                 next_eligible_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![id, fail_reason],
+        )
+        .context("Failed to requeue auto-resume")?;
+        Ok(())
+    }
+
+    /// Open human gate for this task (`awaiting_user`), if any.
+    pub async fn open_human_gate(&self, task_id: &str) -> Result<Option<PendingRerun>> {
+        self.one_by_state(task_id, RerunState::AwaitingUser.as_str())
+            .await
+    }
+
+    /// Live `queued` row for this task, if any.
+    pub async fn queued_for_task(&self, task_id: &str) -> Result<Option<PendingRerun>> {
+        self.one_by_state(task_id, RerunState::Queued.as_str())
+            .await
+    }
+
+    async fn one_by_state(&self, task_id: &str, state: &str) -> Result<Option<PendingRerun>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, original_run_id, fail_reason, attempts, state,
+                        next_eligible_at, created_at
+                 FROM pending_reruns
+                 WHERE task_id = ?1 AND state = ?2
+                 ORDER BY updated_at DESC
+                 LIMIT 1",
+            )
+            .context("Failed to prepare live-row query")?;
+        let mut rows = stmt
+            .query(rusqlite::params![task_id, state])
+            .context("Failed to query live row")?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_pending(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `queued` or `awaiting_user` still controls this task.
+    pub async fn has_live_control_row(&self, task_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_reruns
+                 WHERE task_id = ?1 AND state IN ('queued', 'awaiting_user')",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+            .context("Failed to count live rerun rows")?;
+        Ok(n > 0)
+    }
+
+    /// Queued scheduled auto-resume rows. The hourly watchdog does not see these.
+    pub async fn list_auto_resume_queued(&self) -> Result<Vec<PendingRerun>> {
+        let conn = self.conn.lock().await;
+        let pattern = format!("{AUTO_RESUME_REASON_PREFIX}%");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, original_run_id, fail_reason, attempts, state,
+                        next_eligible_at, created_at
+                 FROM pending_reruns
+                 WHERE state = 'queued' AND fail_reason LIKE ?1
+                 ORDER BY created_at",
+            )
+            .context("Failed to prepare auto-resume list")?;
+        let rows = stmt
+            .query_map(rusqlite::params![pattern], Self::row_to_pending)
+            .context("Failed to query auto-resume rows")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to deserialize auto-resume rows")
     }
 
     fn row_to_pending(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRerun> {

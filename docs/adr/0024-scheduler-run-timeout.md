@@ -6,7 +6,7 @@
 - **Depends on:** ADR-0013 (human-gate / dead-letter), ADR-0020 slice 1b (TurnGate `begin_scheduled` / `finish`)
 - **Related:** #240 / ADR-0039 (timeout transcript continue; Slice B); ADR-0038 / #242 (human-gate copy + inline; Slice A — separate)
 - **Amends:** none (scheduler-side analogue of #58 CLI unbound timeout)
-- **Amended by:** [ADR-0052](./0052-interactive-lane-during-scheduled-run.md) (#338).
+- **Amended by:** [ADR-0052](./0052-interactive-lane-during-scheduled-run.md) (#338); [ADR-0067](./0067-scheduled-auto-resume.md) (#412) Decisions 2 and 4.
   Timeout cancels the scheduled lane only (`cancel_scheduled_run` + that lane's
   tool-cancel scope), then `TurnGate::finish_scheduled`. It does not cancel an
   interactive turn on the same session key. `/stop` still cancels both lanes.
@@ -114,6 +114,10 @@ watchdog; **no** concurrent runner in this slice. `#166` timezone yields.
 - #173 verifier sandbox tools  
 - Concurrent / sharded job runners  
 - Portal UI for timeout config (config.toml / docs enough for v1)
+
+## Amend (2026-11-15, #412 / ADR-0067)
+
+Decision 2's "enqueue_manual, no auto re-fire" no longer applies to a scheduled wall-clock timeout. That stop notifies once and auto-continues from the checkpoint. It does not leave an `awaiting_user` Retry gate. Decision 4 still fails leftover `running` rows on startup and the stale-running watchdog still only owner-warns and fails the stale row. Resume after that is the ADR-0067 startup path and the 60-second restore tick, and only when a checkpoint exists and no live worker holds the run. Interactive turns are still not wrapped in this timeout.
 
 ## Cross-reference (#240 / ADR-0039)
 

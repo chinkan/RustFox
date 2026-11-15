@@ -5,6 +5,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Auto-resume incomplete scheduled tasks (#412, ADR-0067):** A scheduled timeout, max-iterations stop, or process restart continues from its transcript checkpoint without a Retry click. Resume runs at process start and on a 60-second restore tick (not the builtin `heartbeat` liveness cron, and not the hourly watchdog). The checkpoint is written after each completed tool. Max-iterations continue still gets a full iteration cap; timeout and process-restart continue keep the remaining budget. Unverified results stay a human gate. One scheduled task does not start a second run while that continue or a human gate is open. **v1.0.10 Must**; no tag. Closes #412.
+
 ## [1.0.9] — TBD
 
 Release on main after `v1.0.8`. No tag in this commit.

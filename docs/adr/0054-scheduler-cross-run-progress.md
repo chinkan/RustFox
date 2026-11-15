@@ -40,6 +40,8 @@ Product lock (2026-11-01): do A and B from #331. Do not do C (plan read-back). D
 
    The IterationStall gate and the max-iterations reply state used, remaining, and cap. They do not print the configured cap alone.
 
+   **Amend (2026-11-15, #412 / ADR-0067):** the same formula applies when the continue is an automatic resume rather than a human Retry. `CheckpointStopKind::MaxIterations` still gets a full configured cap. Timeout and process-restart (`MidRun`) continues still get `max(configured cap − stored iteration, 1)`. Auto-resume does not grant a full cap to those continues. The default cap is not raised.
+
 5. **Out of scope.** Plan read-back and archiving `.plans/` (#331 C). Idempotent-tool registry. Portal UI for these files. Deleting progress files from other days.
 
 ## Consequences

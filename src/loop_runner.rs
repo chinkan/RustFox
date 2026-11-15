@@ -50,6 +50,12 @@ pub type ToolHandlerFn = Box<
 pub type SteerFn<'a> =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<ChatMessage>> + Send + 'a>> + Send + Sync + 'a>;
 
+/// Scheduled runs only (ADR-0067). Awaited after each completed tool, before
+/// the next tool starts. Not set for interactive turns.
+pub type ToolCompletedHook = std::sync::Arc<
+    dyn Fn(Vec<ChatMessage>, u32) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 pub struct LoopConfig {
     pub max_iterations: u32,
     pub empty_response_retry_limit: u32,
@@ -184,6 +190,7 @@ pub struct AgenticLoop<'a> {
     make_tool_ctx: Box<dyn Fn(&str, &str) -> ToolContext + Send + Sync + 'a>,
     special_tool_handler: Option<ToolHandlerFn>,
     steer: Option<SteerFn<'a>>,
+    on_tool_completed: Option<ToolCompletedHook>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -213,6 +220,7 @@ impl<'a> AgenticLoop<'a> {
             make_tool_ctx,
             special_tool_handler,
             steer: None,
+            on_tool_completed: None,
         }
     }
 
@@ -220,6 +228,19 @@ impl<'a> AgenticLoop<'a> {
     pub fn with_steer(mut self, steer: SteerFn<'a>) -> Self {
         self.steer = Some(steer);
         self
+    }
+
+    /// Persist a scheduled transcript after each completed tool (ADR-0067).
+    pub fn with_tool_completed(mut self, hook: ToolCompletedHook) -> Self {
+        self.on_tool_completed = Some(hook);
+        self
+    }
+
+    async fn persist_completed_tool(&self, messages: &MessageContainer, iterations: u32) {
+        let Some(hook) = &self.on_tool_completed else {
+            return;
+        };
+        hook(messages.messages_snapshot(), iterations).await;
     }
 
     /// Drained steer messages (empty when steering is off).
@@ -496,6 +517,7 @@ impl<'a> AgenticLoop<'a> {
                             );
                             self.finish_child(tool_run, None, Some(rejected.clone()));
                             messages.push_tool_result(&tc.id, rejected);
+                            self.persist_completed_tool(messages, iterations).await;
                             continue;
                         }
                     }
@@ -528,6 +550,7 @@ impl<'a> AgenticLoop<'a> {
                                 None,
                             );
                             messages.push_tool_result(&tc.id, result);
+                            self.persist_completed_tool(messages, iterations).await;
                             continue;
                         }
                     }
@@ -566,11 +589,13 @@ impl<'a> AgenticLoop<'a> {
                                 None,
                             );
                             messages.push_tool_result(&tc.id, result);
+                            self.persist_completed_tool(messages, iterations).await;
                         }
                         Err(e) => {
                             let err = format!("Error: {e}");
                             self.finish_child(tool_run, None, Some(err.clone()));
                             messages.push_tool_result(&tc.id, err);
+                            self.persist_completed_tool(messages, iterations).await;
                         }
                     }
                 }
@@ -1082,6 +1107,193 @@ mod tests {
         burn(CheckpointStopKind::MaxIterations, 3).await;
         burn(CheckpointStopKind::Timeout, 1).await;
         burn(CheckpointStopKind::GuardRewrite, 1).await;
+    }
+
+    /// ADR-0067: the hook runs after a completed tool result is on the
+    /// transcript, and does not run when cancel lands mid-tool.
+    #[tokio::test]
+    async fn tool_completed_hook_runs_after_the_tool_not_mid_cancel() {
+        let server = MockServer::start().await;
+        let tool_body = r#"{
+          "choices":[{
+            "message":{
+              "role":"assistant",
+              "content":"",
+              "tool_calls":[{
+                "id":"call_ok",
+                "type":"function",
+                "function":{"name":"fast_tool","arguments":"{}"}
+              }]
+            },
+            "finish_reason":"tool_calls"
+          }]
+        }"#;
+        let final_body = r#"{
+          "choices":[{
+            "message":{"role":"assistant","content":"done"},
+            "finish_reason":"stop"
+          }]
+        }"#;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(tool_body))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(final_body))
+            .mount(&server)
+            .await;
+
+        let snaps = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let hook_snaps = Arc::clone(&snaps);
+        let hook: ToolCompletedHook = Arc::new(move |messages, iteration| {
+            let hook_snaps = Arc::clone(&hook_snaps);
+            Box::pin(async move {
+                hook_snaps.lock().await.push((iteration, messages));
+            })
+        });
+        let llm = test_llm(server.uri());
+        let tools = ToolRegistry::new();
+        let mcp = McpManager::new();
+        let config = test_loop_config();
+        let sender = NopSender;
+        let special: ToolHandlerFn = Box::new(|name, _args, _uid, _cid| {
+            let name = name.to_string();
+            Box::pin(async move {
+                if name == "fast_tool" {
+                    Some("tool-finished".into())
+                } else {
+                    None
+                }
+            })
+        });
+        let agentic = AgenticLoop::new(
+            &llm,
+            &tools,
+            &mcp,
+            &config,
+            None,
+            None,
+            None,
+            &sender,
+            Box::new(|_u, _c| crate::tool_registry::ToolContext {
+                sandbox_dir: std::env::temp_dir(),
+                home_dir: None,
+                sender: Arc::new(NopSender),
+                cancel_registry: Arc::new(CancelRegistry::new()),
+                user_id: "u".into(),
+                chat_id: "1".into(),
+                bot_id: "default".into(),
+                tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+            }),
+            Some(special),
+        )
+        .with_tool_completed(hook);
+        let mut messages = MessageContainer::Plain(vec![ChatMessage {
+            role: "user".into(),
+            content: Some(MessageContent::from_text("go")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }]);
+        let outcome = agentic
+            .run(&mut messages, "u", "1")
+            .await
+            .expect("loop must not error");
+        assert!(matches!(outcome, LoopOutcome::FinalResponse { .. }));
+        let recorded = snaps.lock().await;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one completed tool, one synchronous write"
+        );
+        assert_eq!(recorded[0].0, 1);
+        assert!(
+            recorded[0].1.iter().any(|m| m
+                .content
+                .as_ref()
+                .is_some_and(|c| c.as_text().contains("tool-finished"))),
+            "checkpoint snapshot includes the completed tool result"
+        );
+
+        let cancel_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(tool_body))
+            .mount(&cancel_server)
+            .await;
+        let cancel_snaps = Arc::new(tokio::sync::Mutex::new(0u32));
+        let cancel_count = Arc::clone(&cancel_snaps);
+        let cancel_hook: ToolCompletedHook = Arc::new(move |_messages, _iteration| {
+            let cancel_count = Arc::clone(&cancel_count);
+            Box::pin(async move {
+                *cancel_count.lock().await += 1;
+            })
+        });
+        let cancel = CancellationToken::new();
+        let cancel_later = cancel.clone();
+        let slow: ToolHandlerFn = Box::new(move |name, _args, _uid, _cid| {
+            let name = name.to_string();
+            Box::pin(async move {
+                if name != "fast_tool" {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Some("late".into())
+            })
+        });
+        let cancel_llm = test_llm(cancel_server.uri());
+        let cancel_tools = ToolRegistry::new();
+        let cancel_mcp = McpManager::new();
+        let cancel_config = test_loop_config();
+        let cancel_loop = AgenticLoop::new(
+            &cancel_llm,
+            &cancel_tools,
+            &cancel_mcp,
+            &cancel_config,
+            Some(cancel),
+            None,
+            None,
+            &sender,
+            Box::new(|_u, _c| crate::tool_registry::ToolContext {
+                sandbox_dir: std::env::temp_dir(),
+                home_dir: None,
+                sender: Arc::new(NopSender),
+                cancel_registry: Arc::new(CancelRegistry::new()),
+                user_id: "u".into(),
+                chat_id: "1".into(),
+                bot_id: "default".into(),
+                tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+            }),
+            Some(slow),
+        )
+        .with_tool_completed(cancel_hook);
+        let mut cancelled_messages = MessageContainer::Plain(vec![ChatMessage {
+            role: "user".into(),
+            content: Some(MessageContent::from_text("go")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }]);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel_later.cancel();
+        });
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(2),
+            cancel_loop.run(&mut cancelled_messages, "u", "1"),
+        )
+        .await
+        .expect("cancel returns")
+        .expect("loop");
+        assert!(matches!(cancelled, LoopOutcome::Cancelled { .. }));
+        assert_eq!(
+            *cancel_snaps.lock().await,
+            0,
+            "do not write a resumable checkpoint mid-tool"
+        );
     }
 
     #[tokio::test]

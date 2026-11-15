@@ -824,6 +824,39 @@ impl ScheduledTaskStore {
         Ok(())
     }
 
+    /// True when this task has a `running` audit row.
+    pub async fn has_running_for_task(&self, task_id: &str) -> Result<bool> {
+        self.running_count(task_id, None).await.map(|n| n > 0)
+    }
+
+    /// True when some `running` row other than `this_run_id` exists.
+    pub async fn has_other_running(&self, task_id: &str, this_run_id: &str) -> Result<bool> {
+        self.running_count(task_id, Some(this_run_id))
+            .await
+            .map(|n| n > 0)
+    }
+
+    async fn running_count(&self, task_id: &str, except_run: Option<&str>) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        let n = if let Some(except) = except_run {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scheduled_task_runs
+                 WHERE task_id = ?1 AND status = 'running' AND id != ?2",
+                rusqlite::params![task_id, except],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scheduled_task_runs
+                 WHERE task_id = ?1 AND status = 'running'",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+        }
+        .context("count running scheduled_task_runs")?;
+        Ok(n)
+    }
+
     /// ADR-0024 startup reconcile: every `running` row → `failed`.
     /// Local single-process: no live cross-process run to preserve.
     pub async fn fail_all_running(&self, reason: &str) -> Result<usize> {

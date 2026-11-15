@@ -1,3 +1,4 @@
+pub mod auto_resume;
 pub mod checkpoint;
 pub mod completion;
 pub mod history;
