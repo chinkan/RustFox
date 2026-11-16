@@ -9,10 +9,18 @@ use crate::llm::ChatMessage;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Locked protocol body. A Windows checkout may insert CR; the prompt uses LF.
+pub(crate) fn protocol_body() -> String {
+    include_str!("work_verification_protocol.txt")
+        .replace("\r\n", "\n")
+        .replace('\r', "")
+}
+
 /// Hard-coded block appended in `Agent::build_system_prompt`.
 /// Leading blank line matches the previous section break.
-pub(crate) const PROTOCOL_SECTION: &str =
-    concat!("\n\n", include_str!("work_verification_protocol.txt"));
+pub(crate) fn protocol_section() -> String {
+    format!("\n\n{}", protocol_body())
+}
 
 pub(crate) const NUDGE_MUST_VERIFY: &str = "[System] Work verification: do not end yet. Skip invoke_agent(verifier) only when all three checks hold and you state each one. This turn does not. Call the verifier with the already-run evidence before the reply goes out.";
 
@@ -547,13 +555,15 @@ mod tests {
 
     #[test]
     fn protocol_is_the_locked_hard_coded_text() {
-        let body = PROTOCOL_SECTION
-            .strip_prefix("\n\n")
-            .expect("section break");
+        let body = protocol_body();
+        assert!(
+            !body.contains('\r'),
+            "prompt keeps the locked LF line endings"
+        );
         assert_eq!(
-            body,
-            include_str!("work_verification_protocol.txt"),
-            "prompt block is the locked protocol file"
+            protocol_section(),
+            format!("\n\n{body}"),
+            "section break precedes the protocol"
         );
         assert!(body.contains(
             "You may skip invoke_agent(verifier) only when all three hold and you can state each one:"

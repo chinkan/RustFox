@@ -589,7 +589,7 @@ impl Agent {
 
         // Work Verification Protocol (ADR-0011a R7, amended by #418).
         // Hard-coded. Not a config, skill, or per-bot off switch.
-        prompt.push_str(crate::work_verification::PROTOCOL_SECTION);
+        prompt.push_str(&crate::work_verification::protocol_section());
 
         // Soul file protocol — instruct the AI to maintain its own identity files
         prompt.push_str(
