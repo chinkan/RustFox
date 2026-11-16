@@ -17,10 +17,13 @@ const baseVoice: VoiceSettings = {
   enabled: true,
   languages: ['yue', 'en'],
   tts: false,
+  engine: 'sensevoice',
+  qwen3LicenseAccepted: false,
   download: {
     sensevoice: { status: 'ready', message: null },
     ttsCantonese: { status: 'downloading', message: 'fetching vits' },
     ttsEnglish: { status: 'absent', message: 'english weights missing' },
+    qwen3Asr: { status: 'absent', message: null },
   },
 }
 
@@ -50,11 +53,15 @@ describe('VoiceSection', () => {
     const tts = screen.getByRole('checkbox', { name: /Spoken replies/i }) as HTMLInputElement
     expect(tts.checked).toBe(false)
     expect(screen.getByText('SenseVoice (STT)')).toBeTruthy()
+    expect(screen.getByText('Qwen3-ASR (optional STT)')).toBeTruthy()
+    expect(screen.getByLabelText('Local speech engine')).toBeTruthy()
+    expect((screen.getByLabelText('Local speech engine') as HTMLSelectElement).value).toBe('sensevoice')
+    expect(screen.getByRole('checkbox', { name: /Apache-2.0 license for Qwen3-ASR/i })).toBeTruthy()
     expect(screen.getByText('Cantonese TTS')).toBeTruthy()
     expect(screen.getByText('English TTS')).toBeTruthy()
     expect(screen.getByText('ready')).toBeTruthy()
     expect(screen.getByText('downloading')).toBeTruthy()
-    expect(screen.getByText('not downloaded')).toBeTruthy()
+    expect(screen.getAllByText('not downloaded').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('fetching vits')).toBeTruthy()
     expect(screen.getByText('english weights missing')).toBeTruthy()
     expect(screen.getAllByText(/Cantonese and English/).length).toBeGreaterThanOrEqual(2)
@@ -95,6 +102,8 @@ describe('VoiceSection', () => {
         voiceEnabled: true,
         voiceLanguages: ['yue', 'en'],
         voiceTts: true,
+        voiceEngine: 'sensevoice',
+        voiceQwen3AsrLicenseAccepted: false,
       })
     })
   })
@@ -109,6 +118,7 @@ describe('VoiceSection', () => {
             sensevoice: { status: 'absent', message: 'run save to fetch' },
             ttsCantonese: { status: 'ready', message: null },
             ttsEnglish: { status: 'ready', message: null },
+            qwen3Asr: { status: 'absent', message: null },
           },
         }}
       />,
@@ -128,6 +138,7 @@ describe('VoiceSection', () => {
             sensevoice: { status: 'ready', message: null },
             ttsCantonese: { status: 'ready', message: null },
             ttsEnglish: { status: 'absent', message: null },
+            qwen3Asr: { status: 'ready', message: null },
           },
         }}
       />,
@@ -145,6 +156,7 @@ describe('VoiceSection', () => {
             sensevoice: { status: 'ready', message: null },
             ttsCantonese: { status: 'ready', message: null },
             ttsEnglish: { status: 'error', message: 'piper unpack failed' },
+            qwen3Asr: { status: 'ready', message: null },
           },
         }}
       />,

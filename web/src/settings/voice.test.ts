@@ -16,10 +16,13 @@ describe('voice settings helpers', () => {
       enabled: true,
       languages: ['yue', 'en'],
       tts: false,
+      engine: 'sensevoice',
+      qwen3LicenseAccepted: false,
       download: {
         sensevoice: { status: 'absent', message: null },
         ttsCantonese: { status: 'absent', message: null },
         ttsEnglish: { status: 'absent', message: null },
+        qwen3Asr: { status: 'absent', message: null },
       },
     })
   })
@@ -46,7 +49,10 @@ describe('voice settings helpers', () => {
       sensevoice: { status: 'ready', message: 'ok' },
       ttsCantonese: { status: 'downloading', message: 'fetching' },
       ttsEnglish: { status: 'absent', message: null },
+      qwen3Asr: { status: 'absent', message: null },
     })
+    expect(partial.engine).toBe('sensevoice')
+    expect(partial.qwen3LicenseAccepted).toBe(false)
   })
 
   it('sorts languages in ADR order and drops unknown ids', () => {
@@ -64,10 +70,12 @@ describe('voice settings helpers', () => {
         ttsEnglish: { status: 'absent', message: null },
       },
     })
-    expect(voiceSettingsDirty(server, false, server.languages, server.tts)).toBe(true)
-    expect(voiceSettingsDirty(server, server.enabled, ['yue'], server.tts)).toBe(true)
-    expect(voiceSettingsDirty(server, server.enabled, server.languages, true)).toBe(true)
-    expect(voiceSettingsDirty(server, server.enabled, server.languages, server.tts)).toBe(false)
+    expect(voiceSettingsDirty(server, false, server.languages, server.tts, server.engine, server.qwen3LicenseAccepted)).toBe(true)
+    expect(voiceSettingsDirty(server, server.enabled, ['yue'], server.tts, server.engine, server.qwen3LicenseAccepted)).toBe(true)
+    expect(voiceSettingsDirty(server, server.enabled, server.languages, true, server.engine, server.qwen3LicenseAccepted)).toBe(true)
+    expect(voiceSettingsDirty(server, server.enabled, server.languages, server.tts, 'qwen3-asr', server.qwen3LicenseAccepted)).toBe(true)
+    expect(voiceSettingsDirty(server, server.enabled, server.languages, server.tts, server.engine, true)).toBe(true)
+    expect(voiceSettingsDirty(server, server.enabled, server.languages, server.tts, server.engine, server.qwen3LicenseAccepted)).toBe(false)
   })
 
   it('flags STT pack attention when enabled and pack missing', () => {
@@ -75,12 +83,17 @@ describe('voice settings helpers', () => {
       sensevoice: { status: 'error', message: 'bin missing' },
       ttsCantonese: { status: 'ready', message: null },
       ttsEnglish: { status: 'ready', message: null },
+      qwen3Asr: { status: 'absent', message: null },
     }
     expect(voicePackNeedsAttention(true, false, download)).toEqual({
       pack: 'sensevoice',
       status: 'error',
     })
     expect(voicePackNeedsAttention(false, false, download)).toBeNull()
+    expect(voicePackNeedsAttention(true, false, download, 'qwen3-asr')).toEqual({
+      pack: 'qwen3Asr',
+      status: 'absent',
+    })
   })
 
   it('flags TTS pack when tts on and pack absent', () => {
@@ -88,6 +101,7 @@ describe('voice settings helpers', () => {
       sensevoice: { status: 'ready', message: null },
       ttsCantonese: { status: 'absent', message: null },
       ttsEnglish: { status: 'ready', message: null },
+      qwen3Asr: { status: 'ready', message: null },
     }
     expect(voicePackNeedsAttention(true, true, download)?.pack).toBe('ttsCantonese')
   })
@@ -97,6 +111,7 @@ describe('voice settings helpers', () => {
       sensevoice: { status: 'ready', message: null },
       ttsCantonese: { status: 'ready', message: null },
       ttsEnglish: { status: 'absent', message: null },
+      qwen3Asr: { status: 'ready', message: null },
     }
     expect(voicePackNeedsAttention(true, true, absent)).toEqual({
       pack: 'ttsEnglish',
@@ -120,6 +135,7 @@ describe('voice settings helpers', () => {
       sensevoice: { status: 'ready', message: null },
       ttsCantonese: { status: 'ready', message: null },
       ttsEnglish: { status: 'downloading', message: null },
+      qwen3Asr: { status: 'ready', message: null },
     }
     const ready: VoiceDownload = {
       ...downloading,
@@ -156,10 +172,13 @@ describe('voice settings helpers', () => {
       enabled: true,
       languages: ['en', 'ko'],
       tts: true,
+      engine: 'sensevoice',
+      qwen3LicenseAccepted: false,
       download: {
         sensevoice: { status: 'ready', message: 'Ready.' },
         ttsCantonese: { status: 'ready', message: 'Ready.' },
         ttsEnglish: { status: 'error', message: 'unpack failed' },
+        qwen3Asr: { status: 'absent', message: null },
       },
     })
     expect(voicePackNeedsAttention(true, true, voiceFromSettings(live).download)?.pack).toBe('ttsEnglish')
@@ -178,6 +197,8 @@ describe('voice settings helpers', () => {
     expect(partial.tts).toBe(true)
     expect(partial.languages).toEqual(['yue', 'en'])
     expect(partial.download.ttsEnglish).toEqual({ status: 'absent', message: null })
+    expect(partial.download.qwen3Asr).toEqual({ status: 'absent', message: null })
+    expect(partial.engine).toBe('sensevoice')
   })
 
   it('names English and Cantonese spoken replies in both locales', () => {

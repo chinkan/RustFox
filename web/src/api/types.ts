@@ -456,6 +456,10 @@ export interface SettingsEditable {
   voiceLanguages?: string[]
   /** ADR-0063. Absent on GET means spoken replies stay off. */
   voiceTts?: boolean
+  /** `sensevoice` (default) or `qwen3-asr`. */
+  voiceEngine?: string
+  /** Apache-2.0 acceptance. Absent means the Qwen3 pack is not fetched. */
+  voiceQwen3AsrLicenseAccepted?: boolean
 }
 
 /** ADR-0057 — Enable is editable; token and secret are write-only masks. */
@@ -475,16 +479,21 @@ export interface VoicePackDownload {
   message: string | null
 }
 
+export type VoiceEngine = 'sensevoice' | 'qwen3-asr'
+
 export interface VoiceDownload {
   sensevoice: VoicePackDownload
   ttsCantonese: VoicePackDownload
   ttsEnglish: VoicePackDownload
+  qwen3Asr: VoicePackDownload
 }
 
 export interface VoiceSettings {
   enabled: boolean
   languages: VoiceLanguage[]
   tts: boolean
+  engine: VoiceEngine
+  qwen3LicenseAccepted: boolean
   download: VoiceDownload
 }
 
@@ -675,6 +684,8 @@ export interface SettingsPatch {
   voiceEnabled?: boolean
   voiceLanguages?: VoiceLanguage[]
   voiceTts?: boolean
+  voiceEngine?: VoiceEngine
+  voiceQwen3AsrLicenseAccepted?: boolean
 }
 
 export interface SettingsPatchResult {

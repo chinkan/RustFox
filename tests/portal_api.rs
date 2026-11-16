@@ -1062,7 +1062,18 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert_eq!(body["editable"]["voiceEnabled"], true);
     assert_eq!(body["editable"]["voiceLanguages"], json!(["yue", "en"]));
     assert_eq!(body["editable"]["voiceTts"], false);
+    assert_eq!(body["editable"]["voiceEngine"], "sensevoice");
+    assert_eq!(body["editable"]["voiceQwen3AsrLicenseAccepted"], false);
     assert_eq!(body["voiceDownload"]["sensevoice"]["status"], "absent");
+    assert_eq!(body["voiceDownload"]["qwen3Asr"]["status"], "absent");
+    assert!(
+        body["voiceDownload"]["qwen3Asr"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Apache-2.0"),
+        "{}",
+        body["voiceDownload"]["qwen3Asr"]["message"]
+    );
     assert_eq!(body["voiceDownload"]["ttsCantonese"]["status"], "absent");
     assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "absent");
     assert!(
@@ -1210,6 +1221,10 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert!(seen.iter().any(|id| id.contains("cantonese")), "{seen:?}");
     assert!(seen.iter().any(|id| id.contains("lessac")), "{seen:?}");
     assert!(
+        seen.iter().all(|id| !id.contains("qwen3")),
+        "a normal voice save must not fetch Qwen3: {seen:?}"
+    );
+    assert!(
         f.state.voice.snapshot().enabled,
         "failed download keeps the save"
     );
@@ -1220,6 +1235,121 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert_eq!(body["editable"]["voiceTts"], true);
     assert_eq!(body["editable"]["voiceLanguages"], json!(["en", "ko"]));
     assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "error");
+    assert_eq!(body["editable"]["voiceEngine"], "sensevoice");
+    assert_eq!(body["voiceDownload"]["qwen3Asr"]["status"], "absent");
+}
+
+#[tokio::test]
+async fn settings_qwen3_download_waits_for_apache_accept() {
+    let f = fixture(with_token_token()).await;
+    let home = f.state.home_dir.clone().expect("fixture home");
+    let mut cfg = f.state.voice.snapshot();
+    cfg.model_dir = home.join("models/sensevoice");
+    cfg.qwen3_asr_model_dir = home.join("models/qwen3-asr");
+    f.state.voice.set(cfg);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    f.state.voice.set_fetcher(Arc::new(FailVoiceFetcher {
+        calls: Arc::clone(&calls),
+    }));
+
+    let before = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "voiceEngine": "whisper.cpp" }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "invalid_voice_engine");
+    let after = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert_eq!(before, after, "an unknown engine must write nothing");
+    assert!(calls.lock().unwrap().is_empty());
+
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "voiceEngine": "qwen3-asr",
+                    "openrouterStt": true
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let live = f.state.voice.snapshot();
+    assert_eq!(live.engine, "qwen3-asr");
+    assert!(!live.qwen3_asr_license_accepted);
+    assert!(!live.openrouter_stt, "openrouter_stt does not select Qwen3");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = calls.lock().unwrap().clone();
+        let view = f.state.voice.view();
+        if view.sensevoice.status == "error" {
+            assert!(
+                seen.iter().all(|id| !id.contains("qwen3")),
+                "engine without acceptance must not fetch Qwen3: {seen:?}"
+            );
+            assert_eq!(view.qwen3_asr.status, "absent");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("sensevoice ensure did not finish: {}", view.to_json());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    calls.lock().unwrap().clear();
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "voiceQwen3AsrLicenseAccepted": true }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert!(body["updated"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("voiceQwen3AsrLicenseAccepted")));
+    assert!(f.state.voice.snapshot().qwen3_asr_license_accepted);
+    let content = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert!(content.contains("engine = \"qwen3-asr\""), "{content}");
+    assert!(
+        content.contains("qwen3_asr_license_accepted = true"),
+        "{content}"
+    );
+    assert!(!content.contains("openrouter_stt"), "{content}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = calls.lock().unwrap().clone();
+        if seen.iter().any(|id| id.contains("qwen3-asr")) {
+            assert_eq!(f.state.voice.view().qwen3_asr.status, "error");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("accepted Qwen3 pack was not fetched: {seen:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

@@ -1,4 +1,10 @@
-import type { VoiceDownload, VoiceLanguage, VoicePackDownload, VoiceSettings } from '../api/types'
+import type {
+  VoiceDownload,
+  VoiceEngine,
+  VoiceLanguage,
+  VoicePackDownload,
+  VoiceSettings,
+} from '../api/types'
 
 /** SenseVoice language ids (ADR-0063). Display order matches storage order. */
 export const VOICE_LANGUAGE_OPTIONS: readonly VoiceLanguage[] = ['yue', 'zh', 'en', 'ja', 'ko']
@@ -24,10 +30,17 @@ const defaultDownload = (): VoiceDownload => ({
   sensevoice: defaultDownloadPack(),
   ttsCantonese: defaultDownloadPack(),
   ttsEnglish: defaultDownloadPack(),
+  qwen3Asr: defaultDownloadPack(),
 })
 
+export function normalizeVoiceEngine(raw: string | null | undefined): VoiceEngine {
+  return raw?.trim().toLowerCase() === 'qwen3-asr' ? 'qwen3-asr' : 'sensevoice'
+}
+
 /** GET may omit `voiceDownload` or one pack key; each pack still has a safe object. */
-type VoiceSettingsInput = Omit<VoiceSettings, 'download'> & {
+type VoiceSettingsInput = Omit<VoiceSettings, 'download' | 'engine' | 'qwen3LicenseAccepted'> & {
+  engine?: string | null
+  qwen3LicenseAccepted?: boolean
   download?: Partial<VoiceDownload> | null
 }
 
@@ -38,6 +51,7 @@ function normalizeDownload(download?: Partial<VoiceDownload> | null): VoiceDownl
     sensevoice: download.sensevoice ?? fallback.sensevoice,
     ttsCantonese: download.ttsCantonese ?? fallback.ttsCantonese,
     ttsEnglish: download.ttsEnglish ?? fallback.ttsEnglish,
+    qwen3Asr: download.qwen3Asr ?? fallback.qwen3Asr,
   }
 }
 
@@ -50,6 +64,8 @@ export function voiceFromSettings(settings?: {
     voiceEnabled?: boolean
     voiceLanguages?: readonly string[] | null
     voiceTts?: boolean
+    voiceEngine?: string | null
+    voiceQwen3AsrLicenseAccepted?: boolean
   } | null
   voiceDownload?: Partial<VoiceDownload> | null
 } | null): VoiceSettings {
@@ -62,6 +78,8 @@ export function voiceFromSettings(settings?: {
     enabled: editable?.voiceEnabled ?? true,
     languages: languages.length > 0 ? languages : ['yue', 'en'],
     tts: editable?.voiceTts ?? false,
+    engine: normalizeVoiceEngine(editable?.voiceEngine),
+    qwen3LicenseAccepted: editable?.voiceQwen3AsrLicenseAccepted ?? false,
     download: settings.voiceDownload,
   })
 }
@@ -73,6 +91,8 @@ export function normalizeVoiceSettings(voice?: VoiceSettingsInput | null): Voice
       enabled: true,
       languages: ['yue', 'en'],
       tts: false,
+      engine: 'sensevoice',
+      qwen3LicenseAccepted: false,
       download: defaultDownload(),
     }
   }
@@ -84,6 +104,8 @@ export function normalizeVoiceSettings(voice?: VoiceSettingsInput | null): Voice
     enabled: voice.enabled,
     languages,
     tts: voice.tts,
+    engine: normalizeVoiceEngine(voice.engine),
+    qwen3LicenseAccepted: voice.qwen3LicenseAccepted ?? false,
     download: normalizeDownload(voice.download),
   }
 }
@@ -100,26 +122,38 @@ export function voiceSettingsDirty(
   enabled: boolean,
   languages: VoiceLanguage[],
   tts: boolean,
+  engine: VoiceEngine,
+  qwen3LicenseAccepted: boolean,
 ): boolean {
   return (
     enabled !== server.enabled ||
     tts !== server.tts ||
+    engine !== server.engine ||
+    qwen3LicenseAccepted !== server.qwen3LicenseAccepted ||
     !voiceLanguagesEqual(languages, server.languages)
   )
 }
 
-export type VoicePackKey = 'sensevoice' | 'ttsCantonese' | 'ttsEnglish'
+export type VoicePackKey = 'sensevoice' | 'ttsCantonese' | 'ttsEnglish' | 'qwen3Asr'
 
 /** Fail-soft copy when voice is on but a required pack is not ready. `tts` needs both TTS packs (ADR-0063). */
 export function voicePackNeedsAttention(
   enabled: boolean,
   tts: boolean,
   download: VoiceDownload,
+  engine: VoiceEngine = 'sensevoice',
 ): { pack: VoicePackKey; status: VoicePackDownload['status'] } | null {
   if (!enabled) return null
-  const stt = download.sensevoice.status
-  if (stt === 'absent' || stt === 'error') {
-    return { pack: 'sensevoice', status: stt }
+  if (engine === 'qwen3-asr') {
+    const qwen = download.qwen3Asr.status
+    if (qwen === 'absent' || qwen === 'error') {
+      return { pack: 'qwen3Asr', status: qwen }
+    }
+  } else {
+    const stt = download.sensevoice.status
+    if (stt === 'absent' || stt === 'error') {
+      return { pack: 'sensevoice', status: stt }
+    }
   }
   if (!tts) return null
   const cantonese = download.ttsCantonese.status

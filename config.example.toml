@@ -481,8 +481,10 @@ Be concise and helpful."""
 #
 # [voice]
 # enabled = true                  # absent = true; false skips STT and TTS
-# engine = "sensevoice"
+# engine = "sensevoice"           # or "qwen3-asr" (optional; default stays sensevoice)
 # model_dir = ""                  # empty = <home>/models/sensevoice
+# qwen3_asr_model_dir = ""        # empty = <home>/models/qwen3-asr
+# qwen3_asr_license_accepted = false  # true fetches the Apache-2.0 Qwen3-ASR pack
 # stt_bin = ""                    # empty = sherpa-onnx-offline on PATH
 # ffmpeg_bin = ""                 # empty = ffmpeg on PATH
 # languages = ["yue", "en"]       # yue, zh, en, ja, ko. One id, or auto when two+.
