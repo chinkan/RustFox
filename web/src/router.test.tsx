@@ -7,8 +7,10 @@ import { authStore, bindAuthApi, __resetAuthForTests, type RouterContext } from 
 import { BootWatcher } from './hooks/useBootWatcher'
 import { ChatSession } from './hooks/useChatStream'
 import { fakeApi } from './api/fake'
-import type { Settings } from './api/types'
+import type { ScheduleBot, Settings } from './api/types'
 import { __resetOfficePrefsForTests } from './agents/officePrefs'
+import en from './locales/en.json'
+import zhHK from './locales/zh-HK.json'
 
 /**
  * Integration tests: mount the real router (memory history) against a FAKE
@@ -773,7 +775,179 @@ describe('tasks page (T5)', () => {
     expect(select.disabled).toBe(true)
     expect(screen.getByText('Trigger type cannot be changed after creation.')).toBeTruthy()
   })
+
+  it('places the bot picker under the task name and hints that this bot sends the Telegram result', async () => {
+    await signIn()
+    expect(en.tasks.botHint).toBe('This bot sends the Telegram result.')
+    expect(zhHK.tasks.botHint).toBe('呢個 bot 會發送 Telegram 結果。')
+    expect(en.tasks.col.bot).toBe('Bot')
+    expect(zhHK.tasks.col.bot).toBe('Bot')
+
+    renderAt('/tasks', makeContext({ listScheduleBots: async () => multiScheduleBots() }))
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getByText('New task'))
+
+    const name = screen.getByLabelText('Task')
+    const bot = screen.getByLabelText('Bot')
+    const trigger = screen.getByText('Trigger')
+    expect(name.compareDocumentPosition(bot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(bot.compareDocumentPosition(trigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const hint = screen.getByText('This bot sends the Telegram result.')
+    expect(hint.closest('select')).toBeNull()
+    expect(bot.compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(bot.getAttribute('aria-describedby')?.split(/\s+/)).toContain(hint.id)
+  })
+
+  it('shows each unselectable bot reason under the field, including a stored unselectable bot', async () => {
+    await signIn()
+    const reason = "Portal owner's Telegram id is not in this bot's allowed users"
+    const updated: Array<{ botId?: string }> = []
+    renderAt(
+      '/tasks',
+      makeContext({
+        listScheduleBots: async () => multiScheduleBots(),
+        listTasks: async () => [
+          {
+            id: 'c3',
+            name: 'Research digest',
+            cron: '0 0 8 * * *',
+            enabled: true,
+            nextRun: '—',
+            prompt: 'p',
+            triggerType: 'recurring',
+            triggerValue: '0 0 8 * * *',
+            status: 'active',
+            platform: 'telegram',
+            botId: 'researcher',
+            timezone: 'UTC',
+          },
+        ],
+        updateTask: async (_id, body) => {
+          updated.push(body)
+          return {
+            id: 'c3',
+            updated: { name: body.name ?? '', prompt: body.prompt ?? '', triggerValue: body.triggerValue ?? '' },
+            rearmed: false,
+            schedulerJobId: null,
+            nextRun: null,
+          }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('Research digest')).toBeTruthy())
+    fireEvent.click(screen.getByText('New task'))
+    const createBot = screen.getByLabelText('Bot') as HTMLSelectElement
+    const researcher = within(createBot).getByRole('option', { name: /researcher/ }) as HTMLOptionElement
+    expect(researcher.disabled).toBe(true)
+    const visible = reasonOutsideOption(reason)
+    expect(createBot.getAttribute('aria-describedby')?.split(/\s+/)).toContain(visible.id)
+
+    fireEvent.click(screen.getByText('Cancel'))
+    fireEvent.click(screen.getByText('Edit'))
+    const editBot = screen.getByLabelText('Bot') as HTMLSelectElement
+    expect(editBot.value).toBe('researcher')
+    const stored = reasonOutsideOption(reason)
+    expect(editBot.getAttribute('aria-describedby')?.split(/\s+/)).toContain(stored.id)
+    const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    fireEvent.click(save)
+    await waitFor(() => expect(updated).toHaveLength(1))
+    expect(updated[0]!.botId).toBe('researcher')
+  })
+
+  it('keeps the bot field up while the bot list is loading and does not omit botId', async () => {
+    await signIn()
+    let resolveBots: (bots: ScheduleBot[]) => void = () => {}
+    const pending = new Promise<ScheduleBot[]>((resolve) => {
+      resolveBots = resolve
+    })
+    const created: Array<{ botId?: string }> = []
+    renderAt(
+      '/tasks',
+      makeContext({
+        listScheduleBots: () => pending,
+        createTask: async (body) => {
+          created.push(body)
+          return { id: 'c9', name: body.name, schedulerJobId: 'job-9', nextRun: null }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getByText('New task'))
+    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'standup' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'nag' } })
+
+    expect(document.querySelector('label[for="task-bot"]')).toBeTruthy()
+    expect(document.querySelector('.loading')?.textContent).toContain('Loading…')
+    const create = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement
+    expect(create.disabled).toBe(true)
+    fireEvent.click(create)
+    expect(created).toHaveLength(0)
+
+    resolveBots([{ id: 'default', selectable: true, reason: null, default: true }])
+    await waitFor(() => expect(document.querySelector('label[for="task-bot"]')).toBeNull())
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    await waitFor(() => expect(created).toHaveLength(1))
+    expect(created[0]!.botId).toBeUndefined()
+  })
+
+  it('shows an error and Retry when the bot list fails, then keeps a multi-bot picker', async () => {
+    await signIn()
+    let calls = 0
+    const created: Array<{ botId?: string }> = []
+    renderAt(
+      '/tasks',
+      makeContext({
+        listScheduleBots: async () => {
+          calls += 1
+          if (calls === 1) throw new Error('bots unavailable')
+          return multiScheduleBots()
+        },
+        createTask: async (body) => {
+          created.push(body)
+          return { id: 'c9', name: body.name, schedulerJobId: 'job-9', nextRun: null }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    fireEvent.click(screen.getByText('New task'))
+    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'standup' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'nag' } })
+
+    const note = await screen.findByText('bots unavailable')
+    expect(note.className).toContain('error-note')
+    expect(document.querySelector('label[for="task-bot"]')).toBeTruthy()
+    expect(screen.queryByLabelText('Bot')).toBeNull()
+    const create = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement
+    expect(create.disabled).toBe(true)
+    fireEvent.click(create)
+    expect(created).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    const bot = (await screen.findByLabelText('Bot')) as HTMLSelectElement
+    expect(calls).toBe(2)
+    expect(within(bot).getByRole('option', { name: /researcher/ })).toBeTruthy()
+    expect((within(bot).getByRole('option', { name: /researcher/ }) as HTMLOptionElement).disabled).toBe(true)
+  })
 })
+
+const UNSELECTABLE_REASON = "Portal owner's Telegram id is not in this bot's allowed users"
+
+function multiScheduleBots(): ScheduleBot[] {
+  return [
+    { id: 'main', selectable: true, reason: null, default: true },
+    { id: 'default', selectable: true, reason: null, default: false },
+    { id: 'researcher', selectable: false, reason: UNSELECTABLE_REASON, default: false },
+  ]
+}
+
+function reasonOutsideOption(text: string): HTMLElement {
+  const outside = screen.getAllByText(text).find((el) => el.tagName !== 'OPTION')
+  expect(outside).toBeTruthy()
+  return outside!
+}
 
 describe('memory evidence', () => {
   it('shows unknown as untrusted and a trusted pointer on the card', async () => {

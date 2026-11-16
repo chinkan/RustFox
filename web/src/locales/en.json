@@ -144,6 +144,7 @@
     "recurring": "Recurring (cron)",
     "oneShot": "One-shot",
     "triggerTypeLocked": "Trigger type cannot be changed after creation.",
+    "botHint": "This bot sends the Telegram result.",
     "cronExpr": "Cron (5 or 6 fields)",
     "runAt": "Run at (ISO-8601)",
     "cronHint": "min hour day month weekday — e.g. 30 7 * * * (optional leading seconds field). Times are in the task timezone.",
