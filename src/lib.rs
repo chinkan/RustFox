@@ -51,4 +51,5 @@ pub mod tool_registry;
 pub mod tools;
 pub mod turn_gate;
 pub mod utils;
+pub mod work_verification;
 pub mod xai;

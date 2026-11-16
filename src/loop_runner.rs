@@ -191,6 +191,9 @@ pub struct AgenticLoop<'a> {
     special_tool_handler: Option<ToolHandlerFn>,
     steer: Option<SteerFn<'a>>,
     on_tool_completed: Option<ToolCompletedHook>,
+    /// Parent-loop gate (ADR-0011a R7 / #418). `Some(scheduled)` enforces it.
+    /// Subagent loops leave this unset so the verifier does not verify itself.
+    work_verification: Option<bool>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -221,7 +224,16 @@ impl<'a> AgenticLoop<'a> {
             special_tool_handler,
             steer: None,
             on_tool_completed: None,
+            work_verification: None,
         }
+    }
+
+    /// Enforce the hard-coded work-verification protocol on this parent loop.
+    /// `scheduled` is true for a scheduled run (publish on that lane stays
+    /// fail-closed). Interactive and scheduled parent loops both set this.
+    pub fn with_work_verification(mut self, scheduled: bool) -> Self {
+        self.work_verification = Some(scheduled);
+        self
     }
 
     /// Drain mid-run user messages at each step (ADR-0020 drain points A/B).
@@ -522,6 +534,27 @@ impl<'a> AgenticLoop<'a> {
                         }
                     }
 
+                    if let Some(scheduled) = self.work_verification {
+                        if crate::work_verification::is_verifier_invoke(
+                            &tc.function.name,
+                            &tc.function.arguments,
+                        ) {
+                            let turn = crate::work_verification::observe(
+                                &messages.messages_snapshot(),
+                                "",
+                                scheduled,
+                            );
+                            if crate::work_verification::block_extra_verifier(&turn) {
+                                let blocked =
+                                    crate::work_verification::TERMINAL_VERIFIER_BLOCK.to_string();
+                                self.finish_child(tool_run, None, Some(blocked.clone()));
+                                messages.push_tool_result(&tc.id, blocked);
+                                self.persist_completed_tool(messages, iterations).await;
+                                continue;
+                            }
+                        }
+                    }
+
                     // Check special tool handler first (for invoke_agent/spawn_agents)
                     if let Some(ref handler) = self.special_tool_handler {
                         let fut = (handler)(&tc.function.name, &args, user_id, chat_id);
@@ -619,6 +652,37 @@ impl<'a> AgenticLoop<'a> {
                         messages.push_user(msg);
                     }
                     continue;
+                }
+
+                // ADR-0011a R7 / #418: hold the reply when this turn did work,
+                // is high-risk, or a verifier already judged it, until the
+                // three-check skip holds, the verifier passed, or an
+                // interactive residual is terminal. A turn with no observation
+                // that does not claim the skip may end. The hold stays in
+                // this loop; there is no background verify.
+                if let Some(scheduled) = self.work_verification {
+                    let turn = crate::work_verification::observe(
+                        &messages.messages_snapshot(),
+                        &text,
+                        scheduled,
+                    );
+                    if let Some(nudge) = crate::work_verification::draft_nudge(&turn) {
+                        messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(MessageContent::Text(text)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        messages.push_user(ChatMessage {
+                            role: "user".to_string(),
+                            content: Some(MessageContent::from_text(nudge)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        continue;
+                    }
                 }
 
                 // ADR-0043 / #277 structural guard (all Active peers): with prior
@@ -767,10 +831,11 @@ mod tests {
     use crate::tool_registry::ToolRegistry;
     use async_trait::async_trait;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::RwLock;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -1306,5 +1371,250 @@ mod tests {
         };
         let result = await_tool_or_cancel(Some(&token), slow).await;
         assert_eq!(result, Err(()));
+    }
+
+    fn llm_text(content: &str) -> String {
+        serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string()
+    }
+
+    fn llm_verifier_call() -> String {
+        serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_again",
+                        "type": "function",
+                        "function": {
+                            "name": "invoke_agent",
+                            "arguments": r#"{"agent":"verifier","prompt":"EVIDENCE: posted id 9"}"#
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string()
+    }
+
+    fn user_msg(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            content: Some(MessageContent::from_text(text)),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn assistant_tool(id: &str, name: &str, arguments: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".into(),
+            content: Some(MessageContent::from_text("")),
+            tool_calls: Some(vec![crate::llm::ToolCall {
+                id: id.into(),
+                call_type: "function".into(),
+                function: crate::llm::FunctionCall {
+                    name: name.into(),
+                    arguments: arguments.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_msg(id: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".into(),
+            content: Some(MessageContent::from_text(text)),
+            tool_calls: None,
+            tool_call_id: Some(id.into()),
+            reasoning_content: None,
+        }
+    }
+
+    /// `responses` are mounted in order. A `Some` needle matches only when the
+    /// request body contains it, so list the default reply first.
+    async fn run_enforced_turn(
+        messages: Vec<ChatMessage>,
+        scheduled: bool,
+        max_iterations: u32,
+        responses: Vec<(Option<&str>, String)>,
+    ) -> (LoopOutcome, usize) {
+        let server = MockServer::start().await;
+        for (needle, body) in responses {
+            let specific = needle.is_some();
+            let mut builder = Mock::given(method("POST")).and(path("/chat/completions"));
+            if let Some(needle) = needle {
+                builder = builder.and(body_string_contains(needle));
+            }
+            let mock = builder.respond_with(ResponseTemplate::new(200).set_body_string(body));
+            // Equal priority keeps insertion order, and a catch-all mock would
+            // swallow the narrower one. A needle match has to win.
+            let mock = if specific {
+                mock.with_priority(1)
+            } else {
+                mock
+            };
+            mock.mount(&server).await;
+        }
+        let llm = test_llm(server.uri());
+        let tools = ToolRegistry::new();
+        let mcp = McpManager::new();
+        let mut config = test_loop_config();
+        config.max_iterations = max_iterations;
+        let sender = NopSender;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let special: ToolHandlerFn = Box::new(move |name, _args, _user, _chat| {
+            let hits_for_handler = Arc::clone(&hits_for_handler);
+            let name = name.to_string();
+            Box::pin(async move {
+                if name == "invoke_agent" {
+                    hits_for_handler.fetch_add(1, Ordering::SeqCst);
+                    return Some("verifier ran".into());
+                }
+                None
+            })
+        });
+        let agentic = AgenticLoop::new(
+            &llm,
+            &tools,
+            &mcp,
+            &config,
+            None,
+            None,
+            None,
+            &sender,
+            Box::new(|_u, _c| crate::tool_registry::ToolContext {
+                sandbox_dir: std::env::temp_dir(),
+                home_dir: None,
+                sender: Arc::new(NopSender),
+                cancel_registry: Arc::new(CancelRegistry::new()),
+                user_id: "u".into(),
+                chat_id: "1".into(),
+                bot_id: "default".into(),
+                tool_ui_mode: crate::tool_registry::ToolUiMode::Silent,
+            }),
+            Some(special),
+        )
+        .with_work_verification(scheduled);
+        let mut container = MessageContainer::Plain(messages);
+        let outcome = agentic
+            .run(&mut container, "u", "1")
+            .await
+            .expect("enforced loop");
+        (outcome, hits.load(Ordering::SeqCst))
+    }
+
+    const SKIP_REPLY: &str = "Volume is 20. Risk class is not high: local device change. This-turn evidence: switchbot_command returned volume=20. Residual effect is local and reversible.";
+
+    #[tokio::test]
+    async fn work_verification_three_check_skip_delivers_the_stated_reply() {
+        let messages = vec![
+            user_msg("set the SwitchBot volume to 20"),
+            assistant_tool("c1", "switchbot_command", r#"{"deviceId":"ABC"}"#),
+            tool_msg("c1", "volume=20"),
+        ];
+        let (outcome, hits) =
+            run_enforced_turn(messages, false, 2, vec![(None, llm_text(SKIP_REPLY))]).await;
+        assert_eq!(hits, 0, "a valid skip must not call the verifier");
+        match outcome {
+            LoopOutcome::FinalResponse { text, .. } => assert_eq!(text, SKIP_REPLY),
+            other => panic!("expected the stated skip reply, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn work_verification_verify_first_and_rejected_dont_verify_do_not_deliver() {
+        let volume = vec![
+            user_msg("set the SwitchBot volume to 20. verify first"),
+            assistant_tool("c1", "switchbot_command", r#"{"deviceId":"ABC"}"#),
+            tool_msg("c1", "volume=20"),
+        ];
+        let (forced, _) =
+            run_enforced_turn(volume, false, 1, vec![(None, llm_text(SKIP_REPLY))]).await;
+        assert!(
+            matches!(forced, LoopOutcome::MaxIterations),
+            "verify first must block the reply, got {forced:?}"
+        );
+
+        let publish = vec![
+            user_msg("publish the threads post. don't verify"),
+            assistant_tool("c1", "mcp_threads_schedule_post", "{}"),
+            tool_msg("c1", "posted id 9"),
+        ];
+        let (rejected, hits) =
+            run_enforced_turn(publish, false, 1, vec![(None, llm_text(SKIP_REPLY))]).await;
+        assert_eq!(hits, 0);
+        assert!(
+            matches!(rejected, LoopOutcome::MaxIterations),
+            "don't verify must not skip a publish, got {rejected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn work_verification_no_shell_unverified_does_not_spend_another_round() {
+        let prompt = r#"{"agent":"verifier","prompt":"TASK: publish\nEVIDENCE: posted id 9"}"#;
+        let messages = vec![
+            user_msg("publish the threads post"),
+            assistant_tool("c1", "mcp_threads_schedule_post", "{}"),
+            tool_msg("c1", "posted id 9"),
+            assistant_tool("v1", "invoke_agent", prompt),
+            tool_msg(
+                "v1",
+                "<evaluation>UNVERIFIED</evaluation>\nno-shell: cannot run commands",
+            ),
+        ];
+        let (interactive, hits) = run_enforced_turn(
+            messages.clone(),
+            false,
+            2,
+            vec![
+                (None, llm_verifier_call()),
+                (
+                    Some("do not call the verifier again"),
+                    llm_text("Residual: the post id was returned."),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(
+            hits, 0,
+            "no-shell UNVERIFIED must not run the verifier again"
+        );
+        match interactive {
+            LoopOutcome::FinalResponse { text, .. } => {
+                assert_eq!(text, "Residual: the post id was returned.");
+            }
+            other => panic!("expected the residual, got {other:?}"),
+        }
+
+        let (scheduled, scheduled_hits) = run_enforced_turn(
+            messages,
+            true,
+            2,
+            vec![
+                (None, llm_verifier_call()),
+                (
+                    Some("do not call the verifier again"),
+                    llm_text("done shipping the post"),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(scheduled_hits, 0);
+        assert!(
+            matches!(scheduled, LoopOutcome::MaxIterations),
+            "scheduled publish must stay fail-closed, got {scheduled:?}"
+        );
     }
 }
