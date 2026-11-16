@@ -1904,23 +1904,26 @@ mod tests {
     #[test]
     fn qwen3_args_use_the_pack_files_and_not_sensevoice_flags() {
         let dir = Path::new("/models/qwen3-asr");
-        let args = qwen3_asr_args(dir, Path::new("/tmp/note.wav"));
+        let wav = Path::new("/tmp/note.wav");
+        let args = qwen3_asr_args(dir, wav);
+        let flag = |name: &str, path: &Path| format!("{name}={}", path.display());
+        assert!(args.iter().any(|arg| {
+            arg == &flag("--qwen3-asr-conv-frontend", &dir.join("conv_frontend.onnx"))
+        }));
         assert!(args
             .iter()
-            .any(|arg| arg == "--qwen3-asr-conv-frontend=/models/qwen3-asr/conv_frontend.onnx"));
+            .any(|arg| arg == &flag("--qwen3-asr-encoder", &dir.join("encoder.int8.onnx"))));
         assert!(args
             .iter()
-            .any(|arg| arg == "--qwen3-asr-encoder=/models/qwen3-asr/encoder.int8.onnx"));
+            .any(|arg| arg == &flag("--qwen3-asr-decoder", &dir.join("decoder.int8.onnx"))));
         assert!(args
             .iter()
-            .any(|arg| arg == "--qwen3-asr-decoder=/models/qwen3-asr/decoder.int8.onnx"));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--qwen3-asr-tokenizer=/models/qwen3-asr/tokenizer"));
+            .any(|arg| arg == &flag("--qwen3-asr-tokenizer", &dir.join("tokenizer"))));
         assert!(args
             .iter()
             .any(|arg| arg == "--qwen3-asr-max-new-tokens=512"));
-        assert_eq!(args.last().map(String::as_str), Some("/tmp/note.wav"));
+        let wav_arg = wav.display().to_string();
+        assert_eq!(args.last().map(String::as_str), Some(wav_arg.as_str()));
         assert!(
             args.iter().all(|arg| !arg.contains("sense-voice")),
             "{args:?}"
