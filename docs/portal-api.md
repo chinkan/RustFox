@@ -124,22 +124,25 @@ Existing same-name entry → skipped with reason (unless `force:true`, which qua
 
 ## Tasks (from `ScheduledTaskStore`) — full CRUD (ADR 0011a R6)
 
-Write paths go through `AgentOps::arm_task`/`disarm_task` against the **live** scheduler (the old `restartToSchedule` fib is gone). Create/update/enable share ONE arming path with restore + the Telegram tool (`build_fire_closure`). `triggerType` is immutable (delete + recreate); in-flight runs are untouched by edits/disarm (already-spawned jobs naturally survive — the UI doesn't pretend otherwise).
+Write paths go through `AgentOps::arm_task`/`disarm_task` against the **live** scheduler (the old `restartToSchedule` fib is gone). Create/update/enable share ONE arming path with restore + the Telegram tool (`build_fire_closure`). `triggerType` is immutable (delete + recreate); `botId` is not. A live edit re-arms on the stored `bot_id`, so delivery follows that bot and not a different one. In-flight runs are untouched by edits/disarm (already-spawned jobs naturally survive — the UI doesn't pretend otherwise).
 
 ### GET /api/schedule/timezone
 → `200 {"timezone":"Asia/Hong_Kong","utcOffset":"+08:00","source":"config|env|system|fallback"}` — effective default schedule timezone (ADR-0022).
 
+### GET /api/schedule/bots
+→ `200 [{"id","selectable":bool,"reason":string|null,"default":bool}]` — every configured `[[bots]]` id, in config order. `default` marks the shim bot (a new task uses it when `botId` is omitted). `selectable` is false when that bot's `allowed_user_ids` does not include the portal owner's Telegram id (the shim bot's first allowlisted user); `reason` is then a short sentence and the bot is still listed. A single configured bot is one row. There is no shim-only filter.
+
 ### GET /api/tasks
-→ `200 [{"id","name","cron","enabled","nextRun","prompt","triggerType","triggerValue","status","platform","timezone"}]` — active + paused (completed/cancelled one-shots hidden; soft-deleted always hidden). `name`=description (or first 40 chars of prompt), `cron`=trigger_value when recurring (`"once"` for one-shot), `enabled`=`status=="active"`, `timezone`=IANA name for the row. Full editable state included so the edit form needs no second fetch.
+→ `200 [{"id","name","cron","enabled","nextRun","prompt","triggerType","triggerValue","status","platform","botId","timezone"}]` — active + paused tasks for every configured bot (completed/cancelled one-shots hidden; soft-deleted always hidden; a `bot_id` that is not configured is omitted). `name`=description (or first 40 chars of prompt), `cron`=trigger_value when recurring (`"once"` for one-shot), `enabled`=`status=="active"`, `botId` is the bot that delivers the row, `timezone`=IANA name. Full editable state included so the edit form needs no second fetch. When both `default` and `main` are configured, old `bot_id=default` rows are included.
 
 ### POST /api/tasks — create + arm immediately
-Body `{"name"?,"prompt","triggerType":"recurring|one_shot","triggerValue":"<6-field cron | ISO-8601 local>","timezone"?}`. Optional `timezone` (IANA); missing → effective default. Invalid → `400 invalid_timezone`.
+Body `{"name"?,"prompt","triggerType":"recurring|one_shot","triggerValue":"<6-field cron | ISO-8601 local>","timezone"?,"botId"?}`. Optional `timezone` (IANA); missing → effective default. Invalid → `400 invalid_timezone`. Optional `botId`; missing or blank → the shim bot. An unknown id → `400 unknown_bot`. A configured bot that cannot message the portal owner → `400 bot_not_selectable` (the bot stays listed by `GET /api/schedule/bots`).
 Validation: non-empty prompt; recurring values run through the **exact** croner config the live evaluator uses (`invalid_cron` otherwise); one-shot parses to a future datetime in the row timezone (`invalid_trigger`, and `bad_request` if in the past).
-→ `201 {"id","name","triggerValue","timezone","schedulerJobId","nextRun"}`. If arming fails the DB row is **rolled back** (`arm_failed`) — a task that exists in the DB but never fires is the worst outcome.
+→ `201 {"id","name","triggerValue","timezone","botId","schedulerJobId","nextRun"}`. If arming fails the DB row is **rolled back** (`arm_failed`) — a task that exists in the DB but never fires is the worst outcome. The armed job uses the stored `botId`.
 
 ### PUT /api/tasks/{id} — edit + re-arm (partial)
-Body any subset of `{"name"?,"prompt"?,"triggerValue"?,"triggerType"?,"timezone"?}`; `triggerType` present-but-different → `400 trigger_type_immutable`. Invalid timezone → `400 invalid_timezone`. Active tasks: disarm → update → re-arm. Paused tasks: DB-only edit (stays disarmed). Re-arm failure surfaces as `arm_failed` (row saved but honestly flagged).
-→ `200 {"id","updated":{...},"rearmed":bool,"schedulerJobId":null|"<id>","nextRun"}`
+Body any subset of `{"name"?,"prompt"?,"triggerValue"?,"triggerType"?,"timezone"?,"botId"?}`; `triggerType` present-but-different → `400 trigger_type_immutable` (the row is not changed). `botId` may change. Unknown id → `400 unknown_bot`. Moving a Telegram-delivery task (`platform` `telegram` or `portal`, or a numeric `chat_id`) onto a bot that cannot message the portal owner → `400 bot_not_selectable`. The same `botId` is a no-op. Invalid timezone → `400 invalid_timezone`. Active tasks: disarm → update → re-arm on the new stored bot. Paused tasks: DB-only edit (stays disarmed; a later enable arms the stored bot). Re-arm failure surfaces as `arm_failed` (row saved but honestly flagged). A task whose bot is not configured → `404`.
+→ `200 {"id","updated":{"name","prompt","triggerValue","timezone","botId"},"rearmed":bool,"schedulerJobId":null|"<id>","nextRun"}`
 
 ### DELETE /api/tasks/{id} — soft delete, history preserved
 Disarms the live job and stamps `deleted_at`; the row and **all** `scheduled_task_runs` history survive (`{"ok":true,"id","softDeleted":true,"historyPreserved":true}`) — run history is the evidence base for replay/noise-floor work (RRSI), never burned with the definition. Hard purge is not exposed.

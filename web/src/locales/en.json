@@ -123,6 +123,7 @@
     "subtitle": "Recurring agent runs — no crontab required.",
     "col": {
       "task": "Task",
+      "bot": "Bot",
       "cron": "Cron",
       "nextRun": "Next run",
       "status": "Status"

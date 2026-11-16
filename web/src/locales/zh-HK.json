@@ -123,6 +123,7 @@
     "subtitle": "定期 agent 執行 — 唔使改 crontab。",
     "col": {
       "task": "任務",
+      "bot": "Bot",
       "cron": "Cron",
       "nextRun": "下次執行",
       "status": "狀態"
