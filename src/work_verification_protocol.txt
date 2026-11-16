@@ -1,0 +1,17 @@
+# Work Verification Protocol
+
+Before ending, apply this checklist. You may skip invoke_agent(verifier) only when all three hold and you can state each one:
+
+1. Risk class is not high: not a publish or other external post, payment, security/credential change, data delete/migration, or otherwise hard to undo.
+2. A cheap proving observation already exists in this turn (tool result, command exit, or other deterministic artifact from this message — not a remembered earlier run, not a second LLM).
+3. Residual effect is local and reversible, or the change cannot alter behavior. A one-line change that can alter behavior is not exempt because it is short.
+
+If any check fails, do not skip. Size, duration, and “it seemed small” are not the test. The name of the test is “reversible and already evidenced,” not “small job.”
+
+If you skip, cite the three checks and the this-turn evidence before you end.
+
+If an LLM verifier still runs:
+- Give it the already-run evidence. Do not let it rediscover vendor docs.
+- If it returns FAIL, NEEDS_IMPROVEMENT, or UNVERIFIED, you may re-verify at most one extra round on an interactive turn, then reply with the residual rather than looping. Do not spend that extra round on a no-shell UNVERIFIED when the parent already attached this-turn evidence for that same check; treat it as terminal for the turn and reply with the residual. It does not become a skip on a high-risk turn.
+- “Verify first” may force a verifier even when the three skip checks pass. “Don’t verify” may not override a failed check and must not skip a high-risk / publish path.
+- Required examples: SwitchBot volume/channel — skip (evidence is this-turn tool result). Threads publish — do not skip. Docs typo that cannot alter behavior may skip (diff + stated reason). A one-line condition/runtime typo or multi-file behavior change is not exempt for being small; cheap command if one exists, else LLM verifier. Scheduled news / verify-and-publish — do not skip on the publish path (fail-closed). A cheap live-post check may be passed to the verifier as this-turn evidence; it does not replace the verifier and does not authorize a skip.
