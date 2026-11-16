@@ -21,6 +21,13 @@ function botOptionLabel(bot: ScheduleBot): string {
   return bot.reason ? `${bot.id} — ${bot.reason}` : bot.id
 }
 
+function botReasonElementId(id: string): string {
+  return `task-bot-reason-${id.replace(/[^A-Za-z0-9_-]/g, '-')}`
+}
+
+/** `.hint` is a section divider. Reset that chrome for this field only. */
+const botFieldHintStyle = { marginTop: 4, paddingTop: 0, borderTop: 'none' } as const
+
 /** 5- or 6-field cron heuristic; the server's parser is the real gate. */
 function triggerLooksValid(draft: Draft): boolean {
   const v = draft.triggerValue.trim()
@@ -39,8 +46,13 @@ function TasksPage() {
   const scheduleTz = useQuery({ queryKey: ['schedule-timezone'], queryFn: api.getScheduleTimezone })
   const scheduleBots = useQuery({ queryKey: ['schedule-bots'], queryFn: api.listScheduleBots })
   const botChoices = scheduleBots.data ?? []
-  // One bot: keep today's form (no picker). Two or more: one combined picker.
-  const showBotPicker = botChoices.length > 1
+  // A pending or failed list is not a single-bot setup: hiding the field would
+  // omit botId and fall back to the shim. One successful bot still hides it.
+  const botsReady = scheduleBots.isSuccess
+  const showBotPicker = botsReady && botChoices.length > 1
+  const showBotField = !botsReady || showBotPicker
+  const unselectableBots = botChoices.filter((b) => !b.selectable && b.reason)
+  const botDescribedBy = ['task-bot-hint', ...unselectableBots.map((b) => botReasonElementId(b.id))].join(' ')
   const defaultBotId = botChoices.find((b) => b.default)?.id ?? ''
   const [runsFor, setRunsFor] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -120,9 +132,10 @@ function TasksPage() {
   const chosenBotId = draft?.botId || defaultBotId
   const chosenBot = botChoices.find((b) => b.id === chosenBotId)
   const botOk =
-    !showBotPicker ||
-    (chosenBot !== undefined &&
-      (chosenBot.selectable || (edit.mode === 'edit' && chosenBotId === edit.draft.botId)))
+    botsReady &&
+    (!showBotPicker ||
+      (chosenBot !== undefined &&
+        (chosenBot.selectable || (edit.mode === 'edit' && chosenBotId === edit.draft.botId))))
   const formOk =
     draft !== null &&
     draft.name.trim() !== '' &&
@@ -199,6 +212,55 @@ function TasksPage() {
                 onChange={(e) => patchDraft({ name: e.target.value })}
               />
             </div>
+            {showBotField ? (
+              <div className="field">
+                <label htmlFor="task-bot">{t('tasks.col.bot')}</label>
+                {scheduleBots.isPending ? (
+                  <div className="loading">{t('common.loading')}</div>
+                ) : scheduleBots.isError ? (
+                  <>
+                    <div className="error-note" role="alert">
+                      {(scheduleBots.error as Error).message}
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() => void scheduleBots.refetch()}
+                    >
+                      {t('common.retry')}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <select
+                      id="task-bot"
+                      aria-describedby={botDescribedBy}
+                      value={chosenBotId}
+                      onChange={(e) => patchDraft({ botId: e.target.value })}
+                    >
+                      {botChoices.map((bot) => (
+                        <option key={bot.id} value={bot.id} disabled={!bot.selectable}>
+                          {botOptionLabel(bot)}
+                        </option>
+                      ))}
+                    </select>
+                    <span id="task-bot-hint" className="hint" style={botFieldHintStyle}>
+                      {t('tasks.botHint')}
+                    </span>
+                    {unselectableBots.map((bot) => (
+                      <span
+                        key={bot.id}
+                        id={botReasonElementId(bot.id)}
+                        className="hint"
+                        style={botFieldHintStyle}
+                      >
+                        {bot.reason}
+                      </span>
+                    ))}
+                  </>
+                )}
+              </div>
+            ) : null}
             <div className="field">
               <label>{t('tasks.triggerType')}</label>
               <select
@@ -213,25 +275,6 @@ function TasksPage() {
               </select>
               {edit.mode === 'edit' ? <span className="hint">{t('tasks.triggerTypeLocked')}</span> : null}
             </div>
-            {showBotPicker ? (
-              <div className="field">
-                <label htmlFor="task-bot">{t('tasks.col.bot')}</label>
-                <select
-                  id="task-bot"
-                  value={chosenBotId}
-                  onChange={(e) => patchDraft({ botId: e.target.value })}
-                >
-                  {botChoices.map((bot) => (
-                    <option key={bot.id} value={bot.id} disabled={!bot.selectable}>
-                      {botOptionLabel(bot)}
-                    </option>
-                  ))}
-                </select>
-                {chosenBot && !chosenBot.selectable && chosenBot.reason ? (
-                  <span className="hint">{chosenBot.reason}</span>
-                ) : null}
-              </div>
-            ) : null}
             <div className="field">
               <label>
                 {draft.triggerType === 'recurring' ? t('tasks.cronExpr') : t('tasks.runAt')}
@@ -275,6 +318,7 @@ function TasksPage() {
                 className="primary"
                 disabled={!formOk || busy}
                 onClick={() => {
+                  if (!formOk || busy) return
                   if (edit.mode === 'create') {
                     create.mutate({
                       name: draft.name,
