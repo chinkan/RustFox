@@ -106,6 +106,9 @@ pub struct IncomingMessage {
     /// `yue` or `en` when [`IncomingMessage::voice_origin`] may be spoken.
     /// Typed chat, schedules, portal, and device text leave this empty.
     pub voice_spoken_lang: Option<String>,
+    /// ADR-0068: this turn was started by a portal webhook. The text is the
+    /// untrusted user-turn template. Tool send / publish / post stay draft-only.
+    pub event_fired: bool,
 }
 
 #[cfg(test)]

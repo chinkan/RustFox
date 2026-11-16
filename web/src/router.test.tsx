@@ -775,6 +775,42 @@ describe('tasks page (T5)', () => {
   })
 })
 
+describe('event triggers (ADR-0068)', () => {
+  it('lists the webhook url and creates a trigger', async () => {
+    await signIn()
+    const created: unknown[] = []
+    renderAt(
+      '/triggers',
+      makeContext({
+        createTrigger: async (body) => {
+          created.push(body)
+          return {
+            id: 'hook-new',
+            name: body.name,
+            prompt: body.prompt,
+            botId: body.botId ?? 'main',
+            enabled: true,
+            webhookPath: '/api/hooks/hook-new',
+            secretName: 'trigger.hook-new.hmac',
+            createdAt: '2026-11-16T00:00:00Z',
+            secret: 'generated-once',
+          }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('CI webhook')).toBeTruthy())
+    expect(screen.getByText(/\/api\/hooks\/hook-1/)).toBeTruthy()
+    fireEvent.click(screen.getByText('New trigger'))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'build' } })
+    fireEvent.change(screen.getByLabelText('Operator instruction'), {
+      target: { value: 'Summarise only.' },
+    })
+    fireEvent.click(screen.getByText('Create'))
+    await waitFor(() => expect(created).toHaveLength(1))
+    expect(screen.getByText('generated-once')).toBeTruthy()
+  })
+})
+
 describe('memory evidence', () => {
   it('shows unknown as untrusted and a trusted pointer on the card', async () => {
     await signIn()

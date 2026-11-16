@@ -62,6 +62,8 @@ struct FakeAgent {
     persist: Mutex<Option<MemoryStore>>,
     /// `bot_id` of the task last passed to `arm_task` (delivery follows it).
     last_armed_bot: Mutex<Option<String>>,
+    /// ADR-0068 webhook dispatches recorded by this fake.
+    events: Mutex<Vec<rustfox::event_trigger::EventFire>>,
 }
 
 impl FakeAgent {
@@ -75,6 +77,7 @@ impl FakeAgent {
             definition_only: Mutex::new(Vec::new()),
             persist: Mutex::new(None),
             last_armed_bot: Mutex::new(None),
+            events: Mutex::new(Vec::new()),
         }
     }
 }
@@ -225,6 +228,13 @@ impl AgentOps for FakeAgent {
     }
     fn config(&self) -> &Config {
         &self.config
+    }
+    fn dispatch_event_run(
+        &self,
+        fire: rustfox::event_trigger::EventFire,
+    ) -> BoxFuture<'_, anyhow::Result<()>> {
+        self.events.lock().unwrap().push(fire);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -4184,4 +4194,205 @@ async fn schedule_bots_single_bot_is_the_shim_default() {
     assert_eq!(rows[0]["selectable"], true);
     assert_eq!(rows[0]["default"], true);
     assert!(rows[0]["reason"].is_null());
+}
+
+fn post_bytes(path: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn signed_hook(path: &str, secret: &str, body: &[u8], idempotency: Option<&str>) -> Request<Body> {
+    let signature = rustfox::event_trigger::sign_body(secret, body);
+    let mut req = post_bytes(path, body.to_vec());
+    let (mut parts, raw) = req.into_parts();
+    parts.headers.insert(
+        "x-rustfox-signature",
+        signature.parse().expect("signature header"),
+    );
+    if let Some(key) = idempotency {
+        parts
+            .headers
+            .insert("idempotency-key", key.parse().expect("idempotency header"));
+    }
+    req = Request::from_parts(parts, raw);
+    req
+}
+
+/// ADR-0068: HMAC webhook on the portal bind, session CRUD, dedup, caps.
+#[tokio::test]
+async fn event_webhook_is_hmac_not_a_portal_session() {
+    let f = fixture(with_token_token()).await;
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(post_bytes("/api/hooks/missing", b"{}".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(post_json(
+            "/api/triggers",
+            json!({"name": "ci", "prompt": "summarise"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/triggers",
+                json!({"name": "ci", "prompt": "Summarise the event."}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let created = body_json(res).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let secret = created["secret"].as_str().unwrap().to_string();
+    assert!(created["webhookPath"].as_str().unwrap().ends_with(&id));
+    assert_eq!(created["botId"], "default");
+    assert!(created["secret"].is_string());
+
+    let path = format!("/api/hooks/{id}");
+    let body = br#"{"hello":"world"}"#;
+    let res = f
+        .app
+        .clone()
+        .oneshot(signed_hook(&path, &secret, body, Some("evt-1")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let started = body_json(res).await;
+    assert_eq!(started["deduped"], false);
+    let fires = f.fake.events.lock().unwrap().clone();
+    assert_eq!(fires.len(), 1);
+    assert!(fires[0].user_text.contains("UNTRUSTED EVENT PAYLOAD"));
+    assert!(fires[0].user_text.contains(r#"{"hello":"world"}"#));
+    assert!(fires[0].user_text.contains("Summarise the event."));
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(signed_hook(&path, &secret, b"different", Some("evt-1")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let replay = body_json(res).await;
+    assert_eq!(replay["deduped"], true);
+    assert_eq!(replay["runId"], started["runId"]);
+    assert_eq!(f.fake.events.lock().unwrap().len(), 1);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(post_bytes(&path, body.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let huge = vec![b'x'; rustfox::event_trigger::MAX_RAW_BODY + 1];
+    let res = f
+        .app
+        .clone()
+        .oneshot(post_bytes(&path, huge))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_empty(&format!("/api/triggers/{id}/disable")),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = f
+        .app
+        .clone()
+        .oneshot(signed_hook(&path, &secret, b"after-disable", Some("evt-2")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/triggers"), TEST_TOKEN))
+        .await
+        .unwrap();
+    let listed = body_json(res).await;
+    let row = &listed["triggers"][0];
+    assert_eq!(row["webhookPath"], created["webhookPath"]);
+    assert!(row.get("secret").is_none());
+    assert_eq!(row["enabled"], false);
+}
+
+#[tokio::test]
+async fn event_trigger_stamps_the_named_bot_and_does_not_pick_a_shim() {
+    let f = fixture_with(with_token_token(), |config| {
+        config.bots = vec![
+            rustfox::config::BotConfig {
+                id: "main".into(),
+                bot_token: "tok-main".into(),
+                allowed_user_ids: vec![1],
+                persona: "main".into(),
+                system_prompt_file: None,
+                model: None,
+                tools: None,
+                fully_silent: false,
+            },
+            rustfox::config::BotConfig {
+                id: "researcher".into(),
+                bot_token: "tok-researcher".into(),
+                allowed_user_ids: vec![2],
+                persona: "researcher".into(),
+                system_prompt_file: None,
+                model: None,
+                tools: None,
+                fully_silent: false,
+            },
+        ];
+    })
+    .await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json("/api/triggers", json!({"name": "n", "prompt": "p"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/triggers",
+                json!({"name": "n", "prompt": "p", "botId": "researcher"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let created = body_json(res).await;
+    assert_eq!(created["botId"], "researcher");
+    assert!(created["secret"].as_str().unwrap().len() >= 32);
 }

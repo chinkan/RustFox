@@ -43,6 +43,7 @@ const WORKSPACE_NAV: NavItem[] = [
   { to: '/skills', labelKey: 'nav.skills', icon: '🧩' },
   { to: '/memory', labelKey: 'nav.memory', icon: '📚' },
   { to: '/tasks', labelKey: 'nav.tasks', icon: '⏰' },
+  { to: '/triggers', labelKey: 'nav.triggers', icon: '🪝' },
 ]
 
 const SYSTEM_NAV: NavItem[] = [
