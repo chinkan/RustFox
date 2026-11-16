@@ -107,6 +107,7 @@ describe('RBAC guard', () => {
         sensevoice: { status: 'ready', message: 'Ready.' },
         ttsCantonese: { status: 'ready', message: 'Ready.' },
         ttsEnglish: { status: 'ready', message: 'Ready.' },
+        qwen3Asr: { status: 'ready', message: 'Ready.' },
       },
     }
     // The wire payload has no `voice`. A leftover nested object must not win.
@@ -140,8 +141,8 @@ describe('RBAC guard', () => {
     expect(section).toBeTruthy()
     const voice = within(section as HTMLElement)
     expect(voice.getByText('English TTS')).toBeTruthy()
-    expect(voice.getAllByText('ready')).toHaveLength(3)
-    expect(voice.getAllByText('Ready.')).toHaveLength(3)
+    expect(voice.getAllByText('ready')).toHaveLength(4)
+    expect(voice.getAllByText('Ready.')).toHaveLength(4)
     expect(voice.queryByText(/not downloaded/i)).toBeNull()
     expect(voice.queryByText(/fail softly/i)).toBeNull()
   })

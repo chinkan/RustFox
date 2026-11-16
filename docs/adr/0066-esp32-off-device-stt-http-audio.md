@@ -3,6 +3,8 @@
 ## Status
 Accepted (Product tip Final ACCEPT 2026-11-12 at `a0f3b9b`, squash #408; Should / Soft parallel). Does not block the v1.0.9 tag. No Must claim. No runtime in the accepted tip. No tag.
 
+Amended 2026-11-16 (#414): the shared library uses the configured local engine (`[voice].engine`, default `sensevoice`).
+
 ## Date
 2026-11-12
 
@@ -25,7 +27,7 @@ ADR-0056 Decisions 1–5 and 7 stay in force: opt-in `[device_ws]`, shared porta
    - `Content-Type: audio/wav`
    - The body is the WAV (one request). HTTP chunked transfer encoding is fine. A separate chunk-index protocol is not part of this ADR.
    - The route exists when `[device_ws]` is on, including the headless API-only process. Portal UI may be off.
-4. **STT, then the existing `user_text` path.** The server transcribes with `SenseVoiceCli` / `transcribe_file` and SenseVoice language `auto` (`--sense-voice-language=auto`) for this upload. The input is 16 kHz mono WAV, or a file the existing ffmpeg helper can convert to 16 kHz mono WAV. The transcript is then submitted as `user_text` on the owner's primary interactive TurnGate (ADR-0056 Decision 3). That is the same owner primary conversation. It is not a new Portal chat and it is not a Telegram turn. Do not wrap it as a Telegram `[Voice note]:` and do not mark it voice-origin for `sendVoice`. A call to `transcribe_file` does not add a device-only cloud default; OpenRouter STT stays the existing opt-in inside that function. An empty or failed transcript does not start a turn.
+4. **STT, then the existing `user_text` path.** The server transcribes with `transcribe_file` on the configured local engine (`[voice].engine`, default SenseVoice language `auto`). The input is 16 kHz mono WAV, or a file the existing ffmpeg helper can convert to 16 kHz mono WAV. The transcript is then submitted as `user_text` on the owner's primary interactive TurnGate (ADR-0056 Decision 3). That is the same owner primary conversation. It is not a new Portal chat and it is not a Telegram turn. Do not wrap it as a Telegram `[Voice note]:` and do not mark it voice-origin for `sendVoice`. A call to `transcribe_file` does not add a device-only cloud default; OpenRouter STT stays the existing opt-in inside that function. An empty or failed transcript does not start a turn.
 5. **TTS downlink is 16 kHz mono PCM (s16le) for the ES8311**, over authenticated HTTP. Do not send OGG/Opus. Do not call Telegram `getFile`, `sendVoice`, or `plan_reply_delivery`.
    - The text reply is still the existing `assistant_text` frame.
    - When PCM is ready, the server also sends a JSON text frame on that device's socket:
@@ -44,7 +46,7 @@ ADR-0056 Decisions 1–5 and 7 stay in force: opt-in `[device_ws]`, shared porta
    - `GET /api/device/v1/audio/{id}` with the same device Bearer token returns the raw PCM bytes (`application/octet-stream`, 16 kHz, mono, s16le). Chunked transfer encoding is fine. The `url` is a path on the same bind the device already uses.
    - The notifying socket is the uploader's Device WS. GET accepts that device's token and rejects any other token.
    - PCM comes from the shared local TTS library (the WAV / PCM stage). This path does not run the OGG/Opus encode used for Telegram `sendVoice`.
-6. **Shared library, separate pipes.** The device path may share the SenseVoice / local TTS library ([ADR-0058](./0058-telegram-cantonese-stt-tts.md) Decision 5). It must not share Telegram voice ingress or `sendVoice` egress.
+6. **Shared library, separate pipes.** The device path may share the configured local engine and the local TTS library ([ADR-0058](./0058-telegram-cantonese-stt-tts.md) Decision 5). It must not share Telegram voice ingress or `sendVoice` egress.
 7. **Firmware stays out of this monorepo.** Logo (official asset at 480×480), touch, I2S, and press-and-hold UX are specified in [rustfox-esp32-c6#2](https://github.com/chinkan/rustfox-esp32-c6/issues/2). This ADR does not choose a touch controller, GPIO map, or blit strategy.
 8. **Priority.** Should / Soft parallel. No Must claim. No tag. Server routes are a later change on #407, after this ADR is accepted. This document does not implement them.
 

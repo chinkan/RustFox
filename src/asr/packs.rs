@@ -47,7 +47,34 @@ pub const EN_TTS_PACK_URL: &str =
 /// Path under the fox home when `tts_en_model_dir` is unset.
 pub const EN_TTS_REL_DIR: &str = "models/tts-english";
 
+/// Official k2-fsa sherpa-onnx INT8 0.6B pack (issue #414). Not the 1.7B or
+/// fp32 ModelScope export. Unpacked under `<home>/models/qwen3-asr`.
+pub const QWEN3_ASR_PACK_ID: &str = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25";
+pub const QWEN3_ASR_PACK_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2";
+/// Compressed size of [`QWEN3_ASR_PACK_URL`] (838 MiB). Product accepted this.
+pub const QWEN3_ASR_PACK_BYTES: u64 = 878_702_423;
+/// GitHub release asset digest for [`QWEN3_ASR_PACK_URL`].
+pub const QWEN3_ASR_PACK_SHA256: &str =
+    "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96";
+/// Upstream Qwen3-ASR license. Acceptance is a Settings flag, not a file
+/// inside the sherpa tarball. A missing `LICENSE` does not skip this gate.
+pub const QWEN3_ASR_LICENSE_URL: &str =
+    "https://raw.githubusercontent.com/QwenLM/Qwen3-ASR/main/LICENSE";
+/// Path under the fox home when `qwen3_asr_model_dir` is unset.
+pub const QWEN3_ASR_REL_DIR: &str = "models/qwen3-asr";
+
+const QWEN3_ASR_PIN: ArchivePin = ArchivePin {
+    bytes: QWEN3_ASR_PACK_BYTES,
+    sha256: QWEN3_ASR_PACK_SHA256,
+};
+
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+struct ArchivePin {
+    bytes: u64,
+    sha256: &'static str,
+}
 
 /// Which on-disk pack a save is ensuring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +82,7 @@ pub enum VoicePack {
     SenseVoice,
     TtsCantonese,
     TtsEnglish,
+    Qwen3Asr,
 }
 
 impl VoicePack {
@@ -63,6 +91,7 @@ impl VoicePack {
             Self::SenseVoice => SENSEVOICE_PACK_ID,
             Self::TtsCantonese => YUE_TTS_PACK_ID,
             Self::TtsEnglish => EN_TTS_PACK_ID,
+            Self::Qwen3Asr => QWEN3_ASR_PACK_ID,
         }
     }
 
@@ -71,6 +100,7 @@ impl VoicePack {
             Self::SenseVoice => "sensevoice",
             Self::TtsCantonese => "tts-cantonese",
             Self::TtsEnglish => "tts-english",
+            Self::Qwen3Asr => "qwen3-asr",
         }
     }
 }
@@ -88,6 +118,11 @@ pub struct VoiceSettingsPatch {
     pub enabled: Option<bool>,
     pub languages: Option<Vec<String>>,
     pub tts: Option<bool>,
+    /// `sensevoice` or `qwen3-asr`. `None` keeps the live engine.
+    pub engine: Option<String>,
+    /// Apache-2.0 acceptance for the Qwen3-ASR pack. `None` keeps the live flag.
+    /// `true` is the only signal that may fetch that pack.
+    pub qwen3_asr_license_accepted: Option<bool>,
 }
 
 /// Merge a whitelist patch onto the live voice config.
@@ -109,6 +144,12 @@ pub fn merge_voice_settings(
     if let Some(tts) = patch.tts {
         next.tts = tts;
     }
+    if let Some(engine) = &patch.engine {
+        next.engine = super::normalize_voice_engine(engine)?;
+    }
+    if let Some(accepted) = patch.qwen3_asr_license_accepted {
+        next.qwen3_asr_license_accepted = accepted;
+    }
     next.normalize();
     Ok(next)
 }
@@ -126,6 +167,7 @@ pub struct VoiceDownloadView {
     pub sensevoice: PackStatus,
     pub tts_cantonese: PackStatus,
     pub tts_english: PackStatus,
+    pub qwen3_asr: PackStatus,
 }
 
 impl VoiceDownloadView {
@@ -139,6 +181,10 @@ impl VoiceDownloadView {
             "ttsEnglish": {
                 "status": self.tts_english.status,
                 "message": self.tts_english.message,
+            },
+            "qwen3Asr": {
+                "status": self.qwen3_asr.status,
+                "message": self.qwen3_asr.message,
             },
         })
     }
@@ -171,6 +217,7 @@ struct Book {
     sensevoice: Slot,
     tts_cantonese: Slot,
     tts_english: Slot,
+    qwen3_asr: Slot,
 }
 
 impl Book {
@@ -179,6 +226,7 @@ impl Book {
             VoicePack::SenseVoice => &self.sensevoice,
             VoicePack::TtsCantonese => &self.tts_cantonese,
             VoicePack::TtsEnglish => &self.tts_english,
+            VoicePack::Qwen3Asr => &self.qwen3_asr,
         }
     }
 
@@ -187,6 +235,7 @@ impl Book {
             VoicePack::SenseVoice => &mut self.sensevoice,
             VoicePack::TtsCantonese => &mut self.tts_cantonese,
             VoicePack::TtsEnglish => &mut self.tts_english,
+            VoicePack::Qwen3Asr => &mut self.qwen3_asr,
         }
     }
 }
@@ -238,10 +287,15 @@ impl VoiceRuntime {
 
     pub fn view(&self) -> VoiceDownloadView {
         let cfg = self.snapshot();
+        let mut qwen3_asr = self.pack_status(VoicePack::Qwen3Asr, &cfg.qwen3_asr_model_dir);
+        if qwen3_asr.status == "absent" && !cfg.qwen3_asr_license_accepted {
+            qwen3_asr.message = "Accept the Apache-2.0 Qwen3-ASR license to download.".to_string();
+        }
         VoiceDownloadView {
             sensevoice: self.pack_status(VoicePack::SenseVoice, &cfg.model_dir),
             tts_cantonese: self.pack_status(VoicePack::TtsCantonese, &cfg.tts_model_dir),
             tts_english: self.pack_status(VoicePack::TtsEnglish, &cfg.tts_en_model_dir),
+            qwen3_asr,
         }
     }
 
@@ -265,6 +319,13 @@ impl VoiceRuntime {
             self.ensure_one(VoicePack::TtsCantonese, &cfg.tts_model_dir)
                 .await;
             self.ensure_one(VoicePack::TtsEnglish, &cfg.tts_en_model_dir)
+                .await;
+        }
+        // Explicit Apache-2.0 acceptance is the only fetch signal. Selecting
+        // the engine, or leaving the pack's LICENSE out of the tarball, does
+        // not download it. A missing pack stays on this optional path.
+        if cfg.qwen3_asr_license_accepted {
+            self.ensure_one(VoicePack::Qwen3Asr, &cfg.qwen3_asr_model_dir)
                 .await;
         }
     }
@@ -360,6 +421,7 @@ pub fn pack_ready(pack: VoicePack, dir: &Path) -> bool {
     match pack {
         VoicePack::SenseVoice => sensevoice_ready(dir),
         VoicePack::TtsCantonese | VoicePack::TtsEnglish => tts_ready(dir),
+        VoicePack::Qwen3Asr => qwen3_ready(dir),
     }
 }
 
@@ -370,6 +432,56 @@ fn sensevoice_ready(dir: &Path) -> bool {
 
 fn tts_ready(dir: &Path) -> bool {
     dir.join("model.onnx").is_file() && dir.join("tokens.txt").is_file()
+}
+
+/// Ready when the official INT8 filenames are on disk. `LICENSE` is not
+/// required: the sherpa tarball may omit it, and that must not skip the
+/// Settings accept gate or mark a complete unpack as missing.
+fn qwen3_ready(dir: &Path) -> bool {
+    dir.join("conv_frontend.onnx").is_file()
+        && dir.join("encoder.int8.onnx").is_file()
+        && dir.join("decoder.int8.onnx").is_file()
+        && dir.join("tokenizer").join("vocab.json").is_file()
+}
+
+fn verify_archive_pin(path: &Path, pin: &ArchivePin) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|err| format!("stat archive: {err}"))?;
+    if meta.len() != pin.bytes {
+        return Err(format!(
+            "archive is {} bytes, expected {} for the pinned Qwen3-ASR pack",
+            meta.len(),
+            pin.bytes
+        ));
+    }
+    let digest = sha256_file(path)?;
+    if !digest.eq_ignore_ascii_case(pin.sha256) {
+        return Err(format!(
+            "archive sha256 {digest} does not match the pinned Qwen3-ASR pack"
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|err| format!("open archive: {err}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|err| format!("read archive: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn short_message(message: &str) -> String {
@@ -448,8 +560,15 @@ impl VoicePackFetcher for HttpVoiceFetcher {
             .await
             .map_err(|err| err.to_string())?;
         let fetched = match pack {
-            VoicePack::SenseVoice => self.fetch_tar_bz2(SENSEVOICE_PACK_URL, &unpacked).await,
-            VoicePack::TtsEnglish => self.fetch_tar_bz2(EN_TTS_PACK_URL, &unpacked).await,
+            VoicePack::SenseVoice => {
+                self.fetch_tar_bz2(SENSEVOICE_PACK_URL, &unpacked, None)
+                    .await
+            }
+            VoicePack::TtsEnglish => self.fetch_tar_bz2(EN_TTS_PACK_URL, &unpacked, None).await,
+            VoicePack::Qwen3Asr => {
+                self.fetch_tar_bz2(QWEN3_ASR_PACK_URL, &unpacked, Some(QWEN3_ASR_PIN))
+                    .await
+            }
             VoicePack::TtsCantonese => self.fetch_yue_files(&unpacked).await,
         };
         if let Err(err) = fetched {
@@ -477,12 +596,23 @@ impl VoicePackFetcher for HttpVoiceFetcher {
 }
 
 impl HttpVoiceFetcher {
-    async fn fetch_tar_bz2(&self, url: &str, dest: &Path) -> Result<(), String> {
+    async fn fetch_tar_bz2(
+        &self,
+        url: &str,
+        dest: &Path,
+        pin: Option<ArchivePin>,
+    ) -> Result<(), String> {
         let archive = dest.parent().unwrap_or(dest).join(format!(
             "{}.tar.bz2",
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pack")
         ));
         self.download_file(url, &archive).await?;
+        if let Some(pin) = pin {
+            if let Err(err) = verify_archive_pin(&archive, &pin) {
+                let _ = tokio::fs::remove_file(&archive).await;
+                return Err(err);
+            }
+        }
         let archive_for_task = archive.clone();
         let dest_for_task = dest.to_path_buf();
         let unpacked =
@@ -682,9 +812,19 @@ mod tests {
                     std::fs::write(dest.join("model.onnx"), b"m").unwrap();
                     std::fs::write(dest.join("tokens.txt"), b"t\n").unwrap();
                 }
+                VoicePack::Qwen3Asr => write_qwen3_stub(dest),
             }
             Ok(())
         }
+    }
+
+    fn write_qwen3_stub(dest: &Path) {
+        std::fs::write(dest.join("conv_frontend.onnx"), b"f").unwrap();
+        std::fs::write(dest.join("encoder.int8.onnx"), b"e").unwrap();
+        std::fs::write(dest.join("decoder.int8.onnx"), b"d").unwrap();
+        let tokenizer = dest.join("tokenizer");
+        std::fs::create_dir_all(&tokenizer).unwrap();
+        std::fs::write(tokenizer.join("vocab.json"), b"{}\n").unwrap();
     }
 
     fn dirs(root: &Path) -> VoiceConfig {
@@ -694,6 +834,7 @@ mod tests {
             model_dir: root.join("sensevoice"),
             tts_model_dir: root.join("tts-cantonese"),
             tts_en_model_dir: root.join("tts-english"),
+            qwen3_asr_model_dir: root.join("qwen3-asr"),
             ..VoiceConfig::default()
         }
     }
@@ -705,6 +846,62 @@ mod tests {
         assert_eq!(EN_TTS_REL_DIR, "models/tts-english");
         assert!(SENSEVOICE_PACK_URL.contains(SENSEVOICE_PACK_ID));
         assert_eq!(YUE_TTS_PACK_ID, "vits-cantonese-hf-xiaomaiiwn");
+    }
+
+    #[test]
+    fn qwen3_pack_is_the_pinned_int8_0_6b_not_a_larger_export() {
+        assert_eq!(
+            QWEN3_ASR_PACK_ID,
+            "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+        );
+        assert!(QWEN3_ASR_PACK_URL.contains(QWEN3_ASR_PACK_ID));
+        assert!(QWEN3_ASR_PACK_URL
+            .contains("github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"));
+        assert!(!QWEN3_ASR_PACK_URL.to_ascii_lowercase().contains("1.7b"));
+        assert!(!QWEN3_ASR_PACK_URL
+            .to_ascii_lowercase()
+            .contains("modelscope"));
+        assert!(!QWEN3_ASR_PACK_URL.to_ascii_lowercase().contains("fp32"));
+        assert_eq!(QWEN3_ASR_PACK_BYTES, 878_702_423);
+        assert_eq!(
+            QWEN3_ASR_PACK_SHA256,
+            "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96"
+        );
+        assert_eq!(QWEN3_ASR_REL_DIR, "models/qwen3-asr");
+        assert_eq!(
+            QWEN3_ASR_LICENSE_URL,
+            "https://raw.githubusercontent.com/QwenLM/Qwen3-ASR/main/LICENSE"
+        );
+    }
+
+    #[test]
+    fn sha256_file_matches_a_known_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn qwen3_pin_rejects_a_stand_in_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pack.tar.bz2");
+        std::fs::write(&path, b"not-the-pack").unwrap();
+        let err = verify_archive_pin(&path, &QWEN3_ASR_PIN).unwrap_err();
+        assert!(err.contains("878702423"), "{err}");
+    }
+
+    #[test]
+    fn qwen3_ready_ignores_a_missing_license_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_qwen3_stub(dir.path());
+        assert!(pack_ready(VoicePack::Qwen3Asr, dir.path()));
+        assert!(!dir.path().join("LICENSE").exists());
+        std::fs::remove_file(dir.path().join("encoder.int8.onnx")).unwrap();
+        assert!(!pack_ready(VoicePack::Qwen3Asr, dir.path()));
     }
 
     #[test]
@@ -763,6 +960,7 @@ mod tests {
                 enabled: Some(true),
                 languages: Some(vec!["ko".into(), "YUE".into(), "en".into(), "yue".into()]),
                 tts: Some(true),
+                ..VoiceSettingsPatch::default()
             },
         )
         .unwrap();
@@ -855,5 +1053,84 @@ mod tests {
         assert!(calls.iter().any(|call| call == "tts-english"));
         assert_eq!(runtime.view().sensevoice.status, "ready");
         assert_eq!(runtime.view().tts_english.status, "ready");
+    }
+
+    #[tokio::test]
+    async fn qwen3_without_apache_accept_is_not_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = dirs(dir.path());
+        cfg.engine = "qwen3-asr".to_string();
+        cfg.qwen3_asr_license_accepted = false;
+        let fetcher = Arc::new(ScriptedFetcher {
+            fail: false,
+            calls: Mutex::new(Vec::new()),
+        });
+        let runtime = VoiceRuntime::with_fetcher(cfg, Arc::clone(&fetcher) as Arc<_>);
+        runtime.ensure_now().await;
+        let calls = fetcher.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|call| call == "qwen3-asr"),
+            "selecting the engine must not fetch: {calls:?}"
+        );
+        let view = runtime.view();
+        assert_eq!(view.qwen3_asr.status, "absent");
+        assert!(
+            view.qwen3_asr.message.contains("Apache-2.0"),
+            "{}",
+            view.qwen3_asr.message
+        );
+        assert_eq!(view.sensevoice.status, "ready");
+    }
+
+    #[tokio::test]
+    async fn apache_accept_downloads_qwen3_and_a_missing_license_file_stays_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = dirs(dir.path());
+        cfg.enabled = false;
+        cfg.tts = false;
+        cfg.engine = "sensevoice".to_string();
+        cfg.qwen3_asr_license_accepted = true;
+        let fetcher = Arc::new(ScriptedFetcher {
+            fail: false,
+            calls: Mutex::new(Vec::new()),
+        });
+        let runtime = VoiceRuntime::with_fetcher(cfg, Arc::clone(&fetcher) as Arc<_>);
+        runtime.ensure_now().await;
+        assert_eq!(
+            fetcher.calls.lock().unwrap().clone(),
+            vec!["qwen3-asr".to_string()]
+        );
+        assert_eq!(runtime.view().qwen3_asr.status, "ready");
+        assert!(!dir.path().join("qwen3-asr").join("LICENSE").exists());
+        assert!(dir
+            .path()
+            .join("qwen3-asr")
+            .join("encoder.int8.onnx")
+            .is_file());
+    }
+
+    #[test]
+    fn merge_rejects_an_unknown_engine_and_keeps_the_accept_flag() {
+        let current = VoiceConfig::default();
+        let unknown = merge_voice_settings(
+            &current,
+            &VoiceSettingsPatch {
+                engine: Some("openrouter_stt".into()),
+                ..VoiceSettingsPatch::default()
+            },
+        );
+        assert!(unknown.is_err(), "{unknown:?}");
+        let next = merge_voice_settings(
+            &current,
+            &VoiceSettingsPatch {
+                engine: Some("Qwen3-ASR".into()),
+                qwen3_asr_license_accepted: Some(true),
+                ..VoiceSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next.engine, "qwen3-asr");
+        assert!(next.qwen3_asr_license_accepted);
+        assert!(!current.qwen3_asr_license_accepted);
     }
 }

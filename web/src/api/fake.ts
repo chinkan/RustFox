@@ -104,6 +104,8 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         voiceEnabled: true,
         voiceLanguages: ['yue', 'en'],
         voiceTts: false,
+        voiceEngine: 'sensevoice',
+        voiceQwen3AsrLicenseAccepted: false,
       },
       masked: {
         telegramBotToken: '123…456',
@@ -141,6 +143,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         sensevoice: { status: 'ready', message: null },
         ttsCantonese: { status: 'absent', message: null },
         ttsEnglish: { status: 'absent', message: null },
+        qwen3Asr: { status: 'absent', message: null },
       },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
       sandbox: {

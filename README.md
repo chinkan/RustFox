@@ -210,7 +210,7 @@ rustfox status
 |---------|-------------|
 | `[[bots]]` | Array of Telegram bots, each with `id`, `bot_token`, `allowed_user_ids`, `persona`, and optional `model` / `tools` overrides |
 | `telegram.*` | Legacy single-bot section (deprecated alias when `[[bots]]` is present) |
-| `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese `yue`), voice-mode short reply, opt-in OpenRouter STT, opt-in `[voice].tts` text + `sendVoice`. Typed chat stays text. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
+| `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese `yue`) by default, optional `qwen3-asr`, voice-mode short reply, opt-in OpenRouter STT, opt-in `[voice].tts` text + `sendVoice`. Typed chat stays text. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
 | `[device_ws]` | Opt-in JSON device WebSocket on the portal bind (default off). See [ADR-0056](docs/adr/0056-device-websocket-channel.md) |
 | `[switchbot]` | SwitchBot Open API (`enabled` + secret refs). Tools stay off until enabled. Token and secret are set in Portal Settings |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
@@ -222,6 +222,10 @@ rustfox status
 | `mcp_servers` | List of MCP servers to connect (see [GUIDE.md](docs/GUIDE.md#mcp-server-integration)) |
 
 → Full configuration reference: [docs/GUIDE.md](docs/GUIDE.md#configuration)
+
+### Optional Qwen3-ASR
+
+The default local engine stays SenseVoice. Settings can switch `[voice].engine` to `qwen3-asr` and download the official k2-fsa sherpa-onnx INT8 0.6B pack only after you accept the upstream Apache-2.0 license. A missing pack fails that optional path and does not stop RustFox. Thanks to joe2643, sennett-lau, and the Qwen base model.
 
 ---
 

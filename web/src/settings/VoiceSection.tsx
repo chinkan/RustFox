@@ -2,7 +2,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Api } from '../api/client'
-import type { SettingsPatch, VoiceLanguage, VoicePackDownload, VoiceSettings } from '../api/types'
+import type {
+  SettingsPatch,
+  VoiceEngine,
+  VoiceLanguage,
+  VoicePackDownload,
+  VoiceSettings,
+} from '../api/types'
 import {
   normalizeVoiceSettings,
   sortVoiceLanguages,
@@ -39,18 +45,22 @@ export function VoiceSection({
   const [enabled, setEnabled] = useState(server.enabled)
   const [languages, setLanguages] = useState<VoiceLanguage[]>(server.languages)
   const [tts, setTts] = useState(server.tts)
+  const [engine, setEngine] = useState<VoiceEngine>(server.engine)
+  const [qwen3LicenseAccepted, setQwen3LicenseAccepted] = useState(server.qwen3LicenseAccepted)
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
   useEffect(() => {
     setEnabled(server.enabled)
     setLanguages(server.languages)
     setTts(server.tts)
-  }, [server.enabled, server.languages, server.tts])
+    setEngine(server.engine)
+    setQwen3LicenseAccepted(server.qwen3LicenseAccepted)
+  }, [server.enabled, server.languages, server.tts, server.engine, server.qwen3LicenseAccepted])
 
   const download = server.download
   const languagesEmpty = languages.length === 0
-  const dirty = voiceSettingsDirty(server, enabled, languages, tts)
-  const attention = voicePackNeedsAttention(enabled, tts, download)
+  const dirty = voiceSettingsDirty(server, enabled, languages, tts, engine, qwen3LicenseAccepted)
+  const attention = voicePackNeedsAttention(enabled, tts, download, engine)
 
   const save = useMutation({
     mutationFn: () => {
@@ -61,6 +71,8 @@ export function VoiceSection({
         voiceEnabled: enabled,
         voiceLanguages: sortVoiceLanguages(languages),
         voiceTts: tts,
+        voiceEngine: engine,
+        voiceQwen3AsrLicenseAccepted: qwen3LicenseAccepted,
       }
       return api.patchSettings(patch)
     },
@@ -88,6 +100,8 @@ export function VoiceSection({
         return t('settings.voicePackTtsEnglish')
       case 'ttsCantonese':
         return t('settings.voicePackTtsCantonese')
+      case 'qwen3Asr':
+        return t('settings.voicePackQwen3')
     }
   }
 
@@ -150,6 +164,19 @@ export function VoiceSection({
           ) : null}
         </fieldset>
 
+        <label className="field" htmlFor="voice-engine">
+          {t('settings.voiceEngine')}
+        </label>
+        <select
+          id="voice-engine"
+          value={engine}
+          onChange={(e) => setEngine(e.target.value === 'qwen3-asr' ? 'qwen3-asr' : 'sensevoice')}
+          style={{ marginBottom: 12 }}
+        >
+          <option value="sensevoice">{t('settings.voiceEngineSensevoice')}</option>
+          <option value="qwen3-asr">{t('settings.voiceEngineQwen3')}</option>
+        </select>
+
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '12px 0' }}>
           <input type="checkbox" checked={tts} onChange={(e) => setTts(e.target.checked)} />
           {t('settings.voiceTts')}
@@ -157,6 +184,25 @@ export function VoiceSection({
 
         <h3 style={{ margin: '0 0 8px', fontSize: 15 }}>{t('settings.voiceDownloadTitle')}</h3>
         {renderPack('sensevoice', t('settings.voicePackSensevoice'))}
+        {renderPack('qwen3Asr', t('settings.voicePackQwen3'))}
+        <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', margin: '4px 0 12px' }}>
+          <input
+            type="checkbox"
+            checked={qwen3LicenseAccepted}
+            onChange={(e) => setQwen3LicenseAccepted(e.target.checked)}
+          />
+          <span>
+            {t('settings.voiceQwen3License')}{' '}
+            <a
+              href="https://raw.githubusercontent.com/QwenLM/Qwen3-ASR/main/LICENSE"
+              target="_blank"
+              rel="noreferrer"
+            >
+              {t('settings.voiceQwen3LicenseLink')}
+            </a>
+            . {t('settings.voiceQwen3LicenseHint')}
+          </span>
+        </label>
         {renderPack('ttsCantonese', t('settings.voicePackTtsCantonese'))}
         {renderPack('ttsEnglish', t('settings.voicePackTtsEnglish'))}
 

@@ -27,7 +27,7 @@ TTS does not run unless you set `tts = true`, and then only for a voice-origin r
 
 | Piece | Choice |
 |-------|--------|
-| Engine id | `sensevoice` (the only implemented id) |
+| Engine id | `sensevoice` (default). Optional `qwen3-asr` (same binary, different argv) |
 | Binary | `sherpa-onnx-offline` on `PATH`, or `stt_bin` |
 | Language | `yue` (Cantonese). Also accepted: `auto`, `zh`, `en`, `ja`, `ko` |
 | Model | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09` |
@@ -57,7 +57,34 @@ curl -fsSL -o /tmp/sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2 \
 
 Sherpa is invoked as a process. RustFox does not link onnxruntime, so the model and these binaries stay outside CI. Tests substitute a script for `stt_bin`.
 
-CLI shape (the wav path is last):
+`sherpa-onnx` **v2.0.1** (`sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2`, checked 2026-11-16) is the binary this tree verified for Qwen3-ASR: `sherpa-onnx-offline --help` lists `--qwen3-asr-encoder`. A binary whose help lacks that flag fails only the optional Qwen3 path. SenseVoice keeps working. There is no second STT binary and no Python runtime.
+
+## Optional Qwen3-ASR
+
+Set `engine = "qwen3-asr"` in `[voice]` or choose it in Portal Settings. The default stays `sensevoice`. `openrouter_stt` does not select this engine.
+
+The pack is the official k2-fsa INT8 0.6B archive, unpacked under `<home>/models/qwen3-asr`:
+
+<https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2>
+
+878702423 bytes, SHA-256 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`. RustFox does not fetch it until Settings (or `qwen3_asr_license_accepted = true`) records acceptance of the upstream Apache-2.0 license at <https://raw.githubusercontent.com/QwenLM/Qwen3-ASR/main/LICENSE>. A missing `LICENSE` inside the sherpa tarball does not skip that step. A missing or declined pack fails only this optional path and does not stop the process. Telegram and device HTTP audio both call `transcribe_file`, so both use the configured engine. Device uploads do not gain a separate cloud default.
+
+CLI shape (the wav path is last). These flags are not the SenseVoice flags:
+
+```
+sherpa-onnx-offline \
+  --qwen3-asr-conv-frontend=<model_dir>/conv_frontend.onnx \
+  --qwen3-asr-encoder=<model_dir>/encoder.int8.onnx \
+  --qwen3-asr-decoder=<model_dir>/decoder.int8.onnx \
+  --qwen3-asr-tokenizer=<model_dir>/tokenizer \
+  --qwen3-asr-max-new-tokens=512 \
+  --num-threads=2 \
+  <wav>
+```
+
+v2.0.1's own default for `--qwen3-asr-max-new-tokens` is 128. RustFox passes 512, matching the official pack example.
+
+SenseVoice CLI shape (the wav path is last):
 
 ```
 sherpa-onnx-offline \
@@ -124,8 +151,10 @@ See the commented `[voice]` block in [`config.example.toml`](../config.example.t
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `engine` | `sensevoice` | Primary local STT. Only this id is implemented. |
+| `engine` | `sensevoice` | Primary local STT. `qwen3-asr` is the optional second id. An unknown id fails that transcription and does not call cloud STT. |
 | `model_dir` | `<home>/models/sensevoice` | SenseVoice `model.int8.onnx` or `model.onnx`, plus `tokens.txt`. |
+| `qwen3_asr_model_dir` | `<home>/models/qwen3-asr` | Optional Qwen3-ASR files: `conv_frontend.onnx`, `encoder.int8.onnx`, `decoder.int8.onnx`, `tokenizer/vocab.json`. |
+| `qwen3_asr_license_accepted` | `false` | Apache-2.0 acceptance. The pack is fetched only after this is true. |
 | `stt_bin` | `sherpa-onnx-offline` | Local STT binary. |
 | `ffmpeg_bin` | `ffmpeg` | OGG/Opus ↔ WAV. |
 | `enabled` | `true` | Master gate. Absent means on. `false` skips STT and TTS. A caption-less note says voice is off. |
