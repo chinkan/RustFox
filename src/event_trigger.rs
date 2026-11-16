@@ -605,7 +605,14 @@ mod tests {
     use super::*;
     use crate::memory::MemoryStore;
     use crate::secret_store::FakeSecretStore;
+    use rand::Rng;
     use serde_json::json;
+
+    /// Drawn at runtime so tests do not embed an HMAC key literal.
+    fn fresh_test_secret() -> String {
+        let bytes: [u8; 16] = rand::rng().random();
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-11-16T08:00:00Z")
@@ -714,12 +721,14 @@ mod tests {
 
     #[test]
     fn hmac_rejects_a_wrong_secret_and_accepts_raw_hex() {
-        let header = sign_body("topsecret", b"{}");
-        assert!(hmac_matches("topsecret", b"{}", &header));
-        assert!(!hmac_matches("other", b"{}", &header));
+        let secret = fresh_test_secret();
+        let other = fresh_test_secret();
+        let header = sign_body(&secret, b"{}");
+        assert!(hmac_matches(&secret, b"{}", &header));
+        assert!(!hmac_matches(&other, b"{}", &header));
         let hex = header.trim_start_matches("sha256=");
-        assert!(hmac_matches("topsecret", b"{}", hex));
-        assert!(!hmac_matches("topsecret", b"{", &header));
+        assert!(hmac_matches(&secret, b"{}", hex));
+        assert!(!hmac_matches(&secret, b"{", &header));
     }
 
     #[test]
@@ -837,13 +846,14 @@ mod tests {
 
     #[tokio::test]
     async fn accept_starts_one_run_and_replays_are_a_noop() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
         let first = accept_ok(
             &memory,
             &secrets,
             "trig",
             b"{\"n\":1}",
-            "s3cret",
+            &secret,
             Some("k1"),
             now(),
         )
@@ -858,7 +868,7 @@ mod tests {
             &secrets,
             "trig",
             b"other",
-            "s3cret",
+            &secret,
             Some("k1"),
             now(),
         )
@@ -883,8 +893,9 @@ mod tests {
 
     #[tokio::test]
     async fn body_hash_dedups_when_no_idempotency_key_is_present() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
-        let first = accept_ok(&memory, &secrets, "trig", b"same", "s3cret", None, now()).await;
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
+        let first = accept_ok(&memory, &secrets, "trig", b"same", &secret, None, now()).await;
         let AcceptOutcome::Started(fire) = first else {
             panic!("start");
         };
@@ -898,14 +909,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let again = accept_ok(&memory, &secrets, "trig", b"same", "s3cret", None, now()).await;
+        let again = accept_ok(&memory, &secrets, "trig", b"same", &secret, None, now()).await;
         assert!(matches!(again, AcceptOutcome::Duplicate { .. }));
         let other = accept_ok(
             &memory,
             &secrets,
             "trig",
             b"different",
-            "s3cret",
+            &secret,
             None,
             now(),
         )
@@ -915,7 +926,8 @@ mod tests {
 
     #[tokio::test]
     async fn bad_signature_disabled_unknown_and_oversize() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
         let bad = accept(
             &memory.connection(),
             &secrets,
@@ -941,7 +953,7 @@ mod tests {
             AcceptInput {
                 trigger_id: "trig",
                 body: b"{}",
-                signature: Some(Box::leak(sign_body("s3cret", b"{}").into_boxed_str())),
+                signature: Some(Box::leak(sign_body(&secret, b"{}").into_boxed_str())),
                 idempotency_key: None,
                 x_idempotency_key: None,
                 now: now(),
@@ -982,7 +994,8 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_and_concurrency_reject_without_a_second_run() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
         for n in 0..MAX_ACCEPTED_PER_WINDOW {
             let body = format!("body-{n}");
             let started = accept_ok(
@@ -990,7 +1003,7 @@ mod tests {
                 &secrets,
                 "trig",
                 body.as_bytes(),
-                "s3cret",
+                &secret,
                 None,
                 now(),
             )
@@ -1013,7 +1026,7 @@ mod tests {
             AcceptInput {
                 trigger_id: "trig",
                 body: b"one-more",
-                signature: Some(Box::leak(sign_body("s3cret", b"one-more").into_boxed_str())),
+                signature: Some(Box::leak(sign_body(&secret, b"one-more").into_boxed_str())),
                 idempotency_key: None,
                 x_idempotency_key: None,
                 now: now(),
@@ -1042,8 +1055,9 @@ mod tests {
 
     #[tokio::test]
     async fn one_active_run_per_trigger_and_three_process_wide() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
-        let first = accept_ok(&memory, &secrets, "trig", b"a", "s3cret", None, now()).await;
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
+        let first = accept_ok(&memory, &secrets, "trig", b"a", &secret, None, now()).await;
         assert!(matches!(first, AcceptOutcome::Started(_)));
         let busy = accept(
             &memory.connection(),
@@ -1051,7 +1065,7 @@ mod tests {
             AcceptInput {
                 trigger_id: "trig",
                 body: b"b",
-                signature: Some(Box::leak(sign_body("s3cret", b"b").into_boxed_str())),
+                signature: Some(Box::leak(sign_body(&secret, b"b").into_boxed_str())),
                 idempotency_key: None,
                 x_idempotency_key: None,
                 now: now(),
@@ -1090,7 +1104,7 @@ mod tests {
             AcceptInput {
                 trigger_id: "trig",
                 body: b"c",
-                signature: Some(Box::leak(sign_body("s3cret", b"c").into_boxed_str())),
+                signature: Some(Box::leak(sign_body(&secret, b"c").into_boxed_str())),
                 idempotency_key: None,
                 x_idempotency_key: None,
                 now: now(),
@@ -1102,8 +1116,9 @@ mod tests {
 
     #[tokio::test]
     async fn x_idempotency_key_is_used_when_the_standard_header_is_empty() {
-        let (memory, secrets) = seeded("trig", "s3cret").await;
-        let sig = sign_body("s3cret", b"body");
+        let secret = fresh_test_secret();
+        let (memory, secrets) = seeded("trig", &secret).await;
+        let sig = sign_body(&secret, b"body");
         let first = accept(
             &memory.connection(),
             &secrets,
@@ -1128,7 +1143,7 @@ mod tests {
                 trigger_id: "trig",
                 body: b"other-body",
                 signature: Some(Box::leak(
-                    sign_body("s3cret", b"other-body").into_boxed_str(),
+                    sign_body(&secret, b"other-body").into_boxed_str(),
                 )),
                 idempotency_key: None,
                 x_idempotency_key: Some("x-key"),
