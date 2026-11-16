@@ -42,6 +42,9 @@ import type {
   StreamFrame,
   SystemHealth,
   TaskCreateBody,
+  EventTriggerList,
+  EventTriggerCreateResult,
+  EventTriggerSecretResult,
   TaskCreateResult,
   TaskDeleteResult,
   TaskEnableResult,
@@ -167,6 +170,27 @@ export const api = {
 
   // ── tasks ───────────────────────────────────────────────────────────────
   listTasks: () => get<ScheduledTask[]>('/tasks'),
+  listTriggers: () => get<EventTriggerList>('/triggers'),
+  createTrigger: (body: { name: string; prompt: string; botId?: string; secret?: string }) =>
+    request<EventTriggerCreateResult>('/triggers', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  enableTrigger: (id: string) =>
+    request<{ ok: boolean; id: string; enabled: boolean }>(
+      `/triggers/${encodeURIComponent(id)}/enable`,
+      { method: 'POST' },
+    ),
+  disableTrigger: (id: string) =>
+    request<{ ok: boolean; id: string; enabled: boolean }>(
+      `/triggers/${encodeURIComponent(id)}/disable`,
+      { method: 'POST' },
+    ),
+  rotateTriggerSecret: (id: string, secret?: string) =>
+    request<EventTriggerSecretResult>(`/triggers/${encodeURIComponent(id)}/secret`, {
+      method: 'POST',
+      body: JSON.stringify(secret ? { secret } : {}),
+    }),
   getScheduleTimezone: () => get<ScheduleTimezoneInfo>('/schedule/timezone'),
   listScheduleBots: () => get<ScheduleBot[]>('/schedule/bots'),
   getTaskRuns: (id: string) => get<TaskRun[]>(`/tasks/${encodeURIComponent(id)}/runs`),

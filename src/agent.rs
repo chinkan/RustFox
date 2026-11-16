@@ -122,6 +122,12 @@ pub struct ScheduledJobRequest {
     /// Tick the scheduler armed for this cron fire (#335). `None` on a
     /// dead-letter re-run, which is not itself a cron boundary.
     pub scheduled_for: Option<chrono::DateTime<chrono::Utc>>,
+    /// ADR-0068: webhook event, not a cron or one-shot fire.
+    pub event_fired: bool,
+    /// When set, the runner updates this `scheduled_task_runs` row instead of
+    /// inserting another. The webhook inserts it before dispatch so the
+    /// concurrency cap can see it.
+    pub existing_run_id: Option<String>,
 }
 
 pub use crate::loop_runner::GuardKind;
@@ -1332,8 +1338,9 @@ impl Agent {
         .await?;
         drop(skills);
 
-        // RAG: auto-retrieve relevant past messages and inject into system prompt
-        if !incoming.text.is_empty() {
+        // RAG injects retrieved text into the system prompt. An event payload
+        // stays in the user turn only (ADR-0068).
+        if !incoming.event_fired && !incoming.text.is_empty() {
             let filtered_msgs: Vec<_> = cmgr
                 .messages()
                 .iter()
@@ -2080,6 +2087,49 @@ impl Agent {
             device_fw: None,
             voice_origin: false,
             voice_spoken_lang: None,
+            event_fired: false,
+        }
+    }
+
+    /// Webhook event as a scheduled job (ADR-0068). Same isolation as
+    /// [`Self::scheduled_incoming`]: `schedule_id` is set, so the turn does not
+    /// enter the interactive conversation.
+    pub fn event_job_request(&self, fire: &crate::event_trigger::EventFire) -> ScheduledJobRequest {
+        let bot_id = crate::platform::normalize_bot_id(&fire.trigger.bot_id).to_string();
+        let incoming = crate::platform::IncomingMessage {
+            platform: fire.trigger.platform.clone(),
+            bot_id: bot_id.clone(),
+            user_id: fire.trigger.user_id.clone(),
+            chat_id: fire.trigger.chat_id.clone(),
+            user_name: String::new(),
+            text: crate::scheduler::history::with_schedule_id(&fire.trigger.id, &fire.user_text),
+            attachments: vec![],
+            schedule_id: Some(fire.trigger.id.clone()),
+            device_id: None,
+            device_room: None,
+            device_fw: None,
+            voice_origin: false,
+            voice_spoken_lang: None,
+            event_fired: true,
+        };
+        let owning_telegram_bot = {
+            let guard = self
+                .telegram_bots
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            crate::scheduler::reminders::owning_bot(&bot_id, &guard).cloned()
+        };
+        ScheduledJobRequest {
+            incoming,
+            task_id: fire.trigger.id.clone(),
+            is_recurring: false,
+            task_store: self.task_store.clone(),
+            rerun_id: None,
+            owning_telegram_bot,
+            continue_from: None,
+            scheduled_for: None,
+            event_fired: true,
+            existing_run_id: Some(fire.run_id.clone()),
         }
     }
 
@@ -2127,6 +2177,8 @@ impl Agent {
                     rerun_id: None,
                     continue_from: None,
                     scheduled_for: Some(fired_at),
+                    event_fired: false,
+                    existing_run_id: None,
                 };
                 if let Err(e) = tx.send(req) {
                     tracing::error!("Failed to dispatch scheduled job: {}", e);
@@ -2161,6 +2213,8 @@ impl Agent {
             rerun_id: Some(rerun_id.to_string()),
             continue_from,
             scheduled_for: None,
+            event_fired: false,
+            existing_run_id: None,
         };
         job_tx.send(req).context("Failed to dispatch rerun")?;
         Ok(())

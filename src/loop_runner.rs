@@ -509,6 +509,19 @@ impl<'a> AgenticLoop<'a> {
                         serde_json::json!({ "arguments": &args }),
                     );
 
+                    if let Some(draft) =
+                        crate::event_trigger::outbound_draft(&tc.function.name, &args)
+                    {
+                        self.finish_child(
+                            tool_run,
+                            Some(serde_json::json!({ "result": &draft })),
+                            None,
+                        );
+                        messages.push_tool_result(&tc.id, draft);
+                        self.persist_completed_tool(messages, iterations).await;
+                        continue;
+                    }
+
                     if let Some(ref whitelist) = self.config.allowed_tools {
                         if !whitelist.contains(&tc.function.name) {
                             let rejected = format!(

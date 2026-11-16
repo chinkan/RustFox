@@ -11,6 +11,7 @@
     "agents": "Agents",
     "memory": "Memory",
     "tasks": "Scheduled Tasks",
+    "triggers": "Event triggers",
     "settings": "Settings",
     "integrations": "Integrations",
     "mcp": "MCP",
@@ -159,6 +160,23 @@
     "defaultTimezone": "Default schedule timezone: {{tz}} (UTC{{offset}})",
     "timezone": "Timezone (IANA)",
     "utcLegacy": "UTC (legacy)"
+  },
+  "triggers": {
+    "title": "Event triggers",
+    "subtitle": "HMAC webhooks on this portal. The payload is untrusted. Send, publish, and post stay draft-only.",
+    "new": "New trigger",
+    "name": "Name",
+    "prompt": "Operator instruction",
+    "bot": "Bot",
+    "create": "Create",
+    "enable": "Enable",
+    "disable": "Disable",
+    "webhook": "Webhook URL",
+    "secretOnce": "HMAC secret (shown once)",
+    "rotate": "Rotate secret",
+    "empty": "No event triggers yet.",
+    "created": "Trigger created. Copy the secret now; it is not shown again.",
+    "rotated": "New HMAC secret (shown once)"
   },
   "settings": {
     "title": "Settings",

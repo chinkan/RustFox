@@ -77,6 +77,40 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     listScheduleBots: async () => [
       { id: 'default', selectable: true, reason: null, default: true },
     ],
+    listTriggers: async () => ({
+      bots: [{ id: 'main', persona: 'main' }],
+      triggers: [
+        {
+          id: 'hook-1',
+          name: 'CI webhook',
+          prompt: 'Summarise the payload.',
+          botId: 'main',
+          enabled: true,
+          webhookPath: '/api/hooks/hook-1',
+          secretName: 'trigger.hook-1.hmac',
+          createdAt: '2026-11-16T00:00:00Z',
+        },
+      ],
+    }),
+    createTrigger: async (body: { name: string; prompt: string; botId?: string }) => ({
+      id: 'hook-new',
+      name: body.name,
+      prompt: body.prompt,
+      botId: body.botId ?? 'main',
+      enabled: true,
+      webhookPath: '/api/hooks/hook-new',
+      secretName: 'trigger.hook-new.hmac',
+      createdAt: '2026-11-16T00:00:00Z',
+      secret: 'generated-once',
+    }),
+    enableTrigger: async (id: string) => ({ ok: true, id, enabled: true }),
+    disableTrigger: async (id: string) => ({ ok: true, id, enabled: false }),
+    rotateTriggerSecret: async (id: string) => ({
+      ok: true,
+      id,
+      secretName: `trigger.${id}.hmac`,
+      secret: 'rotated-once',
+    }),
     listTasks: async () => [
       { id: 'c1', name: '香港天氣報告', cron: '0 30 7 * * *', enabled: true, nextRun: '2026-09-23T07:30:00+08:00', prompt: 'Run the hko-weather skill.', triggerType: 'recurring', triggerValue: '0 30 7 * * *', status: 'active', platform: 'telegram', botId: 'default', timezone: 'Asia/Hong_Kong' },
       { id: 'c2', name: 'arXiv 簡報', cron: '0 0 10 * * *', enabled: false, nextRun: '—', prompt: 'Run cantonese-arxiv-daily-briefing.', triggerType: 'recurring', triggerValue: '0 0 10 * * *', status: 'paused', platform: 'telegram', botId: 'default', timezone: 'UTC' },

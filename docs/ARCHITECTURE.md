@@ -88,7 +88,7 @@ User ──Telegram──▶ bot.rs ──▶ Agent.process_message()
 | **McpManager** | `mcp.rs` | Manages stdio-based MCP child processes; tools namespaced `mcp_{server}_{tool}` |
 | **SkillRegistry** | `skills/mod.rs` | Loads and manages skills/agents from the home directory with compile-time embedded fallback |
 | **Memory** | `memory/` | SQLite-backed persistence, vector embeddings, hybrid search (FTS5 + vector), query rewriting, summarization |
-| **Scheduler** | `scheduler/` | Cron and one-shot task scheduler with DB persistence; supports add/remove/list at runtime. A run is `completed` only after [`scheduler/completion.rs`](../src/scheduler/completion.rs) accepts it ([ADR-0053](adr/0053-scheduler-completion-not-model-speech.md)) |
+| **Scheduler** | `scheduler/` | Cron and one-shot task scheduler with DB persistence; supports add/remove/list at runtime. A run is `completed` only after [`scheduler/completion.rs`](../src/scheduler/completion.rs) accepts it ([ADR-0053](adr/0053-scheduler-completion-not-model-speech.md)). Webhook events reuse that run path without a third trigger type ([ADR-0068](adr/0068-event-webhook-triggers.md)) |
 | **Supervisor** | `supervisor/` | Generic autonomous task runner: intake → classify → plan → execute → verify → report |
 | **FileProcessor** | `file_processor/` | Handles image OCR, vision API calls, PDF/DOCX text extraction |
 | **TurnGate** | `turn_gate.rs` | Per `session_key` (`{bot_id}:{user_id}`): interactive lane and scheduled lane (ADR-0020, ADR-0052) |
@@ -117,6 +117,10 @@ Failure uses the manual dead-letter gate (`enqueue_manual` / `mark_awaiting_user
 [ADR-0054](adr/0054-scheduler-cross-run-progress.md) / #331. A scheduled run reads and writes `{workspace}/_runs/<task_id>-YYYY-MM-DD.json` (the task timezone's calendar day). When today's file exists at the start of a fresh run (no transcript continue), the prompt is told to continue from `next_phase` and not redo completed work. Success and an explicit hard failure delete the file. Timeout, max-iterations, a guard rewrite, and other unverified stops update it. A transient provider error leaves it unchanged.
 
 Transcript checkpoints ([ADR-0039](adr/0039-scheduler-timeout-transcript-continue.md)) are saved on the max-iterations and guard-rewrite stops as well as on wall-clock timeout, and after each completed tool on a scheduled run ([ADR-0067](adr/0067-scheduled-auto-resume.md)). A scheduled timeout, max-iterations stop, or process restart continues from that checkpoint without a Retry click (startup, and a 60-second restore tick). Unverified results stay a human gate. Retry still continues when a checkpoint row exists. Plan read-back is not this path. `max_iterations` is unchanged. The budget formula stays kind-dependent ([ADR-0054](adr/0054-scheduler-cross-run-progress.md) Decision 4).
+
+## Event webhook triggers
+
+[ADR-0068](adr/0068-event-webhook-triggers.md) / #89. `POST /api/hooks/{id}` on the portal bind accepts an HMAC-signed body and dispatches a `ScheduledJobRequest`. The registry is the `triggers` table. Cron and one-shot behaviour is unchanged. The payload is a capped untrusted user turn. Send, publish, and post tools on that run return a draft instead of executing.
 
 ## Agentic Loop
 
