@@ -366,6 +366,15 @@ fn reaction_mark(body: &serde_json::Value) -> Option<String> {
 
 const TOOL_TURN_REPLY: &str = "FINAL_ASSISTANT_STILL_SENT";
 
+/// Tool turns have this-turn evidence, so the parent may end only by stating
+/// the three checks (ADR-0011a R7 / #418). Chat fixtures have no observation
+/// and do not claim the skip, so they keep the bare reply.
+fn evidenced_skip_reply(reply: &str) -> String {
+    format!(
+        "{reply}\n\nRisk class is not high. This-turn evidence: the tool result. Residual effect is local and reversible."
+    )
+}
+
 /// First completion is `execute_command`, then a fixed assistant reply.
 struct ToolThenReply {
     config: rustfox::provider::ProviderConfig,
@@ -456,7 +465,9 @@ impl rustfox::provider::Provider for ToolThenReply {
         } else {
             rustfox::llm::ChatMessage {
                 role: "assistant".into(),
-                content: Some(rustfox::llm::MessageContent::from_text(self.reply.clone())),
+                content: Some(rustfox::llm::MessageContent::from_text(
+                    evidenced_skip_reply(&self.reply),
+                )),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -696,7 +707,7 @@ impl rustfox::provider::Provider for SubagentCommandScript {
                 rustfox::llm::ChatMessage {
                     role: "assistant".into(),
                     content: Some(rustfox::llm::MessageContent::from_text(
-                        TOOL_TURN_REPLY.to_string(),
+                        evidenced_skip_reply(TOOL_TURN_REPLY),
                     )),
                     tool_calls: None,
                     tool_call_id: None,

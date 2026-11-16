@@ -587,21 +587,9 @@ impl Agent {
             prompt.push_str(&section);
         }
 
-        // Work Verification Protocol
-        prompt.push_str(
-            "\n\n# Work Verification Protocol\n\n\
-             BEFORE ending your response, you MUST verify your work:\n\n\
-             1. Call `invoke_agent(agent=\"verifier\", prompt=\"TASK: ...\\nCRITERIA: ...\\nEVIDENCE: ...\")`\n\
-                with the original task, your criteria, and a brief summary of what you did\n\
-                including key file paths.\n\
-             2. The verifier has READ-ONLY sandbox access — it will use read_file and\n\
-                list_files to inspect the actual output. You do NOT need to dump file\n\
-                contents into the prompt. Just tell it which files to look at.\n\
-             3. If the verifier returns NEEDS_IMPROVEMENT or FAIL, do NOT end.\n\
-                Use the feedback to continue working. You will get another iteration.\n\
-             4. Only if the verifier returns PASS may you end.\n\
-             5. You may also verify intermediate results during multi-step tasks."
-        );
+        // Work Verification Protocol (ADR-0011a R7, amended by #418).
+        // Hard-coded. Not a config, skill, or per-bot off switch.
+        prompt.push_str(crate::work_verification::PROTOCOL_SECTION);
 
         // Soul file protocol — instruct the AI to maintain its own identity files
         prompt.push_str(
@@ -1614,7 +1602,8 @@ impl Agent {
             turn_sender.as_ref() as &dyn PlatformSender,
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
-        );
+        )
+        .with_work_verification(incoming.schedule_id.is_some());
         if attach_steer(
             incoming.schedule_id.as_deref(),
             self.get_mid_run_mode(bot_id, user_id).await,
@@ -1948,7 +1937,8 @@ impl Agent {
             turn_sender.as_ref() as &dyn PlatformSender,
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
-        );
+        )
+        .with_work_verification(incoming.schedule_id.is_some());
         if let Some(hook) = on_tool_completed {
             agentic = agentic.with_tool_completed(hook);
         }
