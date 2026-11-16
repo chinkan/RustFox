@@ -22,6 +22,7 @@ pub mod secrets;
 pub mod settings;
 pub mod static_serve;
 pub mod tasks_admin;
+pub mod triggers;
 pub mod url;
 
 use std::sync::Arc;
@@ -131,6 +132,15 @@ pub trait AgentOps: Send + Sync {
     }
     fn mcp_connected_names(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// ADR-0068: send one webhook event onto the scheduled job channel.
+    /// Default fails closed so a test fake cannot pretend a run started.
+    fn dispatch_event_run(
+        &self,
+        fire: crate::event_trigger::EventFire,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let _ = fire;
+        Box::pin(async { anyhow::bail!("event dispatch is not wired on this agent") })
     }
 }
 
@@ -278,6 +288,18 @@ impl AgentOps for Agent {
     }
     fn mcp_connected_names(&self) -> Vec<String> {
         self.mcp.connected_names()
+    }
+    fn dispatch_event_run(
+        &self,
+        fire: crate::event_trigger::EventFire,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let req = self.event_job_request(&fire);
+        let tx = self.job_tx.clone();
+        Box::pin(async move {
+            tx.send(req)
+                .map_err(|_| anyhow::anyhow!("event job channel closed"))?;
+            Ok(())
+        })
     }
 }
 
@@ -493,7 +515,13 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
             "/secrets/claim/{token}",
             get(secrets::get_claim).post(secrets::submit_claim),
         )
-        .route("/secrets/claim/{token}/cancel", post(secrets::cancel_claim));
+        .route("/secrets/claim/{token}/cancel", post(secrets::cancel_claim))
+        // ADR-0068: HMAC webhook. Not a portal session. Same bind as the rest.
+        .route(
+            "/hooks/{id}",
+            post(triggers::webhook)
+                .layer(DefaultBodyLimit::max(crate::event_trigger::MAX_RAW_BODY)),
+        );
 
     let protected = Router::new()
         .route("/chat/history", get(chat::history))
@@ -543,6 +571,10 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
         .route("/tasks/{id}/runs", get(data::task_runs))
         .route("/tasks/{id}/enable", post(tasks_admin::task_enable))
         .route("/tasks/{id}/disable", post(tasks_admin::task_disable))
+        .route("/triggers", get(triggers::list).post(triggers::create))
+        .route("/triggers/{id}/enable", post(triggers::enable))
+        .route("/triggers/{id}/disable", post(triggers::disable))
+        .route("/triggers/{id}/secret", post(triggers::rotate_secret))
         .route("/stats", get(data::stats))
         .route("/opencode/status", get(settings::opencode_status))
         .route("/settings", get(settings::get_settings))

@@ -156,6 +156,33 @@ Re-arms against the live scheduler → `200 {"ok":true,"id","enabled":true,"sche
 ### POST /api/tasks/{id}/disable
 Disarm live job + `status → paused` → `200 {"ok":true,"id","enabled":false,"jobRemoved":bool}`. Telegram-created tasks are listed and toggle-able; they run wherever they were created.
 
+## Event triggers (ADR-0068)
+
+Webhook source A on the existing portal bind. Not a `scheduled_tasks` trigger type. The webhook is **not** session-authenticated.
+
+### POST /api/hooks/{id}
+Public on the portal bind. Body is the raw event, at most 16 KiB (`413 payload_too_large` when larger). Header `X-RustFox-Signature: sha256=<hex HMAC-SHA256 of the raw body>` (a bare hex digest is also accepted). The key is the SecretStore value `trigger.{id}.hmac`.
+
+- Unknown id → `404`.
+- Missing or wrong signature → `401 bad_signature`.
+- Disabled trigger → `403 trigger_disabled`.
+- Same `Idempotency-Key`, else `X-Idempotency-Key`, else `sha256(trigger id bytes || raw body)` within 24 hours → `200 {"ok":true,"runId","deduped":true}` and no second run.
+- More than 30 accepted events in 10 minutes, a second active run for this trigger, or a fourth active event run in the process → `429` with `Retry-After`. Nothing is queued.
+- Accepted → `202 {"ok":true,"runId","deduped":false}`. The run uses the scheduled-task iteration and timeout caps. The payload is placed only in the user turn.
+
+### GET /api/triggers
+Session required. → `200 {"bots":[{"id","persona"}],"triggers":[{"id","name","prompt","botId","enabled","webhookPath","secretName","createdAt"}]}`. Secrets are not included. `webhookPath` is `/api/hooks/{id}` on this portal origin.
+
+### POST /api/triggers
+Body `{"name","prompt","botId"?,"secret"?}`. `botId` is required when more than one `[[bots]]` entry exists (`400 bot_id_required`). An unknown id is `400 unknown_bot`. When `secret` is omitted, the response includes `secret` once. → `201` with the list item fields plus `secret` only when generated.
+
+### POST /api/triggers/{id}/enable
+### POST /api/triggers/{id}/disable
+→ `200 {"ok":true,"id","enabled":true|false}`.
+
+### POST /api/triggers/{id}/secret
+Body `{"secret"?}`. A blank or omitted secret is generated and returned once. A supplied secret is stored and not echoed. → `200 {"ok":true,"id","secretName","secret"?}`.
+
 ## Dashboard
 
 ### GET /api/health

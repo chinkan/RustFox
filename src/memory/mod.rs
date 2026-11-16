@@ -227,7 +227,10 @@ impl MemoryStore {
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
                 ON scheduled_tasks(user_id, status);
 
-            -- Scheduled task execution history
+            -- Scheduled task execution history.
+            -- `origin` is `schedule` (cron / one-shot) or `event` (ADR-0068).
+            -- Event rows use the trigger id as `task_id` and have no
+            -- scheduled_tasks parent, so this table has no foreign key.
             CREATE TABLE IF NOT EXISTS scheduled_task_runs (
                 id          TEXT PRIMARY KEY,
                 task_id     TEXT NOT NULL,
@@ -236,11 +239,37 @@ impl MemoryStore {
                 error       TEXT,
                 status      TEXT NOT NULL DEFAULT 'completed',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
+                origin      TEXT NOT NULL DEFAULT 'schedule'
             );
 
             CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
                 ON scheduled_task_runs(task_id, run_at);
+
+            -- ADR-0068: webhook trigger registry. Not a scheduled_tasks trigger_type.
+            CREATE TABLE IF NOT EXISTS triggers (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                prompt       TEXT NOT NULL,
+                bot_id       TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                chat_id      TEXT NOT NULL,
+                platform     TEXT NOT NULL,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                secret_name  TEXT NOT NULL,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS trigger_events (
+                trigger_id   TEXT NOT NULL,
+                dedup_key    TEXT NOT NULL,
+                accepted_at  TEXT NOT NULL,
+                run_id       TEXT NOT NULL,
+                PRIMARY KEY (trigger_id, dedup_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trigger_events_recent
+                ON trigger_events(trigger_id, accepted_at);
 
             -- Dead-letter re-run queue (ADR-0013): control state for scheduled
             -- tasks that died on a transient LLM error. `scheduled_task_runs`
@@ -359,6 +388,9 @@ impl MemoryStore {
             );
             ",
         )?;
+
+        // ADR-0068: event runs share scheduled_task_runs without a task parent.
+        crate::event_trigger::migrate_schema(conn)?;
 
         // ADR-0061: knowledge.evidence on databases created before the column
         // existed. Fresh databases already have it from CREATE TABLE above.

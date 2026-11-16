@@ -353,6 +353,39 @@ export interface TaskDetail extends ScheduledTask {
   platform: string
 }
 
+export interface EventTrigger {
+  id: string
+  name: string
+  prompt: string
+  botId: string
+  enabled: boolean
+  webhookPath: string
+  secretName: string
+  createdAt: string
+}
+
+export interface EventTriggerBot {
+  id: string
+  persona: string
+}
+
+export interface EventTriggerList {
+  bots: EventTriggerBot[]
+  triggers: EventTrigger[]
+}
+
+export interface EventTriggerCreateResult extends EventTrigger {
+  /** Present only when the server generated the HMAC secret. */
+  secret?: string
+}
+
+export interface EventTriggerSecretResult {
+  ok: boolean
+  id: string
+  secretName: string
+  secret?: string
+}
+
 export interface TaskCreateBody {
   name: string
   prompt: string
