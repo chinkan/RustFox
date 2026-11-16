@@ -60,6 +60,8 @@ struct FakeAgent {
     /// get-or-create conversation (the real agent path). Default off so
     /// older chat tests stay free of memory side effects.
     persist: Mutex<Option<MemoryStore>>,
+    /// `bot_id` of the task last passed to `arm_task` (delivery follows it).
+    last_armed_bot: Mutex<Option<String>>,
 }
 
 impl FakeAgent {
@@ -72,6 +74,7 @@ impl FakeAgent {
             seat_run: SeatRunSignal::new(),
             definition_only: Mutex::new(Vec::new()),
             persist: Mutex::new(None),
+            last_armed_bot: Mutex::new(None),
         }
     }
 }
@@ -135,9 +138,10 @@ impl AgentOps for FakeAgent {
     }
     fn arm_task(
         &self,
-        _task: rustfox::scheduler::reminders::ScheduledTask,
+        task: rustfox::scheduler::reminders::ScheduledTask,
     ) -> BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
         self.counters.arm_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_armed_bot.lock().unwrap() = Some(task.bot_id.clone());
         let fail = self.counters.arm_fail.load(Ordering::SeqCst);
         Box::pin(async move {
             if fail {
@@ -3650,4 +3654,404 @@ async fn task_create_uses_shim_bot_id() {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{ids:?}");
     }
+}
+
+fn test_bot(id: &str, allowed: &[u64]) -> rustfox::config::BotConfig {
+    rustfox::config::BotConfig {
+        id: id.into(),
+        bot_token: format!("tok-{id}"),
+        allowed_user_ids: allowed.to_vec(),
+        persona: "main".into(),
+        system_prompt_file: None,
+        model: None,
+        tools: None,
+        fully_silent: false,
+    }
+}
+
+/// #417: with both `default` and `main`, the portal lists and edits the old
+/// `default` rows that #162 left in place. Rows for an unconfigured bot stay
+/// hidden. There is no shim-only filter.
+#[tokio::test]
+async fn task_list_shows_every_managed_bot_including_default_beside_main() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![test_bot("default", &[1]), test_bot("main", &[1])];
+    })
+    .await;
+    let mut old = make_task("old-default");
+    old.bot_id = "default".into();
+    old.description = "Legacy default".into();
+    let mut live = make_task("live-main");
+    live.bot_id = "main".into();
+    live.description = "On main".into();
+    let mut ghost = make_task("ghost-task");
+    ghost.bot_id = "ghost".into();
+    f.state.task_store.create(&old).await.unwrap();
+    f.state.task_store.create(&live).await.unwrap();
+    f.state.task_store.create(&ghost).await.unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    let ids: Vec<&str> = rows.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert!(ids.contains(&"old-default"), "{ids:?}");
+    assert!(ids.contains(&"live-main"), "{ids:?}");
+    assert!(!ids.contains(&"ghost-task"), "{ids:?}");
+    let legacy = rows.iter().find(|t| t["id"] == "old-default").unwrap();
+    assert_eq!(legacy["botId"], "default");
+    assert_eq!(
+        rows.iter().find(|t| t["id"] == "live-main").unwrap()["botId"],
+        "main"
+    );
+
+    let runs = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks/old-default/runs"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(runs.status(), StatusCode::OK);
+
+    let edited = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/old-default",
+                json!({"prompt": "still on default"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(edited.status(), StatusCode::OK);
+    let row = f
+        .state
+        .task_store
+        .get_by_id("old-default")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.prompt, "still on default");
+    assert_eq!(row.bot_id, "default");
+
+    let disabled = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_empty("/api/tasks/old-default/disable"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::OK);
+
+    let hidden = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/ghost-task", json!({"prompt": "no"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+}
+
+/// #417: every configured bot is listed. A bot that cannot reach the portal
+/// owner's Telegram id stays visible and is not selectable.
+#[tokio::test]
+async fn schedule_bots_lists_unselectable_bots_and_create_rejects_them() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![
+            test_bot("researcher", &[9]),
+            test_bot("default", &[1]),
+            test_bot("main", &[1]),
+        ];
+    })
+    .await;
+
+    let anon = f
+        .app
+        .clone()
+        .oneshot(get("/api/schedule/bots"))
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/schedule/bots"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{body}");
+    let by_id = |id: &str| rows.iter().find(|b| b["id"] == id).unwrap();
+    assert_eq!(by_id("main")["selectable"], true);
+    assert_eq!(by_id("main")["default"], true);
+    assert!(by_id("main")["reason"].is_null());
+    assert_eq!(by_id("default")["selectable"], true);
+    assert_eq!(by_id("default")["default"], false);
+    assert_eq!(by_id("researcher")["selectable"], false);
+    assert_eq!(
+        by_id("researcher")["reason"],
+        "Portal owner's Telegram id is not in this bot's allowed users"
+    );
+
+    let rejected = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "nope",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "researcher"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(rejected).await["error"]["code"],
+        "bot_not_selectable"
+    );
+    assert!(f
+        .state
+        .task_store
+        .list_all_active()
+        .await
+        .unwrap()
+        .is_empty());
+
+    let unknown = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "missing",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "ghost"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(unknown).await["error"]["code"], "unknown_bot");
+
+    let created = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "on default",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "default"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_body = body_json(created).await;
+    assert_eq!(created_body["botId"], "default");
+    let id = created_body["id"].as_str().unwrap().to_string();
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(row.bot_id, "default");
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("default")
+    );
+
+    let omitted = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "shim",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(omitted.status(), StatusCode::CREATED);
+    let omitted_id = body_json(omitted).await["id"].as_str().unwrap().to_string();
+    let row = f
+        .state
+        .task_store
+        .get_by_id(&omitted_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.bot_id, "main");
+}
+
+/// #417: editing `botId` is a real field change. A live task is re-armed on
+/// the new bot; `triggerType` stays immutable. A paused edit does not arm.
+#[tokio::test]
+async fn task_edit_bot_id_rearms_live_task_on_the_new_bot() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![test_bot("default", &[1]), test_bot("main", &[1])];
+    })
+    .await;
+    let mut task = make_task("move-me");
+    task.bot_id = "default".into();
+    task.platform = "portal".into();
+    f.state.task_store.create(&task).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/move-me", json!({"botId": "main"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["rearmed"], true);
+    assert_eq!(body["updated"]["botId"], "main");
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), before + 1);
+    let row = f
+        .state
+        .task_store
+        .get_by_id("move-me")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.bot_id, "main");
+    assert_eq!(
+        rustfox::agent::Agent::scheduled_incoming(&row).bot_id,
+        "main"
+    );
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("main")
+    );
+
+    let immutable = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/move-me",
+                json!({"triggerType": "one_shot", "botId": "default"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(immutable.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(immutable).await["error"]["code"],
+        "trigger_type_immutable"
+    );
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("move-me")
+            .await
+            .unwrap()
+            .unwrap()
+            .bot_id,
+        "main"
+    );
+
+    let mut paused = make_task("paused-move");
+    paused.bot_id = "default".into();
+    paused.status = "paused".into();
+    f.state.task_store.create(&paused).await.unwrap();
+    let armed = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/paused-move", json!({"botId": "main"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["rearmed"], false);
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), armed);
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("paused-move")
+            .await
+            .unwrap()
+            .unwrap()
+            .bot_id,
+        "main"
+    );
+
+    *f.fake.last_armed_bot.lock().unwrap() = None;
+    let enabled = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_empty("/api/tasks/paused-move/enable"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("main"),
+        "enable arms the stored bot_id"
+    );
+}
+
+/// A single configured bot keeps today's create path: no explicit bot, shim id.
+#[tokio::test]
+async fn schedule_bots_single_bot_is_the_shim_default() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/schedule/bots"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "default");
+    assert_eq!(rows[0]["selectable"], true);
+    assert_eq!(rows[0]["default"], true);
+    assert!(rows[0]["reason"].is_null());
 }

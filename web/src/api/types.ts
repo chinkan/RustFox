@@ -119,6 +119,17 @@ export interface ScheduleTimezoneInfo {
   source: string
 }
 
+/** One configured `[[bots]]` id for the scheduled-task picker (#417). */
+export interface ScheduleBot {
+  id: string
+  /** False when this bot cannot message the portal owner's Telegram id. */
+  selectable: boolean
+  /** Short reason when `selectable` is false. */
+  reason: string | null
+  /** Shim bot. A new task uses this when the operator does not pick another. */
+  default: boolean
+}
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -132,6 +143,8 @@ export interface ScheduledTask {
   triggerValue: string
   status: string
   platform: string
+  /** `[[bots]]` id that delivers this task. */
+  botId: string
   /** IANA timezone for this task (ADR-0022). */
   timezone: string
   /** Glob under the RustFox home. Null when completion is not artifact-gated. */
@@ -352,6 +365,8 @@ export interface TaskCreateBody {
   expectedArtifact?: string | null
   /** Minimum 300. Omit for the 900s default. */
   artifactGraceSecs?: number
+  /** Configured bot id. Omit to keep the shim bot. */
+  botId?: string
 }
 
 export interface TaskUpdateBody {
@@ -364,6 +379,8 @@ export interface TaskUpdateBody {
   /** Null clears the glob. Omit to leave it. */
   expectedArtifact?: string | null
   artifactGraceSecs?: number
+  /** Move delivery to another configured bot. Omit to leave it. */
+  botId?: string
 }
 
 export interface TaskCreateResult {

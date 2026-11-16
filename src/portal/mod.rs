@@ -357,8 +357,9 @@ pub struct PortalState {
 }
 
 impl PortalState {
-    /// Bot whose schedules the portal manages: the shim bot (#154; no
-    /// switcher yet). Telegram delivery looks the owner up by this id.
+    /// Shim bot. A new portal task uses this id when the operator does not
+    /// pick one (#417). Telegram delivery for that default still looks the
+    /// owner up by this id.
     pub fn bot_id(&self) -> String {
         let bots = &self.agent.config().bots;
         if bots.is_empty() {
@@ -534,6 +535,7 @@ fn router_with(state: PortalState, device_ws_on: bool) -> Router {
         .route("/memory/search", get(data::memory_search))
         .route("/tasks", get(data::tasks).post(tasks_admin::task_create))
         .route("/schedule/timezone", get(data::schedule_timezone))
+        .route("/schedule/bots", get(tasks_admin::schedule_bots))
         .route(
             "/tasks/{id}",
             axum::routing::put(tasks_admin::task_update).delete(tasks_admin::task_delete),

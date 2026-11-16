@@ -9,6 +9,7 @@
 //! Semantics locked with Kan (Round 3 Q10):
 //! - `triggerType` is IMMUTABLE after creation (cron ⇄ one-shot is a
 //!   different mechanism; delete + recreate instead).
+//! - `botId` is mutable (#417). A live edit re-arms on the new stored bot.
 //! - Editing a live task re-arms it immediately; an in-flight run finishes
 //!   untouched (tokio spawns are naturally immune to job removal).
 //! - DELETE is a soft delete: row + ALL run history survive (evidence, R6).
@@ -21,7 +22,12 @@ use serde_json::{json, Value};
 use super::error::PortalError;
 use super::PortalState;
 use crate::agent::{normalize_cron_expr, parse_one_shot_delay};
+use crate::config::{BotConfig, Config};
+use crate::platform::normalize_bot_id;
 use crate::scheduler::reminders::ScheduledTask;
+
+/// Shown when a configured bot cannot message the portal owner (#417).
+const BOT_NOT_SELECTABLE: &str = "Portal owner's Telegram id is not in this bot's allowed users";
 
 fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
@@ -48,6 +54,9 @@ pub struct CreateTaskBody {
     /// Lookback seconds. Missing → 900. Values below 300 are rejected.
     #[serde(default, rename = "artifactGraceSecs")]
     artifact_grace_secs: Option<i64>,
+    /// `[[bots]]` id. Missing → the shim bot.
+    #[serde(default, rename = "botId")]
+    bot_id: Option<String>,
 }
 
 /// Missing field stays `None` via `#[serde(default)]`. JSON null becomes
@@ -76,12 +85,121 @@ fn parse_artifact_grace(secs: i64) -> Result<i64, PortalError> {
     Ok(secs)
 }
 
-fn portal_owns(state: &PortalState, task: &ScheduledTask) -> Result<(), PortalError> {
-    if task.bot_id == state.bot_id() {
+/// Configured bot ids the portal may list and edit. An empty `[[bots]]`
+/// list (tests / odd embeds) still owns the legacy `default` id.
+pub(super) fn managed_bot_ids(state: &PortalState) -> Vec<String> {
+    let bots = &state.agent.config().bots;
+    if bots.is_empty() {
+        return vec![crate::platform::DEFAULT_BOT_ID.to_string()];
+    }
+    bots.iter()
+        .map(|b| normalize_bot_id(b.id.trim()).to_string())
+        .collect()
+}
+
+/// The portal manages every configured bot, not only the shim (#417).
+/// A row whose bot is not in config stays hidden (404).
+pub(super) fn portal_owns(state: &PortalState, task: &ScheduledTask) -> Result<(), PortalError> {
+    let id = normalize_bot_id(&task.bot_id);
+    if managed_bot_ids(state).iter().any(|b| b == id) {
         Ok(())
     } else {
         Err(PortalError::not_found("task"))
     }
+}
+
+/// Telegram user a portal-created task notifies: the shim bot's first
+/// allowlisted id (same owner `#162` adopts web rows onto).
+fn owner_telegram_id(state: &PortalState) -> Option<u64> {
+    let bots = &state.agent.config().bots;
+    if bots.is_empty() {
+        return state
+            .agent
+            .config()
+            .telegram
+            .allowed_user_ids
+            .first()
+            .copied();
+    }
+    Config::shim_bot(bots).allowed_user_ids.first().copied()
+}
+
+fn lookup_configured_bot<'a>(
+    state: &'a PortalState,
+    raw: &str,
+) -> Result<&'a BotConfig, PortalError> {
+    let want = normalize_bot_id(raw.trim());
+    state
+        .agent
+        .config()
+        .bots
+        .iter()
+        .find(|b| normalize_bot_id(b.id.trim()) == want)
+        .ok_or_else(|| {
+            PortalError::bad_request(
+                "unknown_bot",
+                format!("botId '{want}' is not a configured bot"),
+            )
+        })
+}
+
+fn bot_is_selectable(state: &PortalState, bot: &BotConfig) -> bool {
+    match owner_telegram_id(state) {
+        Some(owner) => bot.allowed_user_ids.contains(&owner),
+        None => false,
+    }
+}
+
+fn ensure_selectable(state: &PortalState, bot: &BotConfig) -> Result<(), PortalError> {
+    if bot_is_selectable(state, bot) {
+        Ok(())
+    } else {
+        Err(PortalError::bad_request(
+            "bot_not_selectable",
+            BOT_NOT_SELECTABLE,
+        ))
+    }
+}
+
+fn stored_bot_id(bot: &BotConfig) -> String {
+    normalize_bot_id(bot.id.trim()).to_string()
+}
+
+/// Portal creates and Telegram rows deliver to a numeric chat. Web-chat
+/// schedules (#163) are not this check.
+fn telegram_delivery(task: &ScheduledTask) -> bool {
+    task.platform == "telegram"
+        || task.platform == "portal"
+        || task.chat_id.trim().parse::<i64>().is_ok()
+}
+
+/// GET /api/schedule/bots — every configured bot, including ones the owner
+/// cannot select for a Telegram-delivery task.
+pub async fn schedule_bots(State(state): State<PortalState>) -> Json<Value> {
+    let shim = state.bot_id();
+    let bots = &state.agent.config().bots;
+    let rows: Vec<Value> = if bots.is_empty() {
+        vec![json!({
+            "id": shim,
+            "selectable": true,
+            "reason": Value::Null,
+            "default": true,
+        })]
+    } else {
+        bots.iter()
+            .map(|bot| {
+                let id = stored_bot_id(bot);
+                let selectable = bot_is_selectable(&state, bot);
+                json!({
+                    "id": id,
+                    "selectable": selectable,
+                    "reason": if selectable { Value::Null } else { json!(BOT_NOT_SELECTABLE) },
+                    "default": id == shim,
+                })
+            })
+            .collect()
+    };
+    Json(Value::Array(rows))
 }
 
 /// POST /api/tasks — create + arm immediately.
@@ -144,6 +262,21 @@ pub async fn task_create(
         Some(n) => parse_artifact_grace(n)?,
         None => crate::scheduler::completion::DEFAULT_ARTIFACT_GRACE_SECS,
     };
+    // Omitted botId stays on the shim. An explicit id must be configured and
+    // able to message the portal owner — create is always Telegram delivery.
+    let chosen_bot = match body
+        .bot_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => state.bot_id(),
+        Some(raw) => {
+            let bot = lookup_configured_bot(&state, raw)?;
+            ensure_selectable(&state, bot)?;
+            stored_bot_id(bot)
+        }
+    };
 
     let id = uuid::Uuid::new_v4().to_string();
     let task = ScheduledTask {
@@ -168,7 +301,7 @@ pub async fn task_create(
         prompt: body.prompt.clone(),
         description: name.clone(),
         status: "active".to_string(),
-        bot_id: state.bot_id(),
+        bot_id: chosen_bot.clone(),
         created_at: now_iso(),
         next_run_at: if body.trigger_type == "one_shot" {
             Some(body.trigger_value.clone())
@@ -213,6 +346,7 @@ pub async fn task_create(
                     "name": name,
                     "triggerValue": trigger_value,
                     "timezone": tz_stored,
+                    "botId": chosen_bot,
                     "schedulerJobId": job_id.to_string(),
                     "nextRun": next_run,
                 })),
@@ -257,6 +391,10 @@ pub struct UpdateTaskBody {
     /// Absent leaves the stored grace. Below 300 is rejected.
     #[serde(default, rename = "artifactGraceSecs")]
     artifact_grace_secs: Option<i64>,
+    /// Move the row to another configured bot. Unlike `triggerType`, this
+    /// is editable. A live task is re-armed on the new bot.
+    #[serde(default, rename = "botId")]
+    bot_id: Option<String>,
 }
 
 /// PUT /api/tasks/{id} — edit + re-arm (if live). Partial update.
@@ -306,16 +444,37 @@ pub async fn task_update(
         Some(n) => Some(parse_artifact_grace(n)?),
         None => None,
     };
+    let new_bot = match body
+        .bot_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(raw) => {
+            let bot = lookup_configured_bot(&state, raw)?;
+            let stored = stored_bot_id(bot);
+            if stored == normalize_bot_id(&task.bot_id) {
+                None
+            } else if telegram_delivery(&task) {
+                ensure_selectable(&state, bot)?;
+                Some(stored)
+            } else {
+                Some(stored)
+            }
+        }
+    };
     if new_prompt.is_none()
         && new_value.is_none()
         && new_name.is_none()
         && new_tz.is_none()
         && artifact_write.is_none()
         && grace_write.is_none()
+        && new_bot.is_none()
     {
         return Err(PortalError::bad_request(
             "empty_patch",
-            "no editable fields provided (name/prompt/triggerValue/timezone/expectedArtifact/artifactGraceSecs)",
+            "no editable fields provided (name/prompt/triggerValue/timezone/expectedArtifact/artifactGraceSecs/botId)",
         ));
     }
     // fall back to current values for validation of combined state
@@ -327,6 +486,9 @@ pub async fn task_update(
     let eff_tz_name = new_tz.clone().unwrap_or_else(|| task.timezone.clone());
     let eff_tz = crate::scheduler::timezone::parse_task_tz(&eff_tz_name)
         .map_err(|e| PortalError::bad_request("invalid_timezone", e.to_string()))?;
+    let eff_bot = new_bot
+        .clone()
+        .unwrap_or_else(|| normalize_bot_id(&task.bot_id).to_string());
 
     if task.trigger_type == "recurring" && body.trigger_value.is_some() {
         eff_value = normalize_cron_expr(&eff_value)
@@ -366,6 +528,14 @@ pub async fn task_update(
                 artifact_write.as_ref().map(|inner| inner.as_deref()),
                 grace_write,
             )
+            .await
+            .map_err(PortalError::internal)?;
+        touched += n;
+    }
+    if let Some(ref bot_id) = new_bot {
+        let n = state
+            .task_store
+            .update_bot_id(&task.id, bot_id)
             .await
             .map_err(PortalError::internal)?;
         touched += n;
@@ -427,6 +597,7 @@ pub async fn task_update(
             "prompt": eff_prompt,
             "triggerValue": eff_value,
             "timezone": eff_tz_name,
+            "botId": eff_bot,
         },
         "rearmed": rearmed.is_some(),
         "schedulerJobId": rearmed,
