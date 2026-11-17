@@ -203,6 +203,10 @@ async fn persist_completed_schedule_run(
     if let Err(e) = queue.supersede_live_for_task(&req.task_id).await {
         tracing::warn!("Failed to supersede live reruns for {}: {e:#}", req.task_id);
     }
+    let checkpoints = rustfox::scheduler::checkpoint::CheckpointStore::new(queue.connection());
+    if let Err(e) = checkpoints.clear_task(&req.task_id).await {
+        tracing::warn!("Failed to clear checkpoints for {}: {e:#}", req.task_id);
+    }
 }
 
 /// Apply the ADR-0054 daily-file action. Returns whether this stop should
@@ -260,6 +264,188 @@ async fn save_transcript_checkpoint(
     }
 }
 
+/// Mid-run checkpoint after each completed tool (ADR-0067). Awaited by the
+/// loop before the next tool starts. Not written mid-tool or mid-LLM-stream.
+fn scheduled_tool_checkpoint_hook(
+    conn: std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    task_id: String,
+    run_id: String,
+    base_iter: u32,
+) -> rustfox::loop_runner::ToolCompletedHook {
+    std::sync::Arc::new(move |messages, local_iters| {
+        let store =
+            rustfox::scheduler::checkpoint::CheckpointStore::new(std::sync::Arc::clone(&conn));
+        let task_id = task_id.clone();
+        let run_id = run_id.clone();
+        let iteration = base_iter.saturating_add(local_iters);
+        Box::pin(async move {
+            let checkpoint = rustfox::scheduler::checkpoint::TranscriptCheckpoint::from_messages(
+                messages,
+                iteration,
+                rustfox::scheduler::checkpoint::CheckpointStopKind::MidRun,
+            );
+            if let Err(e) = store.save_midrun(&task_id, &run_id, &checkpoint).await {
+                tracing::warn!("mid-run checkpoint for {task_id} failed: {e:#}");
+            }
+        })
+    })
+}
+
+/// Timeout or max-iterations: notify once and dispatch continue. No Retry button.
+#[allow(clippy::too_many_arguments)]
+async fn resume_scheduled_stop(
+    agent: &Arc<Agent>,
+    queue: &rustfox::scheduler::reruns::RerunQueue,
+    req: &rustfox::agent::ScheduledJobRequest,
+    run_id: &str,
+    workspace: &std::path::Path,
+    progress_date: &str,
+    kind: StopKind,
+    transcript: Option<rustfox::scheduler::checkpoint::TranscriptCheckpoint>,
+    evidence: &str,
+    notice_detail: &str,
+) {
+    let checkpoint_kind = match kind {
+        StopKind::Timeout => rustfox::scheduler::checkpoint::CheckpointStopKind::Timeout,
+        StopKind::MaxIterations => {
+            rustfox::scheduler::checkpoint::CheckpointStopKind::MaxIterations
+        }
+        _ => return,
+    };
+    let _ = settle_daily_progress(workspace, &req.task_id, progress_date, kind, evidence);
+    let checkpoints = rustfox::scheduler::checkpoint::CheckpointStore::new(queue.connection());
+    let snap = match transcript {
+        Some(mut cp) => {
+            cp.stop_kind = checkpoint_kind;
+            Some(cp)
+        }
+        None => match checkpoints
+            .latest_resumable(&req.task_id, Some(run_id))
+            .await
+        {
+            Ok(Some((_, mut cp))) => {
+                cp.stop_kind = checkpoint_kind;
+                Some(cp)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load mid-run checkpoint for {}: {e:#}",
+                    req.task_id
+                );
+                None
+            }
+        },
+    };
+    let Some(snap) = snap else {
+        tracing::warn!(
+            "Scheduled task {} stopped ({evidence}) with no checkpoint; not full-replaying",
+            req.task_id
+        );
+        return;
+    };
+    match rustfox::scheduler::auto_resume::bind_stop_for_auto_resume(
+        queue,
+        &checkpoints,
+        &req.task_store,
+        &req.task_id,
+        run_id,
+        req.rerun_id.as_deref(),
+        &snap,
+        evidence,
+    )
+    .await
+    {
+        Ok(rustfox::scheduler::auto_resume::BindOutcome::Ready(qid)) => {
+            tracing::info!(
+                "Scheduled task {} will auto-continue from checkpoint (queue {qid})",
+                req.task_id
+            );
+            if let Some(note) =
+                rustfox::scheduler::auto_resume::auto_resume_notice(checkpoint_kind, notice_detail)
+            {
+                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
+                    let _ = send_schedule_reply(
+                        &req.owning_telegram_bot,
+                        teloxide::types::ChatId(cv),
+                        &note,
+                        rustfox::platform::telegram::MessageFormat::Auto,
+                        &agent.memory,
+                    )
+                    .await;
+                }
+            }
+            dispatch_rerun(agent, queue, &qid).await;
+        }
+        Ok(rustfox::scheduler::auto_resume::BindOutcome::Skip) => {
+            tracing::info!(
+                "Auto-resume skipped for {} (human gate or another run is active)",
+                req.task_id
+            );
+        }
+        Err(e) => tracing::warn!("Auto-resume bind failed for {}: {e:#}", req.task_id),
+    }
+}
+
+async fn dispatch_rerun(
+    agent: &Arc<Agent>,
+    queue: &rustfox::scheduler::reruns::RerunQueue,
+    queue_id: &str,
+) {
+    let row = match queue.get(queue_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("Auto-resume lookup failed for {queue_id}: {e:#}");
+            return;
+        }
+    };
+    let bots = {
+        let guard = agent
+            .telegram_bots
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        guard.clone()
+    };
+    if let Err(e) =
+        Agent::claim_and_dispatch_rerun(queue, &agent.task_store, &agent.job_tx, &bots, &row).await
+    {
+        tracing::warn!("Auto-resume dispatch failed for {queue_id}: {e:#}");
+    }
+}
+
+/// Startup (`heal_dead_claims`) or the 60-second restore tick.
+async fn restore_incomplete_scheduled(agent: &Arc<Agent>, heal_dead_claims: bool) {
+    let queue = rustfox::scheduler::reruns::RerunQueue::new(agent.memory.connection());
+    let checkpoints =
+        rustfox::scheduler::checkpoint::CheckpointStore::new(agent.memory.connection());
+    let live = agent.live_scheduled.snapshot();
+    let ids = match rustfox::scheduler::auto_resume::queue_ids_to_restore(
+        &queue,
+        &checkpoints,
+        &agent.task_store,
+        &live,
+        heal_dead_claims,
+    )
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Scheduled auto-resume scan failed: {e:#}");
+            return;
+        }
+    };
+    if !ids.is_empty() {
+        tracing::info!(
+            "Scheduled auto-resume: dispatching {} checkpoint continue(s)",
+            ids.len()
+        );
+    }
+    for id in ids {
+        dispatch_rerun(agent, &queue, &id).await;
+    }
+}
+
 /// One scheduled job: persist, `process_message_outcome`, reply / ADR-0013 dead-letter.
 /// Returns the stop reason (`None` on hard error).
 ///
@@ -270,6 +456,30 @@ async fn run_one_scheduled_job(
     queue_for_runner: rustfox::scheduler::reruns::RerunQueue,
     req: &rustfox::agent::ScheduledJobRequest,
 ) -> Option<rustfox::agent::RunStop> {
+    if req.rerun_id.is_none() {
+        let live = agent.live_scheduled.snapshot();
+        match rustfox::scheduler::auto_resume::fresh_cron_blocked(
+            &queue_for_runner,
+            &req.task_store,
+            &live,
+            &req.task_id,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::info!(
+                    "Skipping scheduled fire for {}: a run, auto-resume, or human gate is already active",
+                    req.task_id
+                );
+                return None;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!("cron overlap check failed for {}: {e:#}", req.task_id);
+            }
+        }
+    }
+    let _live_hold = agent.live_scheduled.hold(&req.task_id);
     let run_id = uuid::Uuid::new_v4().to_string();
     let run_started_at = chrono::Utc::now();
     let run_at = run_started_at.format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -308,12 +518,20 @@ async fn run_one_scheduled_job(
         }
     }
     let continue_from = req.continue_from.clone();
+    let base_iter = continue_from.as_ref().map(|cp| cp.iteration).unwrap_or(0);
+    let on_tool_completed = scheduled_tool_checkpoint_hook(
+        agent.memory.connection(),
+        req.task_id.clone(),
+        run_id.clone(),
+        base_iter,
+    );
     let mut run_fut = Box::pin(agent.process_message_outcome(
         &incoming,
         None,
         None,
         ToolUiMode::Minimal,
         continue_from,
+        Some(on_tool_completed),
     ));
     let processed = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
@@ -373,85 +591,20 @@ async fn run_one_scheduled_job(
                 }
             }
 
-            // ADR-0013 human-gate once — hang may have side effects; no auto re-fire.
-            // ADR-0039 / ADR-0054: persist the transcript checkpoint on this gate.
-            let save_cp = settle_daily_progress(
+            // ADR-0067: timeout auto-resumes from the checkpoint. No Retry gate.
+            resume_scheduled_stop(
+                &agent,
+                &queue_for_runner,
+                req,
+                &run_id,
                 &workspace,
-                &req.task_id,
                 &progress_date,
                 StopKind::Timeout,
+                transcript,
                 &format!("wall-clock timeout after {timeout_secs}s"),
-            );
-            let chat_id_opt: Option<i64> = req.incoming.chat_id.parse().ok();
-            match &req.rerun_id {
-                Some(rid) => {
-                    if let Err(e) = queue_for_runner.mark_awaiting_user(rid, reason).await {
-                        tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
-                    }
-                    if save_cp {
-                        save_transcript_checkpoint(
-                            agent.memory.connection(),
-                            rid,
-                            &run_id,
-                            transcript.as_ref(),
-                        )
-                        .await;
-                    }
-                    if let Some(cv) = chat_id_opt {
-                        let ask = rustfox::scheduler::human_gate::format_human_gate_message(
-                            rustfox::scheduler::human_gate::HumanGateKind::RerunTimeout,
-                            &rustfox::scheduler::human_gate::format_readable_duration(timeout_secs),
-                            rid,
-                        );
-                        let _ = send_human_gate_reply(
-                            &req.owning_telegram_bot,
-                            teloxide::types::ChatId(cv),
-                            &ask,
-                            rid,
-                        )
-                        .await;
-                    }
-                }
-                None => match queue_for_runner
-                    .enqueue_manual(&req.task_id, &run_id, reason)
-                    .await
-                {
-                    Ok(qid) => {
-                        tracing::info!(
-                            "Run timeout on task {} → human-gated queue row {qid}",
-                            req.task_id
-                        );
-                        if save_cp {
-                            save_transcript_checkpoint(
-                                agent.memory.connection(),
-                                &qid,
-                                &run_id,
-                                transcript.as_ref(),
-                            )
-                            .await;
-                        }
-                        if let Some(cv) = chat_id_opt {
-                            let note = rustfox::scheduler::human_gate::format_human_gate_message(
-                                rustfox::scheduler::human_gate::HumanGateKind::FirstRunTimeout,
-                                &rustfox::scheduler::human_gate::format_readable_duration(
-                                    timeout_secs,
-                                ),
-                                &qid,
-                            );
-                            let _ = send_human_gate_reply(
-                                &req.owning_telegram_bot,
-                                teloxide::types::ChatId(cv),
-                                &note,
-                                &qid,
-                            )
-                            .await;
-                        }
-                    }
-                    Err(qe) => {
-                        tracing::warn!("Failed to record timeout gate for {}: {qe:#}", req.task_id);
-                    }
-                },
-            }
+                &rustfox::scheduler::human_gate::format_readable_duration(timeout_secs),
+            )
+            .await;
             // Always finish the TurnGate (caller does); surface Cancelled so
             // auto-continue / pending handoff behaves like a user /stop.
             return Some(rustfox::agent::RunStop::Cancelled);
@@ -513,97 +666,24 @@ async fn run_one_scheduled_job(
                 {
                     tracing::warn!("Failed to update run record: {}", e);
                 }
-                let save_cp = settle_daily_progress(
+                // ADR-0067: max-iterations auto-resumes with a full cap. No Retry gate.
+                resume_scheduled_stop(
+                    &agent,
+                    &queue_for_runner,
+                    req,
+                    &run_id,
                     &workspace,
-                    &req.task_id,
                     &progress_date,
                     StopKind::MaxIterations,
+                    transcript,
                     &reason,
-                );
-                match &req.rerun_id {
-                    Some(rid) => {
-                        if let Err(e) = queue_for_runner.mark_awaiting_user(rid, &reason).await {
-                            tracing::warn!("Failed to mark rerun {rid} awaiting_user: {e:#}");
-                        }
-                        if save_cp {
-                            save_transcript_checkpoint(
-                                agent.memory.connection(),
-                                rid,
-                                &run_id,
-                                transcript.as_ref(),
-                            )
-                            .await;
-                        }
-                        if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                            let ask = rustfox::scheduler::human_gate::iteration_stall_gate_message(
-                                accounting.used,
-                                accounting.remaining,
-                                accounting.cap,
-                                rid,
-                            );
-                            let _ = send_human_gate_reply(
-                                &req.owning_telegram_bot,
-                                teloxide::types::ChatId(cv),
-                                &ask,
-                                rid,
-                            )
-                            .await;
-                        }
-                    }
-                    None => {
-                        match queue_for_runner
-                            .enqueue_manual(&req.task_id, &run_id, &reason)
-                            .await
-                        {
-                            Ok(qid) => {
-                                tracing::info!(
-                                    "Max-iterations on task {} → human-gated queue row {qid}",
-                                    req.task_id
-                                );
-                                if save_cp {
-                                    save_transcript_checkpoint(
-                                        agent.memory.connection(),
-                                        &qid,
-                                        &run_id,
-                                        transcript.as_ref(),
-                                    )
-                                    .await;
-                                }
-                                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                                    let note = rustfox::scheduler::human_gate::iteration_stall_gate_message(
-                                        accounting.used,
-                                        accounting.remaining,
-                                        accounting.cap,
-                                        &qid,
-                                    );
-                                    let _ = send_human_gate_reply(
-                                        &req.owning_telegram_bot,
-                                        teloxide::types::ChatId(cv),
-                                        &note,
-                                        &qid,
-                                    )
-                                    .await;
-                                }
-                            }
-                            Err(qe) => {
-                                tracing::warn!(
-                                    "Failed to record stalled run for {}: {qe:#}",
-                                    req.task_id
-                                );
-                            }
-                        }
-                    }
-                }
-                if let Ok(cv) = req.incoming.chat_id.parse::<i64>() {
-                    let _ = send_schedule_reply(
-                        &req.owning_telegram_bot,
-                        teloxide::types::ChatId(cv),
-                        &r,
-                        rustfox::platform::telegram::MessageFormat::Auto,
-                        &agent.memory,
-                    )
-                    .await;
-                }
+                    &rustfox::scheduler::checkpoint::format_iteration_stall_detail(
+                        accounting.used,
+                        accounting.remaining,
+                        accounting.cap,
+                    ),
+                )
+                .await;
                 return Some(stop);
             }
             let verdict =
@@ -636,6 +716,17 @@ async fn run_one_scheduled_job(
                         &agent.memory,
                     )
                     .await;
+                    // Unverified stays a human gate. Drop the mid-run row so a
+                    // later restore does not auto-continue an unverified stop.
+                    let checkpoints = rustfox::scheduler::checkpoint::CheckpointStore::new(
+                        queue_for_runner.connection(),
+                    );
+                    if let Err(e) = checkpoints.clear_mid_run(&req.task_id).await {
+                        tracing::warn!(
+                            "Failed to clear mid-run checkpoint for {}: {e:#}",
+                            req.task_id
+                        );
+                    }
                     return Some(stop);
                 }
                 rustfox::scheduler::completion::ScheduleCompletion::Completed { warning } => {
@@ -659,6 +750,15 @@ async fn run_one_scheduled_job(
         }
         Err(e) => {
             tracing::error!("Scheduled task {} failed: {}", req.task_id, e);
+            // Hard Err, failed-twice, and transient 429/5xx are not auto-resume.
+            let checkpoints =
+                rustfox::scheduler::checkpoint::CheckpointStore::new(queue_for_runner.connection());
+            if let Err(ce) = checkpoints.clear_task(&req.task_id).await {
+                tracing::warn!(
+                    "Failed to clear checkpoints after hard failure of {}: {ce:#}",
+                    req.task_id
+                );
+            }
             let err_str = format!("{:#}", e);
             if let Err(e) = req
                 .task_store
@@ -910,7 +1010,7 @@ fn spawn_bare_user_turns(
                 voice_spoken_lang: first.voice_spoken_lang.clone(),
             };
             let stop = match agent
-                .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None)
+                .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None, None)
                 .await
             {
                 Ok(outcome) => Some(outcome.stop),
@@ -1566,6 +1666,24 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // ADR-0067: boot resume is this startup call, not the hourly watchdog's
+    // skipped first tick and not the builtin `heartbeat` liveness cron.
+    restore_incomplete_scheduled(&agent, true).await;
+    {
+        let agent_for_restore = Arc::clone(&agent);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                rustfox::scheduler::auto_resume::RESTORE_TICK_SECS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // startup path already ran
+            loop {
+                interval.tick().await;
+                restore_incomplete_scheduled(&agent_for_restore, false).await;
+            }
+        });
+    }
 
     // Spawn dead-letter watchdog (ADR-0013): hourly sweep of pending_reruns.
     // System-level interval job — deliberately NOT a user scheduled_task row

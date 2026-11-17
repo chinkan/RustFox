@@ -19,6 +19,7 @@ import type {
   QuarantineResult,
   ReloadResult,
   ScheduledTask,
+  ScheduleBot,
   ScheduleTimezoneInfo,
   Settings,
   SettingsPatch,
@@ -167,6 +168,7 @@ export const api = {
   // ── tasks ───────────────────────────────────────────────────────────────
   listTasks: () => get<ScheduledTask[]>('/tasks'),
   getScheduleTimezone: () => get<ScheduleTimezoneInfo>('/schedule/timezone'),
+  listScheduleBots: () => get<ScheduleBot[]>('/schedule/bots'),
   getTaskRuns: (id: string) => get<TaskRun[]>(`/tasks/${encodeURIComponent(id)}/runs`),
   // enableTask / disableTask live in the task-CRUD section below (T3: real re-arm).
 

@@ -107,6 +107,7 @@ describe('RBAC guard', () => {
         sensevoice: { status: 'ready', message: 'Ready.' },
         ttsCantonese: { status: 'ready', message: 'Ready.' },
         ttsEnglish: { status: 'ready', message: 'Ready.' },
+        qwen3Asr: { status: 'ready', message: 'Ready.' },
       },
     }
     // The wire payload has no `voice`. A leftover nested object must not win.
@@ -140,8 +141,8 @@ describe('RBAC guard', () => {
     expect(section).toBeTruthy()
     const voice = within(section as HTMLElement)
     expect(voice.getByText('English TTS')).toBeTruthy()
-    expect(voice.getAllByText('ready')).toHaveLength(3)
-    expect(voice.getAllByText('Ready.')).toHaveLength(3)
+    expect(voice.getAllByText('ready')).toHaveLength(4)
+    expect(voice.getAllByText('Ready.')).toHaveLength(4)
     expect(voice.queryByText(/not downloaded/i)).toBeNull()
     expect(voice.queryByText(/fail softly/i)).toBeNull()
   })
@@ -685,6 +686,82 @@ describe('tasks page (T5)', () => {
     expect(screen.getByText(/run history stays available/)).toBeTruthy()
     fireEvent.click(document.querySelector('.modal button.danger')!)
     await waitFor(() => expect(deletedId).toBeTruthy())
+  })
+
+  it('lists every bot and sends the chosen id, with unselectable bots disabled', async () => {
+    await signIn()
+    const created: Array<{ botId?: string }> = []
+    renderAt(
+      '/tasks',
+      makeContext({
+        listScheduleBots: async () => [
+          { id: 'main', selectable: true, reason: null, default: true },
+          { id: 'default', selectable: true, reason: null, default: false },
+          {
+            id: 'researcher',
+            selectable: false,
+            reason: "Portal owner's Telegram id is not in this bot's allowed users",
+            default: false,
+          },
+        ],
+        listTasks: async () => [
+          {
+            id: 'c1',
+            name: '香港天氣報告',
+            cron: '0 30 7 * * *',
+            enabled: true,
+            nextRun: '—',
+            prompt: 'p',
+            triggerType: 'recurring',
+            triggerValue: '0 30 7 * * *',
+            status: 'active',
+            platform: 'telegram',
+            botId: 'default',
+            timezone: 'UTC',
+          },
+          {
+            id: 'c3',
+            name: 'Main digest',
+            cron: '0 0 8 * * *',
+            enabled: true,
+            nextRun: '—',
+            prompt: 'p',
+            triggerType: 'recurring',
+            triggerValue: '0 0 8 * * *',
+            status: 'active',
+            platform: 'telegram',
+            botId: 'main',
+            timezone: 'UTC',
+          },
+        ],
+        createTask: async (body) => {
+          created.push(body)
+          return { id: 'c9', name: body.name, schedulerJobId: 'job-9', nextRun: null }
+        },
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('Main digest')).toBeTruthy())
+    expect(screen.getByText('default')).toBeTruthy()
+    expect(screen.getByText('main')).toBeTruthy()
+    fireEvent.click(screen.getByText('New task'))
+    const botSelect = screen.getByLabelText('Bot') as HTMLSelectElement
+    const researcher = within(botSelect).getByRole('option', { name: /researcher/ }) as HTMLOptionElement
+    expect(researcher.disabled).toBe(true)
+    fireEvent.change(botSelect, { target: { value: 'default' } })
+    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'standup' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'nag' } })
+    fireEvent.click(screen.getByText('Create'))
+    await waitFor(() => expect(created.length).toBe(1))
+    expect(created[0]!.botId).toBe('default')
+  })
+
+  it('hides the bot picker when only one bot is configured', async () => {
+    await signIn()
+    renderAt('/tasks', makeContext())
+    await waitFor(() => expect(screen.getByText('香港天氣報告')).toBeTruthy())
+    expect(screen.getAllByText('default').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByText('New task'))
+    expect(screen.queryByLabelText('Bot')).toBeNull()
   })
 
   it('edit form locks the trigger type', async () => {

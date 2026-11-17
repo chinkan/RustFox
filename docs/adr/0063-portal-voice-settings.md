@@ -3,6 +3,7 @@
 - **Status:** Product lock (ACCEPT pending Soft tip Final)
 - **Date:** 2026-11-09
 - **Amended:** 2026-11-09 (#385) — English TTS is a v1.0.9 Must (`sendVoice` for spoken `yue` or `en`)
+- **Amended:** 2026-11-16 (#414) — optional `[voice].engine` `qwen3-asr` and a Qwen3 pack row. Default stays `sensevoice`. The Qwen3 download runs only after Apache-2.0 acceptance and is not part of the `enabled` ensure.
 - **Milestone:** v1.0.9 (Must/Should). Kan lock 2026-11-09
 - **Amends:** [ADR-0058](./0058-telegram-cantonese-stt-tts.md) — the setup wizard stays out of scope; Portal **Settings** voice is in scope
 - **Related:** [ADR-0006](./0006-portal-token-auth-and-safe-settings.md) (settings whitelist), [Telegram Cantonese voice](../telegram-cantonese-voice.md)

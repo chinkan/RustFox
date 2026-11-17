@@ -42,7 +42,7 @@ _Avoid_: server time, UTC offset (`+08:00`)
 
 
 **Scheduled run timeout**:
-Wall-clock bound on one scheduled agent call (`scheduler.run_timeout_secs`, default 900). On expiry the run is cancelled, marked failed, human-gated once (ADR-0013), and the job runner plus TurnGate are released (ADR-0024).
+Wall-clock bound on one scheduled agent call (`scheduler.run_timeout_secs`, default 900). On expiry the run is cancelled, marked failed, and auto-continued from its checkpoint without a Retry click (ADR-0024 amended by ADR-0067). The job runner and TurnGate are released. Each resume starts a fresh timeout. Interactive turns are not wrapped in this timeout.
 _Avoid_: unbounded schedule, forever cron
 
 **Daily run progress**:

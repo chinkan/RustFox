@@ -60,6 +60,8 @@ struct FakeAgent {
     /// get-or-create conversation (the real agent path). Default off so
     /// older chat tests stay free of memory side effects.
     persist: Mutex<Option<MemoryStore>>,
+    /// `bot_id` of the task last passed to `arm_task` (delivery follows it).
+    last_armed_bot: Mutex<Option<String>>,
 }
 
 impl FakeAgent {
@@ -72,6 +74,7 @@ impl FakeAgent {
             seat_run: SeatRunSignal::new(),
             definition_only: Mutex::new(Vec::new()),
             persist: Mutex::new(None),
+            last_armed_bot: Mutex::new(None),
         }
     }
 }
@@ -135,9 +138,10 @@ impl AgentOps for FakeAgent {
     }
     fn arm_task(
         &self,
-        _task: rustfox::scheduler::reminders::ScheduledTask,
+        task: rustfox::scheduler::reminders::ScheduledTask,
     ) -> BoxFuture<'_, anyhow::Result<uuid::Uuid>> {
         self.counters.arm_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_armed_bot.lock().unwrap() = Some(task.bot_id.clone());
         let fail = self.counters.arm_fail.load(Ordering::SeqCst);
         Box::pin(async move {
             if fail {
@@ -1058,7 +1062,18 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert_eq!(body["editable"]["voiceEnabled"], true);
     assert_eq!(body["editable"]["voiceLanguages"], json!(["yue", "en"]));
     assert_eq!(body["editable"]["voiceTts"], false);
+    assert_eq!(body["editable"]["voiceEngine"], "sensevoice");
+    assert_eq!(body["editable"]["voiceQwen3AsrLicenseAccepted"], false);
     assert_eq!(body["voiceDownload"]["sensevoice"]["status"], "absent");
+    assert_eq!(body["voiceDownload"]["qwen3Asr"]["status"], "absent");
+    assert!(
+        body["voiceDownload"]["qwen3Asr"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Apache-2.0"),
+        "{}",
+        body["voiceDownload"]["qwen3Asr"]["message"]
+    );
     assert_eq!(body["voiceDownload"]["ttsCantonese"]["status"], "absent");
     assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "absent");
     assert!(
@@ -1206,6 +1221,10 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert!(seen.iter().any(|id| id.contains("cantonese")), "{seen:?}");
     assert!(seen.iter().any(|id| id.contains("lessac")), "{seen:?}");
     assert!(
+        seen.iter().all(|id| !id.contains("qwen3")),
+        "a normal voice save must not fetch Qwen3: {seen:?}"
+    );
+    assert!(
         f.state.voice.snapshot().enabled,
         "failed download keeps the save"
     );
@@ -1216,6 +1235,121 @@ async fn settings_voice_patch_rejects_bad_languages_and_hot_reloads() {
     assert_eq!(body["editable"]["voiceTts"], true);
     assert_eq!(body["editable"]["voiceLanguages"], json!(["en", "ko"]));
     assert_eq!(body["voiceDownload"]["ttsEnglish"]["status"], "error");
+    assert_eq!(body["editable"]["voiceEngine"], "sensevoice");
+    assert_eq!(body["voiceDownload"]["qwen3Asr"]["status"], "absent");
+}
+
+#[tokio::test]
+async fn settings_qwen3_download_waits_for_apache_accept() {
+    let f = fixture(with_token_token()).await;
+    let home = f.state.home_dir.clone().expect("fixture home");
+    let mut cfg = f.state.voice.snapshot();
+    cfg.model_dir = home.join("models/sensevoice");
+    cfg.qwen3_asr_model_dir = home.join("models/qwen3-asr");
+    f.state.voice.set(cfg);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    f.state.voice.set_fetcher(Arc::new(FailVoiceFetcher {
+        calls: Arc::clone(&calls),
+    }));
+
+    let before = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "voiceEngine": "whisper.cpp" }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "invalid_voice_engine");
+    let after = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert_eq!(before, after, "an unknown engine must write nothing");
+    assert!(calls.lock().unwrap().is_empty());
+
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "voiceEngine": "qwen3-asr",
+                    "openrouterStt": true
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let live = f.state.voice.snapshot();
+    assert_eq!(live.engine, "qwen3-asr");
+    assert!(!live.qwen3_asr_license_accepted);
+    assert!(!live.openrouter_stt, "openrouter_stt does not select Qwen3");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = calls.lock().unwrap().clone();
+        let view = f.state.voice.view();
+        if view.sensevoice.status == "error" {
+            assert!(
+                seen.iter().all(|id| !id.contains("qwen3")),
+                "engine without acceptance must not fetch Qwen3: {seen:?}"
+            );
+            assert_eq!(view.qwen3_asr.status, "absent");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("sensevoice ensure did not finish: {}", view.to_json());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    calls.lock().unwrap().clear();
+    let req = bearer(
+        Request::builder()
+            .method(axum::http::Method::PATCH)
+            .uri("/api/settings")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "voiceQwen3AsrLicenseAccepted": true }).to_string(),
+            ))
+            .unwrap(),
+        TEST_TOKEN,
+    );
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert!(body["updated"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("voiceQwen3AsrLicenseAccepted")));
+    assert!(f.state.voice.snapshot().qwen3_asr_license_accepted);
+    let content = std::fs::read_to_string(f.state.config_path.as_ref()).unwrap();
+    assert!(content.contains("engine = \"qwen3-asr\""), "{content}");
+    assert!(
+        content.contains("qwen3_asr_license_accepted = true"),
+        "{content}"
+    );
+    assert!(!content.contains("openrouter_stt"), "{content}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let seen = calls.lock().unwrap().clone();
+        if seen.iter().any(|id| id.contains("qwen3-asr")) {
+            assert_eq!(f.state.voice.view().qwen3_asr.status, "error");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("accepted Qwen3 pack was not fetched: {seen:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -3650,4 +3784,404 @@ async fn task_create_uses_shim_bot_id() {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{ids:?}");
     }
+}
+
+fn test_bot(id: &str, allowed: &[u64]) -> rustfox::config::BotConfig {
+    rustfox::config::BotConfig {
+        id: id.into(),
+        bot_token: format!("tok-{id}"),
+        allowed_user_ids: allowed.to_vec(),
+        persona: "main".into(),
+        system_prompt_file: None,
+        model: None,
+        tools: None,
+        fully_silent: false,
+    }
+}
+
+/// #417: with both `default` and `main`, the portal lists and edits the old
+/// `default` rows that #162 left in place. Rows for an unconfigured bot stay
+/// hidden. There is no shim-only filter.
+#[tokio::test]
+async fn task_list_shows_every_managed_bot_including_default_beside_main() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![test_bot("default", &[1]), test_bot("main", &[1])];
+    })
+    .await;
+    let mut old = make_task("old-default");
+    old.bot_id = "default".into();
+    old.description = "Legacy default".into();
+    let mut live = make_task("live-main");
+    live.bot_id = "main".into();
+    live.description = "On main".into();
+    let mut ghost = make_task("ghost-task");
+    ghost.bot_id = "ghost".into();
+    f.state.task_store.create(&old).await.unwrap();
+    f.state.task_store.create(&live).await.unwrap();
+    f.state.task_store.create(&ghost).await.unwrap();
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    let ids: Vec<&str> = rows.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert!(ids.contains(&"old-default"), "{ids:?}");
+    assert!(ids.contains(&"live-main"), "{ids:?}");
+    assert!(!ids.contains(&"ghost-task"), "{ids:?}");
+    let legacy = rows.iter().find(|t| t["id"] == "old-default").unwrap();
+    assert_eq!(legacy["botId"], "default");
+    assert_eq!(
+        rows.iter().find(|t| t["id"] == "live-main").unwrap()["botId"],
+        "main"
+    );
+
+    let runs = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/tasks/old-default/runs"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(runs.status(), StatusCode::OK);
+
+    let edited = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/old-default",
+                json!({"prompt": "still on default"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(edited.status(), StatusCode::OK);
+    let row = f
+        .state
+        .task_store
+        .get_by_id("old-default")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.prompt, "still on default");
+    assert_eq!(row.bot_id, "default");
+
+    let disabled = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_empty("/api/tasks/old-default/disable"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::OK);
+
+    let hidden = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/ghost-task", json!({"prompt": "no"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+}
+
+/// #417: every configured bot is listed. A bot that cannot reach the portal
+/// owner's Telegram id stays visible and is not selectable.
+#[tokio::test]
+async fn schedule_bots_lists_unselectable_bots_and_create_rejects_them() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![
+            test_bot("researcher", &[9]),
+            test_bot("default", &[1]),
+            test_bot("main", &[1]),
+        ];
+    })
+    .await;
+
+    let anon = f
+        .app
+        .clone()
+        .oneshot(get("/api/schedule/bots"))
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/schedule/bots"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{body}");
+    let by_id = |id: &str| rows.iter().find(|b| b["id"] == id).unwrap();
+    assert_eq!(by_id("main")["selectable"], true);
+    assert_eq!(by_id("main")["default"], true);
+    assert!(by_id("main")["reason"].is_null());
+    assert_eq!(by_id("default")["selectable"], true);
+    assert_eq!(by_id("default")["default"], false);
+    assert_eq!(by_id("researcher")["selectable"], false);
+    assert_eq!(
+        by_id("researcher")["reason"],
+        "Portal owner's Telegram id is not in this bot's allowed users"
+    );
+
+    let rejected = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "nope",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "researcher"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(rejected).await["error"]["code"],
+        "bot_not_selectable"
+    );
+    assert!(f
+        .state
+        .task_store
+        .list_all_active()
+        .await
+        .unwrap()
+        .is_empty());
+
+    let unknown = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "missing",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "ghost"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(unknown).await["error"]["code"], "unknown_bot");
+
+    let created = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "on default",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *",
+                    "botId": "default"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_body = body_json(created).await;
+    assert_eq!(created_body["botId"], "default");
+    let id = created_body["id"].as_str().unwrap().to_string();
+    let row = f.state.task_store.get_by_id(&id).await.unwrap().unwrap();
+    assert_eq!(row.bot_id, "default");
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("default")
+    );
+
+    let omitted = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_json(
+                "/api/tasks",
+                json!({
+                    "name": "shim",
+                    "prompt": "p",
+                    "triggerType": "recurring",
+                    "triggerValue": "0 30 9 * * *"
+                }),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(omitted.status(), StatusCode::CREATED);
+    let omitted_id = body_json(omitted).await["id"].as_str().unwrap().to_string();
+    let row = f
+        .state
+        .task_store
+        .get_by_id(&omitted_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.bot_id, "main");
+}
+
+/// #417: editing `botId` is a real field change. A live task is re-armed on
+/// the new bot; `triggerType` stays immutable. A paused edit does not arm.
+#[tokio::test]
+async fn task_edit_bot_id_rearms_live_task_on_the_new_bot() {
+    let f = fixture_with(with_token_token(), |c| {
+        c.bots = vec![test_bot("default", &[1]), test_bot("main", &[1])];
+    })
+    .await;
+    let mut task = make_task("move-me");
+    task.bot_id = "default".into();
+    task.platform = "portal".into();
+    f.state.task_store.create(&task).await.unwrap();
+    let before = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/move-me", json!({"botId": "main"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["rearmed"], true);
+    assert_eq!(body["updated"]["botId"], "main");
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), before + 1);
+    let row = f
+        .state
+        .task_store
+        .get_by_id("move-me")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.bot_id, "main");
+    assert_eq!(
+        rustfox::agent::Agent::scheduled_incoming(&row).bot_id,
+        "main"
+    );
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("main")
+    );
+
+    let immutable = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json(
+                "/api/tasks/move-me",
+                json!({"triggerType": "one_shot", "botId": "default"}),
+            ),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(immutable.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(immutable).await["error"]["code"],
+        "trigger_type_immutable"
+    );
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("move-me")
+            .await
+            .unwrap()
+            .unwrap()
+            .bot_id,
+        "main"
+    );
+
+    let mut paused = make_task("paused-move");
+    paused.bot_id = "default".into();
+    paused.status = "paused".into();
+    f.state.task_store.create(&paused).await.unwrap();
+    let armed = f.fake.counters.arm_calls.load(Ordering::SeqCst);
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            put_json("/api/tasks/paused-move", json!({"botId": "main"})),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["rearmed"], false);
+    assert_eq!(f.fake.counters.arm_calls.load(Ordering::SeqCst), armed);
+    assert_eq!(
+        f.state
+            .task_store
+            .get_by_id("paused-move")
+            .await
+            .unwrap()
+            .unwrap()
+            .bot_id,
+        "main"
+    );
+
+    *f.fake.last_armed_bot.lock().unwrap() = None;
+    let enabled = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            post_empty("/api/tasks/paused-move/enable"),
+            TEST_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    assert_eq!(
+        f.fake.last_armed_bot.lock().unwrap().as_deref(),
+        Some("main"),
+        "enable arms the stored bot_id"
+    );
+}
+
+/// A single configured bot keeps today's create path: no explicit bot, shim id.
+#[tokio::test]
+async fn schedule_bots_single_bot_is_the_shim_default() {
+    let f = fixture(with_token_token()).await;
+    let res = f
+        .app
+        .clone()
+        .oneshot(bearer(get("/api/schedule/bots"), TEST_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "default");
+    assert_eq!(rows[0]["selectable"], true);
+    assert_eq!(rows[0]["default"], true);
+    assert!(rows[0]["reason"].is_null());
 }

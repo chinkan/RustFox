@@ -100,7 +100,8 @@ export function McpRegistrySection({
         delete next[name]
         return next
       }
-      const slug = slugFromRegistryName(name, takenNames)
+      const suggested = entry.install?.suggestedSlug?.trim()
+      const slug = suggested || slugFromRegistryName(name, takenNames)
       return {
         ...prev,
         [name]: { registryName: name, slug, entry, secrets: {} },

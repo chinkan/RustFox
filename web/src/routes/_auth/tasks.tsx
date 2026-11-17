@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import type { ScheduledTask, TaskCreateBody, TaskUpdateBody } from '../../api/types'
+import type { ScheduleBot, ScheduledTask, TaskCreateBody, TaskUpdateBody } from '../../api/types'
 import { CRON_5_OR_6_FIELD } from '../../api/types'
 import { ApiError } from '../../api/client'
 
@@ -16,6 +16,10 @@ type EditState =
   | { mode: 'view' }
   | { mode: 'create'; draft: Draft }
   | { mode: 'edit'; id: string; draft: Draft }
+
+function botOptionLabel(bot: ScheduleBot): string {
+  return bot.reason ? `${bot.id} — ${bot.reason}` : bot.id
+}
 
 /** 5- or 6-field cron heuristic; the server's parser is the real gate. */
 function triggerLooksValid(draft: Draft): boolean {
@@ -33,6 +37,11 @@ function TasksPage() {
   const queryClient = useQueryClient()
   const tasks = useQuery({ queryKey: ['tasks'], queryFn: api.listTasks, refetchInterval: 30_000 })
   const scheduleTz = useQuery({ queryKey: ['schedule-timezone'], queryFn: api.getScheduleTimezone })
+  const scheduleBots = useQuery({ queryKey: ['schedule-bots'], queryFn: api.listScheduleBots })
+  const botChoices = scheduleBots.data ?? []
+  // One bot: keep today's form (no picker). Two or more: one combined picker.
+  const showBotPicker = botChoices.length > 1
+  const defaultBotId = botChoices.find((b) => b.default)?.id ?? ''
   const [runsFor, setRunsFor] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [edit, setEdit] = useState<EditState>({ mode: 'view' })
@@ -108,8 +117,22 @@ function TasksPage() {
 
   const draft = edit.mode === 'create' || edit.mode === 'edit' ? edit.draft : null
   const busy = create.isPending || update.isPending
+  const chosenBotId = draft?.botId || defaultBotId
+  const chosenBot = botChoices.find((b) => b.id === chosenBotId)
+  const botOk =
+    !showBotPicker ||
+    (chosenBot !== undefined &&
+      (chosenBot.selectable || (edit.mode === 'edit' && chosenBotId === edit.draft.botId)))
   const formOk =
-    draft !== null && draft.name.trim() !== '' && draft.prompt.trim() !== '' && triggerLooksValid(draft)
+    draft !== null &&
+    draft.name.trim() !== '' &&
+    draft.prompt.trim() !== '' &&
+    triggerLooksValid(draft) &&
+    botOk
+
+  function botPayload(): { botId?: string } {
+    return showBotPicker && chosenBotId !== '' ? { botId: chosenBotId } : {}
+  }
 
   return (
     <>
@@ -147,6 +170,7 @@ function TasksPage() {
                   triggerType: 'recurring',
                   triggerValue: '0 0 12 * * *',
                   timezone: scheduleTz.data?.timezone ?? '',
+                  botId: defaultBotId,
                 },
               })
             }}
@@ -189,6 +213,25 @@ function TasksPage() {
               </select>
               {edit.mode === 'edit' ? <span className="hint">{t('tasks.triggerTypeLocked')}</span> : null}
             </div>
+            {showBotPicker ? (
+              <div className="field">
+                <label htmlFor="task-bot">{t('tasks.col.bot')}</label>
+                <select
+                  id="task-bot"
+                  value={chosenBotId}
+                  onChange={(e) => patchDraft({ botId: e.target.value })}
+                >
+                  {botChoices.map((bot) => (
+                    <option key={bot.id} value={bot.id} disabled={!bot.selectable}>
+                      {botOptionLabel(bot)}
+                    </option>
+                  ))}
+                </select>
+                {chosenBot && !chosenBot.selectable && chosenBot.reason ? (
+                  <span className="hint">{chosenBot.reason}</span>
+                ) : null}
+              </div>
+            ) : null}
             <div className="field">
               <label>
                 {draft.triggerType === 'recurring' ? t('tasks.cronExpr') : t('tasks.runAt')}
@@ -239,6 +282,7 @@ function TasksPage() {
                       triggerType: draft.triggerType,
                       triggerValue: draft.triggerValue,
                       timezone: draft.timezone || undefined,
+                      ...botPayload(),
                     })
                   } else if (edit.mode === 'edit') {
                     update.mutate({
@@ -248,6 +292,7 @@ function TasksPage() {
                         prompt: draft.prompt,
                         triggerValue: draft.triggerValue,
                         timezone: draft.timezone || undefined,
+                        ...botPayload(),
                       },
                     })
                   }
@@ -269,6 +314,7 @@ function TasksPage() {
           <thead>
             <tr>
               <th>{t('tasks.col.task')}</th>
+              <th>{t('tasks.col.bot')}</th>
               <th>{t('tasks.col.cron')}</th>
               <th>{t('tasks.timezone')}</th>
               <th>{t('tasks.col.nextRun')}</th>
@@ -282,6 +328,7 @@ function TasksPage() {
                 <td>
                   <strong>{task.name}</strong>
                 </td>
+                <td className="mono">{task.botId}</td>
                 <td className="mono">{task.cron}</td>
                 <td className="mono">
                   {task.timezone}
@@ -318,6 +365,7 @@ function TasksPage() {
                           triggerType: task.triggerType as 'recurring' | 'one_shot',
                           triggerValue: task.triggerValue,
                           timezone: task.timezone,
+                          botId: task.botId,
                         },
                       })
                     }

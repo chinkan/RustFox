@@ -529,9 +529,20 @@ impl ScheduledTaskStore {
         )
     }
 
-    /// Active + paused tasks — what the portal Tasks page should show so a
-    /// paused task can be re-enabled from the UI instead of vanishing.
-    /// Portal / command listing: only this bot's active and paused rows.
+    /// Active + paused tasks for every bot. The portal Tasks page filters this
+    /// to configured bots (#417). Per-bot commands keep [`Self::list_browsable_for_bot`].
+    pub async fn list_browsable(&self) -> Result<Vec<ScheduledTask>> {
+        let conn = self.conn.lock().await;
+        self.query_tasks(
+            &conn,
+            "WHERE status IN ('active', 'paused') AND deleted_at IS NULL",
+            rusqlite::params![],
+        )
+    }
+
+    /// Active + paused tasks — what a single bot's chat should show so a
+    /// paused task can be re-enabled instead of vanishing.
+    /// Command listing: only this bot's active and paused rows.
     pub async fn list_browsable_for_bot(&self, bot_id: &str) -> Result<Vec<ScheduledTask>> {
         let bot_id = crate::platform::normalize_bot_id(bot_id);
         let conn = self.conn.lock().await;
@@ -561,6 +572,19 @@ impl ScheduledTaskStore {
         )
         .context("Failed to update task status")?;
         Ok(())
+    }
+
+    /// Store the bot that will deliver this task (#417). Returns rows affected.
+    pub async fn update_bot_id(&self, id: &str, bot_id: &str) -> Result<usize> {
+        let bot_id = crate::platform::normalize_bot_id(bot_id);
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE scheduled_tasks SET bot_id = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                rusqlite::params![bot_id, id],
+            )
+            .context("Failed to update task bot_id")?;
+        Ok(n)
     }
 
     pub async fn update_scheduler_job_id(&self, id: &str, job_id: &str) -> Result<()> {
@@ -822,6 +846,39 @@ impl ScheduledTaskStore {
         )
         .context("Failed to update scheduled task run")?;
         Ok(())
+    }
+
+    /// True when this task has a `running` audit row.
+    pub async fn has_running_for_task(&self, task_id: &str) -> Result<bool> {
+        self.running_count(task_id, None).await.map(|n| n > 0)
+    }
+
+    /// True when some `running` row other than `this_run_id` exists.
+    pub async fn has_other_running(&self, task_id: &str, this_run_id: &str) -> Result<bool> {
+        self.running_count(task_id, Some(this_run_id))
+            .await
+            .map(|n| n > 0)
+    }
+
+    async fn running_count(&self, task_id: &str, except_run: Option<&str>) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        let n = if let Some(except) = except_run {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scheduled_task_runs
+                 WHERE task_id = ?1 AND status = 'running' AND id != ?2",
+                rusqlite::params![task_id, except],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scheduled_task_runs
+                 WHERE task_id = ?1 AND status = 'running'",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+        }
+        .context("count running scheduled_task_runs")?;
+        Ok(n)
     }
 
     /// ADR-0024 startup reconcile: every `running` row → `failed`.

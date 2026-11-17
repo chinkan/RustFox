@@ -1101,6 +1101,11 @@ impl Config {
             &self.voice.tts_en_model_dir,
             crate::asr::EN_TTS_REL_DIR,
         );
+        let qwen3_model = resolve_one(
+            "voice.qwen3_asr_model_dir",
+            &self.voice.qwen3_asr_model_dir,
+            crate::asr::QWEN3_ASR_REL_DIR,
+        );
         // ADR 0011 R7: system_prompt_file is resolved lazily by
         // resolve_prompt_path() (so portal overrides of resolved_home take
         // effect without re-running resolve()).
@@ -1142,6 +1147,7 @@ impl Config {
         self.voice.model_dir = voice_model;
         self.voice.tts_model_dir = tts_model;
         self.voice.tts_en_model_dir = tts_en_model;
+        self.voice.qwen3_asr_model_dir = qwen3_model;
         self.voice.normalize();
         self.resolved_home = Some(home);
 
@@ -1452,6 +1458,11 @@ mod tests {
             home.join(crate::asr::EN_TTS_REL_DIR)
         );
         assert_eq!(
+            cfg.voice.qwen3_asr_model_dir,
+            home.join(crate::asr::QWEN3_ASR_REL_DIR)
+        );
+        assert!(!cfg.voice.qwen3_asr_license_accepted);
+        assert_eq!(
             cfg.voice.languages,
             vec!["yue".to_string(), "en".to_string()]
         );
@@ -1474,6 +1485,33 @@ mod tests {
         assert_eq!(cfg.voice.languages, vec!["yue".to_string()]);
         assert_eq!(cfg.voice.stt_language_flag(), "yue");
         assert!(cfg.voice.enabled);
+    }
+
+    #[test]
+    fn qwen3_engine_without_a_pack_still_resolves() {
+        let _env = isolate_home_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".rustfox");
+        let mut cfg: Config = toml::from_str(&format!(
+            "{}\n[voice]\nengine = \"qwen3-asr\"\n",
+            base_toml()
+        ))
+        .unwrap();
+        cfg.general = Some(GeneralConfig {
+            location: None,
+            home: Some(home.clone()),
+            timezone: None,
+        });
+        cfg.resolve().unwrap();
+        assert_eq!(cfg.voice.engine, "qwen3-asr");
+        assert!(!cfg.voice.qwen3_asr_license_accepted);
+        assert!(!cfg.voice.openrouter_stt);
+        assert_eq!(cfg.voice.qwen3_asr_model_dir, home.join("models/qwen3-asr"));
+        assert!(!cfg
+            .voice
+            .qwen3_asr_model_dir
+            .join("encoder.int8.onnx")
+            .exists());
     }
 
     /// Tests that assert `[general].home` precedence must not see an ambient

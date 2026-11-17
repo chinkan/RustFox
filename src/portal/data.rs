@@ -309,18 +309,28 @@ fn task_json(t: &crate::scheduler::reminders::ScheduledTask) -> serde_json::Valu
     })
 }
 
-/// GET /api/tasks — scheduled tasks for the portal's bot only.
+/// GET /api/tasks — every active or paused task the portal may manage.
+///
+/// That is one combined list across configured bots (#417), not the shim
+/// bot alone. Completed, cancelled, and soft-deleted rows stay hidden, as
+/// do rows whose `bot_id` is not a configured bot.
 pub async fn tasks(
     State(state): State<PortalState>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
-    // Active + paused (completed/cancelled one-shots stay hidden). Paused
-    // rows must remain visible so the UI's Enable button can bring them back.
+    let managed = super::tasks_admin::managed_bot_ids(&state);
     let active = state
         .task_store
-        .list_browsable_for_bot(&state.bot_id())
+        .list_browsable()
         .await
         .map_err(PortalError::from)?;
-    let out: Vec<serde_json::Value> = active.iter().map(task_json).collect();
+    let out: Vec<serde_json::Value> = active
+        .iter()
+        .filter(|t| {
+            let id = crate::platform::normalize_bot_id(&t.bot_id);
+            managed.iter().any(|bot| bot == id)
+        })
+        .map(task_json)
+        .collect();
     Ok(Json(serde_json::Value::Array(out)))
 }
 
@@ -352,8 +362,9 @@ pub async fn task_runs(
         .get_by_id(&p.id)
         .await
         .map_err(PortalError::from)?
-        .filter(|t| t.deleted_at.is_none() && t.bot_id == state.bot_id())
+        .filter(|t| t.deleted_at.is_none())
         .ok_or_else(|| PortalError::not_found("task"))?;
+    super::tasks_admin::portal_owns(&state, &task)?;
     let runs = state
         .task_store
         .get_task_runs(&task.id, 20)

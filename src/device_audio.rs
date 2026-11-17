@@ -5,7 +5,8 @@
 //! HTTP chunked transfer encoding is a normal request body. There is no
 //! chunk-index protocol.
 //!
-//! SenseVoice (`transcribe_file`, language `auto`) produces the transcript.
+//! The configured local engine (`transcribe_file`, default SenseVoice language
+//! `auto`) produces the transcript.
 //! That text is `user_text` on the owner's primary interactive TurnGate. It
 //! is not a Telegram voice note and it is not voice-origin. An empty or
 //! failed transcript does not start a turn.
@@ -104,7 +105,8 @@ pub trait DeviceAudioEngine: Send + Sync {
     async fn synthesize_pcm(&self, text: &str, spoken_lang: &str) -> Result<Vec<u8>, TtsError>;
 }
 
-/// SenseVoice language `auto`, then the WAV/PCM stage of the local TTS library.
+/// Configured local engine, then the WAV/PCM stage of the local TTS library.
+/// SenseVoice uploads still ask for language `auto`.
 pub struct LibraryDeviceAudio {
     voice: VoiceConfig,
     openrouter_base: String,
@@ -137,9 +139,10 @@ impl DeviceAudioEngine for LibraryDeviceAudio {
     }
 }
 
-/// This upload always asks SenseVoice for `auto`. OpenRouter stays whatever
-/// the operator already opted into. `normalize` is not allowed to put a
-/// single language back.
+/// This upload keeps `[voice].engine` and, when that engine is SenseVoice,
+/// asks for language `auto`. It does not invent a device-only cloud default.
+/// OpenRouter stays whatever the operator already opted into. `normalize` is
+/// not allowed to put a single language back.
 pub fn voice_for_device_upload(voice: &VoiceConfig) -> VoiceConfig {
     let mut voice = voice.clone();
     voice.languages = VOICE_LANG_ORDER
@@ -484,8 +487,20 @@ mod tests {
         assert_eq!(voice.stt_language_flag(), "ja");
         let forced = voice_for_device_upload(&voice);
         assert_eq!(forced.stt_language_flag(), "auto");
+        assert_eq!(forced.engine, "sensevoice");
         assert!(!forced.openrouter_stt);
         assert!(!voice.openrouter_stt);
+
+        let qwen = VoiceConfig {
+            engine: "qwen3-asr".into(),
+            languages: vec!["ja".into()],
+            openrouter_stt: false,
+            ..VoiceConfig::default()
+        };
+        let forced = voice_for_device_upload(&qwen);
+        assert_eq!(forced.engine, "qwen3-asr");
+        assert_eq!(forced.stt_language_flag(), "auto");
+        assert!(!forced.openrouter_stt);
     }
 
     #[cfg(unix)]
@@ -526,5 +541,52 @@ mod tests {
         let args = std::fs::read_to_string(&args_path).unwrap();
         assert!(args.contains("--sense-voice-language=auto"), "{args}");
         assert!(!args.contains("--sense-voice-language=ja"), "{args}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn library_transcribe_keeps_qwen3_argv_off_the_sensevoice_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("qwen3-asr");
+        std::fs::create_dir_all(model.join("tokenizer")).unwrap();
+        for name in [
+            "conv_frontend.onnx",
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+        ] {
+            std::fs::write(model.join(name), b"x").unwrap();
+        }
+        std::fs::write(model.join("tokenizer").join("vocab.json"), b"{}\n").unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = dir.path().join("stt.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' '--qwen3-asr-encoder'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"text\":\"香港\"}}'\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let wav = dir.path().join("upload.wav");
+        std::fs::write(&wav, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            engine: "qwen3-asr".into(),
+            languages: vec!["ja".into()],
+            qwen3_asr_model_dir: model,
+            stt_bin: script.display().to_string(),
+            openrouter_stt: false,
+            ..VoiceConfig::default()
+        };
+        let engine = LibraryDeviceAudio::new(voice, "http://127.0.0.1:9", "");
+        let transcript = engine.transcribe(&wav).await.unwrap();
+        assert_eq!(transcript.text, "香港");
+        assert_eq!(transcript.source, crate::asr::SttSource::Qwen3Asr);
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(args.contains("--qwen3-asr-encoder="), "{args}");
+        assert!(!args.contains("sense-voice"), "{args}");
     }
 }

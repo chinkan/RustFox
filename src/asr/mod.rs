@@ -1,9 +1,11 @@
 //! Local speech library (ADR-0058).
 //!
 //! Primary engine: **SenseVoice** (`sherpa-onnx-offline`) with a Cantonese
-//! (`yue`) model. OpenRouter `POST /audio/transcriptions` runs only when
-//! `[voice].openrouter_stt` is true. That flag defaults to false, so a missing
-//! local model never sends audio to the network.
+//! (`yue`) model. Optional engine id `qwen3-asr` uses the same binary with a
+//! separate argv builder. OpenRouter `POST /audio/transcriptions` runs only
+//! when `[voice].openrouter_stt` is true. That flag defaults to false, so a
+//! missing local model never sends audio to the network, and it does not
+//! select Qwen3-ASR.
 //!
 //! TTS defaults off. When `[voice].tts` is true, a voice-origin reply keeps
 //! the text and may add an OGG/Opus copy. Typed chat is not spoken. Synthesis
@@ -24,8 +26,9 @@ mod packs;
 
 pub use packs::{
     merge_voice_settings, PackStatus, VoiceDownloadView, VoicePack, VoicePackFetcher, VoiceRuntime,
-    VoiceSettingsPatch, EN_TTS_PACK_ID, EN_TTS_PACK_URL, EN_TTS_REL_DIR, SENSEVOICE_PACK_ID,
-    SENSEVOICE_PACK_URL, YUE_TTS_PACK_ID,
+    VoiceSettingsPatch, EN_TTS_PACK_ID, EN_TTS_PACK_URL, EN_TTS_REL_DIR, QWEN3_ASR_LICENSE_URL,
+    QWEN3_ASR_PACK_BYTES, QWEN3_ASR_PACK_ID, QWEN3_ASR_PACK_SHA256, QWEN3_ASR_PACK_URL,
+    QWEN3_ASR_REL_DIR, SENSEVOICE_PACK_ID, SENSEVOICE_PACK_URL, YUE_TTS_PACK_ID,
 };
 
 use std::path::{Path, PathBuf};
@@ -44,6 +47,18 @@ pub const VOICE_NOTE_PREFIX: &str = "[Voice note]:\n";
 /// Spoken-text cap for one OGG/Opus reply. The text copy is never truncated.
 pub const TTS_MAX_CHARS: usize = 3500;
 
+/// Local STT ids. `sensevoice` stays the default. `qwen3-asr` is optional.
+pub const ENGINE_SENSEVOICE: &str = "sensevoice";
+pub const ENGINE_QWEN3_ASR: &str = "qwen3-asr";
+
+/// sherpa-onnx release whose `sherpa-onnx-offline --help` was checked for
+/// `--qwen3-asr-encoder` (linux x64 shared asset, 2026-11-16). A binary whose
+/// help lacks that flag is too old for the optional Qwen3 path only.
+pub const QWEN3_ASR_VERIFIED_SHERPA: &str = "2.0.1";
+
+/// Official pack example, not the v2.0.1 flag default of 128.
+const QWEN3_ASR_MAX_NEW_TOKENS: u32 = 512;
+
 const DEFAULT_STT_BIN: &str = "sherpa-onnx-offline";
 const DEFAULT_TTS_BIN: &str = "sherpa-onnx-offline-tts";
 const DEFAULT_FFMPEG_BIN: &str = "ffmpeg";
@@ -56,7 +71,7 @@ pub const VOICE_LANG_ORDER: [&str; 5] = ["yue", "zh", "en", "ja", "ko"];
 pub const VOICE_OFF_CLARIFY: &str = "Voice notes are turned off. Please type your message.";
 
 fn default_engine() -> String {
-    "sensevoice".to_string()
+    ENGINE_SENSEVOICE.to_string()
 }
 
 fn default_language() -> String {
@@ -88,11 +103,18 @@ fn default_voice_timeout_secs() -> u64 {
 pub struct VoiceConfig {
     /// Master gate for STT and TTS. Absent in the file means true.
     pub enabled: bool,
-    /// Primary engine id. Only `sensevoice` is implemented.
+    /// Primary engine id. `sensevoice` (default) or optional `qwen3-asr`.
     pub engine: String,
     /// Directory with `model.int8.onnx` (or `model.onnx`) and `tokens.txt`.
     /// Empty until home resolution fills `<home>/models/sensevoice`.
     pub model_dir: PathBuf,
+    /// Qwen3-ASR weights. Empty until home resolution fills
+    /// `<home>/models/qwen3-asr`. Unused while `engine` is `sensevoice`.
+    pub qwen3_asr_model_dir: PathBuf,
+    /// Operator accepted the upstream Qwen3-ASR Apache-2.0 license.
+    /// False does not download the pack. A missing LICENSE file in the
+    /// sherpa tarball does not turn this on.
+    pub qwen3_asr_license_accepted: bool,
     /// Override for `sherpa-onnx-offline`. Empty uses that name on `PATH`.
     pub stt_bin: String,
     /// Override for `ffmpeg` (OGG/Opus voice notes → 16 kHz mono WAV).
@@ -136,6 +158,10 @@ struct VoiceConfigFile {
     #[serde(default)]
     model_dir: PathBuf,
     #[serde(default)]
+    qwen3_asr_model_dir: PathBuf,
+    #[serde(default)]
+    qwen3_asr_license_accepted: bool,
+    #[serde(default)]
     stt_bin: String,
     #[serde(default)]
     ffmpeg_bin: String,
@@ -167,6 +193,8 @@ impl Default for VoiceConfigFile {
             enabled: default_voice_enabled(),
             engine: default_engine(),
             model_dir: PathBuf::new(),
+            qwen3_asr_model_dir: PathBuf::new(),
+            qwen3_asr_license_accepted: false,
             stt_bin: String::new(),
             ffmpeg_bin: String::new(),
             language: None,
@@ -203,6 +231,8 @@ impl VoiceConfigFile {
             enabled: self.enabled,
             engine: self.engine,
             model_dir: self.model_dir,
+            qwen3_asr_model_dir: self.qwen3_asr_model_dir,
+            qwen3_asr_license_accepted: self.qwen3_asr_license_accepted,
             stt_bin: self.stt_bin,
             ffmpeg_bin: self.ffmpeg_bin,
             language: String::new(),
@@ -227,6 +257,8 @@ impl Default for VoiceConfig {
             enabled: true,
             engine: default_engine(),
             model_dir: PathBuf::new(),
+            qwen3_asr_model_dir: PathBuf::new(),
+            qwen3_asr_license_accepted: false,
             stt_bin: String::new(),
             ffmpeg_bin: String::new(),
             language: String::new(),
@@ -279,6 +311,19 @@ impl VoiceConfig {
     /// `--sense-voice-language` value for this selection.
     pub fn stt_language_flag(&self) -> String {
         stt_language_flag(&self.languages)
+    }
+}
+
+/// Settings engine id. Blank and unknown values are rejected and not written.
+/// File loading still keeps an unknown id so process start does not fail.
+pub fn normalize_voice_engine(raw: &str) -> Result<String, String> {
+    let id = raw.trim().to_ascii_lowercase();
+    if id == ENGINE_SENSEVOICE || id == ENGINE_QWEN3_ASR {
+        Ok(id)
+    } else {
+        Err(format!(
+            "unknown voice engine '{id}' (allowed: {ENGINE_SENSEVOICE}, {ENGINE_QWEN3_ASR})"
+        ))
     }
 }
 
@@ -342,6 +387,7 @@ fn selection_from_legacy(language: &str) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SttSource {
     SenseVoice,
+    Qwen3Asr,
     OpenRouter,
 }
 
@@ -359,6 +405,7 @@ pub struct Transcript {
 pub struct Recognized {
     text: String,
     detected_lang: Option<String>,
+    source: SttSource,
 }
 
 impl Recognized {
@@ -366,6 +413,7 @@ impl Recognized {
         Self {
             text: text.into(),
             detected_lang: None,
+            source: SttSource::SenseVoice,
         }
     }
 }
@@ -573,6 +621,12 @@ pub fn spoken_reply_language(cli_flag: &str, reported: Option<&str>) -> Option<S
     }
 }
 
+/// True when `sherpa-onnx-offline --help` lists the Qwen3 encoder flag.
+/// Verified on sherpa-onnx [`QWEN3_ASR_VERIFIED_SHERPA`].
+pub fn sherpa_offline_supports_qwen3(help: &str) -> bool {
+    help.contains("--qwen3-asr-encoder")
+}
+
 /// argv for `sherpa-onnx-offline` (or `stt_bin`) excluding the program name.
 pub fn sensevoice_args(tokens: &Path, model: &Path, language: &str, wav: &Path) -> Vec<String> {
     vec![
@@ -581,6 +635,32 @@ pub fn sensevoice_args(tokens: &Path, model: &Path, language: &str, wav: &Path) 
         format!("--sense-voice-language={language}"),
         "--num-threads=2".to_string(),
         "--debug=0".to_string(),
+        wav.display().to_string(),
+    ]
+}
+
+/// argv for the same `sherpa-onnx-offline` binary with the Qwen3-ASR pack.
+/// Does not pass `--sense-voice-model` or `--sense-voice-language`.
+pub fn qwen3_asr_args(model_dir: &Path, wav: &Path) -> Vec<String> {
+    vec![
+        format!(
+            "--qwen3-asr-conv-frontend={}",
+            model_dir.join("conv_frontend.onnx").display()
+        ),
+        format!(
+            "--qwen3-asr-encoder={}",
+            model_dir.join("encoder.int8.onnx").display()
+        ),
+        format!(
+            "--qwen3-asr-decoder={}",
+            model_dir.join("decoder.int8.onnx").display()
+        ),
+        format!(
+            "--qwen3-asr-tokenizer={}",
+            model_dir.join("tokenizer").display()
+        ),
+        format!("--qwen3-asr-max-new-tokens={QWEN3_ASR_MAX_NEW_TOKENS}"),
+        "--num-threads=2".to_string(),
         wav.display().to_string(),
     ]
 }
@@ -979,9 +1059,129 @@ impl SpeechToText for SenseVoiceCli {
             Ok(Recognized {
                 text,
                 detected_lang,
+                source: SttSource::SenseVoice,
             })
         }
     }
+}
+
+/// Optional Qwen3-ASR CLI. Same `stt_bin` as SenseVoice, different argv.
+pub struct Qwen3AsrCli {
+    pub cfg: VoiceConfig,
+}
+
+#[async_trait]
+impl SpeechToText for Qwen3AsrCli {
+    async fn transcribe(&self, path: &Path) -> Result<Recognized, AsrError> {
+        if !self.cfg.engine.eq_ignore_ascii_case(ENGINE_QWEN3_ASR) {
+            return Err(AsrError::unavailable(format!(
+                "voice.engine is '{}'; Qwen3-ASR is '{}'",
+                self.cfg.engine, ENGINE_QWEN3_ASR
+            )));
+        }
+        if !path.is_file() {
+            return Err(AsrError::failed(format!(
+                "audio file missing: {}",
+                path.display()
+            )));
+        }
+        qwen3_model_ready(&self.cfg.qwen3_asr_model_dir)?;
+        let bin = bin_path(&self.cfg.stt_bin, DEFAULT_STT_BIN);
+        ensure_qwen3_binary(&bin, self.cfg.stt_timeout_secs).await?;
+        let (wav, cleanup) = prepare_wav(&self.cfg, path).await?;
+        let args = qwen3_asr_args(&self.cfg.qwen3_asr_model_dir, &wav);
+        let captured = run_capturing(&bin, &args, self.cfg.stt_timeout_secs).await;
+        if cleanup {
+            let _ = tokio::fs::remove_file(&wav).await;
+        }
+        let captured = captured?;
+        let combined = format!("{}\n{}", captured.stdout, captured.stderr);
+        let detected_lang = sensevoice_reported_language(&combined);
+        let text = parse_sensevoice_output(&combined);
+        if text.is_empty() {
+            Err(AsrError::empty("Qwen3-ASR produced no transcript"))
+        } else {
+            tracing::info!(
+                preview = %transcript_preview(&text),
+                lang = detected_lang.as_deref().unwrap_or(""),
+                "Qwen3-ASR transcript"
+            );
+            Ok(Recognized {
+                text,
+                detected_lang,
+                source: SttSource::Qwen3Asr,
+            })
+        }
+    }
+}
+
+fn qwen3_model_ready(model_dir: &Path) -> Result<(), AsrError> {
+    let ready = model_dir.join("conv_frontend.onnx").is_file()
+        && model_dir.join("encoder.int8.onnx").is_file()
+        && model_dir.join("decoder.int8.onnx").is_file()
+        && model_dir.join("tokenizer").join("vocab.json").is_file();
+    if ready {
+        return Ok(());
+    }
+    Err(AsrError::unavailable(format!(
+        "Qwen3-ASR model not found in {} (need conv_frontend.onnx, encoder.int8.onnx, \
+         decoder.int8.onnx, and tokenizer/vocab.json). Accept the Apache-2.0 license \
+         ({QWEN3_ASR_LICENSE_URL}) before download. This optional path does not stop the process.",
+        model_dir.display()
+    )))
+}
+
+async fn ensure_qwen3_binary(bin: &Path, timeout_secs: u64) -> Result<(), AsrError> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--help")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = cmd.spawn().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            AsrError::unavailable(format!(
+                "could not start {} for optional Qwen3-ASR: {err}",
+                bin.display()
+            ))
+        } else {
+            AsrError::failed(format!(
+                "could not start {} for optional Qwen3-ASR: {err}",
+                bin.display()
+            ))
+        }
+    })?;
+    let secs = if timeout_secs == 0 {
+        default_voice_timeout_secs()
+    } else {
+        timeout_secs
+    };
+    let output =
+        match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(err)) => {
+                return Err(AsrError::failed(format!(
+                    "{} failed while checking Qwen3-ASR support: {err}",
+                    bin.display()
+                )))
+            }
+            Err(_) => {
+                return Err(AsrError::timed_out(format!(
+                    "{} timed out after {secs}s checking Qwen3-ASR support",
+                    bin.display()
+                )))
+            }
+        };
+    let help = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if sherpa_offline_supports_qwen3(&help) {
+        return Ok(());
+    }
+    Err(AsrError::unavailable(format!(
+        "sherpa-onnx-offline is too old for optional Qwen3-ASR (no --qwen3-asr-encoder; verified on sherpa-onnx {QWEN3_ASR_VERIFIED_SHERPA}). This does not affect SenseVoice."
+    )))
 }
 
 /// Opt-in OpenRouter speech-to-text. Constructed only when the flag is on.
@@ -1073,7 +1273,7 @@ pub async fn transcribe_local_first(
             if !text.is_empty() {
                 return Ok(Transcript {
                     text,
-                    source: SttSource::SenseVoice,
+                    source: recognized.source,
                     detected_lang: recognized.detected_lang,
                 });
             }
@@ -1136,9 +1336,10 @@ pub async fn transcribe_file(
     openrouter_key: &str,
     path: &Path,
 ) -> Result<Transcript, AsrError> {
-    if !voice.engine.eq_ignore_ascii_case("sensevoice") {
+    let engine = voice.engine.trim().to_ascii_lowercase();
+    if engine != ENGINE_SENSEVOICE && engine != ENGINE_QWEN3_ASR {
         return Err(AsrError::unavailable(format!(
-            "voice.engine is '{}'; the primary engine is SenseVoice",
+            "voice.engine is '{}'; local engines are {ENGINE_SENSEVOICE} and {ENGINE_QWEN3_ASR}",
             voice.engine
         )));
     }
@@ -1148,7 +1349,13 @@ pub async fn transcribe_file(
             path.display()
         )));
     }
-    let local = SenseVoiceCli { cfg: voice.clone() };
+    let sense = SenseVoiceCli { cfg: voice.clone() };
+    let qwen = Qwen3AsrCli { cfg: voice.clone() };
+    let local: &dyn SpeechToText = if engine == ENGINE_QWEN3_ASR {
+        &qwen
+    } else {
+        &sense
+    };
     let remote = if voice.openrouter_stt {
         Some(OpenRouterStt {
             base_url: openrouter_base.to_string(),
@@ -1164,7 +1371,7 @@ pub async fn transcribe_file(
     } else {
         None
     };
-    transcribe_local_first(&local, remote.as_ref().map(|remote| remote as _), path).await
+    transcribe_local_first(local, remote.as_ref().map(|remote| remote as _), path).await
 }
 
 /// Text plus optional OGG/Opus. `text` is always the original reply.
@@ -1695,6 +1902,42 @@ mod tests {
     }
 
     #[test]
+    fn qwen3_args_use_the_pack_files_and_not_sensevoice_flags() {
+        let dir = Path::new("/models/qwen3-asr");
+        let wav = Path::new("/tmp/note.wav");
+        let args = qwen3_asr_args(dir, wav);
+        let flag = |name: &str, path: &Path| format!("{name}={}", path.display());
+        assert!(args.iter().any(|arg| {
+            arg == &flag("--qwen3-asr-conv-frontend", &dir.join("conv_frontend.onnx"))
+        }));
+        assert!(args
+            .iter()
+            .any(|arg| arg == &flag("--qwen3-asr-encoder", &dir.join("encoder.int8.onnx"))));
+        assert!(args
+            .iter()
+            .any(|arg| arg == &flag("--qwen3-asr-decoder", &dir.join("decoder.int8.onnx"))));
+        assert!(args
+            .iter()
+            .any(|arg| arg == &flag("--qwen3-asr-tokenizer", &dir.join("tokenizer"))));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--qwen3-asr-max-new-tokens=512"));
+        let wav_arg = wav.display().to_string();
+        assert_eq!(args.last().map(String::as_str), Some(wav_arg.as_str()));
+        assert!(
+            args.iter().all(|arg| !arg.contains("sense-voice")),
+            "{args:?}"
+        );
+        assert!(sherpa_offline_supports_qwen3(
+            "--qwen3-asr-encoder : Path to encoder.onnx for Qwen3-ASR"
+        ));
+        assert!(!sherpa_offline_supports_qwen3(
+            "--sense-voice-model : SenseVoice model"
+        ));
+        assert_eq!(QWEN3_ASR_VERIFIED_SHERPA, "2.0.1");
+    }
+
+    #[test]
     fn ffmpeg_ogg_args_use_libopus() {
         let args = ffmpeg_ogg_opus_args(Path::new("in.wav"), Path::new("out.ogg"));
         assert!(args.iter().any(|arg| arg == "libopus"));
@@ -2071,6 +2314,119 @@ num threads: 2
         assert_eq!(err.kind, AsrErrorKind::Unavailable);
         assert!(!err.cloud_attempted);
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn qwen3_without_a_pack_fails_only_that_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            engine: ENGINE_QWEN3_ASR.to_string(),
+            qwen3_asr_model_dir: dir.path().join("missing-qwen3"),
+            openrouter_stt: false,
+            ..VoiceConfig::default()
+        };
+        let err = transcribe_file(&voice, "http://127.0.0.1:9", "sk-test", &audio)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AsrErrorKind::Unavailable);
+        assert!(!err.cloud_attempted);
+        assert!(err.message.contains("Qwen3-ASR"), "{err}");
+        assert!(err.message.contains("conv_frontend.onnx"), "{err}");
+        assert!(
+            !err.message.contains("sense-voice"),
+            "missing Qwen3 pack must not be reported as SenseVoice: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_qwen3_stub(dir: &Path) {
+        std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+        for name in [
+            "conv_frontend.onnx",
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("tokenizer").join("vocab.json"), b"{}\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn qwen3_script_uses_qwen3_argv_and_a_too_old_binary_stays_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("qwen3-asr");
+        write_qwen3_stub(&model);
+        let args_path = dir.path().join("args.txt");
+        let ready = write_exec(
+            dir.path(),
+            "qwen3.sh",
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' '--qwen3-asr-encoder'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"text\":\"早晨\"}}'\n",
+                args_path.display()
+            ),
+        );
+        let audio = dir.path().join("note.wav");
+        std::fs::write(&audio, b"RIFFfake").unwrap();
+        let voice = VoiceConfig {
+            engine: ENGINE_QWEN3_ASR.to_string(),
+            qwen3_asr_model_dir: model.clone(),
+            stt_bin: ready.display().to_string(),
+            openrouter_stt: true,
+            ..VoiceConfig::default()
+        };
+        let transcript = transcribe_file(&voice, "http://127.0.0.1:9", "sk-test", &audio)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "早晨");
+        assert_eq!(transcript.source, SttSource::Qwen3Asr);
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert!(args.contains("--qwen3-asr-encoder="), "{args}");
+        assert!(args.contains("encoder.int8.onnx"), "{args}");
+        assert!(
+            !args.contains("sense-voice"),
+            "Qwen3 must not use SenseVoice flags: {args}"
+        );
+
+        let old = write_exec(
+            dir.path(),
+            "old.sh",
+            "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' '--sense-voice-model'\n  exit 1\nfi\nprintf '%s\\n' '{\"text\":\"should-not-run\"}'\n",
+        );
+        let too_old = VoiceConfig {
+            engine: ENGINE_QWEN3_ASR.to_string(),
+            qwen3_asr_model_dir: model.clone(),
+            stt_bin: old.display().to_string(),
+            openrouter_stt: false,
+            ..VoiceConfig::default()
+        };
+        let err = transcribe_file(&too_old, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AsrErrorKind::Unavailable);
+        assert!(err.message.contains("too old"), "{err}");
+        assert!(err.message.contains(QWEN3_ASR_VERIFIED_SHERPA), "{err}");
+        assert!(!err.cloud_attempted);
+
+        let sense = VoiceConfig {
+            engine: ENGINE_SENSEVOICE.to_string(),
+            model_dir: {
+                let sense_dir = dir.path().join("sensevoice");
+                std::fs::create_dir_all(&sense_dir).unwrap();
+                std::fs::write(sense_dir.join("model.int8.onnx"), b"m").unwrap();
+                std::fs::write(sense_dir.join("tokens.txt"), b"t\n").unwrap();
+                sense_dir
+            },
+            stt_bin: old.display().to_string(),
+            ..VoiceConfig::default()
+        };
+        let transcript = transcribe_file(&sense, "http://127.0.0.1:9", "", &audio)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "should-not-run");
+        assert_eq!(transcript.source, SttSource::SenseVoice);
     }
 
     #[tokio::test]

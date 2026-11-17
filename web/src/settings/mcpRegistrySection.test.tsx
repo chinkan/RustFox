@@ -77,4 +77,40 @@ describe('McpRegistrySection', () => {
       enabled: true,
     })
   })
+
+  it('reuses install.suggestedSlug for the same Custom URL instead of opening a duplicate row', async () => {
+    const url = 'https://weather.example/mcp'
+    const searchMcpRegistry = vi.fn().mockResolvedValue({
+      servers: [
+        {
+          server: {
+            name: 'io.github.example/weather',
+            remotes: [{ type: 'streamable-http', url }],
+          },
+          install: { suggestedSlug: 'weather' },
+        },
+      ],
+      metadata: {},
+    })
+    const putMcpServer = vi.fn().mockResolvedValue({ server: { name: 'weather' } })
+    wrap(
+      <McpRegistrySection
+        api={apiOver({ searchMcpRegistry, putMcpServer })}
+        existingServerNames={['weather']}
+      />,
+    )
+    fireEvent.change(screen.getByPlaceholderText(/github/i), { target: { value: 'weather' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Search$/i }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: /io\.github\.example\/weather/i }))
+    const slug = screen.getByLabelText(/Portal name/i) as HTMLInputElement
+    expect(slug.value).toBe('weather')
+    fireEvent.click(screen.getByRole('button', { name: /Install selected/i }))
+    await waitFor(() => expect(putMcpServer).toHaveBeenCalledTimes(1))
+    expect(putMcpServer.mock.calls.map((call) => call[0])).toEqual(['weather'])
+    expect(putMcpServer.mock.calls[0][1]).toMatchObject({
+      name: 'weather',
+      url,
+      enabled: true,
+    })
+  })
 })

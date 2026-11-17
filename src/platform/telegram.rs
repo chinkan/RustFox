@@ -2871,6 +2871,7 @@ async fn run_telegram_user_turn(
             Some(stream_token_tx),
             turn_ui_mode,
             None,
+            None,
         )
         .await
     {
@@ -2992,6 +2993,25 @@ async fn run_telegram_user_turn(
     stop
 }
 
+/// ADR-0067: a human Retry during an in-flight scheduled auto-resume must not
+/// start a second copy. Cancel is unchanged.
+async fn human_retry_would_double(
+    agent: &Agent,
+    queue: &crate::scheduler::reruns::RerunQueue,
+    action: &crate::scheduler::human_gate::GateAction,
+) -> bool {
+    let crate::scheduler::human_gate::GateAction::Retry(id) = action else {
+        return false;
+    };
+    let Ok(Some(row)) = queue.get(id).await else {
+        return false;
+    };
+    let live = agent.live_scheduled.snapshot();
+    crate::scheduler::auto_resume::human_retry_blocked(&agent.task_store, &live, &row.task_id)
+        .await
+        .unwrap_or(true)
+}
+
 /// ADR-0038: apply human-gate Retry/Cancel from inline callback.
 async fn handle_human_gate_callback(
     bot: Bot,
@@ -3002,6 +3022,13 @@ async fn handle_human_gate_callback(
     action: crate::scheduler::human_gate::GateAction,
 ) -> ResponseResult<()> {
     let queue = crate::scheduler::reruns::RerunQueue::new(agent.memory.connection());
+    if human_retry_would_double(&agent, &queue, &action).await {
+        bot.answer_callback_query(callback_id)
+            .text(crate::scheduler::human_gate::GateOutcome::AlreadyDone.as_str())
+            .await
+            .ok();
+        return Ok(());
+    }
     let outcome = match crate::scheduler::human_gate::apply_gate_action(
         &queue,
         &agent.task_store,
@@ -3071,6 +3098,14 @@ async fn handle_human_gate_slash(
     action: crate::scheduler::human_gate::GateAction,
 ) -> ResponseResult<()> {
     let queue = crate::scheduler::reruns::RerunQueue::new(agent.memory.connection());
+    if human_retry_would_double(agent, &queue, &action).await {
+        bot.send_message(
+            chat_id,
+            crate::scheduler::human_gate::GateOutcome::AlreadyDone.as_str(),
+        )
+        .await?;
+        return Ok(());
+    }
     let outcome = match crate::scheduler::human_gate::apply_gate_action(
         &queue,
         &agent.task_store,

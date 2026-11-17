@@ -74,9 +74,12 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       utcOffset: '+08:00',
       source: 'config',
     }),
+    listScheduleBots: async () => [
+      { id: 'default', selectable: true, reason: null, default: true },
+    ],
     listTasks: async () => [
-      { id: 'c1', name: '香港天氣報告', cron: '0 30 7 * * *', enabled: true, nextRun: '2026-09-23T07:30:00+08:00', prompt: 'Run the hko-weather skill.', triggerType: 'recurring', triggerValue: '0 30 7 * * *', status: 'active', platform: 'telegram', timezone: 'Asia/Hong_Kong' },
-      { id: 'c2', name: 'arXiv 簡報', cron: '0 0 10 * * *', enabled: false, nextRun: '—', prompt: 'Run cantonese-arxiv-daily-briefing.', triggerType: 'recurring', triggerValue: '0 0 10 * * *', status: 'paused', platform: 'telegram', timezone: 'UTC' },
+      { id: 'c1', name: '香港天氣報告', cron: '0 30 7 * * *', enabled: true, nextRun: '2026-09-23T07:30:00+08:00', prompt: 'Run the hko-weather skill.', triggerType: 'recurring', triggerValue: '0 30 7 * * *', status: 'active', platform: 'telegram', botId: 'default', timezone: 'Asia/Hong_Kong' },
+      { id: 'c2', name: 'arXiv 簡報', cron: '0 0 10 * * *', enabled: false, nextRun: '—', prompt: 'Run cantonese-arxiv-daily-briefing.', triggerType: 'recurring', triggerValue: '0 0 10 * * *', status: 'paused', platform: 'telegram', botId: 'default', timezone: 'UTC' },
     ],
     getTaskRuns: async () => [
       { id: 1, runAt: '2026-09-22T07:30:00Z', status: 'completed', error: null, response: 'ok' },
@@ -101,6 +104,8 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         voiceEnabled: true,
         voiceLanguages: ['yue', 'en'],
         voiceTts: false,
+        voiceEngine: 'sensevoice',
+        voiceQwen3AsrLicenseAccepted: false,
       },
       masked: {
         telegramBotToken: '123…456',
@@ -138,6 +143,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
         sensevoice: { status: 'ready', message: null },
         ttsCantonese: { status: 'absent', message: null },
         ttsEnglish: { status: 'absent', message: null },
+        qwen3Asr: { status: 'absent', message: null },
       },
       systemPrompt: { source: 'builtin' as const, pointer: null, divergence: false },
       sandbox: {

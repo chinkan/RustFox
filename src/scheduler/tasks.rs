@@ -21,7 +21,8 @@ pub async fn register_builtin_tasks(
     let user_model_cron = crate::agent::normalize_cron_expr(&user_model_cron)
         .map_err(|e| anyhow::anyhow!("[learning] user_model_cron: {e}"))?;
 
-    // Heartbeat — log that the bot is alive every hour
+    // Heartbeat — log that the bot is alive every hour.
+    // Not the ADR-0067 scheduled-task restore tick (that is a 60s loop in main).
     scheduler
         .add_cron_job("0 0 * * * *", default_tz, "heartbeat", |_fired_at| {
             Box::pin(async {

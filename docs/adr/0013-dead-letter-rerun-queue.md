@@ -125,6 +125,13 @@ byte-identical.
 before them. Unlike a turn-1 429 (zero side effects), replaying it can duplicate whatever it
 already did — exactly the Threads-duplicate hazard Q3 exists to prevent.
 
+**Amend (2026-11-15, #412 / ADR-0067):** that "no auto re-fire" rule is amended for
+scheduled max-iterations only. The stop still records `failed`, but it does not
+open an `awaiting_user` Retry gate. It notifies once and continues from the
+checkpoint with a full configured `max_iterations` (ADR-0054 Decision 4).
+Continue stubs unfinished tools; it does not full-replay when a checkpoint
+exists. Unverified results, failed-twice, and transient 429/5xx are unchanged.
+
 ## Amendment (2026-09-28): P0 watchdog dispatch + success supersede
 
 Two holes found after #60 merged; queue not trusted until this fixup lands.

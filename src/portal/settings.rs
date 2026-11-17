@@ -48,6 +48,12 @@ pub struct SettingsPatch {
     /// Opt-in spoken reply. Default false. `yue` and `en` only.
     #[serde(default)]
     pub voice_tts: Option<bool>,
+    /// `sensevoice` (default) or `qwen3-asr`. Unknown ids are 400.
+    #[serde(default)]
+    pub voice_engine: Option<String>,
+    /// Apache-2.0 acceptance. True is what starts the optional Qwen3 download.
+    #[serde(default)]
+    pub voice_qwen3_asr_license_accepted: Option<bool>,
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -92,6 +98,7 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
     let workspace = cfg.sandbox.allowed_directory.clone();
     let sandbox_info = sandbox_status_json(live_mode, workspace).await;
     let switchbot = state.switchbot.view();
+    let voice = state.voice.snapshot();
 
     Ok(Json(json!({
         "editable": {
@@ -99,9 +106,11 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
             "generalLocation": cfg.general.as_ref().and_then(|g| g.location.clone()).unwrap_or_default(),
             "defaultAutonomyMode": cfg.supervisor.default_autonomy_mode,
             "portalPort": cfg.portal.port,
-            "voiceEnabled": state.voice.snapshot().enabled,
-            "voiceLanguages": state.voice.snapshot().languages,
-            "voiceTts": state.voice.snapshot().tts,
+            "voiceEnabled": voice.enabled,
+            "voiceLanguages": voice.languages,
+            "voiceTts": voice.tts,
+            "voiceEngine": voice.engine,
+            "voiceQwen3AsrLicenseAccepted": voice.qwen3_asr_license_accepted,
         },
         // ADR 0011 R7: system-prompt provenance so the SPA can show which
         // layer is live and warn about the divergence trap.
@@ -200,6 +209,10 @@ pub async fn patch_settings(
         crate::asr::order_voice_languages(languages)
             .map_err(|message| PortalError::bad_request("invalid_voice_languages", message))?;
     }
+    if let Some(engine) = &patch.voice_engine {
+        crate::asr::normalize_voice_engine(engine)
+            .map_err(|message| PortalError::bad_request("invalid_voice_engine", message))?;
+    }
 
     // `model` has a live setter — no TOML edit needed here (and set_model
     // writes the file itself, so ordering matters: model goes first).
@@ -214,7 +227,9 @@ pub async fn patch_settings(
 
     let voice_touched = patch.voice_enabled.is_some()
         || patch.voice_languages.is_some()
-        || patch.voice_tts.is_some();
+        || patch.voice_tts.is_some()
+        || patch.voice_engine.is_some()
+        || patch.voice_qwen3_asr_license_accepted.is_some();
     let mut pending_voice = None;
 
     let mut doc = match load_doc(path).await {
@@ -308,6 +323,8 @@ pub async fn patch_settings(
                 enabled: patch.voice_enabled,
                 languages: patch.voice_languages.clone(),
                 tts: patch.voice_tts,
+                engine: patch.voice_engine.clone(),
+                qwen3_asr_license_accepted: patch.voice_qwen3_asr_license_accepted,
             },
         )
         .map_err(|message| PortalError::bad_request("invalid_voice_languages", message))?;
@@ -321,6 +338,12 @@ pub async fn patch_settings(
         }
         if patch.voice_tts.is_some() {
             updated.push("voiceTts".to_string());
+        }
+        if patch.voice_engine.is_some() {
+            updated.push("voiceEngine".to_string());
+        }
+        if patch.voice_qwen3_asr_license_accepted.is_some() {
+            updated.push("voiceQwen3AsrLicenseAccepted".to_string());
         }
         pending_voice = Some(next);
     }
@@ -358,6 +381,14 @@ fn write_voice_section(doc: &mut toml::Value, voice: &crate::asr::VoiceConfig) {
         .collect();
     table.insert("languages".to_string(), toml::Value::Array(languages));
     table.insert("tts".to_string(), toml::Value::Boolean(voice.tts));
+    table.insert(
+        "engine".to_string(),
+        toml::Value::String(voice.engine.clone()),
+    );
+    table.insert(
+        "qwen3_asr_license_accepted".to_string(),
+        toml::Value::Boolean(voice.qwen3_asr_license_accepted),
+    );
     table.remove("language");
 }
 

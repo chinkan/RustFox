@@ -269,6 +269,9 @@ pub struct Agent {
     /// Live `[voice]` settings. Portal Settings updates this; Telegram reads
     /// it on the next note (ADR-0063). Not a process restart.
     pub voice_runtime: crate::asr::VoiceRuntime,
+    /// Task ids inside `run_one_scheduled_job` (ADR-0067). A human Retry
+    /// while this set contains the task must not start a second copy.
+    pub live_scheduled: crate::scheduler::auto_resume::LiveScheduledRuns,
 }
 
 /// Follow-up under `# Available Agents`. A name passed to `spawn_agents` loads
@@ -487,6 +490,7 @@ impl Agent {
             schedule_tz,
             seat_run: crate::seat_run::SeatRunSignal::new(),
             voice_runtime,
+            live_scheduled: crate::scheduler::auto_resume::LiveScheduledRuns::new(),
         }
     }
 
@@ -1234,7 +1238,14 @@ impl Agent {
         tool_ui_mode: crate::tool_registry::ToolUiMode,
     ) -> Result<String> {
         Ok(self
-            .process_message_outcome(incoming, tool_event_tx, stream_token_tx, tool_ui_mode, None)
+            .process_message_outcome(
+                incoming,
+                tool_event_tx,
+                stream_token_tx,
+                tool_ui_mode,
+                None,
+                None,
+            )
             .await?
             .text)
     }
@@ -1251,6 +1262,7 @@ impl Agent {
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
         continue_from: Option<crate::scheduler::checkpoint::TranscriptCheckpoint>,
+        on_tool_completed: Option<crate::loop_runner::ToolCompletedHook>,
     ) -> Result<RunOutcome> {
         if let Some(cp) = continue_from {
             return self
@@ -1260,6 +1272,7 @@ impl Agent {
                     tool_event_tx,
                     stream_token_tx,
                     tool_ui_mode,
+                    on_tool_completed,
                 )
                 .await;
         }
@@ -1615,6 +1628,9 @@ impl Agent {
                 })
             }));
         }
+        if let Some(hook) = on_tool_completed {
+            agentic = agentic.with_tool_completed(hook);
+        }
         let mut container = crate::loop_runner::MessageContainer::Conversation(Box::new(cmgr));
         let outcome = CANCEL_SCOPE
             .scope(
@@ -1771,6 +1787,7 @@ impl Agent {
         tool_event_tx: Option<tokio::sync::mpsc::Sender<crate::platform::tool_notifier::ToolEvent>>,
         stream_token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         tool_ui_mode: crate::tool_registry::ToolUiMode,
+        on_tool_completed: Option<crate::loop_runner::ToolCompletedHook>,
     ) -> Result<RunOutcome> {
         let bot_id = crate::platform::normalize_bot_id(&incoming.bot_id);
         let user_id = &incoming.user_id;
@@ -1913,7 +1930,7 @@ impl Agent {
             }
         };
 
-        let agentic = crate::loop_runner::AgenticLoop::new(
+        let mut agentic = crate::loop_runner::AgenticLoop::new(
             &self.llm,
             &self.tool_registry,
             &self.mcp,
@@ -1925,6 +1942,9 @@ impl Agent {
             Box::new(make_ctx),
             Some(Box::new(special_handler)),
         );
+        if let Some(hook) = on_tool_completed {
+            agentic = agentic.with_tool_completed(hook);
+        }
         let mut container = crate::loop_runner::MessageContainer::Plain(messages);
         let outcome = CANCEL_SCOPE
             .scope(
@@ -2859,6 +2879,24 @@ impl Agent {
         text
     }
 
+    /// Per-chat `/verbose` Silent (`tool_ui_mode_{user_id}`). A missing key or a
+    /// failed recall stays non-silent, the same Minimal fallback as the Telegram
+    /// turn. `fully_silent` is applied by the caller and still wins over a stored
+    /// Minimal or Verbose mode.
+    async fn stored_tool_ui_is_silent(&self, user_id: &str) -> bool {
+        let key = format!("tool_ui_mode_{user_id}");
+        match self.memory.recall("settings", &key).await {
+            Ok(val) => {
+                crate::tool_registry::ToolUiMode::from_memory(val.as_deref())
+                    == crate::tool_registry::ToolUiMode::Silent
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to recall tool UI mode");
+                false
+            }
+        }
+    }
+
     /// Shared mini-agentic loop used by both ad-hoc and predefined subagents.
     /// Runs LLM calls, executes whitelisted tools, and returns the final text response.
     /// Returns a boxed future to break type-level cycles with the special_tool_handler.
@@ -2940,9 +2978,15 @@ impl Agent {
             };
 
             let turn_sender = self.sender_for_bot(&delivery.bot_id).await;
+            // Speaking bot (stack root), not the peer. `fully_silent` forces
+            // Silent even when the stored per-chat mode is Minimal or Verbose.
+            // Per-chat `/verbose` Silent does the same. A Minimal or Verbose
+            // speaker keeps today's subagent Minimal hardcode.
             let speaking_fully_silent = invoke_stack
                 .first()
                 .is_some_and(|id| self.config.bot_fully_silent(id));
+            let per_chat_silent = self.stored_tool_ui_is_silent(&delivery.user_id).await;
+            let subagent_silent = speaking_fully_silent || per_chat_silent;
             let make_ctx = {
                 let sandbox_dir = self.config.sandbox.allowed_directory.clone();
                 let home_dir = self.config.resolved_home.clone();
@@ -2959,10 +3003,7 @@ impl Agent {
                     user_id: user_id.clone(),
                     chat_id: chat_id.clone(),
                     bot_id: turn_bot.clone(),
-                    // Follow the speaking bot (stack root), not the peer.
-                    // Another bot's fully_silent flag is not inherited, and a
-                    // silent speaker stays silent for peer tool UI too.
-                    tool_ui_mode: if speaking_fully_silent {
+                    tool_ui_mode: if subagent_silent {
                         crate::tool_registry::ToolUiMode::Silent
                     } else {
                         crate::tool_registry::ToolUiMode::Minimal

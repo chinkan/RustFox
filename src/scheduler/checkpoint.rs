@@ -1,14 +1,18 @@
-//! Scheduler transcript checkpoints (ADR-0039, amended by ADR-0054 / #360).
+//! Scheduler transcript checkpoints (ADR-0039, amended by ADR-0054 / #360
+//! and ADR-0067 / #412).
 //!
-//! Written on the wall-clock timeout human-gate, and also on the
-//! max-iterations and guard-rewrite gates (#331). Retry with a checkpoint
-//! continues the agent loop from the saved transcript; Cancel clears it.
-//! No checkpoint → ADR-0013 full replay with a full iteration budget.
+//! Human-gate writes stay: wall-clock timeout, max-iterations, and
+//! guard-rewrite. ADR-0067 also writes a mid-run row after each completed
+//! tool so a process restart can continue. Retry or scheduled auto-resume
+//! with a checkpoint continues the agent loop from the saved transcript;
+//! Cancel clears it. No checkpoint → ADR-0013 full replay on human Retry.
+//! Scheduled auto-resume does not full-replay when no checkpoint exists.
 //!
-//! The row stores *why* it was written (`stop_kind`). Human Retry of a
+//! The row stores *why* it was written (`stop_kind`). Continuing a
 //! max-iterations / IterationStall checkpoint gets a fresh full
-//! `max_iterations`. Timeout, guard-rewrite, and other checkpoints keep
-//! `max(cap − used, 1)` (#360, ADR-0054 Decision 4).
+//! `max_iterations`. Timeout, mid-run / process-restart, guard-rewrite,
+//! and other checkpoints keep `max(cap − used, 1)` (#360, ADR-0054
+//! Decision 4, ADR-0067).
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -37,6 +41,9 @@ pub enum CheckpointStopKind {
     Timeout,
     /// Guard replaced the final reply and the run was not verified.
     GuardRewrite,
+    /// Mid-run persist after a completed tool (ADR-0067). Process-restart
+    /// continue uses the remaining-budget formula, not a fresh full cap.
+    MidRun,
     /// Legacy row, or a stop that is not one of the three gates above.
     #[default]
     Other,
@@ -48,18 +55,27 @@ impl CheckpointStopKind {
             Self::MaxIterations => "max_iterations",
             Self::Timeout => "timeout",
             Self::GuardRewrite => "guard_rewrite",
+            Self::MidRun => "mid_run",
             Self::Other => "other",
         }
     }
 
-    /// Unknown text stays [`Self::Other`] so a typo does not grant a full budget.
+    /// Unknown text stays [`Self::Other`] so a typo does not grant a full budget
+    /// and does not enter the scheduled auto-resume set.
     pub fn parse(raw: &str) -> Self {
         match raw {
             "max_iterations" => Self::MaxIterations,
             "timeout" => Self::Timeout,
             "guard_rewrite" => Self::GuardRewrite,
+            "mid_run" => Self::MidRun,
             _ => Self::Other,
         }
+    }
+
+    /// Timeout, max-iterations, and mid-run are the scheduled auto-resume set
+    /// (ADR-0067). Guard-rewrite and other unverified stops are not.
+    pub fn is_scheduled_auto_resume(self) -> bool {
+        matches!(self, Self::Timeout | Self::MaxIterations | Self::MidRun)
     }
 }
 
@@ -80,12 +96,14 @@ pub fn stop_kind_from_scheduled(stop: ScheduledLoopStop) -> CheckpointStopKind {
 /// Iteration budget for one transcript continue (#360 / ADR-0054 D4).
 ///
 /// `MaxIterations` is a fresh full `cap` (the configured `max_iterations`).
-/// Every other kind keeps `max(cap − used, 1)`.
+/// Timeout, mid-run / process-restart, guard-rewrite, and other kinds keep
+/// `max(cap − used, 1)` (ADR-0054 Decision 4, ADR-0067 Q4).
 pub fn continue_iteration_budget(cap: u32, used: u32, kind: CheckpointStopKind) -> u32 {
     match kind {
         CheckpointStopKind::MaxIterations => cap,
         CheckpointStopKind::Timeout
         | CheckpointStopKind::GuardRewrite
+        | CheckpointStopKind::MidRun
         | CheckpointStopKind::Other => cap.saturating_sub(used).max(1),
     }
 }
@@ -182,6 +200,33 @@ impl TranscriptCheckpoint {
         synthesize_interrupted_results(&mut out, &self.dangling_tool_ids);
         out
     }
+}
+
+/// Newest resumable checkpoint for one scheduled task (ADR-0067).
+#[derive(Debug, Clone)]
+pub struct ResumableCheckpoint {
+    pub task_id: String,
+    pub queue_id: String,
+    pub run_id: Option<String>,
+    pub checkpoint: TranscriptCheckpoint,
+}
+
+fn decode_checkpoint(
+    messages_json: String,
+    iteration: i64,
+    dangling_json: String,
+    stop_kind_raw: String,
+) -> Result<TranscriptCheckpoint> {
+    let messages: Vec<ChatMessage> =
+        serde_json::from_str(&messages_json).context("deserialize checkpoint messages")?;
+    let dangling_tool_ids: Vec<String> =
+        serde_json::from_str(&dangling_json).context("deserialize dangling ids")?;
+    Ok(TranscriptCheckpoint {
+        messages,
+        iteration: iteration as u32,
+        dangling_tool_ids,
+        stop_kind: CheckpointStopKind::parse(&stop_kind_raw),
+    })
 }
 
 /// Tool-call ids that have an assistant `tool_calls` entry but no tool result.
@@ -304,6 +349,12 @@ impl CheckpointStore {
             )
             .context("add scheduler_transcript_checkpoints.stop_kind")?;
         }
+        if !cols.iter().any(|c| c == "task_id") {
+            conn.execute_batch(
+                "ALTER TABLE scheduler_transcript_checkpoints ADD COLUMN task_id TEXT;",
+            )
+            .context("add scheduler_transcript_checkpoints.task_id")?;
+        }
         Ok(())
     }
 
@@ -315,11 +366,24 @@ impl CheckpointStore {
     /// Upsert checkpoint for a human-gate queue row.
     ///
     /// Callers: wall-clock timeout (ADR-0039), max-iterations, and guard
-    /// rewrite (ADR-0054 / #331).
+    /// rewrite (ADR-0054 / #331). Does not clear `task_id` when omitted.
     pub async fn save(
         &self,
         queue_id: &str,
         run_id: Option<&str>,
+        checkpoint: &TranscriptCheckpoint,
+    ) -> Result<()> {
+        self.save_with_task(queue_id, run_id, None, checkpoint)
+            .await
+    }
+
+    /// [`Self::save`] plus the scheduled task id so boot can find the row
+    /// without a queue id (ADR-0067).
+    pub async fn save_with_task(
+        &self,
+        queue_id: &str,
+        run_id: Option<&str>,
+        task_id: Option<&str>,
         checkpoint: &TranscriptCheckpoint,
     ) -> Result<()> {
         let messages_json =
@@ -330,10 +394,11 @@ impl CheckpointStore {
         Self::ensure_schema(&conn)?;
         conn.execute(
             "INSERT INTO scheduler_transcript_checkpoints
-             (queue_id, run_id, messages_json, iteration, dangling_json, stop_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             (queue_id, run_id, task_id, messages_json, iteration, dangling_json, stop_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(queue_id) DO UPDATE SET
                run_id = excluded.run_id,
+               task_id = COALESCE(excluded.task_id, scheduler_transcript_checkpoints.task_id),
                messages_json = excluded.messages_json,
                iteration = excluded.iteration,
                dangling_json = excluded.dangling_json,
@@ -342,6 +407,7 @@ impl CheckpointStore {
             rusqlite::params![
                 queue_id,
                 run_id,
+                task_id,
                 messages_json,
                 checkpoint.iteration as i64,
                 dangling_json,
@@ -349,6 +415,115 @@ impl CheckpointStore {
             ],
         )
         .context("upsert transcript checkpoint")?;
+        Ok(())
+    }
+
+    /// Synchronous mid-run row keyed by `run_id` (ADR-0067). Overwrites the
+    /// previous snapshot for this run. Not a human-gate queue id.
+    pub async fn save_midrun(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        checkpoint: &TranscriptCheckpoint,
+    ) -> Result<()> {
+        let queue_id = format!("midrun:{run_id}");
+        self.save_with_task(&queue_id, Some(run_id), Some(task_id), checkpoint)
+            .await
+    }
+
+    /// Newest resumable checkpoint for `task_id`. `run_id` narrows to that
+    /// interrupted run when it is known.
+    pub async fn latest_resumable(
+        &self,
+        task_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<Option<(String, TranscriptCheckpoint)>> {
+        let conn = self.conn.lock().await;
+        Self::ensure_schema(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT queue_id, messages_json, iteration, dangling_json, stop_kind
+             FROM scheduler_transcript_checkpoints
+             WHERE task_id = ?1
+               AND stop_kind IN ('timeout', 'max_iterations', 'mid_run')
+               AND (?2 IS NULL OR run_id = ?2)
+             ORDER BY rowid DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![task_id, run_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let queue_id: String = row.get(0)?;
+        let checkpoint = decode_checkpoint(row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)?;
+        Ok(Some((queue_id, checkpoint)))
+    }
+
+    /// One newest resumable checkpoint per task. Guard-rewrite and `other`
+    /// are excluded so unverified stops are not an auto-resume set.
+    pub async fn resumable_latest_per_task(&self) -> Result<Vec<ResumableCheckpoint>> {
+        let conn = self.conn.lock().await;
+        Self::ensure_schema(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id, queue_id, run_id, messages_json, iteration, dangling_json, stop_kind
+             FROM scheduler_transcript_checkpoints
+             WHERE task_id IS NOT NULL
+               AND stop_kind IN ('timeout', 'max_iterations', 'mid_run')
+             ORDER BY rowid DESC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let task_id: String = row.get(0)?;
+            if !seen.insert(task_id.clone()) {
+                continue;
+            }
+            let checkpoint = decode_checkpoint(row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)?;
+            out.push(ResumableCheckpoint {
+                task_id,
+                queue_id: row.get(1)?,
+                run_id: row.get(2)?,
+                checkpoint,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Drop every checkpoint for the task except the queue id continue will load.
+    pub async fn retain_only(&self, task_id: &str, queue_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        Self::ensure_schema(&conn)?;
+        conn.execute(
+            "DELETE FROM scheduler_transcript_checkpoints
+             WHERE task_id = ?1 AND queue_id != ?2",
+            rusqlite::params![task_id, queue_id],
+        )
+        .context("retain transcript checkpoint")?;
+        Ok(())
+    }
+
+    /// Delete every checkpoint stored for this task (success, hard failure, cancel).
+    pub async fn clear_task(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        Self::ensure_schema(&conn)?;
+        conn.execute(
+            "DELETE FROM scheduler_transcript_checkpoints WHERE task_id = ?1",
+            rusqlite::params![task_id],
+        )
+        .context("clear task transcript checkpoints")?;
+        Ok(())
+    }
+
+    /// Drop mid-run rows only. A guard-rewrite checkpoint on the human gate stays.
+    pub async fn clear_mid_run(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        Self::ensure_schema(&conn)?;
+        conn.execute(
+            "DELETE FROM scheduler_transcript_checkpoints
+             WHERE task_id = ?1 AND stop_kind = 'mid_run'",
+            rusqlite::params![task_id],
+        )
+        .context("clear mid-run transcript checkpoints")?;
         Ok(())
     }
 
@@ -596,6 +771,15 @@ mod tests {
             continue_iteration_budget(cap, cap, CheckpointStopKind::Other),
             1
         );
+        // Process-restart / mid-run continue is not a full cap (#412 Q4).
+        assert_eq!(
+            continue_iteration_budget(cap, cap, CheckpointStopKind::MidRun),
+            1
+        );
+        assert_eq!(
+            continue_iteration_budget(cap, 10, CheckpointStopKind::MidRun),
+            15
+        );
         assert_eq!(
             continue_iteration_budget(cap, 10, CheckpointStopKind::Timeout),
             15
@@ -687,6 +871,15 @@ mod tests {
             CheckpointStopKind::parse("guard_rewrite"),
             CheckpointStopKind::GuardRewrite
         );
+        assert_eq!(
+            CheckpointStopKind::parse("mid_run"),
+            CheckpointStopKind::MidRun
+        );
+        assert!(CheckpointStopKind::MidRun.is_scheduled_auto_resume());
+        assert!(CheckpointStopKind::Timeout.is_scheduled_auto_resume());
+        assert!(CheckpointStopKind::MaxIterations.is_scheduled_auto_resume());
+        assert!(!CheckpointStopKind::GuardRewrite.is_scheduled_auto_resume());
+        assert!(!CheckpointStopKind::Other.is_scheduled_auto_resume());
         assert_eq!(
             CheckpointStopKind::parse("other"),
             CheckpointStopKind::Other

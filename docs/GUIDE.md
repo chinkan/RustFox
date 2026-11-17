@@ -122,7 +122,7 @@ persona = "researcher"
 
 ### Per-bot schedules
 
-Every schedule row has a required `bot_id` (the `[[bots]]` id). There is no global cron and no schedule shared between bots. A run uses that bot's prompt and tools. It does not read the owner's interactive chat, and it does not write the prompt or the result into that chat. Telegram still receives the result, and a human-gate when a run stops for review. To ask about that result in chat, reply-quote the schedule message. Run history stays on the task (`scheduled_task_runs` and the portal task page). A task opened from the portal is stored as user `web` and platform `portal`; the Telegram notify still goes to the allowlisted chat id on the row. There is no approval gate before the run. Portal and `list_scheduled_tasks` show only the current bot. Disable and delete affect only that bot. An approval reply is not sent on a bot that did not own the run. Rows saved before `bot_id` existed are assigned to `default` and logged, not dropped.
+Every schedule row has a required `bot_id` (the `[[bots]]` id). There is no global cron and no schedule shared between bots. A run uses that bot's prompt and tools. It does not read the owner's interactive chat, and it does not write the prompt or the result into that chat. Telegram still receives the result, and a human-gate when a run stops for review. To ask about that result in chat, reply-quote the schedule message. Run history stays on the task (`scheduled_task_runs` and the portal task page). A task opened from the portal is stored as user `web` and platform `portal`; the Telegram notify still goes to the allowlisted chat id on the row, sent by the row's `bot_id`. There is no approval gate before the run. The portal Tasks page lists every configured bot in one table (with a bot column) and can create or move a task onto another configured bot. A new task stays on the shim bot when the picker is left alone. A bot whose allowlist does not include the portal owner's Telegram id is still listed and cannot be chosen for Telegram delivery. `list_scheduled_tasks` in a bot's chat still shows only that bot. Disable and delete in that chat affect only that bot. An approval reply is not sent on a bot that did not own the run. Rows saved before `bot_id` existed are assigned to `default` and logged, not dropped. When both `default` and `main` are configured, those `default` rows stay on `default` and show up in the portal list.
 
 ```toml
 [[bots]]
@@ -131,7 +131,7 @@ bot_token = "secret:bot.researcher.token"
 allowed_user_ids = [123456789]
 persona = "researcher"
 # A cron created in this bot's chat is stored as bot_id = "researcher".
-# It does not appear in the portal (the default bot) or in another bot's list.
+# The portal task list shows it with bot researcher. Another bot's chat list does not.
 ```
 
 ### Peer invoke + slash commands

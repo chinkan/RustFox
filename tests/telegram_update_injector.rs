@@ -578,6 +578,145 @@ impl rustfox::provider::Provider for HoldReply {
     }
 }
 
+const SUBAGENT_RAN: &str = "subagent-ran.txt";
+
+/// Main turn calls `spawn_agents` or `invoke_agent`. The child calls
+/// `execute_command`, which writes [`SUBAGENT_RAN`] in the sandbox.
+struct SubagentCommandScript {
+    config: rustfox::provider::ProviderConfig,
+    step: AtomicUsize,
+    first_tool: &'static str,
+    first_args: &'static str,
+}
+
+impl SubagentCommandScript {
+    fn spawn() -> Self {
+        Self::new(
+            "spawn_agents",
+            r#"{"system_prompt":"run the command","prompt":"run it","tools":["execute_command"]}"#,
+        )
+    }
+
+    fn invoke() -> Self {
+        Self::new(
+            "invoke_agent",
+            r#"{"agent":"researcher","prompt":"run it","tools":["execute_command"]}"#,
+        )
+    }
+
+    fn new(first_tool: &'static str, first_args: &'static str) -> Self {
+        Self {
+            config: rustfox::provider::ProviderConfig {
+                name: "fixture".into(),
+                provider_type: rustfox::config::ProviderType::OpenRouter,
+                base_url: "http://fixture.invalid/v1".into(),
+                api_key: None,
+                default_model: "stub".into(),
+                supports_vision: false,
+                max_tokens: 256,
+                discover_models: false,
+                context_window: 4096,
+                context_window_cache: Arc::new(tokio::sync::RwLock::new(None)),
+                parse_retry_limit: 0,
+                rate_limit_retry_limit: 0,
+                extra_headers: vec![],
+            },
+            step: AtomicUsize::new(0),
+            first_tool,
+            first_args,
+        }
+    }
+
+    fn into_registry(self) -> rustfox::provider::ProviderRegistry {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "fixture".to_string(),
+            Arc::new(self) as Arc<dyn rustfox::provider::Provider>,
+        );
+        rustfox::provider::ProviderRegistry::new(providers, "fixture".into())
+    }
+}
+
+fn scripted_tool_call(name: &str, arguments: &str) -> rustfox::llm::ChatMessage {
+    rustfox::llm::ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        tool_calls: Some(vec![rustfox::llm::ToolCall {
+            id: format!("call_{name}"),
+            call_type: "function".into(),
+            function: rustfox::llm::FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }]),
+        tool_call_id: None,
+        reasoning_content: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl rustfox::provider::Provider for SubagentCommandScript {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn default_model(&self) -> &str {
+        &self.config.default_model
+    }
+    fn supports_vision(&self) -> bool {
+        self.config.supports_vision
+    }
+    fn config(&self) -> &rustfox::provider::ProviderConfig {
+        &self.config
+    }
+
+    async fn chat_completion(
+        &self,
+        _client: &reqwest::Client,
+        _messages: &[rustfox::llm::ChatMessage],
+        _tools: &[rustfox::llm::ToolDefinition],
+        model: &str,
+        _max_tokens: u32,
+    ) -> anyhow::Result<rustfox::llm::ChatCompletion> {
+        let n = self.step.fetch_add(1, Ordering::SeqCst);
+        let (message, finish) = if n == 0 {
+            (
+                scripted_tool_call(self.first_tool, self.first_args),
+                "tool_calls",
+            )
+        } else if n == 1 {
+            (
+                scripted_tool_call(
+                    "execute_command",
+                    &format!(r#"{{"command":"touch {SUBAGENT_RAN}"}}"#),
+                ),
+                "tool_calls",
+            )
+        } else {
+            (
+                rustfox::llm::ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(rustfox::llm::MessageContent::from_text(
+                        TOOL_TURN_REPLY.to_string(),
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                "stop",
+            )
+        };
+        Ok(rustfox::llm::ChatCompletion {
+            message,
+            finish_reason: Some(finish.into()),
+            model: model.to_string(),
+        })
+    }
+
+    async fn list_models(&self, _client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+        Ok(vec![self.config.default_model.clone()])
+    }
+}
+
 fn is_tool_progress(text: &str) -> bool {
     text.contains("Working")
         || text.contains("Running:")
@@ -1669,6 +1808,146 @@ async fn fully_silent_max_iterations_still_sends_the_sentence() {
         progress.is_empty(),
         "fully_silent must still hide tool and Thinking bubbles; got {progress:?}"
     );
+}
+
+async fn drive_subagent_command(
+    fully_silent: bool,
+    stored_mode: Option<&str>,
+    script: SubagentCommandScript,
+) -> HandleMessageHarness {
+    let registry = Arc::new(script.into_registry());
+    let h = HandleMessageHarness::tool_turn_registry(fully_silent, 4, registry).await;
+    if let Some(mode) = stored_mode {
+        remember_tool_ui_mode(&h.agent, mode).await;
+    }
+    drive_tool_turn(&h, "main").await;
+    h
+}
+
+fn assert_subagent_command_ran(agent: &Agent) {
+    let marker = agent.config.sandbox.allowed_directory.join(SUBAGENT_RAN);
+    assert!(
+        marker.is_file(),
+        "subagent execute_command must run; missing {}",
+        marker.display()
+    );
+}
+
+async fn assert_no_cancel_button(api: &MockTelegramApi) {
+    let requests = api.server.received_requests().await.unwrap_or_default();
+    for req in &requests {
+        let body = String::from_utf8_lossy(&req.body);
+        assert!(
+            !body.contains("cancel_cmd:"),
+            "must not post a command cancel button; path={} body={body}",
+            req.url.path()
+        );
+    }
+}
+
+async fn assert_silent_subagent_command_ui(h: &HandleMessageHarness) {
+    assert_subagent_command_ran(&h.agent);
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_no_tool_ui(&sent, &deleted);
+    assert_no_cancel_button(&h.api).await;
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_typing_chat_action_allowed(&h.api).await;
+    assert_eyes_set_then_cleared(&h.api.reactions_snapshot(), 22);
+    assert_clear_follows_text(&h.api, 22, TOOL_TURN_REPLY).await;
+}
+
+fn assert_minimal_subagent_command_ui(sent: &[(i32, String)], deleted: &[i32]) {
+    let running: Vec<i32> = sent
+        .iter()
+        .filter(|(_, text)| text.contains("⏳ Running:"))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(
+        !running.is_empty(),
+        "Minimal and Verbose speaking turns keep today's subagent Minimal hardcode; sent={sent:?}"
+    );
+    for id in &running {
+        assert!(
+            deleted.contains(id),
+            "Minimal subagent Running bubble {id} must be deleted; deleted={deleted:?}"
+        );
+    }
+    assert!(
+        sent.iter().all(|(_, text)| !text.contains("💻 Running:")),
+        "subagent must not inherit Verbose command UI; sent={sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn per_chat_silent_spawn_agents_posts_no_command_ui() {
+    let h = drive_subagent_command(false, Some("silent"), SubagentCommandScript::spawn()).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    assert_silent_subagent_command_ui(&h).await;
+}
+
+#[tokio::test]
+async fn per_chat_silent_invoke_agent_posts_no_command_ui() {
+    let h = drive_subagent_command(false, Some("silent"), SubagentCommandScript::invoke()).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    assert_silent_subagent_command_ui(&h).await;
+}
+
+#[tokio::test]
+async fn fully_silent_subagent_ignores_stored_verbose() {
+    let h = drive_subagent_command(true, Some("verbose"), SubagentCommandScript::spawn()).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("verbose"));
+    assert_silent_subagent_command_ui(&h).await;
+}
+
+#[tokio::test]
+async fn fully_silent_subagent_ignores_stored_minimal() {
+    let h = drive_subagent_command(true, Some("minimal"), SubagentCommandScript::invoke()).await;
+    assert!(h.agent.config.bot_fully_silent("main"));
+    let stored = h
+        .agent
+        .memory
+        .recall("settings", &format!("tool_ui_mode_{ALLOWED}"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("minimal"));
+    assert_silent_subagent_command_ui(&h).await;
+}
+
+#[tokio::test]
+async fn minimal_turn_subagent_command_ui_stays_minimal() {
+    let h = drive_subagent_command(false, Some("minimal"), SubagentCommandScript::spawn()).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    assert_subagent_command_ran(&h.agent);
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_minimal_subagent_command_ui(&sent, &deleted);
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_no_eyes(&h.api.reactions_snapshot(), 22);
+}
+
+#[tokio::test]
+async fn verbose_turn_subagent_command_ui_stays_minimal() {
+    let h = drive_subagent_command(false, Some("verbose"), SubagentCommandScript::invoke()).await;
+    assert!(!h.agent.config.bot_fully_silent("main"));
+    assert_subagent_command_ran(&h.agent);
+    let sent = h.api.sent_snapshot();
+    let deleted = h.api.deleted_snapshot();
+    assert_minimal_subagent_command_ui(&sent, &deleted);
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Working") || text.contains("Tool activity")),
+        "Verbose main-turn tool UI stays; sent={sent:?}"
+    );
+    assert_final_text_posted(&sent, &deleted, TOOL_TURN_REPLY);
+    assert_no_eyes(&h.api.reactions_snapshot(), 22);
 }
 
 #[tokio::test]
