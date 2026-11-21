@@ -125,7 +125,11 @@ pub async fn get_settings(State(state): State<PortalState>) -> Result<Json<Value
         },
         "masked": {
             "telegramBotToken": mask_secret(&cfg.telegram.bot_token),
-            "openrouterApiKey": mask_secret(&cfg.openrouter.api_key),
+            "openrouterApiKey": if cfg.openrouter.api_key.trim().is_empty() {
+                "(empty)".to_string()
+            } else {
+                mask_secret(&cfg.openrouter.api_key)
+            },
             "xaiApiKey": cfg
                 .provider
                 .iter()
