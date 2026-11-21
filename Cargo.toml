@@ -156,3 +156,10 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 
+# Issue #415: strip symbols, then fat LTO and one codegen unit.
+# opt-level stays 3 and panic stays unwind.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
