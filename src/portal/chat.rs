@@ -328,17 +328,22 @@ pub async fn create_thread(
 }
 
 fn empty_json_body(body: &[u8]) -> Result<bool, PortalError> {
-    if std::str::from_utf8(body).unwrap_or("").trim().is_empty() {
-        return Ok(true);
-    }
-    match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(value) if value.as_object().is_some_and(|obj| obj.is_empty()) => Ok(true),
-        Ok(_) => Ok(false),
-        Err(_) => Err(PortalError::bad_request(
+    let Ok(text) = std::str::from_utf8(body) else {
+        return Err(PortalError::bad_request(
             "invalid_body",
             "Expected a JSON object",
-        )),
+        ));
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(true);
     }
+    // Accept `{}` and whitespace-only interiors (`{ }`, `{\n}`) without
+    // deserializing the body as `serde_json::Value`.
+    let Some(inner) = text.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Ok(false);
+    };
+    Ok(inner.chars().all(char::is_whitespace))
 }
 
 fn history_body(conv_id: &str, messages: &[crate::llm::ChatMessage]) -> serde_json::Value {
@@ -371,4 +376,31 @@ fn stored_updated_at(stored: &str) -> String {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         })
         .unwrap_or_else(|_| stored.to_string())
+}
+
+#[cfg(test)]
+mod empty_json_body_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_empty_and_empty_object() {
+        assert!(empty_json_body(b"").unwrap());
+        assert!(empty_json_body(b"  \n").unwrap());
+        assert!(empty_json_body(b"{}").unwrap());
+        assert!(empty_json_body(b"  {\n}  ").unwrap());
+    }
+
+    #[test]
+    fn rejects_non_empty_payloads() {
+        assert!(!empty_json_body(b"{\"a\":1}").unwrap());
+        assert!(!empty_json_body(b"[]").unwrap());
+        assert!(!empty_json_body(b"null").unwrap());
+        assert!(!empty_json_body(b"{").unwrap());
+    }
+
+    #[test]
+    fn invalid_utf8_is_bad_request() {
+        let err = empty_json_body(&[0xff]).unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    }
 }
