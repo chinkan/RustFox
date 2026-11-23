@@ -67,6 +67,8 @@ pub struct Config {
     /// `[telegram]`. Prefer this over `telegram` for new multi-bot code.
     #[serde(default)]
     pub bots: Vec<BotConfig>,
+    /// Legacy OpenRouter table. Optional when another provider is Active (#432).
+    #[serde(default)]
     pub openrouter: OpenRouterConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
@@ -365,6 +367,7 @@ pub fn telegram_api_base_url(configured: Option<&str>) -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpenRouterConfig {
+    #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
@@ -385,6 +388,20 @@ pub struct OpenRouterConfig {
     /// When false, OCR is used to extract text from images.
     #[serde(default)]
     pub supports_vision: bool,
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            model: default_model(),
+            base_url: default_base_url(),
+            max_tokens: default_max_tokens(),
+            system_prompt: default_system_prompt(),
+            system_prompt_file: None,
+            supports_vision: false,
+        }
+    }
 }
 
 /// Which layer supplied the effective system prompt (ADR 0011 R7).
@@ -1322,13 +1339,16 @@ impl Config {
     pub fn build_providers(&self) -> Result<(Vec<ProviderSection>, String, Vec<String>)> {
         let mut providers: Vec<ProviderSection> = self.provider.clone();
 
-        // Backward compat: if [openrouter] section exists and no explicit provider named "openrouter"
+        // Backward compat: synthesize legacy [openrouter] unless an explicit
+        // provider is already named "openrouter", or the legacy key is empty
+        // and another provider exists (#432).
+        let legacy_key_empty = self.openrouter.api_key.trim().is_empty();
         let has_openrouter = providers.iter().any(|p| p.name == "openrouter");
         if has_openrouter {
             tracing::warn!(
                 "Both [[provider]] name=\"openrouter\" and [openrouter] configured — explicit [[provider]] entry takes precedence"
             );
-        } else {
+        } else if !legacy_key_empty || providers.is_empty() {
             providers.push(ProviderSection {
                 name: "openrouter".to_string(),
                 provider_type: ProviderType::OpenRouter,
@@ -1346,6 +1366,10 @@ impl Config {
             Some(name) if !name.is_empty() => {
                 if providers.iter().any(|p| p.name == name) {
                     name.to_string()
+                } else if name == "openrouter" && legacy_key_empty {
+                    anyhow::bail!(
+                        "Active provider is openrouter but [openrouter].api_key is empty"
+                    );
                 } else {
                     let known: Vec<_> = providers.iter().map(|p| p.name.as_str()).collect();
                     anyhow::bail!(
@@ -1377,6 +1401,16 @@ impl Config {
 
         // ADR-0043 / #267: OpenCode as Active only when Go peer path is configured.
         if let Some(section) = providers.iter().find(|p| p.name == default) {
+            if section.name == "openrouter"
+                && section
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+            {
+                anyhow::bail!("Active provider is openrouter but [openrouter].api_key is empty");
+            }
             if section.provider_type == ProviderType::OpenCode
                 && !crate::opencode::peer_configured(&section.base_url, section.api_key.as_deref())
             {
@@ -2875,6 +2909,163 @@ default_provider = "xai"
         assert_eq!(xai.base_url, crate::xai::DEFAULT_BASE);
         assert_eq!(xai.model, "grok-4.7");
         assert_eq!(xai.api_key.as_deref(), Some("sk-xai-test"));
+    }
+
+    #[test]
+    fn opencode_active_without_openrouter_table_boots() {
+        let toml = r#"
+            default_provider = "opencode"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [[provider]]
+            name = "opencode"
+            type = "opencode"
+            base_url = "https://opencode.ai/inference/go/openai/v1"
+            api_key = "sk-go"
+            model = "deepseek-v4.1-flash"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("missing [openrouter] must parse");
+        assert_eq!(cfg.default_provider.as_deref(), Some("opencode"));
+        assert!(cfg.openrouter.api_key.is_empty());
+        assert_eq!(cfg.openrouter.model, default_model());
+        assert_eq!(cfg.openrouter.base_url, default_base_url());
+        assert_eq!(cfg.openrouter.max_tokens, default_max_tokens());
+        assert_eq!(cfg.system_prompt_source(), SystemPromptSource::Builtin);
+        assert!(cfg.openrouter.system_prompt_file.is_none());
+        let (providers, default_name, _) = cfg.build_providers().expect("opencode Active boots");
+        assert_eq!(default_name, "opencode");
+        assert!(
+            providers.iter().all(|p| p.name != "openrouter"),
+            "empty legacy key must not synthesize an unusable openrouter provider"
+        );
+    }
+
+    #[test]
+    fn ollama_only_without_openrouter_table_boots() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://127.0.0.1:11434/v1"
+            model = "llama3.2:latest"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("missing [openrouter] must parse");
+        assert!(cfg.default_provider.is_none());
+        assert!(cfg.openrouter.api_key.is_empty());
+        let (providers, default_name, _) = cfg.build_providers().expect("ollama-only boots");
+        assert_eq!(default_name, "ollama");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "ollama");
+    }
+
+    #[test]
+    fn openrouter_active_without_api_key_names_the_key() {
+        let toml = r#"
+            default_provider = "openrouter"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [[provider]]
+            name = "ollama"
+            type = "ollama"
+            base_url = "http://127.0.0.1:11434/v1"
+            model = "llama3.2:latest"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let err = cfg.build_providers().unwrap_err().to_string();
+        assert!(
+            err.contains("[openrouter].api_key"),
+            "expected the missing key to be named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_providers_zero_without_api_key_names_the_key() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let err = cfg.build_providers().unwrap_err().to_string();
+        assert!(
+            err.contains("[openrouter].api_key"),
+            "providers[0] compat openrouter with no key must name it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn existing_openrouter_table_loads_unchanged() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "sk-existing"
+            model = "deepseek/deepseek-v4.1-flash"
+            base_url = "https://openrouter.ai/api/v1"
+            max_tokens = 2048
+            system_prompt = "Stay sharp."
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.openrouter.api_key, "sk-existing");
+        assert_eq!(cfg.openrouter.model, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(cfg.openrouter.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(cfg.openrouter.max_tokens, 2048);
+        assert_eq!(cfg.openrouter.system_prompt, "Stay sharp.");
+        assert_eq!(cfg.system_prompt_source(), SystemPromptSource::Inline);
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "openrouter");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "openrouter");
+        assert_eq!(providers[0].api_key.as_deref(), Some("sk-existing"));
+        assert_eq!(providers[0].model, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(providers[0].max_tokens, 2048);
+    }
+
+    #[test]
+    fn secret_openrouter_api_key_ref_still_boots() {
+        let toml = r#"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [openrouter]
+            api_key = "secret:openrouter.api_key"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.openrouter.api_key, "secret:openrouter.api_key");
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "openrouter");
+        assert_eq!(
+            providers[0].api_key.as_deref(),
+            Some("secret:openrouter.api_key")
+        );
+    }
+
+    #[test]
+    fn explicit_openrouter_provider_without_legacy_table_boots() {
+        let toml = r#"
+            default_provider = "openrouter"
+            [telegram]
+            bot_token = "tok"
+            allowed_user_ids = [1]
+            [[provider]]
+            name = "openrouter"
+            type = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = "sk-explicit"
+            model = "openai/gpt-4o"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (providers, default_name, _) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "openrouter");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].api_key.as_deref(), Some("sk-explicit"));
+        assert_eq!(providers[0].model, "openai/gpt-4o");
     }
 
     #[test]

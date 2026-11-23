@@ -360,8 +360,6 @@ pub fn render_config(answers: &ThinAnswers) -> Result<String> {
                 "provider".into(),
                 toml::Value::Array(vec![toml::Value::Table(provider)]),
             );
-            // Schema requires [openrouter]. The key is unused on this path.
-            openrouter.insert("api_key".into(), toml::Value::String(String::new()));
         }
     }
     openrouter.insert(
