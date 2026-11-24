@@ -428,8 +428,22 @@ Be concise and helpful."""
 # not recommended. This server does not speak TLS — terminate TLS on an
 # external reverse proxy.
 #
+# LAN discovery (DNS-SD `_rustfox-device._tcp`) is off until `enabled = true`.
+# `mdns` absent means on. `mdns = false` skips the in-process advertisement.
+# `mdns_instance` is the instance name (default `rustfox`). Do not put a
+# device token, portal token, or other secret in the instance name.
+# These keys are not Portal Settings fields.
+#
+# The advertisement does not change `portal.bind`. A loopback bind is not
+# advertised and is not reachable from a board. Use `0.0.0.0` or the LAN
+# IPv4. Inside WSL, rustfox does not advertise (portproxy does not carry
+# multicast); run the Windows `rustfox-mdns` sidecar. See
+# docs/wsl-device-ws.md.
+#
 # [device_ws]
 # enabled = false
+# mdns = true
+# mdns_instance = "rustfox"
 
 # ── Telegram voice notes (ADR-0058) ──────────────────────────────────────────
 # Primary STT is local SenseVoice (sherpa-onnx), Cantonese (`yue`).

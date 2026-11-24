@@ -12,6 +12,7 @@ pub mod config;
 pub mod config_edit;
 pub mod conversation;
 pub mod device_audio;
+pub mod device_mdns;
 pub mod device_ws;
 pub mod event_trigger;
 pub mod fallback_edit;

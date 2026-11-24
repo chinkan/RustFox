@@ -46,12 +46,17 @@ RustFox reads `config.toml` on startup. Copy [`config.example.toml`](../config.e
 | `[langsmith]` | `api_key` | LangSmith API key for LLM observability | — |
 | `[learning]` | `skill_extraction_enabled` | Post-task skill extraction | `false` |
 | `[supervisor]` | `default_autonomy_mode` | Workflow mode: `fast`, `standard`, `rigorous` | `standard` |
+| `[device_ws]` | `enabled` | JSON device WebSocket on the portal bind. Off means no socket and no mDNS | `false` |
+| | `mdns` | In-process `_rustfox-device._tcp` when Device WS is on. No effect inside WSL (use the Windows sidecar). Not a Portal Settings field | `true` |
+| | `mdns_instance` | DNS-SD instance name. No token or other secret | `rustfox` |
 | `[voice]` | `enabled` | Master gate for Telegram STT and TTS. Absent means on | `true` |
 | | `engine` | Telegram voice-note STT. Only `sensevoice` | `sensevoice` |
 | | `languages` | SenseVoice selection (`yue`, `zh`, `en`, `ja`, `ko`). One id, or `auto` when two or more. Default yue+en | `yue`, `en` |
 | | `language` | Legacy single id, used only when `languages` is absent | — |
 | | `openrouter_stt` | Opt-in OpenRouter transcription. Off means no cloud audio. Not a Settings field | `false` |
 | | `tts` | Spoken copy of a voice-origin reply when the language is yue or en. Text is still sent. Typed chat stays text | `false` |
+
+Device WS on the LAN (portal bind, WSL portproxy, the Public firewall profile, and the Windows `rustfox-mdns` sidecar) is [wsl-device-ws.md](wsl-device-ws.md). macOS and native Linux advertise in-process and still need `portal.bind` to be `0.0.0.0` or the LAN IPv4.
 
 > Persistent home: All paths resolve relative to `~/.rustfox` by default.
 > Override with `RUSTFOX_HOME` env or `[general].home`.

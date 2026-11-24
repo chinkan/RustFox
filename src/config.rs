@@ -293,11 +293,40 @@ impl Default for PortalConfig {
 /// and the portal UI is off, the process still binds that address and serves
 /// only the device API. Bare public HTTP is not a supported deployment; put
 /// TLS on a reverse proxy and keep the listener on loopback, Tailscale, or a LAN.
-#[derive(Debug, Deserialize, Clone, Default)]
+///
+/// `mdns` and `mdns_instance` are config-file keys. They are not Portal Settings
+/// fields. Advertising does not change this process's bind.
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct DeviceWsConfig {
     /// Master switch. The socket is not mounted when false.
     pub enabled: bool,
+    /// In-process DNS-SD (`_rustfox-device._tcp`). Absent means on.
+    /// `false` does not advertise. Inside WSL the process never advertises;
+    /// the Windows sidecar does. See `docs/wsl-device-ws.md`.
+    #[serde(default = "default_device_ws_mdns")]
+    pub mdns: bool,
+    /// DNS-SD instance name. Default `rustfox`. Not a place for a token.
+    #[serde(default = "default_device_ws_mdns_instance")]
+    pub mdns_instance: String,
+}
+
+fn default_device_ws_mdns() -> bool {
+    true
+}
+
+fn default_device_ws_mdns_instance() -> String {
+    "rustfox".to_string()
+}
+
+impl Default for DeviceWsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mdns: default_device_ws_mdns(),
+            mdns_instance: default_device_ws_mdns_instance(),
+        }
+    }
 }
 
 /// Legacy `[telegram]` section (single-bot installs).

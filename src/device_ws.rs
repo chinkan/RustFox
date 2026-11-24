@@ -24,6 +24,8 @@
 //!
 //! Network: loopback, Tailscale, or a trusted LAN. Bare public HTTP is not
 //! a supported deployment. TLS belongs on an external reverse proxy.
+//! LAN DNS-SD is `device_mdns` (`docs/wsl-device-ws.md`). It does not change
+//! this bind, and it does not put a device token in the advertisement.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
