@@ -302,6 +302,19 @@ pub fn log_envelope_if_interesting(provider: &str, status: reqwest::StatusCode, 
     }
 }
 
+/// Authorization value for an API key. A literal `secret:` ref is refused
+/// (`LlmPreHttpError`) and is never placed on the wire (#438).
+fn bearer_header(api_key: &str, provider_name: &str) -> Result<String> {
+    if crate::secret_store::is_secret_ref(api_key) {
+        return Err(anyhow::Error::from(LlmPreHttpError {
+            message: format!(
+                "refusing to send unresolved secret ref as Bearer for provider '{provider_name}'"
+            ),
+        }));
+    }
+    Ok(format!("Bearer {}", api_key))
+}
+
 /// Internal helper: send a chat completion request with retry logic for
 /// missing/empty `choices` field. Returns the first valid `Choice` on success.
 ///
@@ -330,7 +343,7 @@ async fn chat_completion_with_retry(
     while attempt < max_total {
         let mut req = client.post(url).json(request);
         if let Some(key) = api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            req = req.header("Authorization", bearer_header(key, provider_name)?);
         }
         for (name, value) in &config.extra_headers {
             req = req.header(name.as_str(), value.as_str());
@@ -928,7 +941,7 @@ impl Provider for OpenRouterProvider {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            req = req.header("Authorization", bearer_header(key, &self.config.name)?);
         }
         let response = req
             .send()
@@ -955,7 +968,8 @@ impl Provider for OpenRouterProvider {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            let header = bearer_header(key, &self.config.name).ok()?;
+            req = req.header("Authorization", header);
         }
         let response = req.send().await.ok()?;
         if !response.status().is_success() {
@@ -1052,7 +1066,7 @@ impl Provider for OpenAICompatibleProvider {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            req = req.header("Authorization", bearer_header(key, &self.config.name)?);
         }
         let response = req
             .send()
@@ -1084,7 +1098,8 @@ impl Provider for OpenAICompatibleProvider {
         let url = format!("{}/models", self.config.base_url);
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            let header = bearer_header(key, &self.config.name).ok()?;
+            req = req.header("Authorization", header);
         }
         let response = req.send().await.ok()?;
         if !response.status().is_success() {
@@ -1163,7 +1178,7 @@ impl Provider for OllamaProvider {
         let url = self.discovery_url();
         let mut req = client.get(&url);
         if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            req = req.header("Authorization", bearer_header(key, &self.config.name)?);
         }
         let response = req
             .send()
@@ -1341,7 +1356,7 @@ impl Provider for OpenCodeProvider {
             let url = crate::opencode::go_models_url(&self.config.base_url);
             let mut req = client.get(&url);
             if let Some(ref key) = self.config.api_key {
-                req = req.header("Authorization", format!("Bearer {}", key));
+                req = req.header("Authorization", bearer_header(key, &self.config.name)?);
             }
             for (name, value) in &self.config.extra_headers {
                 req = req.header(name.as_str(), value.as_str());
