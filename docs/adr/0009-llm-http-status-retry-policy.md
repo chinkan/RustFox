@@ -34,6 +34,10 @@
 - **Retry on all non-2xx:** would hammer auth/config errors (401/400) that can never succeed on resend.
 - **Ignore header, fixed exponential only:** OpenRouter sends `Retry-After`; ignoring it wastes time or collides on short windows.
 
+## Amended — 2026-11-25 (#438)
+
+OpenCode Go plain 429 stays on Go and uses this same-model retry. It does not walk `[fallback] chain`. Walk that peer only on HTTP 402 or a quota-class 429 (`GoUsageLimitError` / policy+budget), per ADR-0043. This note does not reopen 401/403 hopping. Other providers keep the retry classes above. Related to #438.
+
 ## Tests
 
 `src/provider.rs` wiremock matrix (tokio `start_paused`, request-count via scripted `AtomicUsize` responder): 429→200; always-429 exhausts budget (3 requests); `Retry-After: 1` honoured; 400 fails fast (1 request); 503→200; missing-choices path unchanged; `limit=0` fail-fast; mixed 429+missing-choices independence; `parse_retry_after` unit cases (seconds/date/garbage/negative); backoff cap at 60 s. Config default/override tests in `src/config.rs`.

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-19
+- **Amended:** 2026-11-25 (#438, Asia/Hong_Kong) — fallback Ollama keeps tools first; this ADR’s primary omit-retry is unchanged
 - **Target release:** v1.0.7+ (does not block v1.0.6)
 - **Depends on:** ADR-0032 (primary Ollama keep-tools; #213 / #216), ADR-0029 (fallback → tool-weak rewrite+omit; #203 / #218 / #220)
 - **Issue:** #226
@@ -49,6 +50,8 @@ below. Separate from #223 / #225 — do not expand those issues.
    chain unchanged. Tool-weak Ollama on that walk remains ADR-0029
    rewrite+omit.
 
+   **Amended 2026-11-25 (#438):** primary keep-tools and this one primary omit-retry are unchanged. Fallback onto Ollama is no longer omit-first. ADR-0029 Amendment (#438) tries the same work first (keep tools; plain user message). Rewrite+omit is recovery only, after keep-tools fails with no user query found (or equivalent), or the model has no tool interface. After that keep-tools 500: one omit-retry on the same fallback model (this ADR’s one-shot shape), then the next chain entry. The “rewrite+omit” sentence above, and the non-goal that freezes fallback omit-tools, are superseded for the fallback walk. Related to #438.
+
 4. **Journal WARN** when this primary rewrite+omit retry runs (so ops can see
    it; do not silently swallow).
 
@@ -59,7 +62,8 @@ below. Separate from #223 / #225 — do not expand those issues.
 
 - Replacing or weakening ADR-0032 first-pass keep-tools on primary.
 - Changing ADR-0029 fallback rewrite / omit-tools for chain walks onto
-  tool-weak Ollama.
+  tool-weak Ollama. **Superseded for the fallback walk 2026-11-25 (#438).**
+  See Decision 3.
 - Expanding #225 / #223 (agent Active resolution, mid-flight scope).
 - Dual-PID / shared Telegram token hygiene.
 - Blocking v1.0.6 tagging (Kan-owned). No tag from this issue.

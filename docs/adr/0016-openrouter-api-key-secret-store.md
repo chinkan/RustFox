@@ -15,6 +15,7 @@ BotFather tokens already use `secret:NAME` in config and SecretStore (seal on wi
 - Startup migrate+scrub: if `[openrouter].api_key` is plaintext, store it (`set_verified`), replace with the secret ref, persist via the shared config write path (`.bak` safety net), matching bot-token migrate.
 - Resolve the ref wherever `[openrouter].api_key` is read for LLM calls (including the legacy provider copy from that field). Reuse / generalize `parse_secret_ref` and seal helpers from `secret_store/bot_token.rs` rather than a one-off path.
 - **Out of scope this ADR:** `[embedding].api_key` and other `[[provider]].api_key` values stay as they are (may remain plaintext). Document that deliberately; a later requirement can seal them.
+- **Amended 2026-11-25 (#438, Asia/Hong_Kong):** `secret:` / Portal-saved keys also resolve on `[[provider]] type=openrouter`. Close secret resolve for every `[[provider]]` type that documents `secret:` keys, not only xAI and this legacy `[openrouter]` table. A literal `secret:` value must never be sent as Bearer. Keys this ADR left as plaintext may stay plaintext. Related to #438. See ADR-0043 Decision — Fallback full work parity.
 - GUIDE / example config: show the secret ref, never echo key material in `/config` or chat.
 
 ## Consequences

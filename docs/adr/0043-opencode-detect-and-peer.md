@@ -2,11 +2,12 @@
 
 - **Status:** Accepted (Direction D Active peer: OpenCode Go cloud OpenAI-compat; Phase 1 detect-only remains for unconfigured peer; #267 ships D; #271 amends Go session header; #277 / #279 ship continuity SoT + anti cold-intro; #280 / #282 ship matcher widen W1 ∪ W2; #283 amends W2 cold-intro phrase widen)
 - **Date:** 2026-10-24
+- **Amended:** 2026-11-25 (#438, Asia/Hong_Kong) — fallback full work parity; #433 residual (a configured `openrouter/…` chain entry is not a silent skip)
 - **Amends / supersedes:** prior Direction **C** (delegate) on this same ADR (commit `9bdceb1` / filename `0043-opencode-detect-and-delegate.md`). Product HOLD + grill R3 parks C; target is peer Active + RustFox tools.
 - **Target release:** post-v1.0.7 / TBD (v1.0.7 tag is Kan-owned; this ADR does not ship a tag)
 - **Depends on:** ADR-0025 (sandbox confinement — required for any peer Active / tool-loop ship that runs OpenCode-side work under confinement)
 - **Related:** #259 (Phase 1 detect-only), #267 (D Active peer), #271 / #272 (`x-opencode-session`), #277 / #279 (continuity SoT + anti cold-intro shipped), #280 / #282 (matcher widen W1 ∪ W2 shipped), #283 (W2+ phrase widen; this docs PR Refs; later impl PR Closes), ADR-0033 (Active vs provider model), ADR-0035 (`default_provider` / Active persist)
-- **Issue:** #259 (Phase 1); #277 / #279 (anti cold-intro shipped); #280 / #282 (matcher widen shipped); #283 (W2 phrase widen amend)
+- **Issue:** #259 (Phase 1); #277 / #279 (anti cold-intro shipped); #280 / #282 (matcher widen shipped); #283 (W2 phrase widen amend); #438 (fallback full work parity — this docs amend is Related, not Closes)
 
 ## Context
 
@@ -87,6 +88,50 @@ Product locks after live false-negative on tip `9f58afb` (grill / #283). Amend i
 
 5. **Out of scope / park (explicit):** `agent.max_iterations`, OpenCode `context_window` / prepare compaction, history inject, session persist, Leave-Go, MissingSessionID, mid-tool draft persist, long-turn focus loss, #194 / #202, and any release tag — out of this amend’s MUST. Soft QA/QA2 only after later impl gates; never the operator main Telegram identity / home config.
 
+## Decision — Fallback full work parity (#438)
+
+Product lock (2026-11-25, Asia/Hong_Kong). **P1 / v1.0.10 Must.** Amend in place. Related to #438. This docs slice does not implement runtime, tests, or config behavior, and does not merge or tag. The same lock is ADR-0029 Amendment (#438). Direction §7 leave-Go triggers stay: plain short 429 does not leave; HTTP 402 or a quota-class 429 does. This decision locks reachability and work parity on that walk, and the #433 residual below.
+
+This supersedes the #218 / #220 omit-tools-first fallback lock in ADR-0029. It does not reopen 401/403 hopping.
+
+1. **Full work parity** between main and fallback for a turn: same tools (MCP, schedule, sandbox, spawn), same system/soul, same memory/history, same tool-loop, first turn and mid-loop, main chat and agent/subagent invoke.
+
+2. **OpenCode→OpenRouter** (and any other configured chain entry) must be reachable when that backup is configured: the provider must be registered; `secret:` / Portal-saved keys resolve on both `[openrouter]` and `[[provider]] type=openrouter`; a successful leave-Go / 402 / quota walk sends tools, not text-only. If the backup is missing, fail in an operator-visible way that names it; no silent skip. A literal `secret:` value must never be sent as Bearer. Close secret resolve for every `[[provider]]` type that documents `secret:` keys, not only xAI and the legacy `[openrouter]` table.
+
+3. **Local/Ollama fallback:** try the same work first (keep tools; guarantee a plain user message). Rewrite+omit is recovery only, after keep-tools fails with no user query found (or equivalent), or the model has no tool interface. After that keep-tools 500: one ADR-0034-style omit-retry on the same fallback model, then the next chain entry.
+
+4. **Plain OpenCode 429:** keep leave-Go (stay on Go, ADR-0009 retry). Walk only on 402 or quota-class 429 (`GoUsageLimitError` / policy+budget).
+
+5. **Vision/audio parts the fallback cannot accept:** skip that chain entry; if none can, fail clearly. Do not silently strip and answer as text.
+
+**Out of scope**
+
+- Models that cannot call tools pretending to
+- Equal quality, speed, context, or `max_tokens` (use each provider’s cap; do not shrink tools to fit)
+- Voice STT/TTS cloud fallback (#349)
+- Embeddings, image-gen, or OpenRouter `models:[]` routing
+- 401/403 hop on a correctly resolved bad key
+- Changing Silent / tool-UI policy
+- mDNS, tag, or flash
+
+**Regression:** Detect-only OpenCode / misconfigured xAI still do not silent-hop. Decision §6 and Direction item 7’s “not a silent hop from detect-only” stay.
+
+**Tests** (acceptance for the implementation issue; this docs PR does not write them):
+
+- Replace the `fallback_ollama_first_turn_with_tools_rewrites_and_omits_tools` omit-first lock.
+- Add leave-Go → registered OpenRouter with tools.
+- Add secret-ref resolve on `type=openrouter`.
+
+### Residual on tip `af0a8161` (#433 and call-time skip)
+
+Independently verified on live main `af0a81617f0931a300beb8a61e90695092e462ce` (parent `cff2878e`, after #433). These are the gaps this lock closes. They are not extra scope.
+
+1. After #433, an OpenCode-Active config with empty or absent `[openrouter]` does not synthesize an `openrouter` provider. A chain entry such as `openrouter/deepseek/deepseek-chat` is skipped at call time; boot only warns (`[fallback] chain entry … names unknown provider … it will be skipped at call time`). **Optional or empty `[openrouter]` must not silently skip a configured `openrouter/…` chain entry at call time.** When that backup is configured, the provider is registered and the walk can send tools. A missing backup is an operator-visible failure that names it. #432 / #433 still stand for boot: a config with no `[openrouter]` table parses, and Active OpenRouter with no key fails naming `[openrouter].api_key`. This amend does not require an unusable empty-key OpenRouter row when no chain entry names `openrouter`.
+
+2. `resolve_openrouter_api_key` only rewrites legacy `[openrouter].api_key`. `resolve_xai_api_keys` covers only `type=xai`. `[[provider]] type=openrouter` `secret:` is not resolved. An unresolved `secret:` can be sent as Bearer and typically 401s, which stops the rest of the chain. A literal `secret:` must never be sent as Bearer.
+
+3. `src/llm.rs` around lines 911–923 is still the #218 omit-tools-first path, including first turn with a plain user query, locked by `fallback_ollama_first_turn_with_tools_rewrites_and_omits_tools`.
+
 ## Direction
 
 **Direction = peer Active + RustFox tools.** Target: OpenCode Go DeepSeek as Active with the full RustFox tool loop. Direction **C** (delegate / peer_invoke-like) is **parked / not the goal**.
@@ -105,7 +150,7 @@ Product locks after live false-negative on tip `9f58afb` (grill / #283). Amend i
 
 6. **A never default:** A tool-less prompt / subprocess shim (**A**) is **never** the default path and **must not** ship as the default. If any experimental A path exists for research, it stays non-default and out of normal Active/chat selection.
 
-7. **Fallback (leave-Go; peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; leave-Go → fall back to **OpenRouter DeepSeek** when the Go response is **HTTP 402** (balance/credits) **OR** **HTTP 429** whose body indicates Go usage-limit / policy budget (`GoUsageLimitError`, `go_usage_limit`, or Policy+budget). Do **not** auto-fallback on a plain short 429 (rate-limit / retry). **`MissingSessionID` / HTTP 400 is NOT leave-Go** — fix the session header (#271); leave remains 402 or 429+GoUsageLimitError/Policy only. This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6).
+7. **Fallback (leave-Go; peer path):** After Active peer ships under D (not under Phase 1 detect-only): Active = OpenCode Go DeepSeek; leave-Go → fall back to **OpenRouter DeepSeek** when the Go response is **HTTP 402** (balance/credits) **OR** **HTTP 429** whose body indicates Go usage-limit / policy budget (`GoUsageLimitError`, `go_usage_limit`, or Policy+budget). Do **not** auto-fallback on a plain short 429 (rate-limit / retry). **`MissingSessionID` / HTTP 400 is NOT leave-Go** — fix the session header (#271); leave remains 402 or 429+GoUsageLimitError/Policy only. This is explicit peer-path fallback, not a silent hop from detect-only errors (see Decision §6). **Amended 2026-11-25 (#438):** a successful leave-Go / 402 / quota walk sends the same tools as the primary turn (full work parity, ADR-0029 Amendment #438). Optional or empty `[openrouter]` must not silently skip a configured `openrouter/…` entry. Plain OpenCode 429 stays on Go (ADR-0009 retry). See Decision — Fallback full work parity (#438).
 
 8. **Sandbox (ADR-0025):** Any ship that runs OpenCode-side work under confinement **MUST** meet ADR-0025 (or equivalent). If that cannot be met for the chosen chat path, do not ship that path.
 
@@ -141,8 +186,8 @@ Product locks after live false-negative on tip `9f58afb` (grill / #283). Amend i
 - Operators can see whether OpenCode is absent, missing creds, or ready with N models, without RustFox routing chat through it yet (Phase 1).
 - Product avoids a false “provider peer” that would drop RustFox tools via a tool-less shim (A never default; B opposed as peer).
 - **D is locked** to OpenCode Go cloud OpenAI-compat (`https://opencode.ai/inference/go` + `/openai/v1/chat/completions`); local serve/run ≠ D. Do not ship Active peer until Product re-gate; HOLD. F interim has no technical blocker. Open items (Go tools smoke, quota status, HK Privacy) do not block Phase 1 docs.
-- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271 / #272); MissingSessionID/400 is not leave-Go. The session header is opaque Go API state, not the transcript (#277).
-- Continuity for **all Active peers** is SQLite → `messages[]` via `ConversationManager` (OpenRouter parity). Anti cold-intro: with ≥1 prior user/assistant turn in continuity, the final reply must not be a capability cold-intro; mechanism = light prompt + structural final-reply guard (regenerate once; else short clarify, no menu) on the shared Active path (#277 / #279). Matcher = **W1 ∪ W2** (#280 / #282 / #283): greeting + ≥2 menu (help-offer not required) **or** lost-context signal + ≥2 menu; W2 phrase set widened under #283 (P1 CJK incl. `冇見到` ≠ `見唔到`; E1 EN); prefer FN (F1); lost-context alone ≠ reject (C1); W1 unchanged. Tip `9f58afb` live FN = W2 phrase coverage (not clarify rewrite / Continuity SoT). Soft #282 ACCEPT claimed W1 ∪ W2; HOLD vs that class. Leave-Go / MissingSessionID / per-conversation session persist / mid-tool draft / long-turn / max_iterations / context_window / #194 / #202 / tag remain parked.
+- After D ships (#267), leave-Go (402 or 429+GoUsageLimitError/Policy) on Active OpenCode Go DeepSeek falls back to OpenRouter DeepSeek along the peer path (not Phase 1); plain short 429 does not leave. Go requests carry stable `x-opencode-session` (#271 / #272); MissingSessionID/400 is not leave-Go. The session header is opaque Go API state, not the transcript (#277). **Amended 2026-11-25 (#438):** that walk has full work parity (tools, not text-only) and a configured OpenRouter backup is registered, including when `[openrouter]` is optional or empty. A missing backup is named. See Decision — Fallback full work parity (#438).
+- Continuity for **all Active peers** is SQLite → `messages[]` via `ConversationManager` (OpenRouter parity). Anti cold-intro: with ≥1 prior user/assistant turn in continuity, the final reply must not be a capability cold-intro; mechanism = light prompt + structural final-reply guard (regenerate once; else short clarify, no menu) on the shared Active path (#277 / #279). Matcher = **W1 ∪ W2** (#280 / #282 / #283): greeting + ≥2 menu (help-offer not required) **or** lost-context signal + ≥2 menu; W2 phrase set widened under #283 (P1 CJK incl. `冇見到` ≠ `見唔到`; E1 EN); prefer FN (F1); lost-context alone ≠ reject (C1); W1 unchanged. Tip `9f58afb` live FN = W2 phrase coverage (not clarify rewrite / Continuity SoT). Soft #282 ACCEPT claimed W1 ∪ W2; HOLD vs that class. MissingSessionID / per-conversation session persist / mid-tool draft / long-turn / max_iterations / context_window / #194 / #202 / tag remain parked for that matcher slice. Leave-Go work parity is Amendment (#438).
 - Active / `default_provider` semantics from ADR-0033 / ADR-0035 stay unchanged for openrouter and ollama until peer Active is validated and implemented.
 - Later Phase 1 impl must include longest-prefix `resolve_model` regression coverage and typed detect-only errors (no silent hop).
 - Prior Direction C text in this ADR is superseded; filename renamed to `0043-opencode-detect-and-peer.md` to match.
@@ -158,4 +203,6 @@ Product locks after live false-negative on tip `9f58afb` (grill / #283). Amend i
 - #277 / #279 — Continuity SoT (SQLite → `messages[]`) + anti cold-intro MUST for all Active peers (docs #278 Refs; impl #279 Closes). Per-conversation session persist = follow-up.
 - #280 / #282 — Anti cold-intro matcher widen (W1 ∪ W2; F1; C1) shipped (docs #281 Refs; impl #282 Closes). Tip `29e4461` live FN was coverage gap.
 - #283 — W2+ phrase widen (P1 CJK incl. `冇見到`; E1 EN; M1/C1; F1; W1 unchanged); this docs PR Refs; later impl Closes. Tip `9f58afb` live FN = phrase coverage gap.
+- #438 — fallback full work parity (2026-11-25). This docs amend is Related. The implementation issue is separate. ADR-0029 Amendment (#438) is the same lock.
+- #432 / #433 — `[openrouter]` optional at boot when another provider is Active. Residual: a configured `openrouter/…` chain entry is not a silent skip at call time.
 - #194 / #202 — parked; out of scope.
