@@ -4,8 +4,12 @@
 //! a LAN URL only when the bind can actually serve that address. Loopback with
 //! no Serve keeps the ADR-0007 hint. Probes and `tailscale serve` share a hard
 //! cap; failures fall through and never crash the bot. Funnel is never started.
+//! When the default tailscaled socket is not usable, those calls pass `--socket`
+//! for `$HOME/.local/state/tailscale/tailscaled.sock`. Tailscale 1.76.1 does not
+//! honor `TS_SOCKET`.
 
 use std::net::{IpAddr, UdpSocket};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -71,6 +75,11 @@ trait HostProbe: Send + Sync {
     ) -> impl std::future::Future<Output = Option<String>> + Send + 'a;
 
     fn lan_ip(&self) -> Option<IpAddr>;
+
+    /// Path for `tailscale --socket`, or `None` when the CLI default socket is used.
+    fn tailscale_socket(&self) -> Option<PathBuf> {
+        detect_tailscale_socket()
+    }
 }
 
 struct SystemProbe;
@@ -282,26 +291,92 @@ fn serve_public_url(serve_json: &str, dns: &str) -> String {
     format!("https://{dns}/")
 }
 
+/// Default daemon socket the `tailscale` CLI uses when `--socket` is omitted.
+const DEFAULT_TAILSCALED_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
+
+/// Per-user userspace tailscaled socket under `home`.
+fn userspace_socket_from_home(home: &Path) -> PathBuf {
+    home.join(".local/state/tailscale/tailscaled.sock")
+}
+
+fn is_unix_socket(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.file_type().is_socket())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// `Some(path)` when `/portal` must pass `tailscale --socket <path>`.
+/// A usable default socket stays the CLI default. A userspace socket is used
+/// only when that default is missing or is not a unix socket.
+fn choose_tailscale_socket(
+    default_socket: &Path,
+    userspace_socket: Option<&Path>,
+) -> Option<PathBuf> {
+    if is_unix_socket(default_socket) {
+        return None;
+    }
+    let userspace = userspace_socket?;
+    if is_unix_socket(userspace) {
+        Some(userspace.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn detect_tailscale_socket() -> Option<PathBuf> {
+    let userspace = dirs::home_dir().map(|home| userspace_socket_from_home(&home));
+    choose_tailscale_socket(Path::new(DEFAULT_TAILSCALED_SOCKET), userspace.as_deref())
+}
+
+/// `tailscale` global flags come before the subcommand. `--socket` is required
+/// on 1.76.1; that build does not read `TS_SOCKET`.
+async fn run_tailscale(
+    probe: &impl HostProbe,
+    socket: Option<&Path>,
+    args: &[&str],
+) -> Option<String> {
+    let mut owned = Vec::with_capacity(args.len() + 2);
+    if let Some(path) = socket {
+        owned.push("--socket".to_string());
+        owned.push(path.to_string_lossy().into_owned());
+    }
+    owned.extend(args.iter().map(|arg| (*arg).to_string()));
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    probe.run("tailscale", &refs).await
+}
+
 /// Start HTTPS Serve to loopback when the node can serve and Serve is down.
 /// `None` is the soft-fail (missing CLI, logged out, start failed).
 async fn magicdns_serve_url(cfg: &PortalConfig, probe: &impl HostProbe) -> Option<String> {
-    let status = probe.run("tailscale", &["status", "--json"]).await?;
+    let socket = probe.tailscale_socket();
+    let status = run_tailscale(probe, socket.as_deref(), &["status", "--json"]).await?;
     if !backend_running(&status) {
         return None;
     }
     let dns = magic_dns_name(&status)?;
-    if let Some(serve) = probe.run("tailscale", &["serve", "status", "--json"]).await {
+    if let Some(serve) =
+        run_tailscale(probe, socket.as_deref(), &["serve", "status", "--json"]).await
+    {
         if serve_is_up(&serve) {
             return Some(serve_public_url(&serve, &dns));
         }
     }
     let target = format!("http://127.0.0.1:{}", cfg.port);
-    probe
-        .run(
-            "tailscale",
-            &["serve", "--bg", "--https=443", "--yes", target.as_str()],
-        )
-        .await?;
+    run_tailscale(
+        probe,
+        socket.as_deref(),
+        &["serve", "--bg", "--https=443", "--yes", target.as_str()],
+    )
+    .await?;
     Some(format!("https://{dns}/"))
 }
 
@@ -351,6 +426,7 @@ pub async fn portal_reply(cfg: &PortalConfig) -> PortalReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use teloxide::types::MessageEntityKind;
@@ -447,6 +523,8 @@ mod tests {
         serve_before: Option<String>,
         serve_start_ok: bool,
         fail_all: bool,
+        /// When set, `/portal` must pass this path as `tailscale --socket`.
+        socket: Option<PathBuf>,
     }
 
     impl FakeHost {
@@ -458,6 +536,7 @@ mod tests {
                 serve_before: None,
                 serve_start_ok: false,
                 fail_all: true,
+                socket: None,
             }
         }
 
@@ -486,6 +565,10 @@ mod tests {
             if self.fail_all || program != "tailscale" {
                 return None;
             }
+            let args = match args {
+                ["--socket", _, rest @ ..] => rest,
+                other => other,
+            };
             match args {
                 ["status", "--json"] => self.status.clone(),
                 ["serve", "status", "--json"] => self.serve_before.clone(),
@@ -506,6 +589,10 @@ mod tests {
 
         fn lan_ip(&self) -> Option<IpAddr> {
             self.lan
+        }
+
+        fn tailscale_socket(&self) -> Option<PathBuf> {
+            self.socket.clone()
         }
     }
 
@@ -556,6 +643,7 @@ mod tests {
             serve_before: Some(serve_https("fox.tailnet.ts.net", 8090)),
             serve_start_ok: true,
             fail_all: false,
+            socket: None,
         };
         let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
         assert_one_tappable(&reply, "https://fox.tailnet.ts.net/");
@@ -583,6 +671,7 @@ mod tests {
             serve_before: Some("{}".to_string()),
             serve_start_ok: true,
             fail_all: false,
+            socket: None,
         };
         let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
         assert_one_tappable(&reply, "https://fox.tailnet.ts.net/");
@@ -664,6 +753,7 @@ mod tests {
             serve_before: None,
             serve_start_ok: true,
             fail_all: false,
+            socket: None,
         };
         let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
         assert!(text_link_urls(&reply).is_empty());
@@ -686,6 +776,7 @@ mod tests {
             serve_before: Some("{}".to_string()),
             serve_start_ok: false,
             fail_all: false,
+            socket: None,
         };
         let reply = portal_reply_bounded(&cfg("0.0.0.0", 8090), &host, PORTAL_BUDGET).await;
         assert_one_tappable(&reply, "http://192.168.1.50:8090/");
@@ -701,6 +792,7 @@ mod tests {
             serve_before: Some("not-json".to_string()),
             serve_start_ok: false,
             fail_all: false,
+            socket: None,
         };
         let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
         assert!(text_link_urls(&reply).is_empty());
@@ -766,5 +858,186 @@ mod tests {
             started.elapsed()
         );
         assert!(started.elapsed() >= PROBE_TIMEOUT);
+    }
+
+    fn listen_socket(path: &Path) -> std::os::unix::net::UnixListener {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::os::unix::net::UnixListener::bind(path).unwrap()
+    }
+
+    #[test]
+    fn userspace_socket_path_is_derived_from_the_home_dir() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            userspace_socket_from_home(home),
+            PathBuf::from("/home/someone/.local/state/tailscale/tailscaled.sock")
+        );
+        assert_ne!(
+            userspace_socket_from_home(Path::new("/home/kan")),
+            userspace_socket_from_home(home)
+        );
+    }
+
+    #[test]
+    fn usable_default_socket_is_left_to_the_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let default_sock = root.path().join("default.sock");
+        let userspace = userspace_socket_from_home(&root.path().join("home/someone"));
+        let _default = listen_socket(&default_sock);
+        let _userspace = listen_socket(&userspace);
+        assert_eq!(
+            choose_tailscale_socket(&default_sock, Some(&userspace)),
+            None,
+            "a usable default socket must not add --socket"
+        );
+    }
+
+    #[test]
+    fn missing_default_socket_uses_the_home_userspace_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let default_sock = root.path().join("missing.sock");
+        let home = root.path().join("home/someone");
+        let userspace = userspace_socket_from_home(&home);
+        let _userspace = listen_socket(&userspace);
+        assert_eq!(
+            choose_tailscale_socket(&default_sock, Some(&userspace)),
+            Some(userspace)
+        );
+    }
+
+    #[test]
+    fn regular_file_is_not_a_usable_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let default_sock = root.path().join("not-a-socket");
+        std::fs::write(&default_sock, b"nope").unwrap();
+        let userspace = userspace_socket_from_home(&root.path().join("home/someone"));
+        std::fs::create_dir_all(userspace.parent().unwrap()).unwrap();
+        std::fs::write(&userspace, b"nope").unwrap();
+        assert_eq!(
+            choose_tailscale_socket(&default_sock, Some(&userspace)),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_userspace_socket_adds_no_override() {
+        let root = tempfile::tempdir().unwrap();
+        let default_sock = root.path().join("missing-default.sock");
+        let userspace = userspace_socket_from_home(&root.path().join("home/someone"));
+        assert_eq!(
+            choose_tailscale_socket(&default_sock, Some(&userspace)),
+            None
+        );
+        assert_eq!(choose_tailscale_socket(&default_sock, None), None);
+    }
+
+    #[test]
+    fn default_socket_that_is_not_a_socket_falls_through_to_userspace() {
+        let root = tempfile::tempdir().unwrap();
+        let default_sock = root.path().join("plain");
+        std::fs::write(&default_sock, b"nope").unwrap();
+        let userspace = userspace_socket_from_home(&root.path().join("home/other"));
+        let _userspace = listen_socket(&userspace);
+        assert_eq!(
+            choose_tailscale_socket(&default_sock, Some(&userspace)),
+            Some(userspace)
+        );
+    }
+
+    fn tailscale_calls(host: &FakeHost) -> Vec<Vec<String>> {
+        host.calls()
+            .into_iter()
+            .filter(|call| call.first().map(String::as_str) == Some("tailscale"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn userspace_socket_is_passed_on_every_tailscale_serve_argv() {
+        let socket = "/home/someone/.local/state/tailscale/tailscaled.sock";
+        let host = FakeHost {
+            calls: Mutex::new(Vec::new()),
+            lan: Some("192.168.1.20".parse().unwrap()),
+            status: Some(running_status("fox.tailnet.ts.net.")),
+            serve_before: Some("{}".to_string()),
+            serve_start_ok: true,
+            fail_all: false,
+            socket: Some(PathBuf::from(socket)),
+        };
+        let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
+        assert_one_tappable(&reply, "https://fox.tailnet.ts.net/");
+        let calls = tailscale_calls(&host);
+        assert_eq!(
+            calls,
+            vec![
+                vec!["tailscale", "--socket", socket, "status", "--json",],
+                vec!["tailscale", "--socket", socket, "serve", "status", "--json",],
+                vec![
+                    "tailscale",
+                    "--socket",
+                    socket,
+                    "serve",
+                    "--bg",
+                    "--https=443",
+                    "--yes",
+                    "http://127.0.0.1:8090",
+                ],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn userspace_socket_is_passed_when_serve_is_already_up() {
+        let socket = "/home/someone/.local/state/tailscale/tailscaled.sock";
+        let host = FakeHost {
+            calls: Mutex::new(Vec::new()),
+            lan: None,
+            status: Some(running_status("fox.tailnet.ts.net.")),
+            serve_before: Some(serve_https("fox.tailnet.ts.net", 8090)),
+            serve_start_ok: true,
+            fail_all: false,
+            socket: Some(PathBuf::from(socket)),
+        };
+        let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
+        assert_one_tappable(&reply, "https://fox.tailnet.ts.net/");
+        let calls = tailscale_calls(&host);
+        assert_eq!(
+            calls,
+            vec![
+                vec!["tailscale", "--socket", socket, "status", "--json"],
+                vec!["tailscale", "--socket", socket, "serve", "status", "--json",],
+            ]
+        );
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|call| call.iter().any(|arg| arg == "--bg")),
+            "already-up Serve must be reused: {:?}",
+            host.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn default_socket_omits_the_socket_flag() {
+        let host = FakeHost {
+            calls: Mutex::new(Vec::new()),
+            lan: None,
+            status: Some(running_status("fox.tailnet.ts.net.")),
+            serve_before: Some(serve_https("fox.tailnet.ts.net", 8090)),
+            serve_start_ok: false,
+            fail_all: false,
+            socket: None,
+        };
+        let reply = portal_reply_bounded(&cfg("127.0.0.1", 8090), &host, PORTAL_BUDGET).await;
+        assert_one_tappable(&reply, "https://fox.tailnet.ts.net/");
+        assert!(
+            host.calls()
+                .iter()
+                .all(|call| !call.iter().any(|arg| arg == "--socket")),
+            "a usable default socket must not pass --socket: {:?}",
+            host.calls()
+        );
     }
 }
