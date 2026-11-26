@@ -860,10 +860,36 @@ mod tests {
         assert!(started.elapsed() >= PROBE_TIMEOUT);
     }
 
+    /// macOS `sockaddr_un.sun_path` is 104 bytes including the NUL. `$TMPDIR`
+    /// under `/var/folders/...` plus the userspace socket suffix exceeds that,
+    /// so the bind root is a short directory in `/tmp`.
+    #[cfg(all(unix, target_os = "macos"))]
+    fn socket_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("rf")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn socket_root() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[cfg(unix)]
     fn listen_socket(path: &Path) -> std::os::unix::net::UnixListener {
+        use std::os::unix::ffi::OsStrExt;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        // Linux sun_path is 108 bytes, macOS 104, both including the trailing NUL.
+        let max = if cfg!(target_os = "macos") { 103 } else { 107 };
+        let len = path.as_os_str().as_bytes().len();
+        assert!(
+            len <= max,
+            "unix socket path is {len} bytes (limit {max}): {}",
+            path.display()
+        );
         std::os::unix::net::UnixListener::bind(path).unwrap()
     }
 
@@ -880,9 +906,10 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn usable_default_socket_is_left_to_the_cli() {
-        let root = tempfile::tempdir().unwrap();
+        let root = socket_root();
         let default_sock = root.path().join("default.sock");
         let userspace = userspace_socket_from_home(&root.path().join("home/someone"));
         let _default = listen_socket(&default_sock);
@@ -894,9 +921,10 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_default_socket_uses_the_home_userspace_socket() {
-        let root = tempfile::tempdir().unwrap();
+        let root = socket_root();
         let default_sock = root.path().join("missing.sock");
         let home = root.path().join("home/someone");
         let userspace = userspace_socket_from_home(&home);
@@ -933,9 +961,10 @@ mod tests {
         assert_eq!(choose_tailscale_socket(&default_sock, None), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn default_socket_that_is_not_a_socket_falls_through_to_userspace() {
-        let root = tempfile::tempdir().unwrap();
+        let root = socket_root();
         let default_sock = root.path().join("plain");
         std::fs::write(&default_sock, b"nope").unwrap();
         let userspace = userspace_socket_from_home(&root.path().join("home/other"));
