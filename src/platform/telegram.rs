@@ -2858,6 +2858,7 @@ async fn run_telegram_user_turn(
         device_fw: input.device_fw.clone(),
         voice_origin: input.voice_origin,
         voice_spoken_lang: input.voice_spoken_lang.clone(),
+        event_fired: false,
     };
 
     // Process through agent — moves stream_token_tx and tool_event_tx

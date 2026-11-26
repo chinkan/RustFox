@@ -13,6 +13,7 @@ pub mod config_edit;
 pub mod conversation;
 pub mod device_audio;
 pub mod device_ws;
+pub mod event_trigger;
 pub mod fallback_edit;
 pub mod file_processor;
 pub mod google_mcp;

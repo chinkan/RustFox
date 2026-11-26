@@ -11,6 +11,7 @@
     "agents": "Agents",
     "memory": "記憶",
     "tasks": "定時任務",
+    "triggers": "事件觸發",
     "settings": "設定",
     "integrations": "整合",
     "mcp": "MCP",
@@ -159,6 +160,23 @@
     "defaultTimezone": "預設排程時區：{{tz}}（UTC{{offset}}）",
     "timezone": "時區（IANA）",
     "utcLegacy": "UTC（舊）"
+  },
+  "triggers": {
+    "title": "事件觸發",
+    "subtitle": "呢個 portal 上嘅 HMAC webhook。內容係唔可信。發送、發佈、貼文只會留底稿。",
+    "new": "新增觸發",
+    "name": "名稱",
+    "prompt": "操作指示",
+    "bot": "Bot",
+    "create": "建立",
+    "enable": "啟用",
+    "disable": "停用",
+    "webhook": "Webhook URL",
+    "secretOnce": "HMAC 密鑰（只顯示一次）",
+    "rotate": "輪換密鑰",
+    "empty": "未有事件觸發。",
+    "created": "已建立觸發。請即刻複製密鑰，之後唔會再顯示。",
+    "rotated": "新 HMAC 密鑰（只顯示一次）"
   },
   "settings": {
     "title": "設定",

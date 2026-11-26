@@ -305,6 +305,15 @@ async fn resume_scheduled_stop(
     evidence: &str,
     notice_detail: &str,
 ) {
+    // Event runs use the scheduled iteration and timeout caps. Auto-resume
+    // stays on scheduled_tasks (ADR-0067). There is no second budget.
+    if req.event_fired {
+        tracing::info!(
+            "Event run {} stopped ({evidence}); auto-resume is not started",
+            req.task_id
+        );
+        return;
+    }
     let checkpoint_kind = match kind {
         StopKind::Timeout => rustfox::scheduler::checkpoint::CheckpointStopKind::Timeout,
         StopKind::MaxIterations => {
@@ -456,7 +465,9 @@ async fn run_one_scheduled_job(
     queue_for_runner: rustfox::scheduler::reruns::RerunQueue,
     req: &rustfox::agent::ScheduledJobRequest,
 ) -> Option<rustfox::agent::RunStop> {
-    if req.rerun_id.is_none() {
+    // Event accepts already inserted the running row. The cron overlap check
+    // would see that row and drop the job.
+    if req.rerun_id.is_none() && !req.event_fired {
         let live = agent.live_scheduled.snapshot();
         match rustfox::scheduler::auto_resume::fresh_cron_blocked(
             &queue_for_runner,
@@ -480,16 +491,21 @@ async fn run_one_scheduled_job(
         }
     }
     let _live_hold = agent.live_scheduled.hold(&req.task_id);
-    let run_id = uuid::Uuid::new_v4().to_string();
     let run_started_at = chrono::Utc::now();
-    let run_at = run_started_at.format("%Y-%m-%dT%H:%M:%S").to_string();
-    if let Err(e) = req
-        .task_store
-        .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
-        .await
-    {
-        tracing::warn!("Failed to persist scheduled task run record: {}", e);
-    }
+    let run_id = if let Some(existing) = req.existing_run_id.clone() {
+        existing
+    } else {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let run_at = run_started_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+        if let Err(e) = req
+            .task_store
+            .insert_run(&run_id, &req.task_id, &run_at, None, None, "running")
+            .await
+        {
+            tracing::warn!("Failed to persist scheduled task run record: {}", e);
+        }
+        run_id
+    };
 
     // ADR-0024: wall-clock timeout around the scheduled agent call.
     // ADR-0039: pass continue_from when Retry loaded a transcript checkpoint.
@@ -525,14 +541,22 @@ async fn run_one_scheduled_job(
         run_id.clone(),
         base_iter,
     );
-    let mut run_fut = Box::pin(agent.process_message_outcome(
+    let event_fired = req.event_fired;
+    let call = agent.process_message_outcome(
         &incoming,
         None,
         None,
         ToolUiMode::Minimal,
         continue_from,
         Some(on_tool_completed),
-    ));
+    );
+    let mut run_fut = Box::pin(async move {
+        if event_fired {
+            rustfox::event_trigger::in_event_run(call).await
+        } else {
+            call.await
+        }
+    });
     let processed = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         &mut run_fut,
@@ -1008,6 +1032,7 @@ fn spawn_bare_user_turns(
                 device_fw: first.device_fw.clone(),
                 voice_origin: first.voice_origin,
                 voice_spoken_lang: first.voice_spoken_lang.clone(),
+                event_fired: false,
             };
             let stop = match agent
                 .process_message_outcome(&incoming, None, None, ToolUiMode::Minimal, None, None)
