@@ -2,10 +2,13 @@
 
 ## Status
 Accepted — supplements [ADR 0011](0011-skills-control-plane-and-provenance.md); where this
-file and the 2026-09-25 plan disagree, **this file wins**.
+file and the 2026-09-25 plan disagree, **this file wins**. Amended 2026-11-16
+([#418](https://github.com/chinkan/RustFox/issues/418)): the hard-coded Verification
+Protocol is no longer an unconditional MUST / PASS-only end. It stays non-configurable.
 
 ## Date
-2026-09-25 (grilling with Kan, three rounds, all decisions user-ratified)
+2026-09-25 (grilling with Kan, three rounds, all decisions user-ratified).
+R7 amended 2026-11-16 ([#418](https://github.com/chinkan/RustFox/issues/418)).
 
 ## Context
 ADR 0011 locked the architecture (native installer, provenance ledger, quarantine deletes).
@@ -83,7 +86,42 @@ PUT-create fall-through removed; "create" is an intent worth its own endpoint + 
   (new allow-listed entry), **not** through config.toml PATCH — the toml round-trip
   destroys comments and mangles multi-line strings.
 - The hard-coded guardrail sections (Verification Protocol, Soul Files) remain
-  **non-configurable**: the most important gate must not ship an off switch.
+  **non-configurable**. Operators still cannot turn the gate off in config.
+  That “no off switch” rule stands.
+- The name of the test is “reversible and already evidenced,” not “small job.”
+  The parent may skip `invoke_agent(verifier)` only when all three hold and
+  each check is stated in the turn. If any check fails, the parent must not skip.
+  1. Risk class is not high: not a publish or other external post, payment,
+     security/credential change, data delete/migration, or otherwise hard to undo.
+  2. A cheap proving observation already exists in this turn (tool result,
+     command exit, or other deterministic artifact from this message — not a
+     remembered earlier run, not a second LLM).
+  3. Residual effect is local and reversible, or the change cannot alter
+     behavior. A one-line change that can alter behavior is not exempt because
+     it is short.
+- The Verification Protocol itself is amended: it is no longer an unconditional
+  MUST / PASS-only end on every interactive turn.
+- When an LLM verifier still runs on an interactive turn, it must be given
+  already-run evidence (it must not rediscover vendor docs). Interactive
+  FAIL / UNVERIFIED re-verify is capped at one extra round, as amended by
+  Soft answer 5; the parent then replies with the residual rather than looping.
+  Do not spend that extra round on a no-shell UNVERIFIED when the parent already
+  attached this-turn evidence for that same check. That result is terminal for
+  the interactive turn and is not a skip on a high-risk turn.
+- “Verify first” may force a verifier even when the three checks pass.
+  “Don’t verify” may not override a failed check and must not skip a high-risk
+  or publish path. If the user says “don’t verify” on a turn that already
+  satisfies all three checks, the parent may skip and must still state the
+  checks and the this-turn evidence.
+- Scheduled publish stays fail-closed. The instrument on that path remains the
+  LLM verifier. A cheap live-post check may be passed to the verifier as
+  this-turn evidence; it does not replace the verifier and does not authorize
+  a skip. FAIL / NEEDS_IMPROVEMENT / UNVERIFIED stays fail-closed. The verifier
+  stays blocking when it runs. This amendment does not add background verify.
+- Soul Files remain hard-coded and unchanged by this amendment.
+- A skill override or a per-bot / per-skill flag that turns the verifier off
+  is not allowed. Home `AGENTS.md` and the local skill are aligned later to
+  this same hard-coded text, not given a stricter or looser override.
 
 ### R8 — Rate limits & file-level deletes (Rounds 2, Q6/Q7)
 - GitHub rate-limit hits → 400 `github_rate_limited` with an honest message
