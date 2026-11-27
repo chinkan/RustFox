@@ -942,7 +942,11 @@ fn handoff_pending_user_after_schedule(
     agent: &Arc<Agent>,
     req: &rustfox::agent::ScheduledJobRequest,
     inputs: Vec<rustfox::turn_gate::QueuedInput>,
+    hold_gen: u64,
 ) {
+    let key = rustfox::agent::session_key(&req.incoming.bot_id, &req.incoming.user_id);
+    let hold =
+        rustfox::turn_gate::InteractiveHold::new(Arc::clone(&agent.turn_gate), key, hold_gen);
     let Some(bot) = req.owning_telegram_bot.clone() else {
         tracing::warn!(
             bot_id = %req.incoming.bot_id,
@@ -955,6 +959,7 @@ fn handoff_pending_user_after_schedule(
             req.incoming.bot_id.clone(),
             req.incoming.user_id.clone(),
             inputs,
+            hold,
         );
         return;
     };
@@ -968,6 +973,7 @@ fn handoff_pending_user_after_schedule(
             req.incoming.bot_id.clone(),
             req.incoming.user_id.clone(),
             inputs,
+            hold,
         );
         return;
     };
@@ -985,6 +991,7 @@ fn handoff_pending_user_after_schedule(
             req.incoming.bot_id.clone(),
             req.incoming.user_id.clone(),
             inputs,
+            hold,
         );
         return;
     };
@@ -996,6 +1003,7 @@ fn handoff_pending_user_after_schedule(
         teloxide::types::ChatId(cv),
         rustfox::platform::telegram::MessageFormat::Auto,
         inputs,
+        hold,
     );
 }
 
@@ -1006,8 +1014,10 @@ fn spawn_bare_user_turns(
     bot_id: String,
     user_id: String,
     inputs: Vec<rustfox::turn_gate::QueuedInput>,
+    hold: rustfox::turn_gate::InteractiveHold,
 ) {
     tokio::spawn(async move {
+        let key = rustfox::agent::session_key(&bot_id, &user_id);
         let mut batch = inputs;
         loop {
             let mut iter = batch.into_iter();
@@ -1015,7 +1025,6 @@ fn spawn_bare_user_turns(
                 break;
             };
             let rest: Vec<_> = iter.collect();
-            let key = rustfox::agent::session_key(&bot_id, &user_id);
             agent.turn_gate.restore_pending(&key, rest).await;
 
             let incoming = rustfox::platform::IncomingMessage {
@@ -1046,7 +1055,7 @@ fn spawn_bare_user_turns(
             };
             first.cleanup().await;
 
-            match agent.turn_gate.finish_user(&key, stop).await {
+            match hold.finish(stop).await {
                 rustfox::turn_gate::Next::User { inputs, .. } => batch = inputs,
                 rustfox::turn_gate::Next::StepLimit { n } => {
                     tracing::warn!(%key, n, "bare user turn hit step-limit; queue kept idle");
@@ -1663,8 +1672,8 @@ async fn main() -> Result<()> {
             }
 
             match agent.turn_gate.finish_scheduled(&key).await {
-                rustfox::turn_gate::Next::User { inputs, .. } => {
-                    handoff_pending_user_after_schedule(&agent, &req, inputs);
+                rustfox::turn_gate::Next::User { inputs, gen, .. } => {
+                    handoff_pending_user_after_schedule(&agent, &req, inputs, gen);
                 }
                 rustfox::turn_gate::Next::StepLimit { n } => {
                     if let (Some(bot), Ok(cv)) = (

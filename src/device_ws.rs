@@ -489,7 +489,7 @@ where
             rejected.cleanup().await;
             return Ok(DeviceTurnOutcome::QueueFull);
         }
-        Submit::Start(inputs) => inputs,
+        Submit::Start((inputs, _)) => inputs,
     };
     let mut replies = Vec::new();
     loop {

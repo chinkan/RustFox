@@ -6,6 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **PDF intake panic no longer sticks a Telegram chat (#442):** `pdf-extract` 0.12.1 unwraps `Content::decode` on `Parse(InvalidContentStream)`. That panic never reached the existing `[PDF processing failed: …]` reply, and the interactive TurnGate stayed `user=true` for the rest of the process, so later messages in that chat were only queued. A panicking extraction is now a failed extraction with that reply. A Telegram turn task releases its TurnGate hold on panic. `/stop` releases a stuck `user=true` gate as well as the queue. Statement PDFs are not hard-extracted when that persona already has an OCR / pdftotext path (`statement_ocr.py` or a file that mentions `pdftotext`); the agent turn runs that path instead. **v1.0.10 Must**. No tag. Closes #442.
 - **Boot without `[openrouter]` when another provider is Active (#432):** A config with no `[openrouter]` table parses. An empty key is not synthesized into the provider list when another provider exists. Active OpenRouter with no key fails naming `[openrouter].api_key`. Closes #432.
 
 ### Added
