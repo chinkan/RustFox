@@ -13,6 +13,8 @@ config) — it must never face the public internet directly.
 | Out and about (phone) | Tailscale on the phone. Manual install: `http://<vps-tailnet-ip>:8090/` (section 2). Settings Serve (ADR-0065): MagicDNS `https://<node>.<tailnet>.ts.net/` when Serve is up; portal bind stays loopback |
 | Don't know your URLs | Message the bot `/portal` in Telegram — it replies with working URLs for the current network |
 
+`/portal` on this page still describes listing existing URLs and `100.x` probes. The accepted command is [ADR-0065](./adr/0065-portal-tailscale-settings-serve.md) §7 (Product ACCEPT 2026-11-10). This runbook does not restate that contract.
+
 ## 1. LAN use
 
 Default config (loopback only):
@@ -39,7 +41,7 @@ bind = "192.168.1.50"   # the exact address your router gave the VPS
 
 Find candidates quickly: send the bot `/portal` — it probes the host and
 lists LAN + tailnet URLs (best-effort, never fabricates URLs the bind
-couldn't serve).
+couldn't serve). That probe list is not the accepted `/portal` reply; see [ADR-0065](./adr/0065-portal-tailscale-settings-serve.md) §7 as amended (Product ACCEPT 2026-11-10).
 
 **Firewall note:** keep port 8090 blocked at any router-level firewall —
 LAN binding is for trusted networks only. Auth is a token, but the channel
@@ -56,7 +58,7 @@ Productized path: Portal **Settings → Tailscale** (SwitchBot-style card, not t
 1. The host already runs OS `tailscaled`. One Tailscale node per RustFox process host.
 2. Enable the card and save an auth key. Vault name `tailscale.auth_key`. `config.toml` stores a `secret:` ref and `enabled` only.
 3. RustFox brings the node up and configures `tailscale serve` HTTPS to `http://127.0.0.1:<portal.port>`. Portal `bind` stays `127.0.0.1`. The same Serve target covers the SPA and `/api/device/v1/ws`.
-4. When Serve is up, Settings and `/portal` show the MagicDNS URL (`https://<node>.<tailnet>.ts.net/`).
+4. When Serve is up, Settings shows the MagicDNS URL (`https://<node>.<tailnet>.ts.net/`). `/portal` follows [ADR-0065](./adr/0065-portal-tailscale-settings-serve.md) §7 as amended (Product ACCEPT 2026-11-10).
 5. If `tailscale` / `tailscaled` is missing, or Serve fails, the bot and Portal keep running. Settings shows the error and links back to this page. Use the manual steps until the node is up.
 
 ### Manual install (still supported)
