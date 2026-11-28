@@ -4,7 +4,8 @@ import { ensureAuthBootstrapped } from '../../auth'
 import { DevicesSection } from '../../settings/devicesSection'
 
 /**
- * `/devices` — admin-only. Device WebSocket token lifecycle (create / rotate / revoke).
+ * `/devices` — admin-only. Device WebSocket token lifecycle (create / rotate / revoke)
+ * and live authenticated-session status.
  */
 export const Route = createFileRoute('/_auth/devices')({
   beforeLoad: async ({ context }) => {

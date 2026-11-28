@@ -7,7 +7,8 @@ import { authStore, bindAuthApi, __resetAuthForTests, type RouterContext } from 
 import { BootWatcher } from './hooks/useBootWatcher'
 import { ChatSession } from './hooks/useChatStream'
 import { fakeApi } from './api/fake'
-import type { ScheduleBot, Settings } from './api/types'
+import type { DeviceListItem, ScheduleBot, Settings } from './api/types'
+import { DEVICES_POLL_MS, devicesPollInterval } from './settings/devicesSection'
 import { __resetOfficePrefsForTests } from './agents/officePrefs'
 import en from './locales/en.json'
 import zhHK from './locales/zh-HK.json'
@@ -303,6 +304,58 @@ describe('RBAC guard', () => {
     expect(await screen.findByRole('heading', { name: 'Devices', level: 1 })).toBeTruthy()
     expect(await screen.findByLabelText('Name')).toBeTruthy()
     expect(await screen.findByText('No devices yet.')).toBeTruthy()
+  })
+
+  it('shows connection status and updates it from the device list without a reload', async () => {
+    await signIn()
+    let connected = false
+    const ctx = makeContext({
+      listDevices: async () => ({
+        enabled: true,
+        path: '/api/device/v1/ws',
+        devices: [
+          {
+            id: 'dev-1',
+            label: 'kitchen-board',
+            room: 'kitchen',
+            createdAt: '2026-11-02T00:00:00Z',
+            connected,
+            token: 'device-secret-should-not-render',
+          } as DeviceListItem,
+        ],
+      }),
+    })
+    const router = renderAt('/devices', ctx)
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/devices')
+    })
+    expect(await screen.findByText('kitchen-board')).toBeTruthy()
+    expect(screen.getByText('Not connected')).toBeTruthy()
+    expect(screen.queryByText('Online')).toBeNull()
+    expect(screen.queryByText('device-secret-should-not-render')).toBeNull()
+
+    const devicesQuery = ctx.queryClient.getQueryCache().find({ queryKey: ['devices'] })
+    const observer = devicesQuery?.observers[0]
+    const interval = observer?.options.refetchInterval
+    expect(typeof interval).toBe('function')
+    if (typeof interval === 'function' && devicesQuery) {
+      expect(interval(devicesQuery)).toBe(DEVICES_POLL_MS)
+    }
+    expect(observer?.options.refetchIntervalInBackground).toBe(false)
+    expect(devicesPollInterval(true)).toBe(DEVICES_POLL_MS)
+    expect(devicesPollInterval(false)).toBe(false)
+
+    connected = true
+    await ctx.queryClient.invalidateQueries({ queryKey: ['devices'] })
+    expect(await screen.findByText('Online')).toBeTruthy()
+    expect(screen.queryByText('Not connected')).toBeNull()
+    expect(screen.queryByText('device-secret-should-not-render')).toBeNull()
+
+    connected = false
+    await ctx.queryClient.invalidateQueries({ queryKey: ['devices'] })
+    expect(await screen.findByText('Not connected')).toBeTruthy()
+    expect(screen.queryByText('Online')).toBeNull()
+    expect(screen.queryByText('device-secret-should-not-render')).toBeNull()
   })
 
   it('system nav shows Integrations, MCP, and Devices for admin', async () => {

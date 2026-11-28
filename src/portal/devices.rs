@@ -38,6 +38,10 @@ struct DeviceJson {
     label: String,
     room: Option<String>,
     created_at: String,
+    /// Authenticated Device WS session currently held by [`crate::device_ws::LiveSockets`].
+    /// A stored token with no live session is false. A TCP accept that has not
+    /// authenticated is not registered, so it is false too.
+    connected: bool,
 }
 
 #[derive(Serialize)]
@@ -50,12 +54,13 @@ struct IssuedJson {
     token: String,
 }
 
-fn view(record: &DeviceRecord) -> DeviceJson {
+fn view(record: &DeviceRecord, connected: bool) -> DeviceJson {
     DeviceJson {
         id: record.id.clone(),
         label: record.label.clone(),
         room: record.room.clone(),
         created_at: record.created_at.clone(),
+        connected,
     }
 }
 
@@ -83,13 +88,21 @@ fn map_store(err: anyhow::Error) -> PortalError {
 }
 
 /// GET /api/settings/devices
+///
+/// `connected` is true only while an authenticated Device WS session for that
+/// token is on `device_live`. Wi-Fi, or a socket that has not authenticated,
+/// does not count.
 pub async fn list_devices(State(state): State<PortalState>) -> Result<Json<Value>, PortalError> {
     let registry = state.device_registry().await?;
     let devices = registry.list().await?;
+    let live = &state.device_live;
     Ok(Json(json!({
         "enabled": state.agent.config().device_ws.enabled,
         "path": device_ws::WS_PATH,
-        "devices": devices.iter().map(view).collect::<Vec<_>>(),
+        "devices": devices
+            .iter()
+            .map(|record| view(record, live.is_connected(&record.id)))
+            .collect::<Vec<_>>(),
     })))
 }
 

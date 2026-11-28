@@ -520,6 +520,7 @@ async fn settings_devices_show_token_once_and_device_token_is_not_portal_login()
     assert_eq!(listed["enabled"], false);
     assert_eq!(listed["path"], "/api/device/v1/ws");
     assert_eq!(listed["devices"][0]["label"], "lamp");
+    assert_eq!(listed["devices"][0]["connected"], false);
     assert!(listed["devices"][0].get("token").is_none());
     assert!(!listed.to_string().contains(&token));
 
@@ -545,6 +546,114 @@ async fn settings_devices_show_token_once_and_device_token_is_not_portal_login()
     assert_eq!(revoked.status(), StatusCode::OK);
     let registry = f.state.device_registry().await.unwrap();
     assert!(registry.authenticate(&token).await.unwrap().is_none());
+}
+
+async fn list_devices(app: &axum::Router) -> Value {
+    let listed = app
+        .clone()
+        .oneshot(bearer("/api/settings/devices", "GET", "portal-token", None))
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    json_body(listed).await
+}
+
+fn assert_list_hides_secrets(body: &Value, device_token: &str) {
+    let text = body.to_string();
+    assert!(
+        body["devices"][0].get("token").is_none(),
+        "list row must not include a token field"
+    );
+    assert!(
+        !text.contains(device_token),
+        "device token leaked into the device list"
+    );
+    assert!(
+        !text.contains("portal-token"),
+        "portal token leaked into the device list"
+    );
+}
+
+async fn wait_connected(app: &axum::Router, want: bool) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let last = list_devices(app).await;
+        if last["devices"][0]["connected"] == want {
+            return last;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "device connected stayed {}, want {want}",
+                last["devices"][0]["connected"]
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn device_list_connected_is_only_a_live_authenticated_session() {
+    let f = portal_fixture(true).await;
+    let created = f
+        .app
+        .clone()
+        .oneshot(bearer(
+            "/api/settings/devices",
+            "POST",
+            "portal-token",
+            Some(json!({"label": "board", "room": "desk"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = json_body(created).await;
+    let token = created["token"].as_str().unwrap().to_string();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(!token.is_empty());
+
+    let idle = list_devices(&f.app).await;
+    assert_eq!(idle["devices"][0]["id"], id);
+    assert_eq!(idle["devices"][0]["label"], "board");
+    assert_eq!(
+        idle["devices"][0]["connected"], false,
+        "a stored token with no session is not online"
+    );
+    assert_list_hides_secrets(&idle, &token);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = f.app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let url = format!("ws://{addr}/api/device/v1/ws");
+
+    // Upgrade without a bearer, then a non-auth frame: still not online.
+    let mut ws = connect(&url, None).await.expect("upgrade before auth");
+    send_json(&mut ws, json!({"type": "ping"})).await;
+    let rejected = recv_json(&mut ws).await;
+    assert_eq!(rejected["type"], "error");
+    assert_eq!(rejected["code"], "unauthorized");
+    let pending = list_devices(&f.app).await;
+    assert_eq!(
+        pending["devices"][0]["connected"], false,
+        "a socket that has not authenticated is not online"
+    );
+    assert_list_hides_secrets(&pending, &token);
+
+    send_json(&mut ws, json!({"type": "auth", "token": token.clone()})).await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["type"], "device_ack");
+    assert_eq!(ack["status"], "authenticated");
+    let online = wait_connected(&f.app, true).await;
+    assert_eq!(online["devices"][0]["id"], id);
+    assert_list_hides_secrets(&online, &token);
+
+    let _ = ws.close(None).await;
+    drop(ws);
+    let dropped = wait_connected(&f.app, false).await;
+    assert_eq!(dropped["devices"][0]["id"], id);
+    assert_list_hides_secrets(&dropped, &token);
 }
 
 #[tokio::test]

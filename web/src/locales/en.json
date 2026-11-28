@@ -334,6 +334,8 @@
     "devicesRotate": "Rotate",
     "devicesRevoke": "Revoke",
     "devicesRevokeConfirm": "Revoke “{{label}}”? The board will be rejected until it gets a new token.",
+    "devicesOnline": "Online",
+    "devicesOffline": "Not connected",
     "devicesEmpty": "No devices yet.",
     "devicesTokenOnce": "Copy this token now. It will not be shown again.",
     "devicesFailed": "{{message}}",
