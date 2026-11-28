@@ -49,7 +49,7 @@ On `main` ahead of a release tag. Not a full changelog — see [Unreleased](CHAN
 |---|---|
 | 🎙 **Telegram Cantonese voice** | Voice note → local SenseVoice STT (`yue`) → short spoken-style reply. Optional `[voice].tts = true` also sends `sendVoice` (the text copy stays). Typed chat never auto-`sendVoice`. [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) · [ADR-0058](docs/adr/0058-telegram-cantonese-stt-tts.md) |
 | 📅 **Schedule context** | Schedule runs stay out of the main chat. Interactive chat sees a result only by reply-quoting that message. [ADR-0059](docs/adr/0059-schedule-run-not-in-interactive-context.md) |
-| 🔌 **Device WebSocket** | Opt-in `[device_ws]` JSON text duplex on the portal bind (`GET /api/device/v1/ws`) for a hardware text adapter. Off by default. [ADR-0056](docs/adr/0056-device-websocket-channel.md) |
+| 🔌 **Device WebSocket** | Opt-in `[device_ws]` JSON text duplex on the portal bind (`GET /api/device/v1/ws`) for a hardware text adapter. Off by default. LAN DNS-SD is in-process on macOS and Linux, and a Windows sidecar for WSL. [ADR-0056](docs/adr/0056-device-websocket-channel.md) · [docs/wsl-device-ws.md](docs/wsl-device-ws.md) |
 | 🏠 **SwitchBot** | Builtin `switchbot_*` tools. Portal Settings holds token + secret. Off until enabled. [ADR-0057](docs/adr/0057-switchbot-open-api-connector.md) |
 | 📚 **Skill catalog** | System prompt lists name, trigger, and how to load. Full `SKILL.md` via `read_skill_file` (whole file, or `offset` / `limit`). [ADR-0060](docs/adr/0060-skill-catalog-on-demand-trigger.md) |
 | 🤝 **Named spawn** | `spawn_agents` with a resolvable agent, skill, or bot name loads that pack and whitelist. An unknown name is an error. Omit the name for an ad-hoc subagent. [ADR-0062](docs/adr/0062-named-spawn-loads-the-pack.md) |
@@ -211,7 +211,7 @@ rustfox status
 | `[[bots]]` | Array of Telegram bots, each with `id`, `bot_token`, `allowed_user_ids`, `persona`, and optional `model` / `tools` overrides |
 | `telegram.*` | Legacy single-bot section (deprecated alias when `[[bots]]` is present) |
 | `[voice]` | Telegram voice notes: local SenseVoice STT (Cantonese `yue`) by default, optional `qwen3-asr`, voice-mode short reply, opt-in OpenRouter STT, opt-in `[voice].tts` text + `sendVoice`. Typed chat stays text. See [docs/telegram-cantonese-voice.md](docs/telegram-cantonese-voice.md) |
-| `[device_ws]` | Opt-in JSON device WebSocket on the portal bind (default off). See [ADR-0056](docs/adr/0056-device-websocket-channel.md) |
+| `[device_ws]` | Opt-in JSON device WebSocket on the portal bind (default off). `mdns` and `mdns_instance` are config keys (not Portal Settings). See [ADR-0056](docs/adr/0056-device-websocket-channel.md) and [docs/wsl-device-ws.md](docs/wsl-device-ws.md) |
 | `[switchbot]` | SwitchBot Open API (`enabled` + secret refs). Tools stay off until enabled. Token and secret are set in Portal Settings |
 | `openrouter.api_key` | OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys)) |
 | `openrouter.model` | Default LLM model ID (`provider/model`; wizard shortcuts or any typed id; default: `moonshotai/kimi-k2.6`) |

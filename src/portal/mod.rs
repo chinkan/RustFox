@@ -7,6 +7,7 @@
 //! ADR-0056: `[device_ws]` shares this bind and port. When only the device
 //! socket is on, [`serve_device_api_only`] binds the same address without the SPA.
 //! ADR-0066 adds `POST/GET /api/device/v1/audio` on that same bind.
+//! mDNS advertising does not change the bind. See `docs/wsl-device-ws.md`.
 
 pub mod auth;
 pub mod chat;

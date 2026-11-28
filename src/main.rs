@@ -1946,6 +1946,7 @@ async fn main() -> Result<()> {
     let portal_shutdown = tokio_util::sync::CancellationToken::new();
     let portal_on = config.portal.enabled;
     let device_on = config.device_ws.enabled;
+    let mut mdns_advertiser = None;
     if portal_on || device_on {
         let portal_agent: std::sync::Arc<dyn rustfox::portal::AgentOps> = agent.clone();
         let portal_state = rustfox::portal::PortalState::new(
@@ -1975,10 +1976,21 @@ async fn main() -> Result<()> {
         } else {
             rustfox::portal::serve_device_api_only(portal_state, portal_shutdown.clone()).await
         };
+        let http_started = started.is_ok();
         if let Err(e) = started {
             // Best-effort: a bind failure must not kill the bot.
             tracing::error!(
                 "HTTP server failed to start (portal={portal_on}, device_ws={device_on}): {e}"
+            );
+        }
+        // Advertise only after the listener is up, and only when Device WS is
+        // on. Loopback, WSL, and a missing LAN address skip with a log line.
+        // The bind itself is unchanged. The handle lives until shutdown.
+        if device_on && http_started {
+            mdns_advertiser = rustfox::device_mdns::spawn_host(
+                &config.device_ws,
+                &config.portal.bind,
+                config.portal.port,
             );
         }
     }
@@ -2060,6 +2072,7 @@ async fn main() -> Result<()> {
     // Brief grace period for message delivery
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    drop(mdns_advertiser);
     portal_shutdown.cancel();
 
     info!("Shutdown complete.");

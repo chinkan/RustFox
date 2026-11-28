@@ -39,6 +39,8 @@ and you don't want the portal answering on any of them):
 bind = "192.168.1.50"   # the exact address your router gave the VPS
 ```
 
+A board on the same LAN needs that same reachable bind (`0.0.0.0` or the LAN IPv4). Loopback is not advertised and the board cannot open it. WSL uses Windows portproxy plus the `rustfox-mdns` sidecar, not an in-process advertisement. See [wsl-device-ws.md](wsl-device-ws.md).
+
 Find candidates quickly: send the bot `/portal` — it probes the host and
 lists LAN + tailnet URLs (best-effort, never fabricates URLs the bind
 couldn't serve). That probe list is not the accepted `/portal` reply; see [ADR-0065](./adr/0065-portal-tailscale-settings-serve.md) §7 as amended (Product ACCEPT 2026-11-10).

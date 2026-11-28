@@ -127,6 +127,11 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 # AES-GCM for encrypted-file secret vault fallback
 aes-gcm = "0.10"
 
+# Device WS LAN discovery (issue #436). Pure Rust: no Avahi and no Bonjour.
+mdns-sd = "0.22"
+# IPv4 addresses and interface names for the advertiser and the Windows sidecar.
+if-addrs = "0.15"
+
 # Direct libc for O_NOFOLLOW sandbox file opens (ADR-0025)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -146,6 +151,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "rustfox"
 path = "src/main.rs"
+
+[[bin]]
+name = "rustfox-mdns"
+path = "src/bin/rustfox-mdns.rs"
 
 [dev-dependencies]
 async-trait = "0.1"
