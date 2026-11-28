@@ -3,10 +3,26 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Api } from '../api/client'
 
+/** Poll while `/devices` is open. Same 2–5s window as `/agents`. */
+export const DEVICES_POLL_MS = 4000
+
+/** `false` pauses the poll (hidden document or unmounted page). */
+export function devicesPollInterval(visible: boolean): number | false {
+  return visible ? DEVICES_POLL_MS : false
+}
+
 export function DevicesSection({ api, hideTitle }: { api: Api; hideTitle?: boolean }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const devices = useQuery({ queryKey: ['devices'], queryFn: api.listDevices })
+  // Poll only while this section is mounted. The interval returns false when
+  // the document is hidden, and refetchIntervalInBackground stays off.
+  const devices = useQuery({
+    queryKey: ['devices'],
+    queryFn: api.listDevices,
+    refetchInterval: () =>
+      devicesPollInterval(typeof document !== 'undefined' && document.visibilityState !== 'hidden'),
+    refetchIntervalInBackground: false,
+  })
   const [label, setLabel] = useState('')
   const [room, setRoom] = useState('')
   const [once, setOnce] = useState<string | null>(null)
@@ -100,9 +116,17 @@ export function DevicesSection({ api, hideTitle }: { api: Api; hideTitle?: boole
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {devices.data?.devices.map((d) => (
             <li key={d.id} className="row" style={{ justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-              <span>
+              <span className="row" style={{ gap: 8, minWidth: 0 }}>
                 <strong>{d.label}</strong>
                 {d.room ? <span className="hint"> · {d.room}</span> : null}
+                <span
+                  className={`badge dot ${d.connected === true ? 'running' : 'idle'}`}
+                  role="status"
+                >
+                  {d.connected === true
+                    ? t('settings.devicesOnline')
+                    : t('settings.devicesOffline')}
+                </span>
               </span>
               <span className="row" style={{ gap: 8 }}>
                 <button

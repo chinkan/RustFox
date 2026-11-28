@@ -677,10 +677,18 @@ export interface DeviceRecord {
   createdAt: string
 }
 
+/**
+ * One issued device on the list. `connected` is true only while an
+ * authenticated Device WS session is up. A stored token is not enough.
+ */
+export interface DeviceListItem extends DeviceRecord {
+  connected: boolean
+}
+
 export interface DeviceList {
   enabled: boolean
   path: string
-  devices: DeviceRecord[]
+  devices: DeviceListItem[]
 }
 
 /** Create / rotate response. `token` is shown once. */
