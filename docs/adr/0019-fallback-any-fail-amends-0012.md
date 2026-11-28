@@ -77,4 +77,9 @@ envelope body with outer 400 + inner 429 still walks (and logs inner code).
 ## Cross-reference (#237 / ADR-0037)
 
 Operator Telegram edit of `[fallback].chain` is **ADR-0037**. This ADR’s
-walk-on-any-fail / hard-exclusion locks are unchanged.
+walk-on-any-fail / hard-exclusion locks are unchanged, except the OpenCode
+plain-429 note in the 2026-11-25 cross-reference below.
+
+## Cross-reference (2026-11-25, #438)
+
+OpenCode Go plain 429 stays on Go (ADR-0009 retry) and does not walk. Walk that peer only on HTTP 402 or a quota-class 429 (`GoUsageLimitError` / policy+budget). HTTP 401/403 remain hard exclusions. A configured chain entry whose provider was not registered — including optional or empty `[openrouter]` with an `openrouter/…` entry — is an operator-visible failure that names the missing backup, not a silent skip. Full work parity on a successful walk is ADR-0029 / ADR-0043 Amendment (#438). Related to #438. Walk-on-any-fail for other failures is unchanged.
