@@ -723,12 +723,101 @@ pub fn user_facing_llm_error(err: &anyhow::Error) -> String {
 }
 
 /// True when the provider error is Ollama's userless-payload reject
-/// (`no user query found` or equivalent). Used by ADR-0029 fallback skip
-/// and ADR-0034 primary omit-retry.
+/// (`no user query found` or equivalent). Used by keep-tools recovery and
+/// ADR-0034 omit-retry.
 pub fn is_ollama_no_user_query_error(err: &anyhow::Error) -> bool {
     format!("{err:#}")
         .to_lowercase()
         .contains("no user query found")
+}
+
+/// True when the provider says this model has no tool interface.
+fn is_no_tool_interface_error(err: &anyhow::Error) -> bool {
+    let lower = format!("{err:#}").to_lowercase();
+    lower.contains("does not support tools")
+        || lower.contains("do not support tools")
+        || lower.contains("tools are not supported")
+        || lower.contains("tool use is not supported")
+}
+
+/// Chain entries whose `provider/` prefix is not registered.
+/// Bare model ids (no `/`) use the default provider and are not listed.
+/// Boot and the fallback walk both use this so a missing backup is named,
+/// not skipped (#438).
+pub fn unregistered_fallback_backups(
+    registry: &crate::provider::ProviderRegistry,
+    chain: &[String],
+) -> Vec<String> {
+    chain
+        .iter()
+        .filter(|entry| match entry.split_once('/') {
+            Some((prefix, _)) => registry.get_provider(prefix).is_none(),
+            None => false,
+        })
+        .cloned()
+        .collect()
+}
+
+fn messages_have_image_parts(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|m| match &m.content {
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+        _ => false,
+    })
+}
+
+/// Vision parts the fallback cannot accept. Audio is not a [`ContentPart`]
+/// variant; image parts are the non-text media this payload can carry.
+/// Returns the media kind to skip, or `None` when the provider can take it.
+fn unsupported_fallback_media(
+    messages: &[ChatMessage],
+    supports_vision: bool,
+) -> Option<&'static str> {
+    if !supports_vision && messages_have_image_parts(messages) {
+        Some("vision")
+    } else {
+        None
+    }
+}
+
+/// Put image parts back onto the last user turn when a tool-weak rewrite
+/// folded them into text. No-op when the shaped payload already has them.
+fn reattach_vision_if_dropped(src: &[ChatMessage], shaped: &mut [ChatMessage]) {
+    if !messages_have_image_parts(src) || messages_have_image_parts(shaped) {
+        return;
+    }
+    let images: Vec<ContentPart> = src
+        .iter()
+        .filter_map(|m| match &m.content {
+            Some(MessageContent::Parts(parts)) => Some(
+                parts
+                    .iter()
+                    .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if images.is_empty() {
+        return;
+    }
+    let Some(user) = shaped.iter_mut().rev().find(|m| m.role == "user") else {
+        return;
+    };
+    let text = user
+        .content
+        .as_ref()
+        .map(|c| c.as_text())
+        .unwrap_or_default();
+    let mut parts = Vec::new();
+    if !text.trim().is_empty() {
+        parts.push(ContentPart::Text { text });
+    }
+    parts.extend(images);
+    user.content = Some(MessageContent::Parts(parts));
 }
 
 /// Cap on `[fallback].chain` length (ADR-0012 attach + ADR-0037 Telegram add).
@@ -791,9 +880,9 @@ impl LlmClient {
         }
     }
 
-    /// Attach a fallback chain (from `[fallback] chain` in config). Entries
-    /// whose provider prefix is not in the registry are dropped with a
-    /// warning at call time, never attempted against the wrong provider.
+    /// Attach a fallback chain (from `[fallback] chain` in config). An entry
+    /// whose provider prefix is not in the registry fails the turn by name
+    /// (#438). It is never attempted against the wrong provider.
     pub fn with_fallback_chain(self, chain: Vec<String>) -> Self {
         // Bound worst-case latency (primary budget + N fallback budgets).
         if chain.len() > MAX_FALLBACK_CHAIN {
@@ -890,37 +979,55 @@ impl LlmClient {
         if !crate::provider::should_walk_fallback(&last_err) || fallback_chain.is_empty() {
             return Err(last_err);
         }
+        let mut media_skips: Vec<(String, &'static str)> = Vec::new();
+        let mut attempted = false;
         for cand in &fallback_chain {
-            let known = match cand.split_once('/') {
-                Some((prefix, _)) => self.registry.get_provider(prefix).is_some(),
-                None => true, // bare model → default provider, resolvable
-            };
-            if !known {
-                tracing::warn!(
-                    "Fallback entry '{cand}' names an unknown provider — skipping (typo in [fallback] chain?)"
+            if !unregistered_fallback_backups(&self.registry, std::slice::from_ref(cand)).is_empty()
+            {
+                tracing::error!(
+                    "Fallback backup '{cand}' is not registered (unknown provider) — not skipped"
                 );
-                continue;
+                return Err(anyhow::anyhow!(
+                    "Fallback backup '{cand}' is not registered (unknown provider)"
+                ));
             }
             let (provider, _) = self.registry.resolve_model(cand);
             let tool_weak = is_tool_weak_provider(provider.config());
             // ADR-0032: never 404-loop foreign OpenRouter-style ids on Ollama.
             if tool_weak && is_foreign_id_for_ollama(&self.registry, cand) {
                 tracing::warn!("Fallback: skipping foreign id '{cand}' for Ollama (ADR-0032)");
+                last_err = anyhow::anyhow!(
+                    "Fallback backup '{cand}' skipped (foreign id for local Ollama)"
+                );
                 continue;
             }
-            // ADR-0029 (+ #218): any tool-weak fallback with tools present
-            // (incl. first turn + plain user), mid-loop, or user-less → rewrite + omit tools.
-            // Do NOT reuse primary keep-tools shaping (ADR-0032) on the fallback walk.
-            let needs_safe = tool_weak
-                && (is_mid_tool_loop(messages)
-                    || !has_plain_user_turn(messages)
-                    || !tools.is_empty());
-            let did_rewrite = needs_safe;
-            let (req_messages, req_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if needs_safe {
+            // Vision the fallback cannot accept: skip the entry. Do not strip
+            // the parts and answer as text (#438). Audio is not a content part.
+            if let Some(kind) = unsupported_fallback_media(messages, provider.supports_vision()) {
                 tracing::warn!(
-                    "Fallback: rewriting payload for tool-weak provider {cand} (ADR-0029; tools omitted)"
+                    "Fallback: skipping '{cand}' — cannot accept {kind} parts (not stripped to text)"
                 );
-                (rewrite_messages_for_tool_weak(messages), Vec::new())
+                media_skips.push((cand.clone(), kind));
+                continue;
+            }
+            // Same work first: keep tools and guarantee a plain user message
+            // (primary Ollama shaping). Rewrite+omit is one recovery after
+            // keep-tools fails with no-user-query (or no tool interface).
+            let (req_messages, req_tools): (Vec<ChatMessage>, Vec<ToolDefinition>) = if tool_weak {
+                match shape_primary_ollama_payload(messages, tools) {
+                    Ok((mut msgs, tls)) => {
+                        reattach_vision_if_dropped(messages, &mut msgs);
+                        (msgs, tls)
+                    }
+                    Err(msg) => {
+                        tracing::warn!(
+                            "Fallback: {cand} cannot keep tools ({msg}); rewrite+omit once"
+                        );
+                        let mut msgs = rewrite_messages_for_tool_weak(messages);
+                        reattach_vision_if_dropped(messages, &mut msgs);
+                        (msgs, Vec::new())
+                    }
+                }
             } else {
                 (messages.to_vec(), tools.to_vec())
             };
@@ -930,6 +1037,7 @@ impl LlmClient {
                 last_err,
                 cand
             );
+            attempted = true;
             match self.try_model(&req_messages, &req_tools, cand).await {
                 Ok(mut completion) => {
                     completion.model = cand.clone();
@@ -937,18 +1045,37 @@ impl LlmClient {
                     return Ok(completion);
                 }
                 Err(e) => {
-                    if tool_weak && is_ollama_no_user_query_error(&e) {
-                        if did_rewrite {
-                            tracing::warn!(
-                                "Fallback: {cand} returned no-user-query after rewrite; skipping"
-                            );
-                        } else {
-                            tracing::warn!(
-                                "Fallback: {cand} returned no-user-query (no rewrite applied); skipping"
-                            );
+                    let recover = tool_weak
+                        && !req_tools.is_empty()
+                        && (is_ollama_no_user_query_error(&e) || is_no_tool_interface_error(&e));
+                    if recover {
+                        tracing::warn!(
+                            "Fallback {cand}: keep-tools failed ({e:#}); rewrite+omit tools, retry once (ADR-0034)"
+                        );
+                        let mut omit_msgs = rewrite_messages_for_tool_weak(messages);
+                        reattach_vision_if_dropped(messages, &mut omit_msgs);
+                        match self.try_model(&omit_msgs, &[], cand).await {
+                            Ok(mut completion) => {
+                                completion.model = cand.clone();
+                                tracing::info!(
+                                    "Fallback: {} answered after omit-retry ({})",
+                                    cand,
+                                    model
+                                );
+                                return Ok(completion);
+                            }
+                            Err(e2) => {
+                                if !crate::provider::should_walk_fallback(&e2) {
+                                    return Err(e2);
+                                }
+                                last_err = if is_ollama_no_user_query_error(&e2) {
+                                    anyhow::anyhow!(USER_FACING_LLM_UNAVAILABLE)
+                                } else {
+                                    e2
+                                };
+                                continue;
+                            }
                         }
-                        last_err = anyhow::anyhow!(USER_FACING_LLM_UNAVAILABLE);
-                        continue;
                     }
                     if !crate::provider::should_walk_fallback(&e) {
                         // Auth hard-exclusion on a backup: surface it — do not
@@ -958,6 +1085,16 @@ impl LlmClient {
                     last_err = e;
                 }
             }
+        }
+        if !attempted && !media_skips.is_empty() {
+            let skipped = media_skips
+                .iter()
+                .map(|(entry, kind)| format!("{entry} ({kind})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(anyhow::anyhow!(
+                "No fallback backup can accept media parts; skipped {skipped}. Not stripped to text."
+            ));
         }
         Err(last_err)
     }
@@ -2114,7 +2251,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn fallback_unknown_provider_entry_skipped_primary_error_kept() {
+    async fn fallback_unknown_provider_names_the_backup() {
         let server = MockServer::start().await;
         mount_model(
             &server,
@@ -2128,9 +2265,14 @@ mod tests {
             .chat_completion_with_model(&fb_msgs(), &[], "p1/m1")
             .await
             .unwrap_err();
+        let msg = user_facing_llm_error(&err);
         assert!(
-            err.to_string().contains("p1 API error"),
-            "primary's error must survive a skipped entry: {err}"
+            msg.contains("nonexistent/some-model"),
+            "missing backup must be named, not silently skipped: {msg} (raw {err})"
+        );
+        assert!(
+            !msg.contains("p1 API error"),
+            "the named backup must stay visible (not scrubbed to the primary body): {msg}"
         );
     }
 
@@ -2441,34 +2583,21 @@ mod tests {
         }
     }
 
-    /// #218 / ADR-0029 amend: OpenRouter primary fail → Ollama first turn with
-    /// tools + plain user must rewrite + omit tools (never raw tools that 500).
+    /// #438: OpenRouter primary fail → Ollama first turn with tools + plain
+    /// user keeps tools (one request). Omit is not the first try.
     #[tokio::test(start_paused = true)]
-    async fn fallback_ollama_first_turn_with_tools_rewrites_and_omits_tools() {
+    async fn fallback_ollama_first_turn_with_tools_keeps_tools() {
         use crate::provider::OllamaProvider;
 
         let server = MockServer::start().await;
-        // If raw tools were forwarded (pre-#218 bug), Ollama-style 500.
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(body_partial_json(serde_json::json!({
-                "model": "qwen",
-                "tools": [{"type": "function"}]
-            })))
-            .respond_with(
-                ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#),
-            )
-            .mount(&server)
-            .await;
-        // Accept rewritten omit-tools payload with a plain user turn.
-        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let cap = Arc::clone(&captured);
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
             .respond_with(move |req: &wiremock::Request| {
                 let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-                *cap.lock().unwrap() = Some(body.clone());
+                cap.lock().unwrap().push(body.clone());
                 let msgs = body["messages"].as_array().cloned().unwrap_or_default();
                 let has_user = msgs.iter().any(|m| {
                     m["role"] == "user"
@@ -2477,11 +2606,11 @@ mod tests {
                             .map(|c| !c.trim().is_empty())
                             .unwrap_or(false)
                 });
-                let tools_empty = body
+                let tools_present = body
                     .get("tools")
-                    .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
-                    .unwrap_or(true);
-                if has_user && tools_empty {
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                if has_user && tools_present {
                     ResponseTemplate::new(200).set_body_string(ok_body())
                 } else {
                     ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
@@ -2504,7 +2633,6 @@ mod tests {
         let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
         let llm = LlmClient::new(reg).with_fallback_chain(vec!["ollama/qwen".to_string()]);
 
-        // Primary OpenRouter fails (402 credits) → walk to Ollama.
         mount_model(
             &server,
             "m1",
@@ -2515,27 +2643,28 @@ mod tests {
         let c = llm
             .chat_completion_with_model(&first_turn_with_tools_user(), &[sample_tool()], "p1/m1")
             .await
-            .expect("Ollama first-turn fallback must succeed after rewrite+omit-tools");
+            .expect("Ollama first-turn fallback must succeed with tools kept");
         assert_eq!(c.model, "ollama/qwen");
-        let body = captured
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("ollama request captured");
+        let bodies = captured.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            1,
+            "keep-tools must succeed on the first Ollama try (no omit-first): {bodies:?}"
+        );
+        let body = &bodies[0];
         let msgs = body["messages"].as_array().unwrap();
         assert!(
             msgs.iter().any(|m| m["role"] == "user"),
-            "rewritten request must include user: {body}"
+            "request must include a plain user turn: {body}"
         );
-        let tools_empty = body
+        let tools_present = body
             .get("tools")
-            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
-            .unwrap_or(true);
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| !a.is_empty());
         assert!(
-            tools_empty,
-            "first-turn tool-weak fallback must omit tools (ADR-0029/#218): {body}"
+            tools_present,
+            "first-turn tool-weak fallback must keep tools: {body}"
         );
-        // User text from the original plain turn must survive rewrite.
         let user_text = msgs
             .iter()
             .filter(|m| m["role"] == "user")
@@ -2545,6 +2674,10 @@ mod tests {
         assert!(
             user_text.contains("HK weather"),
             "plain user text must be preserved: {body}"
+        );
+        assert!(
+            msgs.iter().any(|m| m["role"] == "system"),
+            "system/soul turn must be kept: {body}"
         );
     }
 
@@ -3066,5 +3199,498 @@ mod tests {
             s.contains("timed out") || s.contains("timeout"),
             "expected timeout error, got: {s}"
         );
+    }
+
+    fn oc_provider_config(base_url: String, model: &str) -> ProviderConfig {
+        let mut cfg = fb_provider_config("opencode", base_url, model);
+        cfg.provider_type = ProviderType::OpenCode;
+        cfg.api_key = Some("sk-go".into());
+        cfg
+    }
+
+    /// Leave-Go (402) walks to a registered OpenRouter backup with the same tools.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_leave_go_openrouter_sends_tools() {
+        use crate::provider::OpenCodeProvider;
+
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "deepseek-v4.1-flash",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "payment"})),
+        )
+        .await;
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "deepseek/deepseek-chat" }),
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let auth = req
+                    .headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                assert!(
+                    !auth.to_lowercase().starts_with("bearer secret:"),
+                    "literal secret ref must not be sent as Bearer: {auth}"
+                );
+                *cap.lock().unwrap() = Some(body);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let opencode: Arc<dyn crate::provider::Provider> = Arc::new(OpenCodeProvider::new(
+            oc_provider_config(server.uri(), "deepseek-v4.1-flash"),
+        ));
+        let mut or_cfg = fb_provider_config("openrouter", server.uri(), "deepseek/deepseek-chat");
+        or_cfg.supports_vision = true;
+        let openrouter: Arc<dyn crate::provider::Provider> =
+            Arc::new(OpenRouterProvider::new(or_cfg));
+        providers.insert("opencode".to_string(), opencode);
+        providers.insert("openrouter".to_string(), openrouter);
+        let reg = Arc::new(ProviderRegistry::new(providers, "opencode".to_string()));
+        let llm = LlmClient::new(reg)
+            .with_fallback_chain(vec!["openrouter/deepseek/deepseek-chat".to_string()]);
+
+        let mut messages = first_turn_with_tools_user();
+        messages[0].content = Some(MessageContent::from_text("soul-and-system"));
+        let c = llm
+            .chat_completion_with_model(&messages, &[sample_tool()], "opencode/deepseek-v4.1-flash")
+            .await
+            .expect("leave-Go must reach registered OpenRouter");
+        assert_eq!(c.model, "openrouter/deepseek/deepseek-chat");
+        let body = captured.lock().unwrap().clone().expect("openrouter body");
+        let tools = body.get("tools").and_then(|t| t.as_array());
+        assert!(
+            tools.is_some_and(|t| !t.is_empty()),
+            "leave-Go walk must send tools, not text-only: {body}"
+        );
+        assert_eq!(
+            tools.unwrap()[0]["function"]["name"],
+            "get_weather",
+            "same tool as the primary turn: {body}"
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        let blob = serde_json::to_string(msgs).unwrap();
+        assert!(
+            blob.contains("soul-and-system"),
+            "system/soul must be unchanged: {body}"
+        );
+        assert!(
+            blob.contains("HK weather"),
+            "user history must be unchanged: {body}"
+        );
+    }
+
+    /// Plain OpenCode 429 stays on Go (ADR-0009). It must not walk the chain.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_opencode_plain_429_stays_on_go() {
+        use crate::provider::OpenCodeProvider;
+
+        let server = MockServer::start().await;
+        mount_model(
+            &server,
+            "deepseek-v4.1-flash",
+            ResponseTemplate::new(429).set_body_string("rate limited, retry shortly"),
+        )
+        .await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "deepseek/deepseek-chat" }),
+            ))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut providers = HashMap::new();
+        let opencode: Arc<dyn crate::provider::Provider> = Arc::new(OpenCodeProvider::new(
+            oc_provider_config(server.uri(), "deepseek-v4.1-flash"),
+        ));
+        let openrouter: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("openrouter", server.uri(), "deepseek/deepseek-chat"),
+        ));
+        providers.insert("opencode".to_string(), opencode);
+        providers.insert("openrouter".to_string(), openrouter);
+        let reg = Arc::new(ProviderRegistry::new(providers, "opencode".to_string()));
+        let llm = LlmClient::new(reg)
+            .with_fallback_chain(vec!["openrouter/deepseek/deepseek-chat".to_string()]);
+        let err = llm
+            .chat_completion_with_model(
+                &first_turn_with_tools_user(),
+                &[sample_tool()],
+                "opencode/deepseek-v4.1-flash",
+            )
+            .await
+            .expect_err("plain 429 must stay on Go");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "OpenRouter must not be called"
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("429"), "primary 429 must surface, got: {msg}");
+    }
+
+    /// Keep-tools 500 (no user query) → one omit-retry on the same fallback,
+    /// then the next chain entry still receives tools.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_ollama_keep_tools_500_omits_once_then_next() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let ollama_calls = Arc::new(AtomicUsize::new(0));
+        let oc = Arc::clone(&ollama_calls);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                oc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(500).set_body_string(r#"{"error":"no user query found"}"#)
+            })
+            .mount(&server)
+            .await;
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "m2" })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "credits"})),
+        )
+        .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        let next: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p2", server.uri(), "m2"),
+        ));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        providers.insert("p2".to_string(), next);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg)
+            .with_fallback_chain(vec!["ollama/qwen".to_string(), "p2/m2".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&first_turn_with_tools_user(), &[sample_tool()], "p1/m1")
+            .await
+            .expect("next chain entry must answer after one omit-retry");
+        assert_eq!(c.model, "p2/m2");
+        assert_eq!(
+            ollama_calls.load(Ordering::SeqCst),
+            2,
+            "exactly one keep-tools attempt and one omit-retry on the fallback model"
+        );
+        let body = captured.lock().unwrap().clone().expect("p2 body");
+        let tools = body.get("tools").and_then(|t| t.as_array());
+        assert!(
+            tools.is_some_and(|t| !t.is_empty()),
+            "next chain entry must still receive tools: {body}"
+        );
+    }
+
+    /// A fallback model with no tool interface omits tools only after the
+    /// keep-tools attempt fails. It does not omit on the first try.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_ollama_no_tool_interface_omits_after_keep_tools() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let cap = Arc::clone(&calls);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let tools_present = body
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                cap.lock().unwrap().push(tools_present);
+                if tools_present {
+                    ResponseTemplate::new(400).set_body_string("model does not support tools")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(ok_body())
+                }
+            })
+            .mount(&server)
+            .await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "credits"})),
+        )
+        .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["ollama/qwen".to_string()]);
+        let c = llm
+            .chat_completion_with_model(&first_turn_with_tools_user(), &[sample_tool()], "p1/m1")
+            .await
+            .expect("omit-retry must recover a model with no tool interface");
+        assert_eq!(c.model, "ollama/qwen");
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![true, false],
+            "keep tools first, then one omit-retry: {seen:?}"
+        );
+    }
+
+    /// Non-vision fallback is skipped; a later vision-capable backup gets the
+    /// image and the tools. The image is not stripped into a text answer.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_vision_skip_does_not_strip_to_text() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let ollama_hits = Arc::new(AtomicUsize::new(0));
+        let oh = Arc::clone(&ollama_hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                oh.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let cap = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "deepseek/deepseek-chat" }),
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                *cap.lock().unwrap() = Some(body);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "credits"})),
+        )
+        .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        let mut or_cfg = fb_provider_config("openrouter", server.uri(), "deepseek/deepseek-chat");
+        or_cfg.supports_vision = true;
+        let openrouter: Arc<dyn crate::provider::Provider> =
+            Arc::new(OpenRouterProvider::new(or_cfg));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        providers.insert("openrouter".to_string(), openrouter);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec![
+            "ollama/qwen".to_string(),
+            "openrouter/deepseek/deepseek-chat".to_string(),
+        ]);
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(MessageContent::from_text("soul")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is this".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrlContent {
+                            url: "data:image/png;base64,abc".into(),
+                        },
+                    },
+                ])),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        let c = llm
+            .chat_completion_with_model(&messages, &[sample_tool()], "p1/m1")
+            .await
+            .expect("vision-capable backup must answer");
+        assert_eq!(c.model, "openrouter/deepseek/deepseek-chat");
+        assert_eq!(
+            ollama_hits.load(Ordering::SeqCst),
+            0,
+            "non-vision fallback must not be called"
+        );
+        let body = captured.lock().unwrap().clone().expect("vision body");
+        let blob = serde_json::to_string(&body).unwrap();
+        assert!(
+            blob.contains("data:image/png;base64,abc"),
+            "image part must be forwarded, not stripped: {body}"
+        );
+        let tools = body.get("tools").and_then(|t| t.as_array());
+        assert!(
+            tools.is_some_and(|t| !t.is_empty()),
+            "vision backup must still receive tools: {body}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fallback_vision_when_none_can_accept_fails_clearly() {
+        use crate::provider::OllamaProvider;
+
+        let server = MockServer::start().await;
+        let ollama_hits = Arc::new(AtomicUsize::new(0));
+        let oh = Arc::clone(&ollama_hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "qwen" })))
+            .respond_with(move |_req: &wiremock::Request| {
+                oh.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        mount_model(
+            &server,
+            "m1",
+            ResponseTemplate::new(402).set_body_json(serde_json::json!({"error": "credits"})),
+        )
+        .await;
+
+        let mut providers = HashMap::new();
+        let cloud: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(
+            fb_provider_config("p1", server.uri(), "m1"),
+        ));
+        let ollama: Arc<dyn crate::provider::Provider> = Arc::new(OllamaProvider::new(ollama_cfg(
+            "ollama",
+            server.uri(),
+            "qwen",
+        )));
+        providers.insert("p1".to_string(), cloud);
+        providers.insert("ollama".to_string(), ollama);
+        let reg = Arc::new(ProviderRegistry::new(providers, "p1".to_string()));
+        let llm = LlmClient::new(reg).with_fallback_chain(vec!["ollama/qwen".to_string()]);
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,abc".into(),
+                },
+            }])),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let err = llm
+            .chat_completion_with_model(&messages, &[sample_tool()], "p1/m1")
+            .await
+            .expect_err("no vision-capable backup must fail");
+        let msg = user_facing_llm_error(&err);
+        assert!(
+            msg.contains("ollama/qwen") && msg.to_lowercase().contains("vision"),
+            "failure must name the backup and the media: {msg} (raw {err})"
+        );
+        assert_eq!(
+            ollama_hits.load(Ordering::SeqCst),
+            0,
+            "skipped entry must not be called"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_secret_ref_is_not_sent_as_bearer() {
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_req: &wiremock::Request| {
+                h.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(ok_body())
+            })
+            .mount(&server)
+            .await;
+        let mut cfg = fb_provider_config("openrouter", server.uri(), "m1");
+        cfg.api_key = Some("secret:openrouter.api_key".into());
+        let mut providers = HashMap::new();
+        let provider: Arc<dyn crate::provider::Provider> = Arc::new(OpenRouterProvider::new(cfg));
+        providers.insert("openrouter".to_string(), provider);
+        let reg = Arc::new(ProviderRegistry::new(providers, "openrouter".to_string()));
+        let llm = LlmClient::new(reg);
+        let err = llm
+            .chat_completion_with_model(&fb_msgs(), &[], "openrouter/m1")
+            .await
+            .expect_err("literal secret ref must not be sent");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no HTTP call with a secret Bearer"
+        );
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("secret"),
+            "error must name the unresolved secret ref: {err:#}"
+        );
+    }
+
+    #[test]
+    fn user_facing_names_unregistered_fallback_backup() {
+        let err = anyhow::anyhow!(
+            "Fallback backup 'openrouter/deepseek/deepseek-chat' is not registered (unknown provider)"
+        );
+        let msg = user_facing_llm_error(&err);
+        assert!(msg.contains("openrouter/deepseek/deepseek-chat"), "{msg}");
     }
 }

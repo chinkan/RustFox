@@ -1274,9 +1274,12 @@ async fn main() -> Result<()> {
     }
 
     // ADR 0016: resolve `secret:openrouter.api_key` before providers are built.
+    // Also pulls a Portal-saved key when [fallback] names openrouter and the
+    // legacy table is empty (#438).
     rustfox::secret_store::resolve_openrouter_api_key(&mut config, &secret_bridge)?;
-    // ADR-0044: resolve `secret:xai.api_key` on type=xai [[provider]] rows.
-    rustfox::secret_store::resolve_xai_api_keys(&mut config, &secret_bridge)?;
+    // Resolve `secret:` on every [[provider]] api_key (openrouter, opencode, xai, …)
+    // so a literal `secret:` is never sent as Bearer (#438).
+    rustfox::secret_store::resolve_provider_api_keys(&mut config, &secret_bridge)?;
 
     // Build provider registry from config
     let (provider_sections, default_provider, fallback_chain) = config
@@ -1297,16 +1300,14 @@ async fn main() -> Result<()> {
         registry.default_provider_name(),
         fallback_chain.len()
     );
-    // Fail loudly at boot for typos that would otherwise silently no-op
-    // at call time (ADR-0012 safety: unknown provider prefix → skipped).
-    for entry in &fallback_chain {
-        if let Some((prefix, _)) = entry.split_once('/') {
-            if registry.get_provider(prefix).is_none() {
-                tracing::warn!(
-                    "[fallback] chain entry '{entry}' names unknown provider '{prefix}' — it will be skipped at call time"
-                );
-            }
-        }
+    // #438: a chain entry whose provider is not registered fails boot by name.
+    // Call time uses the same check (no silent skip).
+    let missing = rustfox::llm::unregistered_fallback_backups(registry.as_ref(), &fallback_chain);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "[fallback] backup(s) not registered: {} — not skipped",
+            missing.join(", ")
+        );
     }
 
     // Spawn background task to warm context_window_cache for all providers

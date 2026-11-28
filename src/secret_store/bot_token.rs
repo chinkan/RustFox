@@ -71,7 +71,12 @@ pub fn resolve_bot_token(store: &dyn SecretStore, configured: &str) -> Result<St
 /// Resolve `secret:openrouter.api_key` in place (ADR 0016). Call before
 /// [`Config::build_providers`] so the legacy `[openrouter]` provider copy gets
 /// the real key. Goes through the bridge so the value is seeded for redaction.
-/// Plaintext / empty keys are left as-is (pre-migrate, Ollama-only).
+/// Plaintext keys are left as-is (pre-migrate, Ollama-only).
+///
+/// When `[openrouter].api_key` is empty and `[fallback].chain` names
+/// `openrouter/…`, a Portal-saved `openrouter.api_key` is copied in so
+/// `build_providers` can register that backup (#438). A missing vault entry
+/// stays empty — the chain then fails naming the backup.
 pub fn resolve_openrouter_api_key(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
     if let Some(name) = parse_secret_ref(&cfg.openrouter.api_key) {
         validate_name(name)?;
@@ -79,18 +84,32 @@ pub fn resolve_openrouter_api_key(cfg: &mut Config, bridge: &super::SecretBridge
             format!("secret `{name}` not found in SecretStore ([openrouter].api_key)")
         })?;
         cfg.openrouter.api_key = value.expose().to_string();
+        return Ok(());
+    }
+    let chain_wants_openrouter = cfg.fallback.chain.iter().any(|entry| {
+        entry
+            .split_once('/')
+            .is_some_and(|(prefix, _)| prefix == "openrouter")
+    });
+    let explicit_openrouter = cfg.provider.iter().any(|p| p.name == "openrouter");
+    if cfg.openrouter.api_key.trim().is_empty() && chain_wants_openrouter && !explicit_openrouter {
+        if let Some(value) = bridge.get(OPENROUTER_API_KEY_SECRET)? {
+            cfg.openrouter.api_key = value.expose().to_string();
+        }
     }
     Ok(())
 }
 
-/// Resolve `secret:…` refs on `[[provider]] type=xai` `api_key` fields (ADR-0044).
-/// Call after [`resolve_openrouter_api_key`] and before [`Config::build_providers`].
-/// Plaintext / empty / missing keys are left as-is.
-pub fn resolve_xai_api_keys(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
+/// Resolve `secret:` refs on every `[[provider]].api_key` (ADR 0016 / ADR-0044 / #438).
+///
+/// Documented refs include `type=openrouter` (`secret:openrouter.api_key`),
+/// `type=opencode` (`secret:opencode.api_key`), and `type=xai`
+/// (`secret:xai.api_key`). Any other `secret:` api_key is resolved the same
+/// way so a literal `secret:` is never left for Bearer. Plaintext and empty
+/// keys are left as-is. A missing vault entry is an error (the literal stays
+/// out of the provider that gets built, because boot stops).
+pub fn resolve_provider_api_keys(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
     for section in &mut cfg.provider {
-        if section.provider_type != crate::config::ProviderType::Xai {
-            continue;
-        }
         let Some(raw) = section.api_key.as_deref() else {
             continue;
         };
@@ -100,13 +119,19 @@ pub fn resolve_xai_api_keys(cfg: &mut Config, bridge: &super::SecretBridge) -> R
         validate_name(name)?;
         let value = bridge.get(name)?.with_context(|| {
             format!(
-                "secret `{name}` not found in SecretStore ([[provider]] name={pname} type=xai api_key)",
-                pname = section.name
+                "secret `{name}` not found in SecretStore ([[provider]] name={} api_key)",
+                section.name
             )
         })?;
         section.api_key = Some(value.expose().to_string());
     }
     Ok(())
+}
+
+/// Resolve `secret:…` refs on `[[provider]]` api_key fields.
+/// Call after [`resolve_openrouter_api_key`] and before [`Config::build_providers`].
+pub fn resolve_xai_api_keys(cfg: &mut Config, bridge: &super::SecretBridge) -> Result<()> {
+    resolve_provider_api_keys(cfg, bridge)
 }
 
 /// Persist `plaintext` under `name` (read back via `set_verified`) and return `secret:<name>`.
@@ -559,6 +584,121 @@ model = "grok-4.7"
         assert_eq!(
             store.get(XAI_API_KEY_SECRET).unwrap().unwrap().expose(),
             "sk-xai-plain"
+        );
+    }
+
+    #[test]
+    fn resolve_openrouter_and_opencode_provider_secret_refs() {
+        use crate::secret_store::{PendingSecretRegistry, SecretBridge};
+        use std::sync::Arc;
+
+        let store = Arc::new(FakeSecretStore::new());
+        store_secret(store.as_ref(), OPENROUTER_API_KEY_SECRET, "sk-or-live").unwrap();
+        store_secret(store.as_ref(), "opencode.api_key", "sk-go-live").unwrap();
+        let bridge = SecretBridge::new(store, Arc::new(PendingSecretRegistry::default()));
+        let toml = r#"
+[telegram]
+bot_token = "1:abc"
+allowed_user_ids = [1]
+[openrouter]
+api_key = ""
+model = "m"
+[[provider]]
+name = "ollama"
+type = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen"
+[[provider]]
+name = "openrouter"
+type = "openrouter"
+api_key = "secret:openrouter.api_key"
+model = "deepseek/deepseek-chat"
+[[provider]]
+name = "opencode"
+type = "opencode"
+base_url = "https://opencode.ai/inference/go/openai/v1"
+api_key = "secret:opencode.api_key"
+model = "deepseek-v4.1-flash"
+"#;
+        let mut cfg: Config = toml::from_str(toml).unwrap();
+        resolve_provider_api_keys(&mut cfg, &bridge).unwrap();
+        let or = cfg
+            .provider
+            .iter()
+            .find(|p| p.name == "openrouter")
+            .unwrap();
+        assert_eq!(or.api_key.as_deref(), Some("sk-or-live"));
+        let oc = cfg.provider.iter().find(|p| p.name == "opencode").unwrap();
+        assert_eq!(oc.api_key.as_deref(), Some("sk-go-live"));
+        assert!(
+            cfg.provider.iter().all(|p| {
+                p.api_key
+                    .as_deref()
+                    .map(|k| !k.starts_with("secret:"))
+                    .unwrap_or(true)
+            }),
+            "no literal secret: left on provider api_key"
+        );
+
+        let mut missing: Config = toml::from_str(toml).unwrap();
+        if let Some(section) = missing.provider.iter_mut().find(|p| p.name == "openrouter") {
+            section.api_key = Some("secret:openrouter.missing".into());
+        }
+        let err = resolve_provider_api_keys(&mut missing, &bridge)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("openrouter.missing"),
+            "missing secret must be named: {err}"
+        );
+        let still = missing
+            .provider
+            .iter()
+            .find(|p| p.name == "openrouter")
+            .unwrap();
+        assert_eq!(
+            still.api_key.as_deref(),
+            Some("secret:openrouter.missing"),
+            "failed resolve must not replace the ref with a sent Bearer value"
+        );
+    }
+
+    #[test]
+    fn portal_saved_openrouter_key_registers_chain_provider() {
+        use crate::secret_store::{PendingSecretRegistry, SecretBridge};
+        use std::sync::Arc;
+
+        let store = Arc::new(FakeSecretStore::new());
+        store_secret(store.as_ref(), OPENROUTER_API_KEY_SECRET, "sk-or-portal").unwrap();
+        let bridge = SecretBridge::new(store, Arc::new(PendingSecretRegistry::default()));
+        let toml = r#"
+default_provider = "opencode"
+[telegram]
+bot_token = "1:abc"
+allowed_user_ids = [1]
+[openrouter]
+api_key = ""
+[[provider]]
+name = "opencode"
+type = "opencode"
+base_url = "https://opencode.ai/inference/go/openai/v1"
+api_key = "sk-go"
+model = "deepseek-v4.1-flash"
+[fallback]
+chain = ["openrouter/deepseek/deepseek-chat"]
+"#;
+        let mut cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.openrouter.api_key.is_empty());
+        resolve_openrouter_api_key(&mut cfg, &bridge).unwrap();
+        assert_eq!(cfg.openrouter.api_key, "sk-or-portal");
+        let (providers, default_name, chain) = cfg.build_providers().unwrap();
+        assert_eq!(default_name, "opencode");
+        assert_eq!(chain, vec!["openrouter/deepseek/deepseek-chat".to_string()]);
+        let or = providers.iter().find(|p| p.name == "openrouter").unwrap();
+        assert_eq!(or.api_key.as_deref(), Some("sk-or-portal"));
+        assert!(
+            !or.api_key.as_deref().unwrap().starts_with("secret:"),
+            "registered backup key must be the resolved secret"
         );
     }
 }
