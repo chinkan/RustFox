@@ -45,6 +45,19 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (
+            id.includes('node_modules/three') ||
+            id.includes('node_modules/@react-three') ||
+            id.includes('/agents/office3d/')
+          ) {
+            return 'office-3d'
+          }
+        },
+      },
+    },
   },
   test: {
     environment: 'jsdom',
