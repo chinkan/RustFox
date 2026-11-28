@@ -1057,6 +1057,7 @@ impl Agent {
         key: &str,
         conversation_id: &str,
         supports_vision: bool,
+        bot_id: &str,
     ) -> Vec<ChatMessage> {
         let items = self.turn_gate.drain(key).await;
         let mut out = Vec::with_capacity(items.len());
@@ -1066,12 +1067,15 @@ impl Agent {
             } else {
                 format!("[Steer] {}", item.text)
             };
+            let defer_statement_pdfs =
+                crate::file_processor::defer_statement_pdfs_for_bot(&self.config, bot_id);
             let (attachment_text, image_parts) = crate::file_processor::process_attachments(
                 &item.attachments,
                 &prefixed,
                 &self.config,
                 &self.memory,
                 supports_vision,
+                defer_statement_pdfs,
             )
             .await;
             let combined =
@@ -1612,15 +1616,19 @@ impl Agent {
             let key = session_key(bot_id, user_id);
             let conv_id = conversation_id.clone();
             let vision = supports_vision;
+            let steer_bot_id = bot_id.to_string();
             agentic = agentic.with_steer(Box::new(move || {
                 let weak = weak.clone();
                 let key = key.clone();
                 let conv_id = conv_id.clone();
+                let steer_bot_id = steer_bot_id.clone();
                 Box::pin(async move {
                     let Some(agent) = weak.upgrade() else {
                         return Vec::new();
                     };
-                    agent.drain_steer_messages(&key, &conv_id, vision).await
+                    agent
+                        .drain_steer_messages(&key, &conv_id, vision, &steer_bot_id)
+                        .await
                 })
             }));
         }

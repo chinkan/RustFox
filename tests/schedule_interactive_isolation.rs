@@ -38,7 +38,7 @@ async fn schedule_busy_inbound_is_interactive_not_schedule_steer() {
     started.notify_one();
 
     match chat.await.unwrap() {
-        Submit::Start(v) => assert_eq!(texts(&v), ["while the job runs"]),
+        Submit::Start((v, _)) => assert_eq!(texts(&v), ["while the job runs"]),
         other => panic!("expected interactive Start, got {other:?}"),
     }
     assert!(gate.interactive_active(key).await);

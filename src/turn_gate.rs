@@ -77,7 +77,10 @@ pub enum Submit {
     /// Interactive lane was idle (a scheduled lane may still be running).
     /// A user turn is now active. Run it with these inputs (any leftover
     /// queue first, then the new message — arrival order).
-    Start(Vec<QueuedInput>),
+    ///
+    /// The `u64` is this acquisition's generation. The turn task holds it
+    /// until finish so a panic or `/stop` can release only that hold.
+    Start((Vec<QueuedInput>, u64)),
     /// Queued behind an active **interactive** turn (👀 mid-run steer / queue UX).
     /// A scheduled lane running beside it does not change this (#338).
     Accepted,
@@ -97,6 +100,8 @@ pub enum Next {
     User {
         inputs: Vec<QueuedInput>,
         auto_continue: bool,
+        /// Generation of the interactive hold that owns this batch.
+        gen: u64,
     },
     /// Q6 recursion guard: the auto turn hit the step limit again. The queue
     /// is kept and the gate is idle; tell the user `n` messages are waiting.
@@ -109,6 +114,13 @@ pub enum Next {
 struct KeyState {
     /// Interactive (user chat) turn is running.
     user: bool,
+    /// Bumped each time the interactive lane is acquired or forcibly released.
+    /// A turn task may finish or drop only while this still matches its hold.
+    user_gen: u64,
+    /// An [`InteractiveHold`] for `user_gen` is alive. `/stop` must not mark
+    /// the lane idle while this is set: the turn still has to finish and
+    /// clear 👀. A stuck `user=true` with no hold is released by `clear`.
+    user_held: bool,
     /// Scheduled turn is running. Independent of `user` (#338).
     scheduled: bool,
     pending: VecDeque<QueuedInput>,
@@ -118,6 +130,51 @@ struct KeyState {
     /// `silent_eyes_active`. Minimal and Verbose never set the flag.
     silent_eyes: Vec<i32>,
     silent_eyes_active: bool,
+}
+
+/// The interactive hold that called finish no longer owns the lane.
+/// A newer user turn is left running. An idle lane still hands off a
+/// waiting schedule (the same edge as a normal finish).
+fn finish_after_lost_hold(st: &mut KeyState) -> Next {
+    if st.user {
+        return Next::Idle;
+    }
+    if !st.scheduled {
+        if let Some(next) = release_scheduled_ticket(st) {
+            return next;
+        }
+    }
+    Next::Idle
+}
+
+/// Release this interactive acquisition and, when the scheduled lane is
+/// free, hand it to the oldest waiter. Returns whether this call owned it.
+fn release_held_user(st: &mut KeyState, gen: u64) -> bool {
+    if st.user_gen != gen {
+        return false;
+    }
+    st.user_held = false;
+    if !st.user {
+        return false;
+    }
+    st.user = false;
+    st.user_gen = st.user_gen.wrapping_add(1);
+    if !st.scheduled {
+        let _ = release_scheduled_ticket(st);
+    }
+    true
+}
+
+fn mark_user_held(st: &mut KeyState, gen: u64) {
+    if st.user && st.user_gen == gen {
+        st.user_held = true;
+    }
+}
+
+enum TryRelease {
+    Released,
+    NotHeld,
+    Busy,
 }
 
 /// Hand the scheduled lane to the oldest waiter. Caller must only invoke this
@@ -154,10 +211,12 @@ impl TurnGate {
         let st = keys.entry(key.to_string()).or_default();
         if !st.user {
             st.user = true;
+            st.user_gen = st.user_gen.wrapping_add(1);
+            let gen = st.user_gen;
             st.auto_continue_used = false;
             let mut inputs: Vec<_> = st.pending.drain(..).collect();
             inputs.push(input);
-            return Submit::Start(inputs);
+            return Submit::Start((inputs, gen));
         }
         if st.pending.len() >= QUEUE_CAP {
             return Submit::Full(Box::new(input));
@@ -220,9 +279,29 @@ impl TurnGate {
     /// Does not clear a scheduled lane that is still running. A waiting
     /// schedule is released only when the scheduled lane is free, and it
     /// still starts before leftover pending (ADR-0020 Decision 5.1).
+    ///
+    /// Callers that acquired the lane through [`Submit::Start`] should use
+    /// [`Self::finish_user_gen`] so a `/stop` that already released the hold
+    /// cannot clobber a newer turn.
     pub async fn finish_user(&self, key: &str, stop: Option<RunStop>) -> Next {
+        self.finish_user_inner(key, stop, None).await
+    }
+
+    /// [`Self::finish_user`] for the task that holds `gen`.
+    ///
+    /// A mismatched generation means `/stop` or a panic `Drop` already
+    /// released this hold. A newer interactive turn is left alone. If the
+    /// lane is idle, a waiting schedule is still handed off.
+    pub async fn finish_user_gen(&self, key: &str, stop: Option<RunStop>, gen: u64) -> Next {
+        self.finish_user_inner(key, stop, Some(gen)).await
+    }
+
+    async fn finish_user_inner(&self, key: &str, stop: Option<RunStop>, hold: Option<u64>) -> Next {
         let mut keys = self.keys.lock().await;
         let st = keys.entry(key.to_string()).or_default();
+        if hold.is_some_and(|gen| st.user_gen != gen) {
+            return finish_after_lost_hold(st);
+        }
         let was_user = st.user;
         st.user = false;
         let user_max_iter = was_user && stop == Some(RunStop::MaxIterations);
@@ -232,23 +311,34 @@ impl TurnGate {
 
         if !st.scheduled {
             if let Some(next) = release_scheduled_ticket(st) {
+                if hold.is_some() {
+                    st.user_held = false;
+                }
                 return next;
             }
         }
 
         if st.pending.is_empty() {
+            if hold.is_some() {
+                st.user_held = false;
+            }
             return Next::Idle;
         }
         if user_max_iter && st.auto_continue_used {
+            if hold.is_some() {
+                st.user_held = false;
+            }
             return Next::StepLimit {
                 n: st.pending.len(),
             };
         }
         st.auto_continue_used = user_max_iter;
         st.user = true;
+        let gen = st.user_gen;
         Next::User {
             inputs: st.pending.drain(..).collect(),
             auto_continue: user_max_iter,
+            gen,
         }
     }
 
@@ -272,20 +362,33 @@ impl TurnGate {
             return Next::Idle;
         }
         st.auto_continue_used = false;
+        st.user_gen = st.user_gen.wrapping_add(1);
         st.user = true;
+        let gen = st.user_gen;
         Next::User {
             inputs: st.pending.drain(..).collect(),
             auto_continue: false,
+            gen,
         }
     }
 
-    /// `/stop`: drop every queued message (temp files removed). Waiting
-    /// scheduled runs are kept (PO GO 2). Returns how many were cleared.
+    /// `/stop`: drop every queued message (temp files removed). A stuck
+    /// interactive lane (`user` with no live [`InteractiveHold`]) is released
+    /// so later messages are not queued forever. A live hold keeps the lane
+    /// until that turn finishes or panics. Waiting scheduled runs are kept
+    /// (PO GO 2) for the turn's finish, or for a panic `Drop`, to hand off.
+    /// Returns how many messages were cleared.
     pub async fn clear(&self, key: &str) -> usize {
         let cleared: Vec<_> = {
             let mut keys = self.keys.lock().await;
             match keys.get_mut(key) {
-                Some(st) => st.pending.drain(..).collect(),
+                Some(st) => {
+                    if st.user && !st.user_held {
+                        st.user = false;
+                        st.user_gen = st.user_gen.wrapping_add(1);
+                    }
+                    st.pending.drain(..).collect()
+                }
                 None => Vec::new(),
             }
         };
@@ -382,6 +485,100 @@ impl TurnGate {
         st.silent_eyes_active = false;
         std::mem::take(&mut st.silent_eyes)
     }
+
+    fn try_release_user(&self, key: &str, gen: u64) -> TryRelease {
+        let Ok(mut keys) = self.keys.try_lock() else {
+            return TryRelease::Busy;
+        };
+        let Some(st) = keys.get_mut(key) else {
+            return TryRelease::NotHeld;
+        };
+        if release_held_user(st, gen) {
+            TryRelease::Released
+        } else {
+            TryRelease::NotHeld
+        }
+    }
+
+    async fn release_user(&self, key: &str, gen: u64) {
+        let mut keys = self.keys.lock().await;
+        if let Some(st) = keys.get_mut(key) {
+            release_held_user(st, gen);
+        }
+    }
+}
+
+/// Owns one interactive acquisition for the lifetime of a turn task.
+///
+/// Drop releases that generation if it is still the holder, including when
+/// the task panics. A normal `finish` leaves `user` false, so Drop is a
+/// no-op. `/stop` bumps the generation, so Drop does not clear a newer turn.
+pub struct InteractiveHold {
+    gate: std::sync::Arc<TurnGate>,
+    key: String,
+    gen: u64,
+}
+
+impl InteractiveHold {
+    pub fn new(gate: std::sync::Arc<TurnGate>, key: impl Into<String>, gen: u64) -> Self {
+        let key = key.into();
+        match gate.keys.try_lock() {
+            Ok(mut keys) => {
+                if let Some(st) = keys.get_mut(&key) {
+                    mark_user_held(st, gen);
+                }
+            }
+            Err(_) => {
+                let gate = std::sync::Arc::clone(&gate);
+                let key = key.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let mut keys = gate.keys.lock().await;
+                        if let Some(st) = keys.get_mut(&key) {
+                            mark_user_held(st, gen);
+                        }
+                    });
+                }
+            }
+        }
+        Self { gate, key, gen }
+    }
+
+    /// Same as [`Self::new`], but the hold is marked before this returns.
+    /// Telegram attaches this before the silent-mode 👀 awaits so `/stop`
+    /// during that window still sees a live turn.
+    pub async fn attach(gate: std::sync::Arc<TurnGate>, key: impl Into<String>, gen: u64) -> Self {
+        let key = key.into();
+        {
+            let mut keys = gate.keys.lock().await;
+            if let Some(st) = keys.get_mut(&key) {
+                mark_user_held(st, gen);
+            }
+        }
+        Self { gate, key, gen }
+    }
+
+    pub async fn finish(&self, stop: Option<RunStop>) -> Next {
+        self.gate.finish_user_gen(&self.key, stop, self.gen).await
+    }
+}
+
+impl Drop for InteractiveHold {
+    fn drop(&mut self) {
+        match self.gate.try_release_user(&self.key, self.gen) {
+            TryRelease::Released | TryRelease::NotHeld => {}
+            TryRelease::Busy => {
+                let gate = std::sync::Arc::clone(&self.gate);
+                let key = self.key.clone();
+                let gen = self.gen;
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        gate.release_user(&key, gen).await;
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +614,9 @@ mod tests {
     #[tokio::test]
     async fn idle_starts_then_queues_up_to_cap_then_refuses() {
         let g = TurnGate::new();
-        assert!(matches!(g.submit("k", input("a")).await, Submit::Start(v) if texts(&v) == ["a"]));
+        assert!(
+            matches!(g.submit("k", input("a")).await, Submit::Start((v, _)) if texts(&v) == ["a"])
+        );
         for i in 0..QUEUE_CAP {
             assert!(matches!(
                 g.submit("k", input(&i.to_string())).await,
@@ -455,6 +654,7 @@ mod tests {
             Next::User {
                 inputs,
                 auto_continue,
+                ..
             } => {
                 assert_eq!(texts(&inputs), ["1", "2"]);
                 assert!(!auto_continue);
@@ -487,6 +687,7 @@ mod tests {
             Next::User {
                 inputs,
                 auto_continue,
+                ..
             } => {
                 assert_eq!(texts(&inputs), ["1", "2"]);
                 assert!(auto_continue);
@@ -508,7 +709,7 @@ mod tests {
 
         // Next user message: pending + new, arrival order; guard reset.
         match g.submit("k", input("6")).await {
-            Submit::Start(v) => assert_eq!(texts(&v), ["3", "4", "5", "6"]),
+            Submit::Start((v, _)) => assert_eq!(texts(&v), ["3", "4", "5", "6"]),
             other => panic!("{other:?}"),
         }
         g.submit("k", input("7")).await;
@@ -592,7 +793,7 @@ mod tests {
             let sub = sub.await.unwrap();
             let seen = match (&fin, &sub) {
                 (Next::User { inputs, .. }, Submit::Accepted) => texts(inputs) == ["late"],
-                (Next::Idle, Submit::Start(v)) => texts(v) == ["late"],
+                (Next::Idle, Submit::Start((v, _))) => texts(v) == ["late"],
                 _ => false,
             };
             assert!(seen, "round {round}: lost message ({fin:?}, {sub:?})");
@@ -672,7 +873,7 @@ mod tests {
         assert!(!g.interactive_active("k").await);
 
         match g.submit("k", input("hello")).await {
-            Submit::Start(v) => assert_eq!(texts(&v), ["hello"]),
+            Submit::Start((v, _)) => assert_eq!(texts(&v), ["hello"]),
             other => panic!("expected interactive Start, got {other:?}"),
         }
         assert!(g.interactive_active("k").await);
@@ -790,7 +991,7 @@ mod tests {
             let fin = g.finish_scheduled("k").await;
             let sub = sub.await.unwrap();
             let ok = match (&fin, &sub) {
-                (Next::Idle, Submit::Start(v)) => texts(v) == ["late"],
+                (Next::Idle, Submit::Start((v, _))) => texts(v) == ["late"],
                 _ => false,
             };
             assert!(
@@ -876,5 +1077,137 @@ mod tests {
         }
         waiter.await.unwrap();
         assert!(g.is_active("k").await);
+    }
+
+    #[tokio::test]
+    async fn clear_releases_stuck_interactive_lane() {
+        let g = TurnGate::new();
+        assert!(matches!(
+            g.submit("k", input("stuck")).await,
+            Submit::Start(_)
+        ));
+        g.submit("k", input("queued")).await;
+        assert!(g.interactive_active("k").await);
+        assert_eq!(g.clear("k").await, 1);
+        assert!(
+            !g.interactive_active("k").await,
+            "/stop must flip a stuck user=true gate back to false"
+        );
+        assert!(!g.scheduled_active("k").await);
+        match g.submit("k", input("next")).await {
+            Submit::Start((v, _)) => assert_eq!(texts(&v), ["next"]),
+            other => panic!("later message must start, not stay queued: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_releases_user_lane_and_keeps_scheduled_lane() {
+        let g = TurnGate::new();
+        g.begin_scheduled("k").await;
+        assert!(matches!(
+            g.submit("k", input("chat")).await,
+            Submit::Start(_)
+        ));
+        assert_eq!(g.clear("k").await, 0);
+        assert!(!g.interactive_active("k").await);
+        assert!(g.scheduled_active("k").await);
+    }
+
+    #[tokio::test]
+    async fn interactive_hold_releases_gate_when_turn_task_panics() {
+        let g = std::sync::Arc::new(TurnGate::new());
+        let gen = match g.submit("bot:user", input("pdf")).await {
+            Submit::Start((_, gen)) => gen,
+            other => panic!("{other:?}"),
+        };
+        g.submit("bot:user", input("queued")).await;
+        let g2 = std::sync::Arc::clone(&g);
+        let task = tokio::spawn(async move {
+            let _hold = InteractiveHold::new(g2, "bot:user", gen);
+            panic!("pdf-extract");
+        });
+        assert!(task.await.expect_err("turn task panics").is_panic());
+        assert!(
+            !g.interactive_active("bot:user").await,
+            "panic must release the interactive gate"
+        );
+        match g.submit("bot:user", input("next")).await {
+            Submit::Start((v, _)) => assert_eq!(texts(&v), ["queued", "next"]),
+            other => panic!("later message must be processed, not only queued: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_drop_hands_waiting_schedule_the_lane() {
+        let g = std::sync::Arc::new(TurnGate::new());
+        let gen = match g.submit("k", input("pdf")).await {
+            Submit::Start((_, gen)) => gen,
+            other => panic!("{other:?}"),
+        };
+        let g2 = std::sync::Arc::clone(&g);
+        let waiter = tokio::spawn(async move {
+            g2.begin_scheduled("k").await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let g3 = std::sync::Arc::clone(&g);
+        let task = tokio::spawn(async move {
+            let _hold = InteractiveHold::new(g3, "k", gen);
+            panic!("pdf-extract");
+        });
+        assert!(task.await.expect_err("panic").is_panic());
+        waiter.await.unwrap();
+        assert!(g.scheduled_active("k").await);
+        assert!(!g.interactive_active("k").await);
+    }
+
+    #[tokio::test]
+    async fn clear_with_live_hold_keeps_the_lane_until_finish() {
+        let g = std::sync::Arc::new(TurnGate::new());
+        let gen = match g.submit("k", input("old")).await {
+            Submit::Start((_, gen)) => gen,
+            other => panic!("{other:?}"),
+        };
+        let hold = InteractiveHold::attach(std::sync::Arc::clone(&g), "k", gen).await;
+        assert_eq!(g.clear("k").await, 0);
+        assert!(
+            g.interactive_active("k").await,
+            "/stop must not idle a live turn before it finishes"
+        );
+        assert!(matches!(
+            hold.finish(Some(RunStop::Cancelled)).await,
+            Next::Idle
+        ));
+        assert!(!g.interactive_active("k").await);
+        drop(hold);
+        assert!(!g.interactive_active("k").await);
+    }
+
+    #[tokio::test]
+    async fn stale_finish_after_stuck_clear_does_not_clobber_a_newer_turn() {
+        let g = std::sync::Arc::new(TurnGate::new());
+        let gen = match g.submit("k", input("old")).await {
+            Submit::Start((_, gen)) => gen,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(g.clear("k").await, 0);
+        assert!(!g.interactive_active("k").await);
+        let hold = InteractiveHold::new(std::sync::Arc::clone(&g), "k", gen);
+        let _new_gen = match g.submit("k", input("new")).await {
+            Submit::Start((v, gen)) => {
+                assert_eq!(texts(&v), ["new"]);
+                gen
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            hold.finish(Some(RunStop::Cancelled)).await,
+            Next::Idle
+        ));
+        assert!(g.interactive_active("k").await);
+        drop(hold);
+        assert!(
+            g.interactive_active("k").await,
+            "dropping the stopped hold must not release the newer turn"
+        );
     }
 }

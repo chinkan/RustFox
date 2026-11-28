@@ -410,12 +410,15 @@ impl ConversationManager {
             incoming.device_room.as_deref(),
             incoming.device_fw.as_deref(),
         );
+        let defer_statement_pdfs =
+            crate::file_processor::defer_statement_pdfs_for_bot(config, &incoming.bot_id);
         let (attachment_text, image_parts) = crate::file_processor::process_attachments(
             &incoming.attachments,
             &text,
             config,
             &self.memory,
             supports_vision,
+            defer_statement_pdfs,
         )
         .await;
 

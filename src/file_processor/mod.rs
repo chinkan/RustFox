@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use crate::config::Config;
@@ -34,6 +35,7 @@ pub async fn process_attachments(
     config: &Config,
     memory: &MemoryStore,
     supports_vision: bool,
+    defer_statement_pdfs: bool,
 ) -> (String, Vec<ContentPart>) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut image_parts: Vec<ContentPart> = Vec::new();
@@ -64,13 +66,15 @@ pub async fn process_attachments(
                 let fname = attachment.file_name.as_deref().unwrap_or("document.pdf");
                 match std::fs::read(&attachment.path) {
                     Ok(bytes) => {
-                        let routed = route_native_pdf(
+                        let routed = route_pdf_attachment(
                             &bytes,
                             fname,
+                            &attachment.path,
                             user_query,
                             memory,
                             supports_vision,
                             &SystemPdfRenderer,
+                            defer_statement_pdfs,
                         )
                         .await;
                         text_parts.push(routed.text);
@@ -204,15 +208,232 @@ impl PdfPageRenderer for SystemPdfRenderer {
     }
 }
 
+/// A statement PDF is named like a bank statement (`eStatement`, `statement`).
+fn is_statement_pdf_name(file_name: &str) -> bool {
+    file_name.to_ascii_lowercase().contains("statement")
+}
+
+/// True when this persona pack already has an OCR / pdftotext bridge, so
+/// intake must not run `pdf-extract` on statement PDFs. The bridge is
+/// `statement_ocr.py`, or a text file that mentions `pdftotext`, under
+/// `agents/<persona>/` or under a skill directory that pack names.
+pub(crate) fn persona_defers_statement_pdfs(
+    agents_dir: &Path,
+    skills_dir: &Path,
+    persona: &str,
+) -> bool {
+    let persona = persona.trim();
+    if persona.is_empty() {
+        return false;
+    }
+    let persona_dir = agents_dir.join(persona);
+    if tree_has_ocr_bridge(&persona_dir) {
+        return true;
+    }
+    let mentioned = persona_pack_text(&persona_dir);
+    if mentioned.is_empty() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if crate::skills::is_hidden_entry(name) {
+            continue;
+        }
+        let stem = name.strip_suffix(".md").unwrap_or(name);
+        if !mentions_token(&mentioned, stem) {
+            continue;
+        }
+        if tree_has_ocr_bridge(&entry.path()) {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn defer_statement_pdfs_for_bot(config: &Config, bot_id: &str) -> bool {
+    let persona = crate::persona_prompt::bot_for_prompt(config, bot_id)
+        .persona
+        .clone();
+    persona_defers_statement_pdfs(&config.agents.directory, &config.skills.directory, &persona)
+}
+
+fn mentions_token(text: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let needle = token.as_bytes();
+    text.match_indices(token).any(|(i, _)| {
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let end = i + needle.len();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        before_ok && after_ok
+    })
+}
+
+fn persona_pack_text(persona_dir: &Path) -> String {
+    let mut out = String::new();
+    let mut budget = 32usize;
+    collect_text(persona_dir, 0, &mut budget, &mut out);
+    out
+}
+
+fn collect_text(dir: &Path, depth: usize, budget: &mut usize, out: &mut String) {
+    if depth > 4 || *budget == 0 || !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if crate::skills::is_hidden_entry(name) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_text(&path, depth + 1, budget, out);
+            continue;
+        }
+        if !is_bridge_text_ext(&path) {
+            continue;
+        }
+        *budget -= 1;
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+}
+
+fn tree_has_ocr_bridge(root: &Path) -> bool {
+    if root.is_file() {
+        let named_bridge =
+            root.file_name().and_then(|name| name.to_str()) == Some("statement_ocr.py");
+        return named_bridge || file_mentions_pdftotext(root);
+    }
+    let mut budget = 64usize;
+    walk_ocr_bridge(root, 0, &mut budget)
+}
+
+fn walk_ocr_bridge(dir: &Path, depth: usize, budget: &mut usize) -> bool {
+    if depth > 8 || *budget == 0 || !dir.is_dir() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if crate::skills::is_hidden_entry(name) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if walk_ocr_bridge(&path, depth + 1, budget) {
+                return true;
+            }
+            continue;
+        }
+        if name == "statement_ocr.py" || file_mentions_pdftotext(&path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_bridge_text_ext(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("py" | "md" | "sh" | "txt" | "toml")
+    )
+}
+
+fn file_mentions_pdftotext(path: &Path) -> bool {
+    if !is_bridge_text_ext(path) {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() > 256 * 1024 {
+        return false;
+    }
+    std::fs::read_to_string(path)
+        .map(|text| text.contains("pdftotext"))
+        .unwrap_or(false)
+}
+
+fn statement_pdf_for_persona_ocr(filename: &str, path: &Path) -> String {
+    format!(
+        "[File: {filename}]\nPath: {}\nRun the persona OCR / pdftotext path on this statement PDF (for example statement_ocr.py).",
+        path.display()
+    )
+}
+
+enum PdfExtractFail {
+    Error(String),
+    Panic(String),
+}
+
+fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "pdf-extract panicked".to_string()
+}
+
+/// `pdf-extract` 0.12.1 unwraps `Content::decode` (`Parse(InvalidContentStream)`).
+/// A panic is not an `Err`, so catch it and surface the same failure text.
+fn pdf_extract_call<T>(
+    op: impl FnOnce() -> Result<T, pdf_extract::OutputError>,
+) -> Result<T, PdfExtractFail> {
+    match std::panic::catch_unwind(AssertUnwindSafe(op)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(PdfExtractFail::Error(err.to_string())),
+        Err(payload) => Err(PdfExtractFail::Panic(format!(
+            "pdf-extract panicked: {}",
+            panic_payload(payload)
+        ))),
+    }
+}
+
 /// Page-split native text. Falls back to one blob when the file parses but
 /// pages do not, so the text-RAG path still runs. No OCR.
 fn load_pdf_pages(bytes: &[u8]) -> Result<Vec<String>> {
-    match pdf_extract::extract_text_from_mem_by_pages(bytes) {
+    match pdf_extract_call(|| pdf_extract::extract_text_from_mem_by_pages(bytes)) {
         Ok(pages) => Ok(pages),
-        Err(page_err) => match pdf_extract::extract_text_from_mem(bytes) {
-            Ok(text) => Ok(vec![text]),
-            Err(_) => Err(anyhow::anyhow!("Failed to extract PDF text: {page_err}")),
-        },
+        Err(PdfExtractFail::Panic(message)) => {
+            Err(anyhow::anyhow!("Failed to extract PDF text: {message}"))
+        }
+        Err(PdfExtractFail::Error(page_err)) => {
+            match pdf_extract_call(|| pdf_extract::extract_text_from_mem(bytes)) {
+                Ok(text) => Ok(vec![text]),
+                Err(_) => Err(anyhow::anyhow!("Failed to extract PDF text: {page_err}")),
+            }
+        }
     }
 }
 
@@ -259,6 +480,29 @@ fn format_retrieved_hit(filename: &str, key: &str, value: &str) -> String {
         Some(page) => format!("[p.{page}]\n{value}"),
         None => value.to_string(),
     }
+}
+
+/// Intake for one PDF. Statement files stay on the persona OCR / pdftotext
+/// bridge when that pack already has one; every other PDF still uses
+/// pdf-extract, with a panic reported as a failed extraction.
+#[allow(clippy::too_many_arguments)]
+async fn route_pdf_attachment<R: PdfPageRenderer>(
+    bytes: &[u8],
+    filename: &str,
+    path: &Path,
+    query: &str,
+    memory: &MemoryStore,
+    supports_vision: bool,
+    renderer: &R,
+    defer_statement_pdfs: bool,
+) -> PdfRoute {
+    if defer_statement_pdfs && is_statement_pdf_name(filename) {
+        return PdfRoute {
+            text: statement_pdf_for_persona_ocr(filename, path),
+            images: Vec::new(),
+        };
+    }
+    route_native_pdf(bytes, filename, query, memory, supports_vision, renderer).await
 }
 
 /// Long native PDFs stay on the shipped 6000-char knowledge path.
@@ -829,5 +1073,209 @@ mod tests {
             .render_page(&bytes, 2)
             .expect("pdftoppm png");
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    fn pdf_with_content_stream(content: &[u8]) -> Vec<u8> {
+        use pdf_extract::{Dictionary, Document, Object, Stream};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let content_id = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
+        let mut page = Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("Parent", Object::Reference(pages_id));
+        page.set(
+            "MediaBox",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]),
+        );
+        page.set("Contents", Object::Reference(content_id));
+        let page_id = doc.add_object(Object::Dictionary(page));
+        let mut pages = Dictionary::new();
+        pages.set("Type", Object::Name(b"Pages".to_vec()));
+        pages.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+        pages.set("Count", Object::Integer(1));
+        doc.set_object(pages_id, Object::Dictionary(pages));
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        catalog.set("Pages", Object::Reference(pages_id));
+        let catalog_id = doc.add_object(Object::Dictionary(catalog));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).expect("save pdf");
+        buf
+    }
+
+    #[test]
+    fn invalid_content_stream_still_panics_inside_pdf_extract() {
+        let bytes = pdf_with_content_stream(b"BI");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = pdf_extract::extract_text_from_mem_by_pages(&bytes);
+        }));
+        assert!(
+            panicked.is_err(),
+            "pdf-extract 0.12.1 must still panic on this content stream"
+        );
+    }
+
+    #[test]
+    fn pdf_extract_panic_becomes_failed_extraction_reply() {
+        let bytes = pdf_with_content_stream(b"BI");
+        let err = load_pdf_pages(&bytes).expect_err("panic must be an Err");
+        let text = err.to_string();
+        assert!(
+            text.contains("pdf-extract panicked"),
+            "failure must name the panic, got {text}"
+        );
+        let reply = format!("[PDF processing failed: {text}]");
+        assert!(
+            reply.starts_with("[PDF processing failed:"),
+            "same reply prefix as the existing PDF failure path"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_surfaces_pdf_extract_panic_as_processing_failed() {
+        let bytes = pdf_with_content_stream(b"BI");
+        let memory = MemoryStore::open_in_memory().expect("memory");
+        let renderer = RecordingRenderer {
+            pages: std::sync::Mutex::new(Vec::new()),
+            png: Vec::new(),
+        };
+        let path = std::path::Path::new("/tmp/bad.pdf");
+        let routed = route_pdf_attachment(
+            &bytes,
+            "bad.pdf",
+            path,
+            "read this",
+            &memory,
+            false,
+            &renderer,
+            false,
+        )
+        .await;
+        assert!(
+            routed.text.starts_with("[PDF processing failed:"),
+            "intake reply path, got {}",
+            routed.text
+        );
+        assert!(
+            routed.text.contains("pdf-extract panicked"),
+            "{}",
+            routed.text
+        );
+        assert!(routed.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn statement_pdf_with_ocr_path_skips_pdf_extract() {
+        let bytes = native_pdf(&["ONLY_NATIVE_EXTRACT".to_string()]);
+        let memory = MemoryStore::open_in_memory().expect("memory");
+        let renderer = RecordingRenderer {
+            pages: std::sync::Mutex::new(Vec::new()),
+            png: Vec::new(),
+        };
+        let path = std::path::Path::new("/tmp/rustfox-statement.pdf");
+        let routed = route_pdf_attachment(
+            &bytes,
+            "eStatementFile_b0c56c.pdf",
+            path,
+            "reconcile",
+            &memory,
+            true,
+            &renderer,
+            true,
+        )
+        .await;
+        assert!(
+            !routed.text.contains("ONLY_NATIVE_EXTRACT"),
+            "statement PDF must not be hard-extracted: {}",
+            routed.text
+        );
+        assert!(routed.text.contains("eStatementFile_b0c56c.pdf"));
+        assert!(routed.text.contains(path.display().to_string().as_str()));
+        assert!(routed.text.contains("pdftotext") || routed.text.contains("statement_ocr.py"));
+        assert!(routed.images.is_empty());
+        assert!(renderer.pages.lock().expect("pages").is_empty());
+
+        let still = route_pdf_attachment(
+            &bytes,
+            "notes.pdf",
+            path,
+            "hello",
+            &memory,
+            false,
+            &renderer,
+            true,
+        )
+        .await;
+        assert!(
+            still.text.contains("ONLY_NATIVE_EXTRACT"),
+            "a non-statement PDF still uses pdf-extract: {}",
+            still.text
+        );
+
+        let no_bridge = route_pdf_attachment(
+            &bytes,
+            "eStatementFile_b0c56c.pdf",
+            path,
+            "hello",
+            &memory,
+            false,
+            &renderer,
+            false,
+        )
+        .await;
+        assert!(
+            no_bridge.text.contains("ONLY_NATIVE_EXTRACT"),
+            "without the persona OCR path, statement PDFs are still extracted: {}",
+            no_bridge.text
+        );
+    }
+
+    #[test]
+    fn persona_ocr_bridge_is_persona_local() {
+        let root = tempfile::tempdir().expect("temp");
+        let agents = root.path().join("agents");
+        let skills = root.path().join("skills");
+        std::fs::create_dir_all(agents.join("finance").join("tools")).unwrap();
+        std::fs::create_dir_all(skills.join("statement-ocr")).unwrap();
+        std::fs::create_dir_all(agents.join("researcher")).unwrap();
+        std::fs::write(
+            agents.join("finance").join("AGENT.md"),
+            "Load statement-ocr before booking a statement.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skills.join("statement-ocr").join("SKILL.md"),
+            "Run pdftotext on the statement, then statement_ocr.py.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents.join("researcher").join("AGENT.md"),
+            "Cite sources.\n",
+        )
+        .unwrap();
+
+        assert!(persona_defers_statement_pdfs(&agents, &skills, "finance"));
+        assert!(!persona_defers_statement_pdfs(
+            &agents,
+            &skills,
+            "researcher"
+        ));
+
+        std::fs::write(
+            agents
+                .join("finance")
+                .join("tools")
+                .join("statement_ocr.py"),
+            "print('bridge')\n",
+        )
+        .unwrap();
+        assert!(persona_defers_statement_pdfs(&agents, &skills, "finance"));
     }
 }

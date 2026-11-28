@@ -2449,7 +2449,16 @@ pub async fn handle_message(
             agent.turn_gate.note_silent_eyes(&key, msg.id.0).await;
             Ok(())
         }
-        Submit::Start(inputs) => {
+        Submit::Start((inputs, hold_gen)) => {
+            // Own the lane before any await. `/stop` during the 👀 window
+            // must see a live hold and leave the gate busy until this turn
+            // finishes (otherwise the chat looks idle and 👀 is never cleared).
+            let hold = crate::turn_gate::InteractiveHold::attach(
+                Arc::clone(&agent.turn_gate),
+                key.clone(),
+                hold_gen,
+            )
+            .await;
             // Silent (per-chat or fully_silent): 👀 on each accepted message
             // before the task runs, so a steer that arrives immediately is
             // tracked for the end-of-turn clear. No text bubble.
@@ -2480,6 +2489,7 @@ pub async fn handle_message(
                 msg.chat.id,
                 msg_format,
                 inputs,
+                hold,
             );
             Ok(())
         }
@@ -2517,6 +2527,7 @@ async fn set_eyes_reaction(
 /// StepLimit. `Next::Scheduled` breaks so the waiting job runner proceeds.
 /// A scheduled lane that is already running is left alone (`finish_user`
 /// does not clear it — ADR-0052).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_telegram_turn_loop(
     bot: Bot,
     agent: Arc<Agent>,
@@ -2525,8 +2536,12 @@ pub fn spawn_telegram_turn_loop(
     chat_id: teloxide::types::ChatId,
     msg_format: MessageFormat,
     inputs: Vec<QueuedInput>,
+    hold: crate::turn_gate::InteractiveHold,
 ) {
     tokio::spawn(async move {
+        let key = session_key(&bot_id, &user_id.to_string());
+        // `hold` releases the lane on panic as well as on a normal return.
+        // finish() only applies while this generation still owns the lane.
         let mut batch = inputs;
         loop {
             let mut iter = batch.into_iter();
@@ -2534,7 +2549,6 @@ pub fn spawn_telegram_turn_loop(
                 break;
             };
             let rest: Vec<_> = iter.collect();
-            let key = session_key(&bot_id, &user_id.to_string());
             agent.turn_gate.restore_pending(&key, rest).await;
 
             let stop = run_telegram_user_turn(
@@ -2548,7 +2562,7 @@ pub fn spawn_telegram_turn_loop(
             )
             .await;
 
-            match agent.turn_gate.finish_user(&key, stop).await {
+            match hold.finish(stop).await {
                 Next::User { inputs, .. } => {
                     batch = inputs;
                 }
